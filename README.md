@@ -7,7 +7,7 @@ An extension for [LoopBack 4](https://loopback.io/doc/en/lb4/) that adds **OData
 - Provides `$metadata` endpoint.  
 - Simple developer experience with decorators.  
 
-Currently in **phase 2.2** — CRUD endpoints are backed by LoopBack repositories and `$metadata` exposes generated CSDL; relations & advanced features remain in progress.  
+Currently in **phase 3** — CRUD endpoints are backed by LoopBack repositories, `$metadata` exposes generated CSDL, and core OData query options map to LoopBack filters. Relations & advanced features remain in progress.  
 
 ---
 
@@ -99,13 +99,15 @@ export class ProductODataController {}
 
 That’s it — the extension generates repository-backed CRUD endpoints automatically.
 
-## Endpoints (Phase 2.2)
+## Endpoints (Phase 3)
 
 Start your app and test:
 
 ```bash
 npm start
 ```
+
+For a quick demo, run `npm run dev`; the in-memory datasource comes pre-seeded with sample products and orders so you can experiment with the query options immediately.
 
 ##### Metadata
 
@@ -176,6 +178,33 @@ DELETE /odata/Products/1
 
 `PATCH` accepts partial payloads, and `DELETE` responds with `204 No Content` once the repository removes the entity.
 
+##### Query options
+
+Common OData query options are translated into LoopBack filters out of the box:
+
+```http
+GET /odata/Products?$filter=price gt 500 and name ne 'Monitor'&$orderby=price desc&$top=5&$skip=10&$select=id,name,price
+```
+
+Becomes:
+
+```json
+{
+  "where": {
+    "and": [
+      {"price": {"gt": 500}},
+      {"name": {"neq": "Monitor"}}
+    ]
+  },
+  "order": ["price DESC"],
+  "limit": 5,
+  "offset": 10,
+  "fields": {"id": true, "name": true, "price": true}
+}
+```
+
+You can combine `$filter` (eq, ne, gt, ge, lt, le with `and`/`or`), `$orderby`, `$top`, `$skip`, and `$select` to shape the data returned by your repository queries.
+
 ## Features
 
 - [x] OData-style entity paths (Products(1)) supported via middleware
@@ -183,10 +212,10 @@ DELETE /odata/Products/1
 - [x] Registry of entity sets
 - [x] CRUD controller factory backed by LoopBack repositories
 - [x] $metadata endpoint with generated CSDL (entity sets & primitive properties)
+- [x] Basic query options → LoopBack filters (`$filter`, `$orderby`, `$top`, `$skip`, `$select`)
 
 ## Roadmap
 
-- [ ] Rich query support: $filter, $orderby, $top, $skip, …
 - [ ] CSDL navigation properties (relations)
 - [ ] Proper pluralization (using inflection)
 - [ ] Advanced OData features: $expand, batch requests, function/action imports

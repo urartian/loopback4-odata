@@ -84,9 +84,31 @@ export async function main() {
     app.controller(ProductODataController);
     app.controller(OrderODataController);
     await app.boot();   // runs the ODataBooter
+    await seedData(app);
     await app.start();
     const { url } = app.restServer;
     console.log(`OData dev server running at ${url}`);
+}
+
+async function seedData(app: DevApp) {
+    const productRepo = await app.getRepository(ProductRepository);
+    const orderRepo = await app.getRepository(OrderRepository);
+
+    const existingProducts = await productRepo.count();
+    if (existingProducts.count === 0) {
+        const [laptop, phone, monitor] = await productRepo.createAll([
+            { name: 'Laptop', price: 1299 },
+            { name: 'Phone', price: 799 },
+            { name: 'Monitor', price: 349 },
+        ]);
+
+        await orderRepo.createAll([
+            { productId: laptop.id!, quantity: 2, total: 2598 },
+            { productId: phone.id!, quantity: 1, total: 799 },
+            { productId: monitor.id!, quantity: 3, total: 1047 },
+            { productId: laptop.id!, quantity: 1, total: 1299 },
+        ]);
+    }
 }
 
 if (require.main === module) {

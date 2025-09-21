@@ -8,6 +8,8 @@ import {
     patch,
     post,
     requestBody,
+    Request,
+    RestBindings,
 } from '@loopback/rest';
 import {
     DefaultCrudRepository,
@@ -16,6 +18,7 @@ import {
     FilterExcludingWhere,
 } from '@loopback/repository';
 import { EntitySetDef } from '../registry/entityset-registry';
+import { parseODataQuery } from '../services/odata-query-parser.service';
 type CrudEntity = Entity & { [key: string]: unknown };
 type CrudRepo = DefaultCrudRepository<CrudEntity, unknown>;
 
@@ -89,6 +92,8 @@ export function defineODataCrudController(def: EntitySetDef) {
         constructor(
             @inject(repoBindingKey)
             public readonly repository: CrudRepo,
+            @inject(RestBindings.Http.REQUEST)
+            public readonly request: Request,
         ) { }
 
         @get(`/odata/${setName}`, {
@@ -100,7 +105,19 @@ export function defineODataCrudController(def: EntitySetDef) {
             },
         })
         async list(@filterParam filter?: Filter<CrudEntity>) {
-            const results = await this.repository.find(filter);
+            const baseFilter: Filter<CrudEntity> = filter ? { ...filter } : {};
+
+            try {
+                const parsed = parseODataQuery(
+                    this.request.query as Record<string, string | string[] | undefined>,
+                );
+                this.mergeFilters(baseFilter, parsed as Filter<CrudEntity>);
+            } catch (error) {
+                const message = (error as Error).message ?? 'Invalid OData query.';
+                throw new HttpErrors.BadRequest(message);
+            }
+
+            const results = await this.repository.find(baseFilter);
             return {
                 '@odata.context': contextBase,
                 value: results,
@@ -193,6 +210,28 @@ export function defineODataCrudController(def: EntitySetDef) {
         })
         async delete(@idParam id: unknown): Promise<void> {
             await this.repository.deleteById(id as any);
+        }
+
+        mergeFilters(target: Filter<CrudEntity>, source: Filter<CrudEntity>) {
+            if (source.where) {
+                if (target.where) {
+                    target.where = {
+                        and: [target.where, source.where],
+                    } as Filter<CrudEntity>['where'];
+                } else {
+                    target.where = source.where;
+                }
+            }
+
+            if (source.order) target.order = source.order;
+            if (source.limit !== undefined) target.limit = source.limit;
+            if (source.offset !== undefined) target.offset = source.offset;
+            if (source.fields) {
+                target.fields = {
+                    ...(target.fields ?? {}),
+                    ...source.fields,
+                } as Filter<CrudEntity>['fields'];
+            }
         }
     }
 
