@@ -7,7 +7,7 @@ An extension for [LoopBack 4](https://loopback.io/doc/en/lb4/) that adds **OData
 - Provides `$metadata` endpoint.  
 - Simple developer experience with decorators.  
 
-Currently in **early phase (1.2)** — CRUD stubs only, metadata is placeholder, but the foundation is ready.  
+Currently in **phase 2.1** — CRUD endpoints are backed by LoopBack repositories, metadata remains placeholder while the surface stabilises.  
 
 ---
 
@@ -24,13 +24,18 @@ npm install @loopback/odata
 In your application class:
 
 ```ts
+import {ApplicationConfig} from '@loopback/core';
+import {BootMixin} from '@loopback/boot';
+import {RepositoryMixin} from '@loopback/repository';
+import {RestApplication} from '@loopback/rest';
 import {ODataComponent} from '@loopback/odata';
 
-export class MyAppApplication extends BootMixin(RestApplication) {
+export class MyAppApplication extends BootMixin(RepositoryMixin(RestApplication)) {
   constructor(options: ApplicationConfig = {}) {
     super(options);
 
-    this.component(ODataComponent); // ✅ enable OData support
+    this.component(ODataComponent); // enable OData support
+    // Register datasources and repositories once they are defined (see Step 3).
   }
 }
 ```
@@ -55,16 +60,46 @@ export class Product extends Entity {
 }
 ```
 
-3. Add a controller
+3. Create a repository
+
+The component expects a `DefaultCrudRepository` binding for each model decorated with `@odataController`. Provide a datasource and expose the repository via `RepositoryMixin`.
+
+```ts
+import {inject} from '@loopback/core';
+import {DefaultCrudRepository, juggler} from '@loopback/repository';
+
+const ds = new juggler.DataSource({
+  name: 'db',
+  connector: 'memory',
+});
+
+export class ProductRepository extends DefaultCrudRepository<
+  Product,
+  typeof Product.prototype.id
+> {
+  constructor(@inject('datasources.db') dataSource: juggler.DataSource) {
+    super(Product, dataSource);
+  }
+}
+```
+
+Register both the datasource and the repository inside the application constructor from Step 1:
+
+```ts
+this.dataSource(ds);
+this.repository(ProductRepository);
+```
+
+4. Add a controller
 
 ```ts
 @odataController(Product)
 export class ProductODataController {}
 ```
 
-That’s it — the extension generates CRUD endpoints automatically.
+That’s it — the extension generates repository-backed CRUD endpoints automatically.
 
-## Endpoints (Phase 1.2)
+## Endpoints (Phase 2.1)
 
 Start your app and test:
 
@@ -90,7 +125,13 @@ GET /odata/Products
 ```json
 {
   "@odata.context": "/odata/$metadata#Products",
-  "value": ["This would return all Products"]
+  "value": [
+    {
+      "id": 1,
+      "name": "Laptop",
+      "price": 1299
+    }
+  ]
 }
 ```
 
@@ -108,32 +149,44 @@ GET /odata/Products(1)
 ```json
 {
   "@odata.context": "/odata/$metadata#Products/$entity",
-  "value": "This would return Products with id=1"
+  "value": {
+    "id": 1,
+    "name": "Laptop",
+    "price": 1299
+  }
 }
 ```
 
-##### Create, Update, Delete
+##### Create
+
+```bash
+curl -X POST /odata/Products \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Laptop","price":1299}'
+```
+
+Returns the persisted entity in the body under `value`.
+
+##### Update & Delete
 
 ```http
-POST   /odata/Products
 PATCH  /odata/Products/1
 DELETE /odata/Products/1
 ```
 
-Currently return stub messages.
+`PATCH` accepts partial payloads, and `DELETE` responds with `204 No Content` once the repository removes the entity.
 
 ## Features
 
 - [x] OData-style entity paths (Products(1)) supported via middleware
 - [x] Auto-discovery of OData controllers (Booter)
 - [x] Registry of entity sets
-- [x] CRUD controller factory (stub)
+- [x] CRUD controller factory backed by LoopBack repositories
 - [x] $metadata endpoint (placeholder)
 
 ## Roadmap
 
-- [ ] Repository integration (CRUD backed by LB4 repositories)
-- [ ] $filter, $orderby, $top, $skip, … query support
+- [ ] Rich query support: $filter, $orderby, $top, $skip, …
 - [ ] Real CSDL metadata generator
 - [ ] Proper pluralization (using inflection)
 - [ ] Advanced OData features: navigation properties, $expand, batch requests
@@ -145,6 +198,3 @@ Contributions are welcome! Please open an issue or PR on GitHub.
 ## License
 
 MIT © Urartian LLC
-
-
-

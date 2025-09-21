@@ -12,7 +12,7 @@ export class ODataComponent implements Component {
     bindings = [
         Binding.bind(ODATA_BINDINGS.CONFIG).to({ basePath: '/odata' } as ODataConfig),
         Binding.bind(ODATA_BINDINGS.CSDL_GEN).toClass(CsdlGenerator),
-        Binding.bind('odata.registry').toClass(EntitySetRegistry),
+        Binding.bind(ODATA_BINDINGS.ENTITY_SET_REGISTRY).toClass(EntitySetRegistry),
         createMiddlewareBinding(OdataPathRewriterProvider, {
             key: 'middleware.odataPathRewriter',
         }),
