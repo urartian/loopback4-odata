@@ -1,5 +1,5 @@
 import { Component, Binding, BindingScope } from '@loopback/core';
-import { createMiddlewareBinding } from '@loopback/rest';
+import { RestBindings, createMiddlewareBinding } from '@loopback/rest';
 import { ODataConfig } from './types';
 import { ODATA_BINDINGS } from './keys';
 import { CsdlGenerator } from './metadata/csdl-generator';
@@ -7,6 +7,7 @@ import { ODataMetadataController } from './controllers/metadata.controller';
 import { EntitySetRegistry } from './registry/entityset-registry';
 import { ODataBooter } from './booters/odata.booter';
 import { OdataPathRewriterProvider } from './middleware/odata-path-rewriter.provider';
+import { ODataErrorProvider } from './providers/odata-error.provider';
 
 export class ODataComponent implements Component {
     bindings = [
@@ -16,6 +17,9 @@ export class ODataComponent implements Component {
         createMiddlewareBinding(OdataPathRewriterProvider, {
             key: 'middleware.odataPathRewriter',
         }),
+        Binding.bind(RestBindings.SequenceActions.REJECT)
+            .toProvider(ODataErrorProvider)
+            .inScope(BindingScope.SINGLETON),
     ];
 
     controllers = [ODataMetadataController];
