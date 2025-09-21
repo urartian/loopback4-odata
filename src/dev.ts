@@ -18,6 +18,7 @@ class DevApp extends BootMixin(RepositoryMixin(RestApplication)) {
 
         this.dataSource(new juggler.DataSource(MEMORY_DS_CONFIG), MEMORY_DS_CONFIG.name);
         this.repository(ProductRepository);
+        this.repository(OrderRepository);
 
         this.component(ODataComponent);
     }
@@ -32,8 +33,24 @@ export class Product extends Entity {
     @property()
     name!: string;
 
-    @property()
-    price!: number;
+@property()
+price!: number;
+}
+
+@odataModel()
+@model()
+export class Order extends Entity {
+    @property({ id: true })
+    id!: number;
+
+    @property({ required: true })
+    productId!: number;
+
+    @property({ required: true })
+    quantity!: number;
+
+    @property({ required: true })
+    total!: number;
 }
 
 
@@ -46,20 +63,35 @@ export class ProductRepository extends DefaultCrudRepository<
     }
 }
 
+export class OrderRepository extends DefaultCrudRepository<
+    Order,
+    typeof Order.prototype.id
+> {
+    constructor(@inject('datasources.db') dataSource: juggler.DataSource) {
+        super(Order, dataSource);
+    }
+}
+
 @odataController(Product)
 class ProductODataController { }
 
-async function main() {
+@odataController(Order)
+class OrderODataController { }
+
+export async function main() {
     const app = new DevApp();
     // Explicitly register the OData controller
     app.controller(ProductODataController);
+    app.controller(OrderODataController);
     await app.boot();   // runs the ODataBooter
     await app.start();
     const { url } = app.restServer;
     console.log(`OData dev server running at ${url}`);
 }
 
-main().catch(err => {
-    console.error('Failed to start dev app', err);
-    process.exit(1);
-});
+if (require.main === module) {
+    main().catch(err => {
+        console.error('Failed to start dev app', err);
+        process.exit(1);
+    });
+}

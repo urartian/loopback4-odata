@@ -7,7 +7,7 @@ An extension for [LoopBack 4](https://loopback.io/doc/en/lb4/) that adds **OData
 - Provides `$metadata` endpoint.  
 - Simple developer experience with decorators.  
 
-Currently in **phase 2.1** — CRUD endpoints are backed by LoopBack repositories, metadata remains placeholder while the surface stabilises.  
+Currently in **phase 2.2** — CRUD endpoints are backed by LoopBack repositories and `$metadata` exposes generated CSDL; relations & advanced features remain in progress.  
 
 ---
 
@@ -99,7 +99,7 @@ export class ProductODataController {}
 
 That’s it — the extension generates repository-backed CRUD endpoints automatically.
 
-## Endpoints (Phase 2.1)
+## Endpoints (Phase 2.2)
 
 Start your app and test:
 
@@ -112,7 +112,7 @@ npm start
 ```bash
 GET /odata/$metadata
 ```
-Returns placeholder CSDL XML.
+Returns generated EDMX/CSDL describing your registered entity sets.
 
 ##### Collection
 
@@ -182,14 +182,14 @@ DELETE /odata/Products/1
 - [x] Auto-discovery of OData controllers (Booter)
 - [x] Registry of entity sets
 - [x] CRUD controller factory backed by LoopBack repositories
-- [x] $metadata endpoint (placeholder)
+- [x] $metadata endpoint with generated CSDL (entity sets & primitive properties)
 
 ## Roadmap
 
 - [ ] Rich query support: $filter, $orderby, $top, $skip, …
-- [ ] Real CSDL metadata generator
+- [ ] CSDL navigation properties (relations)
 - [ ] Proper pluralization (using inflection)
-- [ ] Advanced OData features: navigation properties, $expand, batch requests
+- [ ] Advanced OData features: $expand, batch requests, function/action imports
 
 ## Contributing
 
