@@ -33,6 +33,8 @@ export class ODataBatchController {
   constructor(
     @inject(RestBindings.HANDLER)
     private readonly httpHandler: HttpHandler,
+    @inject(RestBindings.URL)
+    private readonly serverUrl: string,
   ) {}
 
   @post('/odata/$batch', {
@@ -140,6 +142,7 @@ export class ODataBatchController {
     }
 
     response.contentType('application/json');
+    response.set('OData-Version', '4.01');
     return {responses};
   }
 
@@ -171,7 +174,7 @@ export class ODataBatchController {
     return entries;
   }
 
-  private async executeSingle(request: BatchRequest): Promise<BatchResponseEntry> {
+  private async executeSingleLegacy(request: BatchRequest): Promise<BatchResponseEntry> {
     const url = this.sanitizeUrl(request.url);
     if (!url) {
       return {
@@ -191,9 +194,18 @@ export class ODataBatchController {
     }
 
     const bodyBuffer = request.body ? Buffer.from(JSON.stringify(request.body)) : Buffer.alloc(0);
-    const socket = new PassThrough();
+    const socket = new PassThrough() as any;
+    // minimal socket surface for Node/Express expectations
+    socket.writable = true;
+    socket.readable = true;
+    socket.setTimeout = () => socket;
+    socket.setNoDelay = () => socket;
+    socket.setKeepAlive = () => socket;
+    socket.ref = () => socket;
+    socket.unref = () => socket;
+    socket.destroy = () => {};
 
-    const req = new IncomingMessage(socket as any);
+    const req = new IncomingMessage(socket);
     req.method = method;
     req.url = url;
     (req as any).headers = Object.fromEntries(
@@ -206,11 +218,24 @@ export class ODataBatchController {
       (req as any).headers['content-length'] = String(bodyBuffer.length);
     }
 
+    // minimal Express-style helpers used by LB4
+    (req as any).get = (name: string) => {
+      return (req as any).headers?.[String(name).toLowerCase()] as string | undefined;
+    };
+    (req as any).header = (name: string) => (req as any).get(name);
+    (req as any).protocol = 'http';
+    (req as any).baseUrl = '';
+    (req as any).originalUrl = url;
+
     const res = new ServerResponse(req);
+    res.assignSocket?.(socket);
     const chunks: Buffer[] = [];
+    let resolved = false;
 
     const finishPromise = new Promise<BatchResponseEntry>((resolve, reject) => {
-      res.on('finish', () => {
+      const finalize = () => {
+        if (resolved) return;
+        resolved = true;
         const bodyText = Buffer.concat(chunks).toString('utf-8');
         let body: unknown;
         try {
@@ -218,21 +243,16 @@ export class ODataBatchController {
         } catch {
           body = bodyText;
         }
-
         const headers: Record<string, string> = {};
         for (const [key, value] of Object.entries(res.getHeaders())) {
           if (typeof value === 'string') headers[key] = value;
           else if (Array.isArray(value)) headers[key] = value.join(',');
         }
+        resolve({ id: request.id, status: res.statusCode, headers, body });
+      };
 
-        resolve({
-          id: request.id,
-          status: res.statusCode,
-          headers,
-          body,
-        });
-      });
-
+      res.on('finish', finalize);
+      res.on('close', finalize);
       res.on('error', reject);
     });
 
@@ -248,12 +268,39 @@ export class ODataBatchController {
       return end(chunk, ...args);
     } as any;
 
+    // Provide Express-style response helpers expected by LoopBack internals
+    (res as any).status = (code: number) => { res.statusCode = code; return res; };
+    (res as any).contentType = (type: string) => { res.setHeader('Content-Type', type); return res; };
+    (res as any).type = (type: string) => { res.setHeader('Content-Type', type); return res; };
+    (res as any).set = (field: string, value: string) => { res.setHeader(field, value); return res; };
+    (res as any).header = (field: string, value: string) => { res.setHeader(field, value); return res; };
+    (res as any).json = (body: unknown) => {
+      if (!res.getHeader('Content-Type')) res.setHeader('Content-Type', 'application/json');
+      const payload = Buffer.isBuffer(body) ? body : Buffer.from(JSON.stringify(body ?? null));
+      res.end(payload);
+      return res;
+    };
+    (res as any).send = (body: unknown) => {
+      if (body === undefined || body === null) { res.end(); return res; }
+      if (Buffer.isBuffer(body)) { res.end(body); return res; }
+      if (typeof body === 'object') {
+        if (!res.getHeader('Content-Type')) res.setHeader('Content-Type', 'application/json');
+        res.end(JSON.stringify(body));
+        return res;
+      }
+      res.end(String(body));
+      return res;
+    };
+
     const handlerPromise = this.httpHandler.handleRequest(req as any, res as any);
 
     socket.end(bodyBuffer.length ? bodyBuffer : undefined);
 
     try {
-      await handlerPromise;
+      // Add per-request timeout to avoid hangs
+      const TIMEOUT_MS = 30000;
+      const timeoutPromise = new Promise<never>((_, reject) => setTimeout(() => reject(new Error('Batch sub-request timeout')), TIMEOUT_MS));
+      await Promise.race([handlerPromise, timeoutPromise]);
       return await finishPromise;
     } catch (error) {
       const status = (error && typeof error === 'object' && 'statusCode' in error
@@ -265,6 +312,35 @@ export class ODataBatchController {
         status,
         body,
       };
+    }
+  }
+
+  private async executeSingle(request: BatchRequest): Promise<BatchResponseEntry> {
+    const path = this.sanitizeUrl(request.url);
+    if (!path) {
+      return {id: request.id, status: 400, body: this.odataError('InvalidUrl', `Invalid request URL: ${request.url}`)};
+    }
+    const method = request.method?.toUpperCase();
+    if (!method) {
+      return {id: request.id, status: 400, body: this.odataError('InvalidMethod', 'Batch request method is required.')};
+    }
+    try {
+      const target = new URL(path, this.serverUrl).toString();
+      const headers: Record<string, string> = {...(request.headers ?? {})};
+      let body: string | undefined;
+      if (request.body !== undefined) {
+        body = typeof request.body === 'string' ? request.body : JSON.stringify(request.body);
+        if (!headers['content-type'] && !headers['Content-Type']) headers['Content-Type'] = 'application/json';
+      }
+      const resp = await fetch(target, {method, headers, body} as any);
+      const text = await resp.text();
+      let parsed: unknown;
+      try { parsed = text ? JSON.parse(text) : undefined; } catch { parsed = text; }
+      const outHeaders: Record<string, string> = {};
+      resp.headers.forEach((v, k) => { outHeaders[k] = v; });
+      return {id: request.id, status: resp.status, headers: outHeaders, body: parsed};
+    } catch (err) {
+      return {id: request.id, status: 500, body: this.odataError('BatchExecutionError', (err as Error).message ?? 'Failed to execute request.')};
     }
   }
 
