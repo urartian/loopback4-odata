@@ -252,6 +252,39 @@ GET /odata/Products/$count
 
 The endpoint responds with a plain number and honours `$filter` (and other supported query options) to scope the count.
 
+Batch multiple operations with a single round-trip using the `$batch` endpoint:
+
+```http
+POST /odata/$batch
+Content-Type: application/json
+
+{
+  "requests": [
+    {"id": "1", "method": "GET", "url": "/odata/Products?$top=1"},
+    {"id": "2", "method": "GET", "url": "/odata/Products/$count"},
+    {
+      "id": "3",
+      "atomicityGroup": "changeset-1",
+      "method": "POST",
+      "url": "/odata/Products",
+      "body": {"name": "Tablet", "price": 499}
+    }
+  ]
+}
+```
+
+Responses preserve request order; operations that share `atomicityGroup` succeed or fail together:
+
+```json
+{
+  "responses": [
+    {"id": "1", "status": 200, "body": {"value": [{"id": 1, "name": "Laptop"}]}},
+    {"id": "2", "status": 200, "body": {"value": []}},
+    {"atomicityGroup": "changeset-1", "id": "3", "status": 201, "body": {"value": {"id": 4}}}
+  ]
+}
+```
+
 ## Features
 
 - [x] OData-style entity paths (Products(1)) supported via middleware
@@ -262,11 +295,12 @@ The endpoint responds with a plain number and honours `$filter` (and other suppo
 - [x] Basic query options → LoopBack filters (`$filter`, `$orderby`, `$top`, `$skip`, `$select`)
 - [x] Relational expansion via `$expand`
 - [x] Inline and standalone `$count`
+- [x] `$batch` endpoint (JSON batching)
 
 ## Roadmap
 
 - [ ] Proper pluralization (using inflection)
-- [ ] `$batch` endpoint for multi-operation requests
+- [ ] Transaction-backed `$batch` changesets (repository transactions)
 - [ ] OData actions & functions decorators
 
 ## Contributing
