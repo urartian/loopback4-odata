@@ -253,7 +253,7 @@ export function defineODataCrudController(def: EntitySetDef) {
                     'application/json': {
                         schema: getModelSchemaRef(modelCtor, {
                             title: `New${modelCtor.name ?? 'Entity'}`,
-                            exclude: idProperties as unknown as (keyof Entity)[],
+                            optional: idProperties as unknown as (keyof Entity)[],
                         }),
                     },
                 },
