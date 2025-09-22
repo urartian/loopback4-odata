@@ -226,6 +226,32 @@ The extension validates relation names against the model metadata and produces t
 
 > **Note:** OData identifiers are case-sensitive. Use the exact navigation property names exposed in `$metadata` (for example, `$expand=orders` not `$expand=Orders`).
 
+Enable inline counts by passing `$count=true` alongside other query options:
+
+```http
+GET /odata/Products?$filter=price gt 500&$count=true
+```
+
+Response:
+
+```json
+{
+  "@odata.context": "/odata/$metadata#Products",
+  "@odata.count": 12,
+  "value": [
+    {"id": 1, "name": "Laptop", "price": 1299}
+  ]
+}
+```
+
+To fetch the count only, call the dedicated path:
+
+```http
+GET /odata/Products/$count
+```
+
+The endpoint responds with a plain number and honours `$filter` (and other supported query options) to scope the count.
+
 ## Features
 
 - [x] OData-style entity paths (Products(1)) supported via middleware
@@ -235,11 +261,11 @@ The extension validates relation names against the model metadata and produces t
 - [x] $metadata endpoint with generated CSDL (including navigation properties for relations)
 - [x] Basic query options → LoopBack filters (`$filter`, `$orderby`, `$top`, `$skip`, `$select`)
 - [x] Relational expansion via `$expand`
+- [x] Inline and standalone `$count`
 
 ## Roadmap
 
 - [ ] Proper pluralization (using inflection)
-- [ ] Inline & standalone `$count`
 - [ ] `$batch` endpoint for multi-operation requests
 - [ ] OData actions & functions decorators
 

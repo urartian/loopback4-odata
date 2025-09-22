@@ -75,6 +75,7 @@ export function defineODataCrudController(def: EntitySetDef) {
         required: ['@odata.context', 'value'],
         properties: {
             '@odata.context': { type: 'string' },
+            '@odata.count': { type: 'integer', format: 'int64' },
             value: {
                 type: 'array',
                 items: getModelSchemaRef(modelCtor, { includeRelations: true }),
@@ -137,22 +138,70 @@ export function defineODataCrudController(def: EntitySetDef) {
         async list(@filterParam filter?: Filter<CrudEntity>) {
             const baseFilter: Filter<CrudEntity> = filter ? { ...filter } : {};
 
+            let inlineCountRequested = false;
             try {
                 const parsed = parseODataQuery(
                     this.request.query as Record<string, string | string[] | undefined>,
                     { relations: modelRelations },
                 );
-                this.mergeFilters(baseFilter, parsed as Filter<CrudEntity>);
+                inlineCountRequested = parsed.inlineCount === true;
+                const parsedFilter = { ...parsed } as Filter<CrudEntity> & { inlineCount?: boolean };
+                delete (parsedFilter as { inlineCount?: boolean }).inlineCount;
+                this.mergeFilters(baseFilter, parsedFilter);
             } catch (error) {
                 const message = (error as Error).message ?? 'Invalid OData query.';
                 throw new HttpErrors.BadRequest(message);
             }
 
             const results = await this.repository.find(baseFilter);
+            let totalCount: number | undefined;
+
+            if (inlineCountRequested) {
+                const where = baseFilter.where as Filter<CrudEntity>['where'];
+                const { count } = await this.repository.count(where as any);
+                totalCount = count;
+            }
+
             return {
                 '@odata.context': contextBase,
+                ...(inlineCountRequested ? { '@odata.count': totalCount ?? results.length } : {}),
                 value: results,
             };
+        }
+
+        @get(`/odata/${setName}/$count`, {
+            responses: {
+                '200': {
+                    description: `Count ${setName}`,
+                    content: {
+                        'text/plain': {
+                            schema: {
+                                type: 'string',
+                            },
+                        },
+                    },
+                },
+            },
+        })
+        async count() {
+            const baseFilter: Filter<CrudEntity> = {};
+
+            try {
+                const parsed = parseODataQuery(
+                    this.request.query as Record<string, string | string[] | undefined>,
+                    { relations: modelRelations },
+                );
+                const parsedFilter = { ...parsed } as Filter<CrudEntity> & { inlineCount?: boolean };
+                delete (parsedFilter as { inlineCount?: boolean }).inlineCount;
+                this.mergeFilters(baseFilter, parsedFilter);
+            } catch (error) {
+                const message = (error as Error).message ?? 'Invalid OData query.';
+                throw new HttpErrors.BadRequest(message);
+            }
+
+            const where = baseFilter.where as Filter<CrudEntity>['where'];
+            const { count } = await this.repository.count(where as any);
+            return `${count}`;
         }
 
         @get(`/odata/${setName}/{id}`, {

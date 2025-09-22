@@ -193,8 +193,12 @@ function parseExpand(
   return includes.length ? includes : undefined;
 }
 
-export function parseODataQuery(query: QueryObject, options: ParseOptions = {}): Filter<AnyObject> {
-  const filter: Filter<AnyObject> = {};
+export interface ParsedODataQuery extends Filter<AnyObject> {
+  inlineCount?: boolean;
+}
+
+export function parseODataQuery(query: QueryObject, options: ParseOptions = {}): ParsedODataQuery {
+  const filter: ParsedODataQuery = {};
   const {relations} = options;
 
   const filterExpr = typeof query['$filter'] === 'string' ? query['$filter'] : undefined;
@@ -230,6 +234,11 @@ export function parseODataQuery(query: QueryObject, options: ParseOptions = {}):
   const include = parseExpand(expand, relations);
   if (include) {
     filter.include = include;
+  }
+
+  const inlineCount = typeof query['$count'] === 'string' && query['$count'].toLowerCase() === 'true';
+  if (inlineCount) {
+    filter.inlineCount = true;
   }
 
   return filter;

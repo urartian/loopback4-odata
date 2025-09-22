@@ -11,34 +11,35 @@ const parse = (query: Record<string, unknown>) =>
   parseODataQuery(query as Record<string, string | string[] | undefined>, {relations});
 
 (() => {
-  const filter = parse({'$expand': 'customer, items'});
+  const result = parse({'$expand': 'customer, items'});
 
-  assert.deepStrictEqual(filter.include, [
+  assert.deepStrictEqual(result.include, [
     {relation: 'customer'},
     {relation: 'items'},
   ]);
 })();
 
 (() => {
-  const filter = parse({'$expand': ['customer', 'items']});
+  const result = parse({'$expand': ['customer', 'items']});
 
-  assert.deepStrictEqual(filter.include, [
+  assert.deepStrictEqual(result.include, [
     {relation: 'customer'},
     {relation: 'items'},
   ]);
 })();
 
 (() => {
-  const filter = parse({'$expand': 'customer,customer'});
+  const result = parse({'$expand': 'customer,customer'});
 
-  assert.deepStrictEqual(filter.include, [
+  assert.deepStrictEqual(result.include, [
     {relation: 'customer'},
   ]);
 })();
 
 (() => {
-  const filter = parse({});
-  assert.equal(filter.include, undefined);
+  const result = parse({});
+  assert.equal(result.include, undefined);
+  assert.equal(result.inlineCount, undefined);
 })();
 
 (() => {
@@ -48,4 +49,9 @@ const parse = (query: Record<string, unknown>) =>
   );
 })();
 
-console.log('All $expand parser tests passed');
+(() => {
+  const result = parse({'$count': 'true'});
+  assert.equal(result.inlineCount, true);
+})();
+
+console.log('All OData parser tests passed');
