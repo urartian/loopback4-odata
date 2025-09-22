@@ -1,7 +1,20 @@
 import { RestApplication } from '@loopback/rest';
 import { BootMixin } from '@loopback/boot';
-import { inject } from '@loopback/core';
-import { DefaultCrudRepository, Entity, RepositoryMixin, juggler, model, property } from '@loopback/repository';
+import { Getter, inject } from '@loopback/core';
+import {
+    BelongsToAccessor,
+    DefaultCrudRepository,
+    Entity,
+    HasManyRepositoryFactory,
+    HasManyThroughRepositoryFactory,
+    RepositoryMixin,
+    belongsTo,
+    hasMany,
+    juggler,
+    model,
+    property,
+    repository,
+} from '@loopback/repository';
 import { ODataComponent } from './component';
 import { odataModel } from './decorators/model.decorator';
 import { odataController } from './decorators/controller.decorator';
@@ -17,6 +30,7 @@ class DevApp extends BootMixin(RepositoryMixin(RestApplication)) {
         this.projectRoot = __dirname; // Required for BootMixin
 
         this.dataSource(new juggler.DataSource(MEMORY_DS_CONFIG), MEMORY_DS_CONFIG.name);
+        this.repository(OrderItemRepository);
         this.repository(ProductRepository);
         this.repository(OrderRepository);
 
@@ -33,8 +47,16 @@ export class Product extends Entity {
     @property()
     name!: string;
 
-@property()
-price!: number;
+    @property()
+    price!: number;
+
+    @hasMany(() => OrderItem)
+    orderItems?: OrderItem[];
+
+    @hasMany(() => Order, {
+        through: { model: () => OrderItem, keyFrom: 'productId', keyTo: 'orderId' },
+    })
+    orders?: Order[];
 }
 
 @odataModel()
@@ -44,13 +66,34 @@ export class Order extends Entity {
     id!: number;
 
     @property({ required: true })
+    total!: number;
+
+    @hasMany(() => OrderItem)
+    items?: OrderItem[];
+
+    @hasMany(() => Product, {
+        through: { model: () => OrderItem, keyFrom: 'orderId', keyTo: 'productId' },
+    })
+    products?: Product[];
+}
+
+@odataModel()
+@model()
+export class OrderItem extends Entity {
+    @property({ id: true, generated: true })
+    id?: number;
+
+    @belongsTo(() => Order)
+    orderId!: number;
+
+    @belongsTo(() => Product)
     productId!: number;
 
     @property({ required: true })
     quantity!: number;
 
     @property({ required: true })
-    total!: number;
+    unitPrice!: number;
 }
 
 
@@ -58,8 +101,21 @@ export class ProductRepository extends DefaultCrudRepository<
     Product,
     typeof Product.prototype.id
 > {
-    constructor(@inject('datasources.db') dataSource: juggler.DataSource) {
+    public readonly orderItems: HasManyRepositoryFactory<OrderItem, typeof Product.prototype.id>;
+    public readonly orders: HasManyThroughRepositoryFactory<Order, typeof Order.prototype.id, OrderItem, typeof Product.prototype.id>;
+
+    constructor(
+        @inject('datasources.db') dataSource: juggler.DataSource,
+        @repository.getter('OrderRepository')
+        protected orderRepositoryGetter: Getter<OrderRepository>,
+        @repository.getter('OrderItemRepository')
+        protected orderItemRepositoryGetter: Getter<OrderItemRepository>,
+    ) {
         super(Product, dataSource);
+        this.orderItems = this.createHasManyRepositoryFactoryFor('orderItems', orderItemRepositoryGetter);
+        this.registerInclusionResolver('orderItems', this.orderItems.inclusionResolver);
+        this.orders = this.createHasManyThroughRepositoryFactoryFor('orders', orderRepositoryGetter, orderItemRepositoryGetter);
+        this.registerInclusionResolver('orders', this.orders.inclusionResolver);
     }
 }
 
@@ -67,8 +123,43 @@ export class OrderRepository extends DefaultCrudRepository<
     Order,
     typeof Order.prototype.id
 > {
-    constructor(@inject('datasources.db') dataSource: juggler.DataSource) {
+    public readonly items: HasManyRepositoryFactory<OrderItem, typeof Order.prototype.id>;
+    public readonly products: HasManyThroughRepositoryFactory<Product, typeof Product.prototype.id, OrderItem, typeof Order.prototype.id>;
+
+    constructor(
+        @inject('datasources.db') dataSource: juggler.DataSource,
+        @repository.getter('ProductRepository')
+        protected productRepositoryGetter: Getter<ProductRepository>,
+        @repository.getter('OrderItemRepository')
+        protected orderItemRepositoryGetter: Getter<OrderItemRepository>,
+    ) {
         super(Order, dataSource);
+        this.items = this.createHasManyRepositoryFactoryFor('items', orderItemRepositoryGetter);
+        this.registerInclusionResolver('items', this.items.inclusionResolver);
+        this.products = this.createHasManyThroughRepositoryFactoryFor('products', productRepositoryGetter, orderItemRepositoryGetter);
+        this.registerInclusionResolver('products', this.products.inclusionResolver);
+    }
+}
+
+export class OrderItemRepository extends DefaultCrudRepository<
+    OrderItem,
+    typeof OrderItem.prototype.id
+> {
+    public readonly order: BelongsToAccessor<Order, typeof OrderItem.prototype.id>;
+    public readonly product: BelongsToAccessor<Product, typeof OrderItem.prototype.id>;
+
+    constructor(
+        @inject('datasources.db') dataSource: juggler.DataSource,
+        @repository.getter('OrderRepository')
+        protected orderRepositoryGetter: Getter<OrderRepository>,
+        @repository.getter('ProductRepository')
+        protected productRepositoryGetter: Getter<ProductRepository>,
+    ) {
+        super(OrderItem, dataSource);
+        this.order = this.createBelongsToAccessorFor('order', orderRepositoryGetter);
+        this.registerInclusionResolver('order', this.order.inclusionResolver);
+        this.product = this.createBelongsToAccessorFor('product', productRepositoryGetter);
+        this.registerInclusionResolver('product', this.product.inclusionResolver);
     }
 }
 
@@ -78,11 +169,15 @@ class ProductODataController { }
 @odataController(Order)
 class OrderODataController { }
 
+@odataController(OrderItem)
+class OrderItemODataController { }
+
 export async function main() {
     const app = new DevApp();
     // Explicitly register the OData controller
     app.controller(ProductODataController);
     app.controller(OrderODataController);
+    app.controller(OrderItemODataController);
     await app.boot();   // runs the ODataBooter
     await seedData(app);
     await app.start();
@@ -93,6 +188,7 @@ export async function main() {
 async function seedData(app: DevApp) {
     const productRepo = await app.getRepository(ProductRepository);
     const orderRepo = await app.getRepository(OrderRepository);
+    const orderItemRepo = await app.getRepository(OrderItemRepository);
 
     const existingProducts = await productRepo.count();
     if (existingProducts.count === 0) {
@@ -102,12 +198,31 @@ async function seedData(app: DevApp) {
             { name: 'Monitor', price: 349 },
         ]);
 
-        await orderRepo.createAll([
-            { productId: laptop.id!, quantity: 2, total: 2598 },
-            { productId: phone.id!, quantity: 1, total: 799 },
-            { productId: monitor.id!, quantity: 3, total: 1047 },
-            { productId: laptop.id!, quantity: 1, total: 1299 },
+        const [orderOne, orderTwo] = await orderRepo.createAll([
+            { total: 0 },
+            { total: 0 },
         ]);
+
+        const items = [
+            { orderId: orderOne.id!, productId: laptop.id!, quantity: 2, unitPrice: laptop.price },
+            { orderId: orderOne.id!, productId: monitor.id!, quantity: 1, unitPrice: monitor.price },
+            { orderId: orderTwo.id!, productId: phone.id!, quantity: 1, unitPrice: phone.price },
+            { orderId: orderTwo.id!, productId: monitor.id!, quantity: 3, unitPrice: monitor.price },
+        ];
+
+        await orderItemRepo.createAll(items);
+
+        const totals = items.reduce<Record<number, number>>((acc, item) => {
+            const itemTotal = item.quantity * item.unitPrice;
+            acc[item.orderId] = (acc[item.orderId] ?? 0) + itemTotal;
+            return acc;
+        }, {});
+
+        await Promise.all(
+            Object.entries(totals).map(([orderId, total]) =>
+                orderRepo.updateById(Number(orderId), { total }),
+            ),
+        );
     }
 }
 

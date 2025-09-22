@@ -1,5 +1,5 @@
 import { BindingScope, inject, injectable } from '@loopback/core';
-import { Entity, ModelDefinition, PropertyDefinition } from '@loopback/repository';
+import { Entity, ModelDefinition, PropertyDefinition, RelationDefinitionMap } from '@loopback/repository';
 import { EntitySetDef, EntitySetRegistry } from '../registry/entityset-registry';
 import { ODATA_BINDINGS } from '../keys';
 
@@ -55,7 +55,22 @@ function xmlEscape(value: string): string {
         .replace(/'/g, '&apos;');
 }
 
-function buildEntityType(def: EntitySetDef): { name: string; xml: string } | undefined {
+interface NavigationBinding {
+    path: string;
+    target: string;
+}
+
+interface EntityTypeResult {
+    name: string;
+    xml: string;
+    navigationBindings: NavigationBinding[];
+}
+
+function buildEntityType(
+    def: EntitySetDef,
+    namespace: string,
+    setLookup: Map<typeof Entity, EntitySetDef>,
+): EntityTypeResult | undefined {
     const modelDefinition = (def.modelCtor as typeof Entity).definition as ModelDefinition | undefined;
     if (!modelDefinition) return undefined;
 
@@ -63,6 +78,8 @@ function buildEntityType(def: EntitySetDef): { name: string; xml: string } | und
     const { properties } = modelDefinition;
     const propertyLines: string[] = [];
     const keyProps = modelDefinition.idProperties();
+    const navigationLines: string[] = [];
+    const navigationBindings: NavigationBinding[] = [];
 
     for (const [propertyName, propertyMeta] of Object.entries(properties)) {
         const propertyDef = propertyMeta as PropertyDefinition;
@@ -76,7 +93,31 @@ function buildEntityType(def: EntitySetDef): { name: string; xml: string } | und
         );
     }
 
-    if (!propertyLines.length) return undefined;
+    const relations = (modelDefinition.relations ?? {}) as RelationDefinitionMap;
+    for (const [relationName, relationDef] of Object.entries(relations)) {
+        const resolver = relationDef?.target;
+        if (typeof resolver !== 'function') continue;
+        const targetModel = resolver() as typeof Entity | undefined;
+        if (!targetModel) continue;
+
+        const targetSet = setLookup.get(targetModel);
+        if (!targetSet) continue;
+
+        const targetDefinition = (targetModel as typeof Entity).definition as ModelDefinition | undefined;
+        const targetEntityName = targetDefinition?.name ?? targetModel.name;
+        if (!targetEntityName) continue;
+
+        const qualifiedType = relationDef.targetsMany
+            ? `Collection(${namespace}.${xmlEscape(targetEntityName)})`
+            : `${namespace}.${xmlEscape(targetEntityName)}`;
+
+        navigationLines.push(
+            `      <NavigationProperty Name="${xmlEscape(relationName)}" Type="${qualifiedType}" />`,
+        );
+        navigationBindings.push({ path: relationName, target: targetSet.name });
+    }
+
+    if (!propertyLines.length && !navigationLines.length) return undefined;
 
     const keySection = keyProps.length
         ? [
@@ -90,12 +131,13 @@ function buildEntityType(def: EntitySetDef): { name: string; xml: string } | und
         `    <EntityType Name="${xmlEscape(entityName)}">`,
         keySection,
         ...propertyLines,
+        ...navigationLines,
         '    </EntityType>',
     ]
         .filter(Boolean)
         .join('\n');
 
-    return { name: entityName, xml };
+    return { name: entityName, xml, navigationBindings };
 }
 
 @injectable({ scope: BindingScope.SINGLETON })
@@ -116,13 +158,28 @@ export class CsdlGenerator {
         const namespace = 'Default';
         const containerName = 'DefaultContainer';
 
+        const setLookup = new Map<typeof Entity, EntitySetDef>();
         for (const set of entitySets) {
-            const entityType = buildEntityType(set);
+            setLookup.set(set.modelCtor, set);
+        }
+
+        for (const set of entitySets) {
+            const entityType = buildEntityType(set, namespace, setLookup);
             if (!entityType) continue;
 
             entityTypes.push(entityType.xml);
+            const navigationBindings = entityType.navigationBindings.map(binding =>
+                `        <NavigationPropertyBinding Path="${xmlEscape(binding.path)}" Target="${xmlEscape(binding.target)}" />`,
+            );
+
+            const entitySetLines = [
+                `      <EntitySet Name="${xmlEscape(set.name)}" EntityType="${namespace}.${xmlEscape(entityType.name)}">`,
+                ...navigationBindings,
+                '      </EntitySet>',
+            ];
+
             containerSets.push(
-                `      <EntitySet Name="${xmlEscape(set.name)}" EntityType="${namespace}.${xmlEscape(entityType.name)}"/>`,
+                navigationBindings.length ? entitySetLines.join('\n') : entitySetLines[0].replace(/>$/, '/>'),
             );
         }
 

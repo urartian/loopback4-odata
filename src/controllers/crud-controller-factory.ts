@@ -16,6 +16,8 @@ import {
     Entity,
     Filter,
     FilterExcludingWhere,
+    InclusionFilter,
+    RelationDefinitionMap,
 } from '@loopback/repository';
 import { EntitySetDef } from '../registry/entityset-registry';
 import { parseODataQuery } from '../services/odata-query-parser.service';
@@ -66,6 +68,7 @@ export function defineODataCrudController(def: EntitySetDef) {
     const filterParam = param.filter(modelCtor);
     const filterExcludingWhereParam = param.filter(modelCtor, { exclude: 'where' });
     const idProperties = getIdProperties(modelDefinition);
+    const modelRelations = (modelDefinition?.relations ?? {}) as RelationDefinitionMap;
 
     const collectionResponseSchema = {
         type: 'object',
@@ -86,6 +89,33 @@ export function defineODataCrudController(def: EntitySetDef) {
             '@odata.context': { type: 'string' },
             value: getModelSchemaRef(modelCtor, { includeRelations: true }),
         },
+    };
+
+    const mergeIncludes = (
+        target: InclusionFilter[] = [],
+        source: InclusionFilter[] = [],
+    ): InclusionFilter[] => {
+        type NormalizedInclude = Exclude<InclusionFilter, string>;
+        const normalize = (include: InclusionFilter): NormalizedInclude =>
+            (typeof include === 'string' ? { relation: include } : include);
+
+        const merged = new Map<string, NormalizedInclude>();
+
+        for (const include of target) {
+            const normalized = normalize(include);
+            if (normalized.relation) {
+                merged.set(normalized.relation, { ...normalized });
+            }
+        }
+
+        for (const include of source) {
+            const normalized = normalize(include);
+            if (!normalized.relation) continue;
+            const existing = merged.get(normalized.relation);
+            merged.set(normalized.relation, existing ? { ...existing, ...normalized } : { ...normalized });
+        }
+
+        return Array.from(merged.values());
     };
 
     class ODataCrudController {
@@ -110,6 +140,7 @@ export function defineODataCrudController(def: EntitySetDef) {
             try {
                 const parsed = parseODataQuery(
                     this.request.query as Record<string, string | string[] | undefined>,
+                    { relations: modelRelations },
                 );
                 this.mergeFilters(baseFilter, parsed as Filter<CrudEntity>);
             } catch (error) {
@@ -136,7 +167,23 @@ export function defineODataCrudController(def: EntitySetDef) {
             @idParam id: unknown,
             @filterExcludingWhereParam filter?: FilterExcludingWhere<CrudEntity>,
         ) {
-            const entity = await this.repository.findById(id as any, filter);
+            const baseFilter: FilterExcludingWhere<CrudEntity> = filter ? { ...filter } : {};
+
+            try {
+                const parsed = parseODataQuery(
+                    this.request.query as Record<string, string | string[] | undefined>,
+                    { relations: modelRelations },
+                );
+                const sanitized: Filter<CrudEntity> = {};
+                if (parsed.fields) sanitized.fields = parsed.fields;
+                if (parsed.include) sanitized.include = parsed.include;
+                this.mergeFilters(baseFilter as Filter<CrudEntity>, sanitized);
+            } catch (error) {
+                const message = (error as Error).message ?? 'Invalid OData query.';
+                throw new HttpErrors.BadRequest(message);
+            }
+
+            const entity = await this.repository.findById(id as any, baseFilter);
             return {
                 '@odata.context': entityContext,
                 value: entity,
@@ -231,6 +278,11 @@ export function defineODataCrudController(def: EntitySetDef) {
                     ...(target.fields ?? {}),
                     ...source.fields,
                 } as Filter<CrudEntity>['fields'];
+            }
+
+            if (source.include?.length) {
+                const existing = target.include ?? [];
+                target.include = mergeIncludes(existing, source.include);
             }
         }
     }

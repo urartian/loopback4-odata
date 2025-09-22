@@ -9,7 +9,8 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "clean": "rimraf dist || true",
-    "dev": "ts-node-dev --respawn src/dev.ts"
+    "dev": "ts-node-dev --respawn src/dev.ts",
+    "test": "ts-node --transpile-only src/__tests__/odata-query-parser.expand.spec.ts"
   },
   "keywords": [],
   "author": "Artiom Sargesjan",

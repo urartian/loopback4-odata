@@ -1,4 +1,4 @@
-import {Filter, Where, AnyObject} from '@loopback/repository';
+import {Filter, Where, AnyObject, InclusionFilter, RelationDefinitionMap} from '@loopback/repository';
 
 const comparisonOperators: Record<string, string> = {
   eq: 'eq',
@@ -14,6 +14,10 @@ type ParsedExpression =
   | {operator: 'logical'; type: 'and' | 'or'; expressions: ParsedExpression[]};
 
 type QueryObject = Record<string, string | string[] | undefined>;
+
+interface ParseOptions {
+  relations?: RelationDefinitionMap;
+}
 
 function tokenize(filter: string): string[] {
   const tokens: string[] = [];
@@ -158,8 +162,40 @@ function parseSelect(select?: string): AnyObject | undefined {
   }, {});
 }
 
-export function parseODataQuery(query: QueryObject): Filter<AnyObject> {
+function parseExpand(
+  expand?: string | string[],
+  relations?: RelationDefinitionMap,
+): InclusionFilter[] | undefined {
+  if (!expand) return undefined;
+
+  const normalized = Array.isArray(expand) ? expand.join(',') : expand;
+  const names = normalized
+    .split(',')
+    .map(item => item.trim())
+    .filter(Boolean);
+
+  if (!names.length) return undefined;
+
+  const includes: InclusionFilter[] = [];
+  const seen = new Set<string>();
+
+  for (const name of names) {
+    if (seen.has(name)) continue;
+
+    if (relations && !relations[name]) {
+      throw new Error(`Unknown expand relation: ${name}`);
+    }
+
+    includes.push({relation: name});
+    seen.add(name);
+  }
+
+  return includes.length ? includes : undefined;
+}
+
+export function parseODataQuery(query: QueryObject, options: ParseOptions = {}): Filter<AnyObject> {
   const filter: Filter<AnyObject> = {};
+  const {relations} = options;
 
   const filterExpr = typeof query['$filter'] === 'string' ? query['$filter'] : undefined;
   if (filterExpr) {
@@ -188,6 +224,12 @@ export function parseODataQuery(query: QueryObject): Filter<AnyObject> {
   const select = typeof query['$select'] === 'string' ? query['$select'] : undefined;
   if (select) {
     filter.fields = parseSelect(select);
+  }
+
+  const expand = query['$expand'];
+  const include = parseExpand(expand, relations);
+  if (include) {
+    filter.include = include;
   }
 
   return filter;

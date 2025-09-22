@@ -7,7 +7,7 @@ An extension for [LoopBack 4](https://loopback.io/doc/en/lb4/) that adds **OData
 - Provides `$metadata` endpoint.  
 - Simple developer experience with decorators.  
 
-Currently in **phase 3** — CRUD endpoints are backed by LoopBack repositories, `$metadata` exposes generated CSDL, and core OData query options map to LoopBack filters. Relations & advanced features remain in progress.  
+Currently in **phase 4** — CRUD endpoints are stable and the first advanced feature (`$expand`) is available. Inline related models through LoopBack include filters while we continue building the remaining enterprise capabilities (`$count`, `$batch`, actions/functions, pluralization).  
 
 ---
 
@@ -205,20 +205,43 @@ Becomes:
 
 You can combine `$filter` (eq, ne, gt, ge, lt, le with `and`/`or`), `$orderby`, `$top`, `$skip`, and `$select` to shape the data returned by your repository queries.
 
+Use `$expand` to inline related models that are registered on your LoopBack entity relations:
+
+```http
+GET /odata/Orders?$expand=customer,items
+```
+
+The extension validates relation names against the model metadata and produces the corresponding `include` filter:
+
+```json
+{
+  "include": [
+    {"relation": "customer"},
+    {"relation": "items"}
+  ]
+}
+```
+
+`$expand` is also supported on single-entity requests (`/odata/Orders(1)?$expand=customer`). Unknown relation names result in a `400 Bad Request` response so clients get immediate feedback when requesting unsupported navigation properties.
+
+> **Note:** OData identifiers are case-sensitive. Use the exact navigation property names exposed in `$metadata` (for example, `$expand=orders` not `$expand=Orders`).
+
 ## Features
 
 - [x] OData-style entity paths (Products(1)) supported via middleware
 - [x] Auto-discovery of OData controllers (Booter)
 - [x] Registry of entity sets
 - [x] CRUD controller factory backed by LoopBack repositories
-- [x] $metadata endpoint with generated CSDL (entity sets & primitive properties)
+- [x] $metadata endpoint with generated CSDL (including navigation properties for relations)
 - [x] Basic query options → LoopBack filters (`$filter`, `$orderby`, `$top`, `$skip`, `$select`)
+- [x] Relational expansion via `$expand`
 
 ## Roadmap
 
-- [ ] CSDL navigation properties (relations)
 - [ ] Proper pluralization (using inflection)
-- [ ] Advanced OData features: $expand, batch requests, function/action imports
+- [ ] Inline & standalone `$count`
+- [ ] `$batch` endpoint for multi-operation requests
+- [ ] OData actions & functions decorators
 
 ## Contributing
 
