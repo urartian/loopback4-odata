@@ -9,9 +9,17 @@ const comparisonOperators: Record<string, string> = {
   le: 'lte',
 };
 
+type FunctionExpression = {
+  operator: 'function';
+  name: 'contains' | 'startswith' | 'endswith';
+  field: string;
+  args: unknown[];
+};
+
 type ParsedExpression =
   | {operator: 'comparison'; field: string; comparator: string; value: unknown}
-  | {operator: 'logical'; type: 'and' | 'or'; expressions: ParsedExpression[]};
+  | {operator: 'logical'; type: 'and' | 'or'; expressions: ParsedExpression[]}
+  | FunctionExpression;
 
 type QueryObject = Record<string, string | string[] | undefined>;
 
@@ -33,12 +41,22 @@ function tokenize(filter: string): string[] {
       continue;
     }
 
-    if (!inString && /\s/.test(char)) {
-      if (current) {
-        tokens.push(current);
-        current = '';
+    if (!inString) {
+      if (char === '(' || char === ')' || char === ',') {
+        if (current) {
+          tokens.push(current);
+          current = '';
+        }
+        tokens.push(char);
+        continue;
       }
-      continue;
+      if (/\s/.test(char)) {
+        if (current) {
+          tokens.push(current);
+          current = '';
+        }
+        continue;
+      }
     }
 
     current += char;
@@ -49,7 +67,53 @@ function tokenize(filter: string): string[] {
   return tokens;
 }
 
+function parseFunction(tokens: string[], index: number): [FunctionExpression, number] | undefined {
+  const name = tokens[index]?.toLowerCase();
+  if (name !== 'contains' && name !== 'startswith' && name !== 'endswith') {
+    return undefined;
+  }
+
+  if (tokens[index + 1] !== '(') {
+    throw new Error(`Malformed ${name} invocation. Expected opening parenthesis.`);
+  }
+
+  const field = tokens[index + 2];
+  if (!field) {
+    throw new Error(`${name} requires a target field.`);
+  }
+
+  if (tokens[index + 3] !== ',') {
+    throw new Error(`${name} requires a value argument.`);
+  }
+
+  const valueToken = tokens[index + 4];
+  if (valueToken === undefined) {
+    throw new Error(`${name} requires a value argument.`);
+  }
+
+  if (tokens[index + 5] !== ')') {
+    throw new Error(`Malformed ${name} invocation. Expected closing parenthesis.`);
+  }
+
+  const value = parseLiteral(valueToken);
+
+  return [
+    {
+      operator: 'function',
+      name,
+      field,
+      args: [value],
+    },
+    index + 6,
+  ];
+}
+
 function parseComparison(tokens: string[], index: number): [ParsedExpression, number] {
+  const fn = parseFunction(tokens, index);
+  if (fn) {
+    return [fn[0], fn[1]];
+  }
+
   const field = tokens[index];
   const comparator = tokens[index + 1];
   const valueToken = tokens[index + 2];
@@ -137,6 +201,25 @@ function buildWhere(expr: ParsedExpression): Where<AnyObject> {
       return {[field]: value};
     }
     return {[field]: {[comparator]: value}};
+  }
+
+  if (expr.operator === 'function') {
+    const value = expr.args[0];
+    if (typeof value !== 'string') {
+      throw new Error(`${expr.name} requires a string literal argument.`);
+    }
+    const escaped = value.replace(/%/g, '\\%').replace(/_/g, '\\_');
+    const pattern = expr.name === 'contains'
+      ? `%${escaped}%`
+      : expr.name === 'startswith'
+        ? `${escaped}%`
+        : `%${escaped}`;
+    return {
+      [expr.field]: {
+        like: pattern,
+        escape: '\\',
+      },
+    };
   }
 
   const clauses = expr.expressions.map(buildWhere);

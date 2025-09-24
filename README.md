@@ -203,7 +203,45 @@ Becomes:
 }
 ```
 
-You can combine `$filter` (eq, ne, gt, ge, lt, le with `and`/`or`), `$orderby`, `$top`, `$skip`, and `$select` to shape the data returned by your repository queries.
+You can combine `$filter` (eq, ne, gt, ge, lt, le with `and`/`or`, plus string predicates like `contains`, `startswith`, `endswith`), `$orderby`, `$top`, `$skip`, and `$select` to shape the data returned by your repository queries.
+
+Examples of string predicates translated to LoopBack filters:
+
+```http
+GET /odata/Products?$filter=contains(name,'Lap')
+```
+
+```json
+{
+  "where": {
+    "name": {"like": "%Lap%", "escape": "\\"}
+  }
+}
+```
+
+```http
+GET /odata/Products?$filter=startswith(code,'PR-')
+```
+
+```json
+{
+  "where": {
+    "code": {"like": "PR-%", "escape": "\\"}
+  }
+}
+```
+
+```http
+GET /odata/Products?$filter=endswith(category,'ware')
+```
+
+```json
+{
+  "where": {
+    "category": {"like": "%ware", "escape": "\\"}
+  }
+}
+```
 
 Use `$expand` to inline related models that are registered on your LoopBack entity relations:
 
