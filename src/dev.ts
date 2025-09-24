@@ -17,6 +17,7 @@ import {
 } from '@loopback/repository';
 import { ODataComponent } from './component';
 import { odataModel } from './decorators/model.decorator';
+import { odataAction, odataFunction } from './decorators/action.function.decorators';
 import { odataController } from './decorators/controller.decorator';
 
 const MEMORY_DS_CONFIG = {
@@ -164,7 +165,27 @@ export class OrderItemRepository extends DefaultCrudRepository<
 }
 
 @odataController(Product)
-class ProductODataController { }
+class ProductODataController {
+    constructor(
+        @repository(ProductRepository) private readonly products: ProductRepository,
+    ) { }
+
+    @odataAction({ binding: 'entity', params: [{ name: 'percent', type: 'Edm.Double' }], returnType: 'Default.Product' })
+    async discount(id: typeof Product.prototype.id, body: { percent: number }) {
+        const entity = await this.products.findById(id);
+        const percent = Number(body?.percent ?? 0);
+        const factor = 1 - percent / 100;
+        const newPrice = Number((entity.price ?? 0) * factor);
+        await this.products.updateById(id, { price: newPrice });
+        return await this.products.findById(id);
+    }
+
+    @odataFunction({ binding: 'collection', params: [{ name: 'minPrice', type: 'Edm.Double' }], returnType: 'Collection(Default.Product)' })
+    async premiumProducts(query: { minPrice?: string }) {
+        const minPrice = Number(query?.minPrice ?? 1000);
+        return this.products.find({ where: { price: { gte: minPrice } } });
+    }
+}
 
 @odataController(Order)
 class OrderODataController { }

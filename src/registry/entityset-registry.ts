@@ -1,5 +1,6 @@
 import { BindingScope, injectable } from '@loopback/core';
 import { Entity } from '@loopback/repository';
+import { OperationMeta } from '../decorators/action.function.decorators';
 
 export interface EntitySetDef<T extends Entity = Entity> {
     name: string;                                      // e.g. "Products"
@@ -7,6 +8,8 @@ export interface EntitySetDef<T extends Entity = Entity> {
     controllerCtor?: Function;                         // generated controller
     repositoryBindingKey?: string;                     // app.binding key for the repository
     repositoryCtor?: Function;                         // repository class constructor
+    actions?: OperationMeta[];
+    functions?: OperationMeta[];
 }
 
 @injectable({ scope: BindingScope.SINGLETON })

@@ -285,6 +285,79 @@ Responses preserve request order; operations that share `atomicityGroup` succeed
 }
 ```
 
+### Actions & Functions
+
+You can publish custom OData operations on top of the generated CRUD surface by decorating controller methods. The OData booter discovers them at startup, wires REST routes automatically, and emits `<Action>` / `<Function>` entries in `$metadata` so OData clients can discover them.
+
+`@odataAction()` and `@odataFunction()` accept the same options:
+
+- `name` overrides the exported operation name (defaults to the method name).
+- `binding` selects the scope: `entity` (default), `collection`, or `unbound`.
+- `params` describes parameters for `$metadata` (each entry has `name` and optional `type`).
+- `returnType` sets the CSDL return type hint. Functions default to `Edm.String` when omitted.
+- `rawResponse` skips the default `{ "@odata.context": ..., "value": ... }` envelope so you can return a bespoke payload.
+
+At runtime the framework resolves method arguments this way:
+
+- Entity-bound operations receive the entity key as the first argument and then the JSON body (actions) or query object (functions).
+- Collection-bound operations receive only the body/query object.
+- Unbound operations are mounted at `/odata/<OperationName>` and never receive an entity id.
+
+| Binding      | HTTP verb | Route example                              | Notes |
+|--------------|-----------|--------------------------------------------|-------|
+| `entity`     | POST/GET  | `POST /odata/Products(1)/discount`         | Actions expect a JSON body; functions read the query string. |
+| `collection` | POST/GET  | `GET /odata/Products/premiumProducts`      | Operates on the entire set. |
+| `unbound`    | POST/GET  | `POST /odata/resetInventory`               | No entity segment; useful for cross-cutting jobs. |
+
+Decorated methods still run through the standard LoopBack interceptors and middleware pipeline. The generated CSDL includes bound parameters and return types so metadata-driven tooling (e.g. Power BI, SAP UI5) can discover the operations automatically.
+
+#### Example: entity action & collection function
+
+Define custom actions and functions with decorators:
+
+```ts
+@odataController(Product)
+class ProductController {
+  constructor(@repository(ProductRepository) private products: ProductRepository) {}
+
+  @odataAction({binding: 'entity'})
+  async discount(id: number, body: {percent: number}) {
+    const entity = await this.products.findById(id);
+    const percent = Number(body?.percent ?? 0);
+    await this.products.updateById(id, {
+      price: Number(entity.price ?? 0) * (1 - percent / 100),
+    });
+    return this.products.findById(id);
+  }
+
+  @odataFunction({binding: 'collection'})
+  async premiumProducts(query: {minPrice?: string}) {
+    const minPrice = Number(query?.minPrice ?? 1_000);
+    return this.products.find({where: {price: {gte: minPrice}}});
+  }
+}
+```
+
+- Actions map to `POST /odata/Products({id})/discount` (body contains parameters) and registered routes respect the usual LoopBack interceptors/middleware.
+- Functions map to `GET /odata/Products/premiumProducts?minPrice=1000` and return a collection via GET.
+- Set `rawResponse: true` in the decorator if you want to return a custom payload instead of the default `{ "@odata.context": ..., "value": ... }` envelope.
+- Decorated operations are listed automatically in `$metadata` (CSDL) as bound/unbound actions and functions.
+
+#### Example: unbound action with a raw response
+
+```ts
+@odataAction({name: 'resetInventory', binding: 'unbound', params: [{name: 'confirm', type: 'Edm.Boolean'}], rawResponse: true})
+async resetInventory(body: {confirm?: boolean}) {
+  if (!body?.confirm) {
+    throw new HttpErrors.BadRequest('Pass {"confirm": true} to reset inventory');
+  }
+  await this.products.updateAll({quantityOnHand: 0});
+  return {status: 'ok'};
+}
+```
+
+This action is exposed as `POST /odata/resetInventory`, surfaces in `$metadata` as an unbound action, and because `rawResponse` is set, the controller controls the full payload.
+
 ## Features
 
 - [x] OData-style entity paths (Products(1)) supported via middleware
@@ -296,12 +369,13 @@ Responses preserve request order; operations that share `atomicityGroup` succeed
 - [x] Relational expansion via `$expand`
 - [x] Inline and standalone `$count`
 - [x] `$batch` endpoint (JSON batching)
+- [x] Actions & Functions decorators with auto CSDL generation
 
 ## Roadmap
 
 - [ ] Proper pluralization (using inflection)
 - [ ] Transaction-backed `$batch` changesets (repository transactions)
-- [ ] OData actions & functions decorators
+- [ ] Multipart/mixed `$batch` support
 
 ## Contributing
 

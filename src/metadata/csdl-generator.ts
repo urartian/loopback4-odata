@@ -2,6 +2,7 @@ import { BindingScope, inject, injectable } from '@loopback/core';
 import { Entity, ModelDefinition, PropertyDefinition, RelationDefinitionMap } from '@loopback/repository';
 import { EntitySetDef, EntitySetRegistry } from '../registry/entityset-registry';
 import { ODATA_BINDINGS } from '../keys';
+import { getODataActions, getODataFunctions, OperationMeta } from '../decorators/action.function.decorators';
 
 const EDM_NAMESPACE = 'http://docs.oasis-open.org/odata/ns/edm';
 const EDMX_NAMESPACE = 'http://docs.oasis-open.org/odata/ns/edmx';
@@ -155,6 +156,9 @@ export class CsdlGenerator {
         const entitySets = this.registry.list();
         const entityTypes: string[] = [];
         const containerSets: string[] = [];
+        const actionSchemas: string[] = [];
+        const functionSchemas: string[] = [];
+        const operationImports: string[] = [];
         const namespace = 'Default';
         const containerName = 'DefaultContainer';
 
@@ -181,6 +185,21 @@ export class CsdlGenerator {
             containerSets.push(
                 navigationBindings.length ? entitySetLines.join('\n') : entitySetLines[0].replace(/>$/, '/>'),
             );
+
+            const entityName = (set.modelCtor as typeof Entity).definition?.name ?? set.modelCtor.name;
+            const actions = set.actions ?? [];
+            for (const action of actions) {
+                const { schema, importLine } = this.buildOperationSchema('Action', action, namespace, entityName, set.name);
+                actionSchemas.push(schema);
+                if (importLine) operationImports.push(importLine);
+            }
+
+            const functions = set.functions ?? [];
+            for (const fn of functions) {
+                const { schema, importLine } = this.buildOperationSchema('Function', fn, namespace, entityName, set.name);
+                functionSchemas.push(schema);
+                if (importLine) operationImports.push(importLine);
+            }
         }
 
         return [
@@ -189,12 +208,62 @@ export class CsdlGenerator {
             '  <edmx:DataServices>',
             `    <Schema Namespace="${namespace}" xmlns="${EDM_NAMESPACE}">`,
             ...entityTypes,
+            ...actionSchemas,
+            ...functionSchemas,
             `      <EntityContainer Name="${containerName}">`,
             ...containerSets,
+            ...operationImports,
             '      </EntityContainer>',
             '    </Schema>',
             '  </edmx:DataServices>',
             '</edmx:Edmx>',
         ].join('\n');
+    }
+
+    private buildOperationSchema(
+        kind: 'Action' | 'Function',
+        op: OperationMeta,
+        namespace: string,
+        entityName: string | undefined,
+        setName: string,
+    ) {
+        const isBound = op.binding !== 'unbound';
+        const lines: string[] = [];
+        const qualifiedEntity = entityName ? `${namespace}.${xmlEscape(entityName)}` : undefined;
+
+        if (isBound && qualifiedEntity) {
+            const bindingType = op.binding === 'collection'
+                ? `Collection(${qualifiedEntity})`
+                : qualifiedEntity;
+            lines.push(`  <Parameter Name="bindingParameter" Type="${bindingType}" />`);
+        }
+
+        for (const param of op.parameters ?? []) {
+            const type = param.type ?? 'Edm.String';
+            lines.push(`  <Parameter Name="${xmlEscape(param.name)}" Type="${xmlEscape(type)}" />`);
+        }
+
+        const name = xmlEscape(op.name);
+        let returnTypeLine = '';
+        if (op.returnType) {
+            returnTypeLine = `  <ReturnType Type="${xmlEscape(op.returnType)}" />`;
+        } else if (kind === 'Function') {
+            returnTypeLine = '  <ReturnType Type="Edm.String" />';
+        }
+
+        const schemaLines = [
+            `    <${kind} Name="${name}"${isBound ? ' IsBound="true"' : ''}>`,
+            ...lines,
+            returnTypeLine,
+            `    </${kind}>`,
+        ].filter(Boolean);
+
+        let importLine: string | undefined;
+        if (!isBound) {
+            const importTag = kind === 'Action' ? 'ActionImport' : 'FunctionImport';
+            importLine = `      <${importTag} Name="${name}" ${kind}="${namespace}.${name}" />`;
+        }
+
+        return { schema: schemaLines.join('\n'), importLine };
     }
 }

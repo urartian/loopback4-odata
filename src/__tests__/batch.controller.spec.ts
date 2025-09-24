@@ -21,7 +21,10 @@ function createController(stubs: StubResponseMap) {
   return controller;
 }
 
-const responseStub = {contentType: () => undefined} as unknown as Response;
+const responseStub = {
+  contentType: () => undefined,
+  set: () => undefined,
+} as unknown as Response;
 
 (async () => {
   const controller = createController({
