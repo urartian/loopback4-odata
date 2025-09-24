@@ -9,7 +9,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "clean": "rimraf dist || true",
-    "dev": "ts-node-dev --respawn src/dev.ts",
+    "dev": "ts-node-dev --respawn --project tsconfig.dev.json examples/basic-app/index.ts",
     "test": "ts-node --transpile-only src/__tests__/run.ts"
   },
   "keywords": [],

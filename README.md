@@ -107,7 +107,7 @@ Start your app and test:
 npm start
 ```
 
-For a quick demo, run `npm run dev`; the in-memory datasource comes pre-seeded with sample products and orders so you can experiment with the query options immediately.
+For a quick demo, run `npm run dev`; this boots the example app in `examples/basic-app`, with an in-memory datasource pre-seeded with sample products and orders so you can experiment with the query options immediately.
 
 ##### Metadata
 
