@@ -396,6 +396,10 @@ async resetInventory(body: {confirm?: boolean}) {
 
 This action is exposed as `POST /odata/resetInventory`, surfaces in `$metadata` as an unbound action, and because `rawResponse` is set, the controller controls the full payload.
 
+## Testing
+
+Run `npm test` to compile the TypeScript specs and execute the unit suite. Acceptance specs leverage `@loopback/testlab` and will be skipped automatically in environments that disallow binding HTTP ports (for example, certain sandboxes). When running locally, the acceptance suite exercises the generated REST endpoints against a seeded in-memory datasource.
+
 ## Features
 
 - [x] OData-style entity paths (Products(1)) supported via middleware
