@@ -1,8 +1,9 @@
 /// <reference path="../../types/testing.globals.d.ts" />
 
 import {strict as assert} from 'assert';
-import {ODataBatchController} from '../../controllers/batch.controller';
+import {ODataBatchController, BatchResponsePayload} from '../../controllers/batch.controller';
 import {HttpErrors, Response} from '@loopback/rest';
+import {Readable} from 'stream';
 
 type StubResponseMap = Record<string, {status: number; body?: unknown; headers?: Record<string, string>}>;
 
@@ -31,7 +32,15 @@ function createController(stubs: StubResponseMap) {
 const responseStub = {
   contentType: () => undefined,
   set: () => undefined,
+  send: () => undefined,
 } as unknown as Response;
+
+function requestStub(contentType: string): any {
+  return {
+    headers: {'content-type': contentType},
+    get: (header: string) => (header.toLowerCase() === 'content-type' ? contentType : undefined),
+  };
+}
 
 describe('$batch controller', () => {
   it('returns batched responses in order', async () => {
@@ -40,7 +49,7 @@ describe('$batch controller', () => {
       '2': {status: 200, body: {value: []}},
     });
 
-    const batchResult = await controller.handleBatch(
+    const batchResult = (await controller.handleBatch(
       {
         requests: [
           {id: '1', method: 'GET', url: '/odata/Products'},
@@ -48,7 +57,8 @@ describe('$batch controller', () => {
         ],
       },
       responseStub,
-    );
+      requestStub('application/json'),
+    )) as BatchResponsePayload;
 
     assert.equal(batchResult.responses.length, 2);
     const first = batchResult.responses[0];
@@ -76,7 +86,7 @@ describe('$batch controller', () => {
       },
     });
 
-    const batchResult = await controller.handleBatch(
+    const batchResult = (await controller.handleBatch(
       {
         requests: [
           {id: 'a1', method: 'POST', url: '/odata/Products', atomicityGroup: 'changeset-1'},
@@ -84,7 +94,8 @@ describe('$batch controller', () => {
         ],
       },
       responseStub,
-    );
+      requestStub('application/json'),
+    )) as BatchResponsePayload;
 
     assert.equal(batchResult.responses.length, 1);
     const [failure] = batchResult.responses;
@@ -98,7 +109,7 @@ describe('$batch controller', () => {
   it('rejects empty request arrays', async () => {
     const controller = createController({});
     await assert.rejects(
-      controller.handleBatch({requests: []}, responseStub),
+      controller.handleBatch({requests: []}, responseStub, requestStub('application/json')),
       (err: unknown) => err instanceof HttpErrors.BadRequest,
     );
   });
@@ -155,7 +166,7 @@ describe('$batch controller', () => {
       rollback: async () => undefined,
     });
 
-    const result = await controller.handleBatch(
+    const result = (await controller.handleBatch(
       {
         requests: [
           {id: 't1', method: 'POST', url: '/odata/Products', atomicityGroup: 'group-1'},
@@ -163,7 +174,8 @@ describe('$batch controller', () => {
         ],
       },
       responseStub,
-    );
+      requestStub('application/json'),
+    )) as BatchResponsePayload;
 
     assert.equal(result.responses.length, 2);
     assert.equal(commitCalled, true);
@@ -191,14 +203,15 @@ describe('$batch controller', () => {
       registry,
     );
 
-    const result = await controller.handleBatch(
+    const result = (await controller.handleBatch(
       {
         requests: [
           {id: 'x', method: 'POST', url: '/odata/Products', atomicityGroup: 'no-tx'},
         ],
       },
       responseStub,
-    );
+      requestStub('application/json'),
+    )) as BatchResponsePayload;
 
     assert.equal(result.responses.length, 1);
     const failure = result.responses[0];

@@ -1,5 +1,5 @@
 import {Application, CoreBindings, inject} from '@loopback/core';
-import {post, requestBody, Response, RestBindings, HttpErrors} from '@loopback/rest';
+import {post, requestBody, Response, RestBindings, HttpErrors, Request} from '@loopback/rest';
 import {HttpHandler} from '@loopback/rest/dist/http-handler';
 import {IncomingMessage, ServerResponse} from 'http';
 import {PassThrough} from 'stream';
@@ -8,9 +8,12 @@ import {ODATA_BINDINGS} from '../keys';
 import {EntitySetRegistry} from '../registry/entityset-registry';
 import {ODATA_ATOMICITY_STATE} from '../constants';
 import {AtomicityRequestState} from '../types/batch';
+import {parseMultipartBatch} from '../services/multipart-batch.parser';
+import {serializeMultipartBatch} from '../services/multipart-batch.serializer';
+import {Readable} from 'stream';
 
-interface BatchRequest {
-  id: string;
+export interface BatchRequest {
+  id?: string;
   atomicityGroup?: string;
   method: string;
   url: string;
@@ -22,7 +25,7 @@ interface BatchPayload {
   requests: BatchRequest[];
 }
 
-interface BatchResponseEntry {
+export interface BatchResponseEntry {
   id?: string;
   atomicityGroup?: string;
   status: number;
@@ -30,7 +33,7 @@ interface BatchResponseEntry {
   body?: unknown;
 }
 
-interface BatchResponsePayload {
+export interface BatchResponsePayload {
   responses: BatchResponseEntry[];
 }
 
@@ -158,7 +161,6 @@ export class ODataBatchController {
         'application/json': {
           schema: {
             type: 'object',
-            required: ['requests'],
             properties: {
               requests: {
                 type: 'array',
@@ -181,14 +183,38 @@ export class ODataBatchController {
             },
           },
         },
+        'multipart/mixed': {
+          'x-parser': 'stream',
+          schema: {type: 'object'},
+        },
       },
     })
-    payload: BatchPayload,
+    payload: BatchPayload | Readable,
     @inject(RestBindings.Http.RESPONSE) response: Response,
-  ): Promise<BatchResponsePayload> {
-    const requests = payload?.requests;
-    if (!Array.isArray(requests) || !requests.length) {
-      throw new HttpErrors.BadRequest('Batch payload must contain at least one request.');
+    @inject(RestBindings.Http.REQUEST) request: Request,
+  ): Promise<BatchResponsePayload | void> {
+    const contentType = request.get('content-type') ?? request.headers['content-type'] ?? '';
+    const isMultipart = /multipart\/mixed/i.test(contentType ?? '');
+    let requests: BatchRequest[];
+
+    if (isMultipart) {
+      const boundary = this.extractBoundary(contentType);
+      if (!boundary) {
+        throw new HttpErrors.BadRequest('Multipart batch request must specify a boundary.');
+      }
+      const stream = isReadable(payload) ? (payload as Readable) : (request as unknown as Readable);
+      const parsed = await parseMultipartBatch(stream, boundary);
+      requests = parsed.requests as BatchRequest[];
+      if (!requests.length) {
+        throw new HttpErrors.BadRequest('Batch payload must contain at least one request.');
+      }
+    } else {
+      const jsonPayload = payload as BatchPayload;
+      const jsonRequests = jsonPayload?.requests;
+      if (!Array.isArray(jsonRequests) || !jsonRequests.length) {
+        throw new HttpErrors.BadRequest('Batch payload must contain at least one request.');
+      }
+      requests = jsonRequests;
     }
 
     const grouped = this.groupByAtomicity(requests);
@@ -231,8 +257,17 @@ export class ODataBatchController {
       }
     }
 
-    response.contentType('application/json');
     response.set('OData-Version', '4.01');
+
+    if (isMultipart) {
+      const {body, boundary: responseBoundary} = serializeMultipartBatch(responses);
+      response.set('Content-Type', `multipart/mixed; boundary=${responseBoundary}`);
+      response.set('Content-Length', Buffer.byteLength(body, 'utf-8').toString());
+      response.send(body);
+      return;
+    }
+
+    response.contentType('application/json');
     return {responses};
   }
 
@@ -360,6 +395,12 @@ export class ODataBatchController {
       ? candidate.slice(0, candidate.indexOf('('))
       : candidate;
     return normalized;
+  }
+
+  private extractBoundary(contentType: string): string | undefined {
+    const match = /boundary=([^;]+)/i.exec(contentType ?? '');
+    if (!match) return undefined;
+    return match[1]?.trim().replace(/^"|"$/g, '');
   }
 
   private async beginTransactionForDataSource(dataSource: {
@@ -591,4 +632,8 @@ export class ODataBatchController {
       },
     };
   }
+}
+
+function isReadable(value: unknown): value is Readable {
+  return !!value && typeof (value as Readable).pipe === 'function';
 }

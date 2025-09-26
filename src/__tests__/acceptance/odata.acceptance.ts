@@ -224,4 +224,64 @@ describe('OData component acceptance', () => {
     expect(failure.status).to.equal(501);
     expect(failure.body?.error?.code).to.equal('BatchExecutionError');
   });
+
+  it('accepts multipart/mixed batch requests', async () => {
+    const batchBoundary = 'batch_123';
+    const changesetBoundary = 'changeset_abc';
+    const multipartBody = [
+      `--${batchBoundary}`,
+      `Content-Type: multipart/mixed; boundary=${changesetBoundary}`,
+      '',
+      `--${changesetBoundary}`,
+      'Content-Type: application/http',
+      'Content-Transfer-Encoding: binary',
+      'Content-ID: 1',
+      '',
+      'POST /odata/Products HTTP/1.1',
+      'Content-Type: application/json',
+      '',
+      '{"name":"Drone","price":899}',
+      `--${changesetBoundary}`,
+      'Content-Type: application/http',
+      'Content-Transfer-Encoding: binary',
+      'Content-ID: 2',
+      '',
+      'PATCH /odata/Products(1) HTTP/1.1',
+      'Content-Type: application/json',
+      '',
+      '{"price":1399}',
+      `--${changesetBoundary}--`,
+      `--${batchBoundary}`,
+      'Content-Type: application/http',
+      'Content-Transfer-Encoding: binary',
+      'Content-ID: 3',
+      '',
+      'GET /odata/Products HTTP/1.1',
+      'Accept: application/json',
+      '',
+      '',
+      `--${batchBoundary}--`,
+      '',
+    ].join('\r\n');
+
+    const res = await client
+      .post('/odata/$batch')
+      .set('Content-Type', `multipart/mixed; boundary=${batchBoundary}`)
+      .set('Accept', 'multipart/mixed')
+      .send(multipartBody)
+      .expect(200)
+      .expect('Content-Type', /multipart\/mixed/);
+
+    const multipartPayload =
+      typeof res.text === 'string' && res.text.length
+        ? res.text
+        : Buffer.isBuffer(res.body)
+        ? res.body.toString('utf-8')
+        : '';
+
+    if (multipartPayload) {
+      expect(multipartPayload).to.match(/HTTP\/1\.1 200/);
+      expect(multipartPayload).to.match(/Content-Type: application\/http/);
+    }
+  });
 });

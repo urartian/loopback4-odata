@@ -440,7 +440,7 @@ Run `npm test` to compile the TypeScript specs and execute the unit suite. Accep
 - [x] Basic query options → LoopBack filters (`$filter`, `$orderby`, `$top`, `$skip`, `$select`)
 - [x] Relational expansion via `$expand`
 - [x] Inline and standalone `$count`
-- [x] `$batch` endpoint (JSON batching)
+- [x] `$batch` endpoint (JSON and multipart/mixed)
 - Transactions are attempted for changesets (`atomicityGroup`). If a datasource cannot begin a transaction (e.g. LoopBack's in-memory connector), the changeset is rejected with `501 Not Implemented` and a `BatchExecutionError`. Use a transactional connector or omit `atomicityGroup` to accept best-effort processing.
 - [x] Actions & Functions decorators with auto CSDL generation
 - [x] Proper pluralization of entity sets (via inflection)
@@ -448,9 +448,7 @@ Run `npm test` to compile the TypeScript specs and execute the unit suite. Accep
 
 ## Roadmap
 
-- [x] Proper pluralization (using inflection)
-- [x] Transaction-backed `$batch` changesets (repository transactions)
-- [ ] Multipart/mixed `$batch` support
+- [ ] Protocol hardening (OData headers, preference handling, richer errors)
 
 ## Contributing
 
