@@ -24,6 +24,7 @@ import { EntitySetDef } from '../registry/entityset-registry';
 import { parseODataQuery } from '../services/odata-query-parser.service';
 import { ODATA_ATOMICITY_STATE } from '../constants';
 import { AtomicityRequestState } from '../types/batch';
+import { Response } from '@loopback/rest';
 type CrudEntity = Entity & { [key: string]: unknown };
 type CrudRepo = DefaultCrudRepository<CrudEntity, unknown>;
 
@@ -128,6 +129,8 @@ export function defineODataCrudController(def: EntitySetDef) {
             public readonly repository: CrudRepo,
             @inject(RestBindings.Http.REQUEST)
             public readonly request: Request,
+            @inject(RestBindings.Http.RESPONSE)
+            public readonly response: Response,
         ) { }
 
         @get(`/odata/${setName}`, {
@@ -166,6 +169,7 @@ export function defineODataCrudController(def: EntitySetDef) {
                 totalCount = count;
             }
 
+            this.ensureODataHeaders();
             return {
                 '@odata.context': contextBase,
                 ...(inlineCountRequested ? { '@odata.count': totalCount ?? results.length } : {}),
@@ -206,6 +210,7 @@ export function defineODataCrudController(def: EntitySetDef) {
 
             const where = baseFilter.where as Filter<CrudEntity>['where'];
             const { count } = await this.repository.count(where as any, options);
+            this.ensureODataHeaders();
             return `${count}`;
         }
 
@@ -239,6 +244,7 @@ export function defineODataCrudController(def: EntitySetDef) {
             }
 
             const entity = await this.repository.findById(id as any, baseFilter, options);
+            this.ensureODataHeaders();
             return {
                 '@odata.context': entityContext,
                 value: entity,
@@ -267,7 +273,18 @@ export function defineODataCrudController(def: EntitySetDef) {
             payload: CrudEntity,
         ) {
             const options = this.repositoryOptions();
+            const preference = this.returnPreference();
             const created = await this.repository.create(payload as any, options);
+
+            if (preference === 'minimal') {
+                this.ensureODataHeaders();
+                this.applyPreference(preference);
+                this.response.status(204).end();
+                return;
+            }
+
+            this.ensureODataHeaders();
+            this.applyPreference(preference);
             return {
                 '@odata.context': entityContext,
                 value: created,
@@ -297,8 +314,19 @@ export function defineODataCrudController(def: EntitySetDef) {
             payload: Partial<CrudEntity>,
         ) {
             const options = this.repositoryOptions();
+            const preference = this.returnPreference();
             await this.repository.updateById(id as any, payload as any, options);
+
+            if (preference === 'minimal') {
+                this.ensureODataHeaders();
+                this.applyPreference(preference);
+                this.response.status(204).end();
+                return;
+            }
+
             const updated = await this.repository.findById(id as any, undefined, options);
+            this.ensureODataHeaders();
+            this.applyPreference(preference);
             return {
                 '@odata.context': entityContext,
                 value: updated,
@@ -315,6 +343,7 @@ export function defineODataCrudController(def: EntitySetDef) {
         async delete(@idParam id: unknown): Promise<void> {
             const options = this.repositoryOptions();
             await this.repository.deleteById(id as any, options);
+            this.ensureODataHeaders();
         }
 
         atomicityState(): AtomicityRequestState | undefined {
@@ -325,6 +354,35 @@ export function defineODataCrudController(def: EntitySetDef) {
             const state = this.atomicityState();
             const transaction = state?.getTransaction(setName);
             return transaction ? { transaction } : undefined;
+        }
+
+        returnPreference(): 'minimal' | 'representation' | undefined {
+            const header = this.request.get('Prefer') ?? (this.request.headers?.['prefer'] as string | undefined);
+            if (!header) return undefined;
+            const tokens = String(header)
+                .split(',')
+                .map(token => token.trim().toLowerCase())
+                .filter(Boolean);
+            for (const token of tokens) {
+                if (token.startsWith('return=')) {
+                    const value = token.split('=')[1];
+                    if (value === 'minimal') return 'minimal';
+                    if (value === 'representation') return 'representation';
+                }
+            }
+            return undefined;
+        }
+
+        applyPreference(preference?: 'minimal' | 'representation') {
+            if (!preference || this.response.headersSent) return;
+            this.response.set('Preference-Applied', `return=${preference}`);
+        }
+
+        ensureODataHeaders() {
+            if (this.response.headersSent) return;
+            if (!this.response.getHeader('OData-Version')) {
+                this.response.set('OData-Version', '4.01');
+            }
         }
 
         mergeFilters(target: Filter<CrudEntity>, source: Filter<CrudEntity>) {

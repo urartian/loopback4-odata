@@ -181,6 +181,36 @@ describe('OData component acceptance', () => {
     await client.get(`/odata/Products(${createdId})`).expect(404);
   });
 
+  it('honors Prefer return=minimal for write operations', async () => {
+    const createRes = await client
+      .post('/odata/Products')
+      .set('Prefer', 'return=minimal')
+      .send({name: 'Speaker', price: 199})
+      .expect(204);
+
+    expect(createRes.headers['preference-applied']).to.equal('return=minimal');
+    expect(createRes.headers['odata-version']).to.equal('4.01');
+
+    const createdList = await client
+      .get('/odata/Products')
+      .query({$filter: "name eq 'Speaker'"})
+      .expect(200);
+    const speakerId = createdList.body.value[0]?.id;
+
+    const updateRes = await client
+      .patch(`/odata/Products(${speakerId})`)
+      .set('Prefer', 'return=minimal')
+      .send({price: 219})
+      .expect(204);
+    expect(updateRes.headers['preference-applied']).to.equal('return=minimal');
+    expect(updateRes.headers['odata-version']).to.equal('4.01');
+
+    const verify = await client.get(`/odata/Products(${speakerId})`).expect(200);
+    expect(verify.body.value.price).to.equal(219);
+
+    await client.del(`/odata/Products(${speakerId})`).expect(204);
+  });
+
   it('reports errors for invalid batch requests', async () => {
     const res = await client
       .post('/odata/$batch')
