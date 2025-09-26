@@ -451,10 +451,12 @@ Run `npm test` to compile the TypeScript specs and execute the unit suite. Accep
 ## Roadmap
 
 - [ ] Optimistic concurrency & ETag headers to align with enterprise clients (If-Match/If-None-Match validation)
-- [ ] Deeper query language coverage (nested groups, additional OData functions, `$search`, `any`/`all`)
+- [ ] Full OData filter grammar: nested groups, numeric/date functions, `$search`, `any`/`all`
 - [ ] Configuration plumbing for base path, `$top` limits, and `$count` toggles exposed by `ODataConfig`
-- [ ] Robust path rewriting for GUIDs/quoted/composite keys without relying on `\w+` heuristics
-- [ ] Richer EDMX output (complex/collection types, precision metadata, navigation partners)
+- [ ] Robust path rewriting for GUID, quoted, and alternate keys without `\w+` heuristics
+- [ ] Richer EDMX output (complex/collection types, precision metadata, annotations, navigation partners)
+- [ ] Batch execution via LoopBack pipeline so interceptors/auth run for changesets across datasources
+- [ ] Draft/deep insert workflows, localized fields, and SAP Fiori-friendly annotations
 
 ## Contributing
 
