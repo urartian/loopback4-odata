@@ -8,6 +8,7 @@ import { getODataModelMeta } from '../decorators/model.decorator';
 import { ODATA_BINDINGS } from '../keys';
 import { Entity } from '@loopback/repository';
 import { getODataActions, getODataFunctions, OperationMeta } from '../decorators/action.function.decorators';
+import { pluralize } from 'inflection';
 
 @injectable({ tags: { booters: 'odata' } })
 export class ODataBooter implements Booter {
@@ -74,7 +75,9 @@ export class ODataBooter implements Booter {
     private getEntitySetName(modelCtor: typeof Entity): string {
         const meta = getODataModelMeta(modelCtor);
         if (meta?.entitySetName) return meta.entitySetName;
-        return `${modelCtor?.name ?? 'Entity'}s`; // TODO: pluralize properly
+        const baseName = modelCtor?.name?.trim()?.length ? modelCtor.name : 'Entity';
+        const plural = pluralize(baseName);
+        return plural?.trim()?.length ? plural : `${baseName}s`;
     }
 
     private registerOperations(def: EntitySetDef, controllerCtor: Function) {

@@ -412,10 +412,11 @@ Run `npm test` to compile the TypeScript specs and execute the unit suite. Accep
 - [x] Inline and standalone `$count`
 - [x] `$batch` endpoint (JSON batching)
 - [x] Actions & Functions decorators with auto CSDL generation
+- [x] Proper pluralization of entity sets (via inflection)
 
 ## Roadmap
 
-- [ ] Proper pluralization (using inflection)
+- [x] Proper pluralization (using inflection)
 - [ ] Transaction-backed `$batch` changesets (repository transactions)
 - [ ] Multipart/mixed `$batch` support
 
