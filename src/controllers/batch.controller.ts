@@ -1,8 +1,13 @@
-import {inject} from '@loopback/core';
+import {Application, CoreBindings, inject} from '@loopback/core';
 import {post, requestBody, Response, RestBindings, HttpErrors} from '@loopback/rest';
 import {HttpHandler} from '@loopback/rest/dist/http-handler';
 import {IncomingMessage, ServerResponse} from 'http';
 import {PassThrough} from 'stream';
+import {IsolationLevel, Transaction} from '@loopback/repository';
+import {ODATA_BINDINGS} from '../keys';
+import {EntitySetRegistry} from '../registry/entityset-registry';
+import {ODATA_ATOMICITY_STATE} from '../constants';
+import {AtomicityRequestState} from '../types/batch';
 
 interface BatchRequest {
   id: string;
@@ -29,12 +34,85 @@ interface BatchResponsePayload {
   responses: BatchResponseEntry[];
 }
 
+class AtomicityGroupContext {
+  private readonly requestState: AtomicityRequestState;
+  private readonly transactions: Transaction[];
+  private settled = false;
+  private rolledBack = false;
+
+  constructor(
+    public readonly id: string,
+    private readonly transactionsBySet: Map<string, Transaction>,
+  ) {
+    const unique = new Set<Transaction>();
+    for (const tx of transactionsBySet.values()) unique.add(tx);
+    this.transactions = Array.from(unique.values());
+    this.requestState = {
+      groupId: id,
+      getTransaction: (entitySetName: string) => this.transactionsBySet.get(entitySetName),
+    };
+  }
+
+  applyTo(req: IncomingMessage) {
+    (req as any)[ODATA_ATOMICITY_STATE] = this.requestState;
+  }
+
+  clearFrom(req: IncomingMessage) {
+    delete (req as any)[ODATA_ATOMICITY_STATE];
+  }
+
+  async commit() {
+    if (this.settled) return;
+    try {
+      for (const tx of this.transactions) {
+        await tx.commit();
+      }
+      this.settled = true;
+    } catch (error) {
+      try {
+        await this.safeRollback();
+      } catch {
+        /* ignore rollback errors here to surface original commit failure */
+      }
+      throw error;
+    }
+  }
+
+  async rollback() {
+    if (this.settled && this.rolledBack) return;
+    await this.safeRollback();
+  }
+
+  private async safeRollback() {
+    if (this.rolledBack) return;
+    const errors: Error[] = [];
+    for (const tx of this.transactions) {
+      try {
+        await tx.rollback();
+      } catch (err) {
+        errors.push(err as Error);
+      }
+    }
+    this.rolledBack = true;
+    this.settled = true;
+    if (errors.length) {
+      const aggregate = new Error(errors.map(e => e.message ?? String(e)).join('; '));
+      (aggregate as any).cause = errors[0];
+      throw aggregate;
+    }
+  }
+}
+
 export class ODataBatchController {
   constructor(
     @inject(RestBindings.HANDLER)
     private readonly httpHandler: HttpHandler,
     @inject(RestBindings.URL)
     private readonly serverUrl: string,
+    @inject(CoreBindings.APPLICATION_INSTANCE)
+    private readonly app: Application,
+    @inject(ODATA_BINDINGS.ENTITY_SET_REGISTRY)
+    private readonly registry: EntitySetRegistry,
   ) {}
 
   @post('/odata/$batch', {
@@ -118,22 +196,34 @@ export class ODataBatchController {
 
     for (const group of grouped) {
       if (group.atomicityGroup) {
-        const groupResponses = await this.executeGroup(group.requests);
-        const failed = groupResponses.find(r => r.status >= 400);
-        if (failed) {
+        try {
+          const {entries, failure} = await this.executeAtomicGroup(group.requests, group.atomicityGroup);
+          if (failure) {
+            responses.push({
+              atomicityGroup: group.atomicityGroup,
+              id: failure.id,
+              status: failure.status,
+              headers: failure.headers,
+              body: failure.body,
+            });
+          } else if (entries?.length) {
+            responses.push(
+              ...entries.map(entry => ({
+                ...entry,
+                atomicityGroup: group.atomicityGroup,
+              })),
+            );
+          }
+        } catch (error) {
+          const status = this.resolveErrorStatus(error, 500);
           responses.push({
             atomicityGroup: group.atomicityGroup,
-            id: failed.id,
-            status: failed.status,
-            body: failed.body,
+            status,
+            body: this.odataError(
+              'BatchExecutionError',
+              (error as Error).message ?? 'Failed to execute atomicity group.',
+            ),
           });
-        } else {
-          responses.push(
-            ...groupResponses.map(entry => ({
-              ...entry,
-              atomicityGroup: group.atomicityGroup,
-            })),
-          );
         }
       } else {
         const entries = await this.executeGroup(group.requests);
@@ -164,17 +254,131 @@ export class ODataBatchController {
     return result;
   }
 
-  private async executeGroup(requests: BatchRequest[]): Promise<BatchResponseEntry[]> {
+  private async executeGroup(
+    requests: BatchRequest[],
+    context?: AtomicityGroupContext,
+  ): Promise<BatchResponseEntry[]> {
     const entries: BatchResponseEntry[] = [];
     for (const request of requests) {
-      const entry = await this.executeSingle(request);
+      const entry = await this.executeSingle(request, context);
       entries.push(entry);
       if (entry.status >= 400) break;
     }
     return entries;
   }
 
-  private async executeSingleLegacy(request: BatchRequest): Promise<BatchResponseEntry> {
+  private async executeAtomicGroup(
+    requests: BatchRequest[],
+    groupId: string,
+  ): Promise<{entries?: BatchResponseEntry[]; failure?: BatchResponseEntry}> {
+    const context = await this.createAtomicGroupContext(groupId, requests);
+    try {
+      const entries = await this.executeGroup(requests, context);
+      const failed = entries.find(entry => entry.status >= 400);
+      if (failed) {
+        await context.rollback();
+        return {failure: failed};
+      }
+      await context.commit();
+      return {entries};
+    } catch (error) {
+      await context.rollback();
+      throw error;
+    }
+  }
+
+  private async createAtomicGroupContext(
+    groupId: string,
+    requests: BatchRequest[],
+  ): Promise<AtomicityGroupContext> {
+    const setNames = new Set<string>();
+    for (const request of requests) {
+      const setName = this.resolveEntitySetName(request.url);
+      if (setName) setNames.add(setName);
+    }
+
+    const transactionsBySet = new Map<string, Transaction>();
+    const transactionsByDataSource = new Map<string, Transaction>();
+    const startedTransactions: Transaction[] = [];
+
+    try {
+      for (const setName of setNames) {
+        const def = this.registry.findByName(setName);
+        if (!def) continue;
+        if (!def.repositoryBindingKey) {
+          throw new HttpErrors.InternalServerError(
+            `Entity set ${def.name} is missing a repository binding and cannot participate in transactions.`,
+          );
+        }
+
+        const repository = await this.app.get(def.repositoryBindingKey);
+        const dataSource = (repository as {dataSource?: {beginTransaction?: Function; name?: string}}).dataSource;
+        if (!dataSource || typeof dataSource.beginTransaction !== 'function') {
+          throw new HttpErrors.NotImplemented(
+            `Repository for entity set ${def.name} does not support transactions required for atomicity group ${groupId}.`,
+          );
+        }
+
+        const dsKey = dataSource.name ?? def.repositoryBindingKey;
+        let tx = transactionsByDataSource.get(dsKey);
+        if (!tx) {
+          tx = await this.beginTransactionForDataSource(
+            dataSource as {
+              beginTransaction: (options: IsolationLevel) => Promise<Transaction>;
+              name?: string;
+            },
+          );
+          transactionsByDataSource.set(dsKey, tx);
+          startedTransactions.push(tx);
+        }
+        transactionsBySet.set(def.name, tx);
+      }
+    } catch (error) {
+      for (const tx of startedTransactions) {
+        try {
+          await tx.rollback();
+        } catch {
+          /* no-op */
+        }
+      }
+      throw error;
+    }
+
+    return new AtomicityGroupContext(groupId, transactionsBySet);
+  }
+
+  private resolveEntitySetName(rawUrl: string): string | undefined {
+    const sanitized = this.sanitizeUrl(rawUrl);
+    if (!sanitized) return undefined;
+    const [path] = sanitized.split('?');
+    const segments = path.split('/').filter(Boolean);
+    if (segments.length < 2) return undefined;
+    if (segments[0].toLowerCase() !== 'odata') return undefined;
+    const candidate = segments[1];
+    if (!candidate || candidate.startsWith('$')) return undefined;
+    const normalized = candidate.includes('(')
+      ? candidate.slice(0, candidate.indexOf('('))
+      : candidate;
+    return normalized;
+  }
+
+  private async beginTransactionForDataSource(dataSource: {
+    beginTransaction: (options: IsolationLevel) => Promise<Transaction>;
+    name?: string;
+  }): Promise<Transaction> {
+    try {
+      return await dataSource.beginTransaction(IsolationLevel.READ_COMMITTED);
+    } catch (err) {
+      throw new HttpErrors.NotImplemented(
+        `Datasource ${dataSource.name ?? 'unknown'} cannot begin a transaction: ${(err as Error).message ?? 'unsupported connector'}.`,
+      );
+    }
+  }
+
+  private async executeWithHandler(
+    request: BatchRequest,
+    context: AtomicityGroupContext,
+  ): Promise<BatchResponseEntry> {
     const url = this.sanitizeUrl(request.url);
     if (!url) {
       return {
@@ -292,6 +496,7 @@ export class ODataBatchController {
       return res;
     };
 
+    context.applyTo(req);
     const handlerPromise = this.httpHandler.handleRequest(req as any, res as any);
 
     socket.end(bodyBuffer.length ? bodyBuffer : undefined);
@@ -301,8 +506,11 @@ export class ODataBatchController {
       const TIMEOUT_MS = 30000;
       const timeoutPromise = new Promise<never>((_, reject) => setTimeout(() => reject(new Error('Batch sub-request timeout')), TIMEOUT_MS));
       await Promise.race([handlerPromise, timeoutPromise]);
-      return await finishPromise;
+      const result = await finishPromise;
+      context.clearFrom(req);
+      return result;
     } catch (error) {
+      context.clearFrom(req);
       const status = (error && typeof error === 'object' && 'statusCode' in error
         ? (error as {statusCode?: number}).statusCode
         : undefined) ?? 500;
@@ -315,7 +523,7 @@ export class ODataBatchController {
     }
   }
 
-  private async executeSingle(request: BatchRequest): Promise<BatchResponseEntry> {
+  private async executeViaFetch(request: BatchRequest): Promise<BatchResponseEntry> {
     const path = this.sanitizeUrl(request.url);
     if (!path) {
       return {id: request.id, status: 400, body: this.odataError('InvalidUrl', `Invalid request URL: ${request.url}`)};
@@ -344,6 +552,14 @@ export class ODataBatchController {
     }
   }
 
+  private async executeSingle(
+    request: BatchRequest,
+    context?: AtomicityGroupContext,
+  ): Promise<BatchResponseEntry> {
+    if (context) return this.executeWithHandler(request, context);
+    return this.executeViaFetch(request);
+  }
+
   private sanitizeUrl(rawUrl: string): string | undefined {
     if (!rawUrl) return undefined;
     if (/^https?:\/\//i.test(rawUrl)) {
@@ -356,6 +572,15 @@ export class ODataBatchController {
     }
     if (!rawUrl.startsWith('/')) return undefined;
     return rawUrl;
+  }
+
+  private resolveErrorStatus(error: unknown, fallback: number): number {
+    if (typeof error === 'object' && error !== null) {
+      const withStatus = error as {statusCode?: number; status?: number};
+      const status = withStatus.statusCode ?? withStatus.status;
+      if (typeof status === 'number' && !Number.isNaN(status)) return status;
+    }
+    return fallback;
   }
 
   private odataError(code: string, message: string) {

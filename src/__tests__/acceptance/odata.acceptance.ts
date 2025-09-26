@@ -194,4 +194,34 @@ describe('OData component acceptance', () => {
     expect(res.body.responses[0].status).to.equal(400);
     expect(res.body.responses[0].body?.error?.code).to.equal('InvalidUrl');
   });
+
+  it('rejects transactional changesets when datasource lacks transactions', async () => {
+    const res = await client
+      .post('/odata/$batch')
+      .send({
+        requests: [
+          {
+            id: 'c1',
+            method: 'POST',
+            url: '/odata/Products',
+            body: {name: 'Tablet', price: 599},
+            atomicityGroup: 'g1',
+          },
+          {
+            id: 'c2',
+            method: 'PATCH',
+            url: '/odata/Products(1)',
+            body: {price: 1499},
+            atomicityGroup: 'g1',
+          },
+        ],
+      })
+      .expect(200);
+
+    expect(res.body.responses).to.have.lengthOf(1);
+    const failure = res.body.responses[0];
+    expect(failure.atomicityGroup).to.equal('g1');
+    expect(failure.status).to.equal(501);
+    expect(failure.body?.error?.code).to.equal('BatchExecutionError');
+  });
 });

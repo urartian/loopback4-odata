@@ -10,6 +10,8 @@ function createController(stubs: StubResponseMap) {
   const controller = new ODataBatchController(
     {handleRequest: async () => undefined} as any,
     'http://localhost',
+    {get: async () => undefined} as any,
+    {findByName: () => undefined} as any,
   );
   (controller as any).executeSingle = async (request: {id: string}) => {
     const stub = stubs[request.id];
@@ -64,6 +66,15 @@ describe('$batch controller', () => {
       a1: {status: 200, body: {value: [{id: 10}]}},
       a2: {status: 409, body: {error: {code: 'Conflict'}}},
     });
+    let rollbackCalled = false;
+    (controller as any).createAtomicGroupContext = async () => ({
+      applyTo: () => undefined,
+      clearFrom: () => undefined,
+      commit: async () => undefined,
+      rollback: async () => {
+        rollbackCalled = true;
+      },
+    });
 
     const batchResult = await controller.handleBatch(
       {
@@ -81,6 +92,7 @@ describe('$batch controller', () => {
     assert.equal(failure.id, 'a2');
     assert.equal(failure.status, 409);
     assert.deepStrictEqual(failure.body, {error: {code: 'Conflict'}});
+    assert.equal(rollbackCalled, true);
   });
 
   it('rejects empty request arrays', async () => {
@@ -95,6 +107,8 @@ describe('$batch controller', () => {
     const controller = new ODataBatchController(
       {handleRequest: async () => undefined} as any,
       'http://localhost',
+      {get: async () => undefined} as any,
+      {findByName: () => undefined} as any,
     );
 
     const result = await (controller as any).executeSingle({
@@ -111,6 +125,8 @@ describe('$batch controller', () => {
     const controller = new ODataBatchController(
       {handleRequest: async () => undefined} as any,
       'http://localhost',
+      {get: async () => undefined} as any,
+      {findByName: () => undefined} as any,
     );
 
     const result = await (controller as any).executeSingle({
@@ -121,5 +137,73 @@ describe('$batch controller', () => {
 
     assert.equal(result.status, 400);
     assert.equal((result.body as any)?.error?.code, 'InvalidMethod');
+  });
+
+  it('commits transactional group when all requests succeed', async () => {
+    const controller = createController({
+      t1: {status: 200},
+      t2: {status: 200},
+    });
+
+    let commitCalled = false;
+    (controller as any).createAtomicGroupContext = async () => ({
+      applyTo: () => undefined,
+      clearFrom: () => undefined,
+      commit: async () => {
+        commitCalled = true;
+      },
+      rollback: async () => undefined,
+    });
+
+    const result = await controller.handleBatch(
+      {
+        requests: [
+          {id: 't1', method: 'POST', url: '/odata/Products', atomicityGroup: 'group-1'},
+          {id: 't2', method: 'PATCH', url: '/odata/Products(1)', atomicityGroup: 'group-1'},
+        ],
+      },
+      responseStub,
+    );
+
+    assert.equal(result.responses.length, 2);
+    assert.equal(commitCalled, true);
+    for (const entry of result.responses) {
+      assert.equal(entry.atomicityGroup, 'group-1');
+      assert.equal(entry.status, 200);
+    }
+  });
+
+  it('returns 501 when atomicity group cannot start a transaction', async () => {
+    const registry = {
+      findByName: (name: string) =>
+        name === 'Products'
+          ? {
+              name: 'Products',
+              modelCtor: class {},
+              repositoryBindingKey: 'repositories.Products',
+            }
+          : undefined,
+    } as any;
+    const controller = new ODataBatchController(
+      {handleRequest: async () => undefined} as any,
+      'http://localhost',
+      {get: async () => ({dataSource: {name: 'db'}})} as any,
+      registry,
+    );
+
+    const result = await controller.handleBatch(
+      {
+        requests: [
+          {id: 'x', method: 'POST', url: '/odata/Products', atomicityGroup: 'no-tx'},
+        ],
+      },
+      responseStub,
+    );
+
+    assert.equal(result.responses.length, 1);
+    const failure = result.responses[0];
+    assert.equal(failure.atomicityGroup, 'no-tx');
+    assert.equal(failure.status, 501);
+    assert.equal((failure.body as any)?.error?.code, 'BatchExecutionError');
   });
 });

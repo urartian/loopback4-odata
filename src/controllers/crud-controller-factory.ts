@@ -17,10 +17,13 @@ import {
     Filter,
     FilterExcludingWhere,
     InclusionFilter,
+    Options,
     RelationDefinitionMap,
 } from '@loopback/repository';
 import { EntitySetDef } from '../registry/entityset-registry';
 import { parseODataQuery } from '../services/odata-query-parser.service';
+import { ODATA_ATOMICITY_STATE } from '../constants';
+import { AtomicityRequestState } from '../types/batch';
 type CrudEntity = Entity & { [key: string]: unknown };
 type CrudRepo = DefaultCrudRepository<CrudEntity, unknown>;
 
@@ -153,12 +156,13 @@ export function defineODataCrudController(def: EntitySetDef) {
                 throw new HttpErrors.BadRequest(message);
             }
 
-            const results = await this.repository.find(baseFilter);
+            const options = this.repositoryOptions();
+            const results = await this.repository.find(baseFilter, options);
             let totalCount: number | undefined;
 
             if (inlineCountRequested) {
                 const where = baseFilter.where as Filter<CrudEntity>['where'];
-                const { count } = await this.repository.count(where as any);
+                const { count } = await this.repository.count(where as any, options);
                 totalCount = count;
             }
 
@@ -185,6 +189,7 @@ export function defineODataCrudController(def: EntitySetDef) {
         })
         async count() {
             const baseFilter: Filter<CrudEntity> = {};
+            const options = this.repositoryOptions();
 
             try {
                 const parsed = parseODataQuery(
@@ -200,7 +205,7 @@ export function defineODataCrudController(def: EntitySetDef) {
             }
 
             const where = baseFilter.where as Filter<CrudEntity>['where'];
-            const { count } = await this.repository.count(where as any);
+            const { count } = await this.repository.count(where as any, options);
             return `${count}`;
         }
 
@@ -217,6 +222,7 @@ export function defineODataCrudController(def: EntitySetDef) {
             @filterExcludingWhereParam filter?: FilterExcludingWhere<CrudEntity>,
         ) {
             const baseFilter: FilterExcludingWhere<CrudEntity> = filter ? { ...filter } : {};
+            const options = this.repositoryOptions();
 
             try {
                 const parsed = parseODataQuery(
@@ -232,7 +238,7 @@ export function defineODataCrudController(def: EntitySetDef) {
                 throw new HttpErrors.BadRequest(message);
             }
 
-            const entity = await this.repository.findById(id as any, baseFilter);
+            const entity = await this.repository.findById(id as any, baseFilter, options);
             return {
                 '@odata.context': entityContext,
                 value: entity,
@@ -260,7 +266,8 @@ export function defineODataCrudController(def: EntitySetDef) {
             })
             payload: CrudEntity,
         ) {
-            const created = await this.repository.create(payload as any);
+            const options = this.repositoryOptions();
+            const created = await this.repository.create(payload as any, options);
             return {
                 '@odata.context': entityContext,
                 value: created,
@@ -289,8 +296,9 @@ export function defineODataCrudController(def: EntitySetDef) {
             })
             payload: Partial<CrudEntity>,
         ) {
-            await this.repository.updateById(id as any, payload as any);
-            const updated = await this.repository.findById(id as any);
+            const options = this.repositoryOptions();
+            await this.repository.updateById(id as any, payload as any, options);
+            const updated = await this.repository.findById(id as any, undefined, options);
             return {
                 '@odata.context': entityContext,
                 value: updated,
@@ -305,7 +313,18 @@ export function defineODataCrudController(def: EntitySetDef) {
             },
         })
         async delete(@idParam id: unknown): Promise<void> {
-            await this.repository.deleteById(id as any);
+            const options = this.repositoryOptions();
+            await this.repository.deleteById(id as any, options);
+        }
+
+        atomicityState(): AtomicityRequestState | undefined {
+            return (this.request as any)[ODATA_ATOMICITY_STATE] as AtomicityRequestState | undefined;
+        }
+
+        repositoryOptions(): Options | undefined {
+            const state = this.atomicityState();
+            const transaction = state?.getTransaction(setName);
+            return transaction ? { transaction } : undefined;
         }
 
         mergeFilters(target: Filter<CrudEntity>, source: Filter<CrudEntity>) {

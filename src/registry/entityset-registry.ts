@@ -39,4 +39,12 @@ export class EntitySetRegistry {
     list(): EntitySetDef[] {
         return Array.from(this.sets.values());
     }
+
+    findByName(name: string): EntitySetDef | undefined {
+        const normalized = name.toLowerCase();
+        for (const def of this.sets.values()) {
+            if (def.name.toLowerCase() === normalized) return def;
+        }
+        return undefined;
+    }
 }

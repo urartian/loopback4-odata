@@ -396,6 +396,36 @@ async resetInventory(body: {confirm?: boolean}) {
 
 This action is exposed as `POST /odata/resetInventory`, surfaces in `$metadata` as an unbound action, and because `rawResponse` is set, the controller controls the full payload.
 
+### Using `$batch`
+
+Send a JSON payload containing `requests`. When multiple entries share the same `atomicityGroup`, LoopBack executes them as a changeset and either commits or rolls everything back.
+
+```http
+POST /odata/$batch
+Content-Type: application/json
+
+{
+  "requests": [
+    {
+      "id": "create",
+      "method": "POST",
+      "url": "/odata/Products",
+      "body": {"name": "Tablet", "price": 599},
+      "atomicityGroup": "g1"
+    },
+    {
+      "id": "update",
+      "method": "PATCH",
+      "url": "/odata/Products(1)",
+      "body": {"price": 1499},
+      "atomicityGroup": "g1"
+    }
+  ]
+}
+```
+
+If the datasource behind the repositories cannot create transactions (for example, the in-memory connector), the OData component returns `501 Not Implemented` with a `BatchExecutionError` explaining that the changeset could not be guaranteed. Use a transactional connector or omit `atomicityGroup` to execute requests independently.
+
 ## Testing
 
 Run `npm test` to compile the TypeScript specs and execute the unit suite. Acceptance specs leverage `@loopback/testlab` and will be skipped automatically in environments that disallow binding HTTP ports (for example, certain sandboxes). When running locally, the acceptance suite exercises the generated REST endpoints against a seeded in-memory datasource.
@@ -411,13 +441,15 @@ Run `npm test` to compile the TypeScript specs and execute the unit suite. Accep
 - [x] Relational expansion via `$expand`
 - [x] Inline and standalone `$count`
 - [x] `$batch` endpoint (JSON batching)
+- Transactions are attempted for changesets (`atomicityGroup`). If a datasource cannot begin a transaction (e.g. LoopBack's in-memory connector), the changeset is rejected with `501 Not Implemented` and a `BatchExecutionError`. Use a transactional connector or omit `atomicityGroup` to accept best-effort processing.
 - [x] Actions & Functions decorators with auto CSDL generation
 - [x] Proper pluralization of entity sets (via inflection)
+- [x] Transaction-backed `$batch` changesets (when datasource supports transactions)
 
 ## Roadmap
 
 - [x] Proper pluralization (using inflection)
-- [ ] Transaction-backed `$batch` changesets (repository transactions)
+- [x] Transaction-backed `$batch` changesets (repository transactions)
 - [ ] Multipart/mixed `$batch` support
 
 ## Contributing
