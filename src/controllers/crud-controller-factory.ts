@@ -142,6 +142,9 @@ export function defineODataCrudController(def: EntitySetDef) {
             },
         })
         async list(@filterParam filter?: Filter<CrudEntity>) {
+            const preferences = this.parsePreferenceHeader();
+            if (preferences.respondAsync) this.throwPreferenceNotSupported('respond-async');
+
             const baseFilter: Filter<CrudEntity> = filter ? { ...filter } : {};
 
             let inlineCountRequested = false;
@@ -192,6 +195,9 @@ export function defineODataCrudController(def: EntitySetDef) {
             },
         })
         async count() {
+            const preferences = this.parsePreferenceHeader();
+            if (preferences.respondAsync) this.throwPreferenceNotSupported('respond-async');
+
             const baseFilter: Filter<CrudEntity> = {};
             const options = this.repositoryOptions();
 
@@ -226,6 +232,9 @@ export function defineODataCrudController(def: EntitySetDef) {
             @idParam id: unknown,
             @filterExcludingWhereParam filter?: FilterExcludingWhere<CrudEntity>,
         ) {
+            const preferences = this.parsePreferenceHeader();
+            if (preferences.respondAsync) this.throwPreferenceNotSupported('respond-async');
+
             const baseFilter: FilterExcludingWhere<CrudEntity> = filter ? { ...filter } : {};
             const options = this.repositoryOptions();
 
@@ -272,8 +281,11 @@ export function defineODataCrudController(def: EntitySetDef) {
             })
             payload: CrudEntity,
         ) {
+            const preferences = this.parsePreferenceHeader();
+            if (preferences.respondAsync) this.throwPreferenceNotSupported('respond-async');
+
             const options = this.repositoryOptions();
-            const preference = this.returnPreference();
+            const preference = preferences.returnPreference;
             const created = await this.repository.create(payload as any, options);
 
             if (preference === 'minimal') {
@@ -313,8 +325,11 @@ export function defineODataCrudController(def: EntitySetDef) {
             })
             payload: Partial<CrudEntity>,
         ) {
+            const preferences = this.parsePreferenceHeader();
+            if (preferences.respondAsync) this.throwPreferenceNotSupported('respond-async');
+
             const options = this.repositoryOptions();
-            const preference = this.returnPreference();
+            const preference = preferences.returnPreference;
             await this.repository.updateById(id as any, payload as any, options);
 
             if (preference === 'minimal') {
@@ -341,6 +356,9 @@ export function defineODataCrudController(def: EntitySetDef) {
             },
         })
         async delete(@idParam id: unknown): Promise<void> {
+            const preferences = this.parsePreferenceHeader();
+            if (preferences.respondAsync) this.throwPreferenceNotSupported('respond-async');
+
             const options = this.repositoryOptions();
             await this.repository.deleteById(id as any, options);
             this.ensureODataHeaders();
@@ -356,21 +374,35 @@ export function defineODataCrudController(def: EntitySetDef) {
             return transaction ? { transaction } : undefined;
         }
 
-        returnPreference(): 'minimal' | 'representation' | undefined {
+        parsePreferenceHeader(): {returnPreference?: 'minimal' | 'representation'; respondAsync: boolean} {
             const header = this.request.get('Prefer') ?? (this.request.headers?.['prefer'] as string | undefined);
-            if (!header) return undefined;
+            const result: {returnPreference?: 'minimal' | 'representation'; respondAsync: boolean} = {
+                respondAsync: false,
+            };
+            if (!header) return result;
+
             const tokens = String(header)
                 .split(',')
-                .map(token => token.trim().toLowerCase())
+                .map(token => token.trim())
                 .filter(Boolean);
+
             for (const token of tokens) {
-                if (token.startsWith('return=')) {
-                    const value = token.split('=')[1];
-                    if (value === 'minimal') return 'minimal';
-                    if (value === 'representation') return 'representation';
+                const lower = token.toLowerCase();
+                if (lower === 'respond-async') {
+                    result.respondAsync = true;
+                    continue;
+                }
+                if (lower.startsWith('return=')) {
+                    const value = lower.split('=')[1];
+                    if (value === 'minimal') {
+                        result.returnPreference = 'minimal';
+                    } else if (value === 'representation') {
+                        result.returnPreference = 'representation';
+                    }
                 }
             }
-            return undefined;
+
+            return result;
         }
 
         applyPreference(preference?: 'minimal' | 'representation') {
@@ -383,6 +415,13 @@ export function defineODataCrudController(def: EntitySetDef) {
             if (!this.response.getHeader('OData-Version')) {
                 this.response.set('OData-Version', '4.01');
             }
+        }
+
+        throwPreferenceNotSupported(target: string) {
+            const error = new HttpErrors.NotImplemented(`Prefer ${target} is not supported.`);
+            (error as any).code = 'PreferenceNotSupported';
+            (error as any).target = target;
+            throw error;
         }
 
         mergeFilters(target: Filter<CrudEntity>, source: Filter<CrudEntity>) {

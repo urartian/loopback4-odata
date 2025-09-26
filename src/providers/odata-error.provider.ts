@@ -45,7 +45,10 @@ export class ODataErrorProvider implements Provider<Reject> {
       const innererror = this.buildInnerError(httpError);
 
       response.status(statusCode);
-      response.contentType('application/json');
+      if (!response.getHeader('OData-Version')) {
+        response.set('OData-Version', '4.01');
+      }
+      response.contentType('application/json; charset=utf-8');
 
       response.send({
         error: {
@@ -71,6 +74,8 @@ export class ODataErrorProvider implements Provider<Reject> {
         return 'NotFound';
       case 409:
         return 'Conflict';
+      case 501:
+        return 'NotImplemented';
       default:
         return 'InternalServerError';
     }
@@ -83,6 +88,8 @@ export class ODataErrorProvider implements Provider<Reject> {
       case 'VALIDATION_ERROR':
       case 'REQUEST_VALIDATION_FAILED':
         return 400;
+      case 'PreferenceNotSupported':
+        return 501;
       default:
         return undefined;
     }

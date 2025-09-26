@@ -443,13 +443,14 @@ Run `npm test` to compile the TypeScript specs and execute the unit suite. Accep
 - [x] `$batch` endpoint (JSON and multipart/mixed)
 - Transactions are attempted for changesets (`atomicityGroup`). If a datasource cannot begin a transaction (e.g. LoopBack's in-memory connector), the changeset is rejected with `501 Not Implemented` and a `BatchExecutionError`. Use a transactional connector or omit `atomicityGroup` to accept best-effort processing.
 - [x] Honors `Prefer: return=minimal|representation` for write operations and emits `OData-Version`/`Preference-Applied` headers by default
+- [x] OData-compliant error payloads (`odata.error`) with 501 `PreferenceNotSupported` for unsupported preferences like `respond-async`
 - [x] Actions & Functions decorators with auto CSDL generation
 - [x] Proper pluralization of entity sets (via inflection)
 - [x] Transaction-backed `$batch` changesets (when datasource supports transactions)
 
 ## Roadmap
 
-- [ ] Protocol hardening (OData headers, preference handling, richer errors)
+- [ ] Streaming / async processing (e.g., respond-async workflows, job status endpoints)
 
 ## Contributing
 

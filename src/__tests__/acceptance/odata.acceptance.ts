@@ -211,6 +211,31 @@ describe('OData component acceptance', () => {
     await client.del(`/odata/Products(${speakerId})`).expect(204);
   });
 
+  it('returns OData error payloads for invalid filters', async () => {
+    const res = await client
+      .get('/odata/Products')
+      .query({$filter: 'invalid eq'})
+      .expect(400);
+
+    expect(res.headers['odata-version']).to.equal('4.01');
+    expect(res.body.error).to.be.Object();
+    expect(res.body.error.code).to.equal('BadRequest');
+    expect(res.body.error.message).to.match(/Invalid (OData )?query|Invalid filter expression/i);
+  });
+
+  it('rejects Prefer respond-async', async () => {
+    const res = await client
+      .post('/odata/Products')
+      .set('Prefer', 'respond-async')
+      .send({name: 'AsyncWidget', price: 5})
+      .expect(501);
+
+    expect(res.headers['odata-version']).to.equal('4.01');
+    expect(res.body.error.code).to.equal('PreferenceNotSupported');
+    expect(res.body.error.target).to.equal('respond-async');
+    expect(res.body.error.message).to.match(/not supported/i);
+  });
+
   it('reports errors for invalid batch requests', async () => {
     const res = await client
       .post('/odata/$batch')
