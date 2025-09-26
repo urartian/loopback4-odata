@@ -354,7 +354,8 @@ export class ODataBatchController {
         return undefined;
       }
     }
-    return rawUrl.startsWith('/') ? rawUrl : `/${rawUrl}`;
+    if (!rawUrl.startsWith('/')) return undefined;
+    return rawUrl;
   }
 
   private odataError(code: string, message: string) {

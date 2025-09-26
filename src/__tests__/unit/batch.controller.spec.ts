@@ -1,3 +1,5 @@
+/// <reference path="../../types/testing.globals.d.ts" />
+
 import {strict as assert} from 'assert';
 import {ODataBatchController} from '../../controllers/batch.controller';
 import {HttpErrors, Response} from '@loopback/rest';
@@ -87,5 +89,37 @@ describe('$batch controller', () => {
       controller.handleBatch({requests: []}, responseStub),
       (err: unknown) => err instanceof HttpErrors.BadRequest,
     );
+  });
+
+  it('returns 400 for malformed URLs', async () => {
+    const controller = new ODataBatchController(
+      {handleRequest: async () => undefined} as any,
+      'http://localhost',
+    );
+
+    const result = await (controller as any).executeSingle({
+      id: 'bad',
+      method: 'GET',
+      url: '',
+    });
+
+    assert.equal(result.status, 400);
+    assert.equal((result.body as any)?.error?.code, 'InvalidUrl');
+  });
+
+  it('returns 400 when method is missing', async () => {
+    const controller = new ODataBatchController(
+      {handleRequest: async () => undefined} as any,
+      'http://localhost',
+    );
+
+    const result = await (controller as any).executeSingle({
+      id: 'bad',
+      method: undefined,
+      url: '/odata/Products',
+    });
+
+    assert.equal(result.status, 400);
+    assert.equal((result.body as any)?.error?.code, 'InvalidMethod');
   });
 });

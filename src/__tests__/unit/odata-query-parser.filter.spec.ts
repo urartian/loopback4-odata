@@ -1,3 +1,5 @@
+/// <reference path="../../types/testing.globals.d.ts" />
+
 import {strict as assert} from 'assert';
 import {parseODataQuery} from '../../services/odata-query-parser.service';
 

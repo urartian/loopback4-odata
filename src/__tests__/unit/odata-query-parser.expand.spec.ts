@@ -1,3 +1,5 @@
+/// <reference path="../../types/testing.globals.d.ts" />
+
 import {strict as assert} from 'assert';
 import {RelationDefinitionMap} from '@loopback/repository';
 import {parseODataQuery} from '../../services/odata-query-parser.service';

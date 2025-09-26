@@ -123,12 +123,17 @@ export class ODataBooter implements Booter {
             },
         };
 
-        const setSegment = basePath.split('/').pop() ?? '';
+        const setSegment = op.binding === 'unbound'
+            ? undefined
+            : basePath.split('/').pop() ?? '';
         const bindingKey = `controllers.${controllerCtor.name}`;
+        const routePath = op.binding === 'unbound'
+            ? `/odata/${op.name}`
+            : path;
 
         return new ODataOperationRoute(
             verb,
-            path,
+            routePath,
             spec,
             async (ctx: RequestContext, ...params: unknown[]) => {
                 const controller = await ctx.get(bindingKey as any) as any;
@@ -159,8 +164,9 @@ export class ODataBooter implements Booter {
                 }
                 const result = await controller[op.methodName](...args);
                 if (op.rawResponse) return result;
+                const context = setSegment ? `/odata/$metadata#${setSegment}` : '/odata/$metadata';
                 return {
-                    '@odata.context': `/odata/$metadata#${setSegment}`,
+                    '@odata.context': context,
                     value: result,
                 };
             },

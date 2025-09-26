@@ -1,10 +1,13 @@
 import 'reflect-metadata';
 import {BootMixin} from '@loopback/boot';
 import {RestApplication, RestServerConfig} from '@loopback/rest';
-import {inject} from '@loopback/core';
+import {Getter, inject} from '@loopback/core';
 import {
+  BelongsToAccessor,
   DefaultCrudRepository,
   Entity,
+  HasManyRepositoryFactory,
+  HasManyThroughRepositoryFactory,
   RepositoryMixin,
   belongsTo,
   hasMany,
@@ -95,8 +98,30 @@ export class ProductRepository extends DefaultCrudRepository<
   Product,
   typeof Product.prototype.id
 > {
-  constructor(@inject('datasources.db') dataSource: juggler.DataSource) {
+  public readonly orderItems: HasManyRepositoryFactory<OrderItem, typeof Product.prototype.id>;
+  public readonly orders: HasManyThroughRepositoryFactory<
+    Order,
+    typeof Order.prototype.id,
+    OrderItem,
+    typeof Product.prototype.id
+  >;
+
+  constructor(
+    @inject('datasources.db') dataSource: juggler.DataSource,
+    @repository.getter('OrderRepository')
+    protected orderRepositoryGetter: Getter<OrderRepository>,
+    @repository.getter('OrderItemRepository')
+    protected orderItemRepositoryGetter: Getter<OrderItemRepository>,
+  ) {
     super(Product, dataSource);
+    this.orderItems = this.createHasManyRepositoryFactoryFor('orderItems', orderItemRepositoryGetter);
+    this.registerInclusionResolver('orderItems', this.orderItems.inclusionResolver);
+    this.orders = this.createHasManyThroughRepositoryFactoryFor(
+      'orders',
+      orderRepositoryGetter,
+      orderItemRepositoryGetter,
+    );
+    this.registerInclusionResolver('orders', this.orders.inclusionResolver);
   }
 }
 
@@ -104,8 +129,30 @@ export class OrderRepository extends DefaultCrudRepository<
   Order,
   typeof Order.prototype.id
 > {
-  constructor(@inject('datasources.db') dataSource: juggler.DataSource) {
+  public readonly items: HasManyRepositoryFactory<OrderItem, typeof Order.prototype.id>;
+  public readonly products: HasManyThroughRepositoryFactory<
+    Product,
+    typeof Product.prototype.id,
+    OrderItem,
+    typeof Order.prototype.id
+  >;
+
+  constructor(
+    @inject('datasources.db') dataSource: juggler.DataSource,
+    @repository.getter('ProductRepository')
+    protected productRepositoryGetter: Getter<ProductRepository>,
+    @repository.getter('OrderItemRepository')
+    protected orderItemRepositoryGetter: Getter<OrderItemRepository>,
+  ) {
     super(Order, dataSource);
+    this.items = this.createHasManyRepositoryFactoryFor('items', orderItemRepositoryGetter);
+    this.registerInclusionResolver('items', this.items.inclusionResolver);
+    this.products = this.createHasManyThroughRepositoryFactoryFor(
+      'products',
+      productRepositoryGetter,
+      orderItemRepositoryGetter,
+    );
+    this.registerInclusionResolver('products', this.products.inclusionResolver);
   }
 }
 
@@ -113,8 +160,21 @@ export class OrderItemRepository extends DefaultCrudRepository<
   OrderItem,
   typeof OrderItem.prototype.id
 > {
-  constructor(@inject('datasources.db') dataSource: juggler.DataSource) {
+  public readonly order: BelongsToAccessor<Order, typeof OrderItem.prototype.id>;
+  public readonly product: BelongsToAccessor<Product, typeof OrderItem.prototype.id>;
+
+  constructor(
+    @inject('datasources.db') dataSource: juggler.DataSource,
+    @repository.getter('OrderRepository')
+    protected orderRepositoryGetter: Getter<OrderRepository>,
+    @repository.getter('ProductRepository')
+    protected productRepositoryGetter: Getter<ProductRepository>,
+  ) {
     super(OrderItem, dataSource);
+    this.order = this.createBelongsToAccessorFor('order', orderRepositoryGetter);
+    this.registerInclusionResolver('order', this.order.inclusionResolver);
+    this.product = this.createBelongsToAccessorFor('product', productRepositoryGetter);
+    this.registerInclusionResolver('product', this.product.inclusionResolver);
   }
 }
 
@@ -146,6 +206,17 @@ class ProductODataController {
   async premiumProducts(query: {minPrice?: string}) {
     const minPrice = Number(query?.minPrice ?? 1000);
     return this.products.find({where: {price: {gte: minPrice}}});
+  }
+
+  @odataAction({
+    name: 'resetInventory',
+    binding: 'unbound',
+    rawResponse: true,
+  })
+  async resetInventory(body: {confirm?: boolean} = {}) {
+    if (!body.confirm) return {status: 'skipped'};
+    const count = await this.products.count();
+    return {status: 'ok', total: count.count};
   }
 }
 
