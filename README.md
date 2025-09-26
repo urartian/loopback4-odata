@@ -341,11 +341,11 @@ At runtime the framework resolves method arguments this way:
 - Collection-bound operations receive only the body/query object.
 - Unbound operations are mounted at `/odata/<OperationName>` and never receive an entity id.
 
-| Binding      | HTTP verb | Route example                              | Notes |
-|--------------|-----------|--------------------------------------------|-------|
-| `entity`     | POST/GET  | `POST /odata/Products(1)/discount`         | Actions expect a JSON body; functions read the query string. |
-| `collection` | POST/GET  | `GET /odata/Products/premiumProducts`      | Operates on the entire set. |
-| `unbound`    | POST/GET  | `POST /odata/resetInventory`               | No entity segment; useful for cross-cutting jobs. |
+| Binding      | HTTP verb | Route example                         | Notes                                                        |
+| ------------ | --------- | ------------------------------------- | ------------------------------------------------------------ |
+| `entity`     | POST/GET  | `POST /odata/Products(1)/discount`    | Actions expect a JSON body; functions read the query string. |
+| `collection` | POST/GET  | `GET /odata/Products/premiumProducts` | Operates on the entire set.                                  |
+| `unbound`    | POST/GET  | `POST /odata/resetInventory`          | No entity segment; useful for cross-cutting jobs.            |
 
 Decorated methods still run through the standard LoopBack interceptors and middleware pipeline. The generated CSDL includes bound parameters and return types so metadata-driven tooling (e.g. Power BI, SAP UI5) can discover the operations automatically.
 
@@ -450,7 +450,11 @@ Run `npm test` to compile the TypeScript specs and execute the unit suite. Accep
 
 ## Roadmap
 
-- [ ] Streaming / async processing (e.g., respond-async workflows, job status endpoints)
+- [ ] Optimistic concurrency & ETag headers to align with enterprise clients (If-Match/If-None-Match validation)
+- [ ] Deeper query language coverage (nested groups, additional OData functions, `$search`, `any`/`all`)
+- [ ] Configuration plumbing for base path, `$top` limits, and `$count` toggles exposed by `ODataConfig`
+- [ ] Robust path rewriting for GUIDs/quoted/composite keys without relying on `\w+` heuristics
+- [ ] Richer EDMX output (complex/collection types, precision metadata, navigation partners)
 
 ## Contributing
 
