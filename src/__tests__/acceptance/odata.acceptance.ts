@@ -14,6 +14,10 @@ if (typeof process.setMaxListeners === 'function') {
 describe('OData component acceptance', () => {
   let app: TestApplication;
   let client: Client;
+  const getProductWithEtag = async (id: number) => {
+    const res = await client.get(`/odata/Products(${id})`).expect(200);
+    return {body: res.body.value, etag: res.headers['etag'] as string};
+  };
 
   beforeEach(async function () {
     app = await givenODataApplication({port: 0, host: '127.0.0.1'});
@@ -167,17 +171,28 @@ describe('OData component acceptance', () => {
 
     const createdId = created.body.value.id;
     expect(created.body.value.name).to.equal('Camera');
+    const createdEtag = created.headers['etag'] as string;
+    expect(createdEtag).to.be.String();
+    expect(created.body.value['@odata.etag']).to.equal(createdEtag);
 
     const updated = await client
       .patch(`/odata/Products(${createdId})`)
+      .set('If-Match', createdEtag)
       .send({price: 500})
       .expect(200);
     expect(updated.body.value.price).to.equal(500);
+    const updatedEtag = updated.headers['etag'] as string;
+    expect(updatedEtag).to.be.String();
+    expect(updatedEtag).to.not.equal(createdEtag);
 
     const fetched = await client.get(`/odata/Products(${createdId})`).expect(200);
     expect(fetched.body.value.name).to.equal('Camera');
+    expect(fetched.headers['etag']).to.equal(updatedEtag);
 
-    await client.del(`/odata/Products(${createdId})`).expect(204);
+    await client
+      .del(`/odata/Products(${createdId})`)
+      .set('If-Match', updatedEtag)
+      .expect(204);
     await client.get(`/odata/Products(${createdId})`).expect(404);
   });
 

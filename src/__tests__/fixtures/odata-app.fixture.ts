@@ -36,7 +36,7 @@ export class TestApplication extends BootMixin(RepositoryMixin(RestApplication))
   }
 }
 
-@odataModel()
+@odataModel({etag: 'updatedAt'})
 @model()
 export class Product extends Entity {
   @property({id: true})
@@ -47,6 +47,9 @@ export class Product extends Entity {
 
   @property()
   price!: number;
+
+  @property({type: 'date', required: true, defaultFn: 'now'})
+  updatedAt!: Date;
 
   @hasMany(() => OrderItem)
   orderItems?: OrderItem[];
@@ -122,6 +125,15 @@ export class ProductRepository extends DefaultCrudRepository<
       orderItemRepositoryGetter,
     );
     this.registerInclusionResolver('orders', this.orders.inclusionResolver);
+
+    this.modelClass.observe('before save', async (ctx: any) => {
+      const now = new Date();
+      if (ctx.instance) {
+        ctx.instance.updatedAt = now;
+      } else if (ctx.data) {
+        ctx.data.updatedAt = now;
+      }
+    });
   }
 }
 

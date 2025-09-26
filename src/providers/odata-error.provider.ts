@@ -74,6 +74,10 @@ export class ODataErrorProvider implements Provider<Reject> {
         return 'NotFound';
       case 409:
         return 'Conflict';
+      case 412:
+        return 'PreconditionFailed';
+      case 428:
+        return 'PreconditionRequired';
       case 501:
         return 'NotImplemented';
       default:
@@ -90,6 +94,10 @@ export class ODataErrorProvider implements Provider<Reject> {
         return 400;
       case 'PreferenceNotSupported':
         return 501;
+      case 'PreconditionFailed':
+        return 412;
+      case 'PreconditionRequired':
+        return 428;
       default:
         return undefined;
     }

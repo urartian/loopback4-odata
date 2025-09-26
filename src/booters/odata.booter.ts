@@ -30,6 +30,7 @@ export class ODataBooter implements Booter {
 
             const setName = this.getEntitySetName(modelCtor);
             const repoBinding = repositoryMap.get(modelCtor);
+            const modelMeta = getODataModelMeta(modelCtor);
 
             if (!repoBinding) {
                 throw new Error(
@@ -44,6 +45,7 @@ export class ODataBooter implements Booter {
                 modelCtor,
                 repositoryBindingKey: repoBinding.key,
                 repositoryCtor: repoBinding.valueConstructor ?? undefined,
+                etagProperty: modelMeta?.etag,
             });
 
             const CrudController = defineODataCrudController(def);
