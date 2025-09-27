@@ -69,6 +69,8 @@ describe('OData component acceptance', () => {
     expect(res.text.includes('<Action Name="resetInventory"')).to.be.true();
     expect(res.text.includes('<Function Name="premiumProducts"')).to.be.true();
     expect(res.text.includes('<NavigationPropertyBinding Path="orderItems"')).to.be.true();
+    expect(res.text.includes('<PropertyPath>id</PropertyPath>')).to.be.true();
+    expect(res.text.includes('<PropertyPath>updatedAt</PropertyPath>')).to.be.true();
   });
 
   it('invokes bound actions through generated routes', async () => {
@@ -165,7 +167,9 @@ describe('OData component acceptance', () => {
 
     expect(topOne.body.value).to.have.lengthOf(1);
     expect(topOne.body.value[0].name).to.equal('Laptop');
-    expect(topOne.body.value[0]).to.not.have.property('id');
+    expect(topOne.body.value[0]).to.have.property('id');
+    expect(topOne.body.value[0]).to.have.property('updatedAt');
+    expect(topOne.body.value[0]['@odata.etag']).to.be.String();
 
     const second = await client
       .get('/odata/Products')
@@ -332,6 +336,85 @@ describe('OData component acceptance', () => {
     const current = await getProductWithEtag(createdId);
     expect(current.etag).to.equal(nextEtag);
     expect(current.body.price).to.equal(329);
+  });
+
+  it('honors composite ETags across CRUD operations', async () => {
+    const created = await client
+      .post('/odata/Products')
+      .send({name: 'Composite Widget', price: 199})
+      .expect(200);
+
+    const productId = created.body.value.id;
+    const initialEtag = created.headers['etag'] as string;
+    expect(initialEtag).to.be.String();
+    expect(created.body.value['@odata.etag']).to.equal(initialEtag);
+
+    const fetched = await getProductWithEtag(productId);
+    expect(fetched.etag).to.equal(initialEtag);
+
+    const updated = await client
+      .patch(`/odata/Products(${productId})`)
+      .set('If-Match', initialEtag)
+      .send({price: 209})
+      .expect(200);
+
+    const updatedEtag = updated.headers['etag'] as string;
+    expect(updatedEtag).to.be.String();
+    expect(updatedEtag).to.not.equal(initialEtag);
+    expect(updated.body.value['@odata.etag']).to.equal(updatedEtag);
+
+    await client
+      .patch(`/odata/Products(${productId})`)
+      .set('If-Match', initialEtag)
+      .send({price: 219})
+      .expect(412);
+
+    const current = await getProductWithEtag(productId);
+    expect(current.etag).to.equal(updatedEtag);
+
+    await client
+      .del(`/odata/Products(${productId})`)
+      .set('If-Match', initialEtag)
+      .expect(412);
+
+    await client
+      .del(`/odata/Products(${productId})`)
+      .set('If-Match', updatedEtag)
+      .expect(204);
+  });
+
+  it('rejects stale single-field If-Match tokens for composite ETags', async () => {
+    const created = await client
+      .post('/odata/Products')
+      .send({name: 'Composite Gizmo', price: 149})
+      .expect(200);
+
+    const productId = created.body.value.id;
+    const createdBody = created.body.value;
+    const initialEtag = created.headers['etag'] as string;
+    expect(initialEtag).to.be.String();
+
+    const initialUpdatedAt = createdBody.updatedAt;
+    expect(initialUpdatedAt).to.be.String();
+
+    const staleSingleFieldEtag = `"${Buffer.from(
+      JSON.stringify({t: 'date', v: String(initialUpdatedAt)}),
+      'utf-8',
+    ).toString('base64')}"`;
+
+    await client
+      .patch(`/odata/Products(${productId})`)
+      .set('If-Match', initialEtag)
+      .send({price: 159})
+      .expect(200);
+
+    const res = await client
+      .patch(`/odata/Products(${productId})`)
+      .set('If-Match', staleSingleFieldEtag)
+      .send({price: 169})
+      .expect(412);
+
+    expect(res.body.error?.code).to.equal('PreconditionFailed');
   });
 
   it('returns OData error payloads for invalid filters', async () => {

@@ -36,7 +36,7 @@ export class TestApplication extends BootMixin(RepositoryMixin(RestApplication))
   }
 }
 
-@odataModel({etag: 'updatedAt'})
+@odataModel({etag: ['id', 'updatedAt']})
 @model()
 export class Product extends Entity {
   @property({id: true})

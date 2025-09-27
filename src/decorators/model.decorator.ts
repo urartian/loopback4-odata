@@ -3,7 +3,7 @@ const ODATA_MODEL_KEY = 'odata:model';
 
 export interface ODataModelOptions {
     entitySetName?: string;
-    etag?: string;
+    etag?: string | string[];
 }
 
 export function odataModel(opts: ODataModelOptions = {}) {
