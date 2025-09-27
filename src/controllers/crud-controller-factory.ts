@@ -195,10 +195,16 @@ export function defineODataCrudController(def: EntitySetDef) {
             return { [primary]: id } as Filter<CrudEntity>['where'];
         }
 
-        buildConditionalWhere(id: unknown, expected: unknown[], allowAny: boolean): Filter<CrudEntity>['where'] {
+        buildConditionalWhere(
+            id: unknown,
+            expected: unknown[],
+            allowAny: boolean,
+            options?: { invalidComposite?: boolean },
+        ): Filter<CrudEntity>['where'] {
             const idWhere = this.buildIdWhere(id);
             if (!this.etagEnabled() || allowAny) return idWhere;
-            if (!expected.length) return idWhere;
+            if (options?.invalidComposite) this.throwPreconditionFailed();
+            if (!expected.length) this.throwPreconditionFailed();
             if ((etagProperties?.length ?? 0) <= 1) {
                 const property = primaryEtagProperty!;
                 const condition = expected.length > 1
@@ -217,7 +223,7 @@ export function defineODataCrudController(def: EntitySetDef) {
                 })
                 .filter((value): value is Record<string, unknown> => Boolean(value));
 
-            if (!compositeConditions.length) return idWhere;
+            if (!compositeConditions.length) this.throwPreconditionFailed();
 
             const condition = compositeConditions.length === 1
                 ? compositeConditions[0]
@@ -236,15 +242,38 @@ export function defineODataCrudController(def: EntitySetDef) {
             return parseIfNoneMatch(raw);
         }
 
-        decodeEtags(rawValues: string[]): unknown[] {
-            if (!rawValues.length) return [];
-            if (!etagProperties?.length) return [];
+        decodeEtags(rawValues: string[]): { values: unknown[]; invalidComposite: boolean } {
+            const values: unknown[] = [];
+            if (!rawValues.length) return { values, invalidComposite: false };
+            if (!etagProperties?.length) return { values, invalidComposite: false };
+
             const isComposite = etagProperties.length > 1;
-            return rawValues
-                .map(value => isComposite
-                    ? decodeEtagToken(value, undefined, etagPropertyDefs)
-                    : decodeEtagToken(value, primaryEtagDef))
-                .filter(value => value !== undefined);
+            let invalidComposite = false;
+
+            for (const raw of rawValues) {
+                const decoded = isComposite
+                    ? decodeEtagToken(raw, undefined, etagPropertyDefs)
+                    : decodeEtagToken(raw, primaryEtagDef);
+
+                if (decoded === undefined) {
+                    if (isComposite) invalidComposite = true;
+                    continue;
+                }
+
+                if (isComposite) {
+                    const isObject = typeof decoded === 'object' && decoded !== null && !Array.isArray(decoded);
+                    if (!isObject) {
+                        invalidComposite = true;
+                        continue;
+                    }
+                    values.push(decoded);
+                    continue;
+                }
+
+                values.push(decoded);
+            }
+
+            return { values, invalidComposite };
         }
 
         requireIfMatch(
@@ -504,8 +533,13 @@ export function defineODataCrudController(def: EntitySetDef) {
             const ifMatch = this.parseIfMatchHeader();
             this.requireIfMatch(ifMatch);
 
-            const expected = ifMatch?.any ? [] : this.decodeEtags(ifMatch?.values ?? []);
-            const where = this.buildConditionalWhere(id, expected, Boolean(ifMatch?.any));
+            const decoded = ifMatch?.any ? { values: [], invalidComposite: false } : this.decodeEtags(ifMatch?.values ?? []);
+            const where = this.buildConditionalWhere(
+                id,
+                decoded.values,
+                Boolean(ifMatch?.any),
+                { invalidComposite: decoded.invalidComposite },
+            );
             const { count } = await this.repository.updateAll(payload as any, where, options);
 
             if (!count) {
@@ -545,8 +579,13 @@ export function defineODataCrudController(def: EntitySetDef) {
             const ifMatch = this.parseIfMatchHeader();
             this.requireIfMatch(ifMatch);
 
-            const expected = ifMatch?.any ? [] : this.decodeEtags(ifMatch?.values ?? []);
-            const where = this.buildConditionalWhere(id, expected, Boolean(ifMatch?.any));
+            const decoded = ifMatch?.any ? { values: [], invalidComposite: false } : this.decodeEtags(ifMatch?.values ?? []);
+            const where = this.buildConditionalWhere(
+                id,
+                decoded.values,
+                Boolean(ifMatch?.any),
+                { invalidComposite: decoded.invalidComposite },
+            );
             const { count } = await this.repository.deleteAll(where, options);
 
             if (!count) {

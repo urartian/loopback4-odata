@@ -385,6 +385,41 @@ describe('OData component acceptance', () => {
       .expect(204);
   });
 
+  it('rejects stale single-field If-Match tokens for composite ETags', async () => {
+    const created = await client
+      .post('/odata/Documents')
+      .send({title: 'Specs', version: 1, checksum: 'draft-1'})
+      .expect(200);
+
+    const docId = created.body.value.id;
+    const initialVersion = created.body.value.version;
+    const initialChecksum = created.body.value.checksum;
+    expect(initialVersion).to.equal(1);
+    expect(initialChecksum).to.equal('draft-1');
+
+    const initialEtag = created.headers['etag'] as string;
+    expect(initialEtag).to.be.String();
+
+    const staleSingleFieldEtag = `"${Buffer.from(
+      JSON.stringify({t: 'number', v: String(initialVersion)}),
+      'utf-8',
+    ).toString('base64')}"`;
+
+    await client
+      .patch(`/odata/Documents(${docId})`)
+      .set('If-Match', initialEtag)
+      .send({version: 2, checksum: 'draft-2'})
+      .expect(200);
+
+    const res = await client
+      .patch(`/odata/Documents(${docId})`)
+      .set('If-Match', staleSingleFieldEtag)
+      .send({checksum: 'draft-3'})
+      .expect(412);
+
+    expect(res.body.error?.code).to.equal('PreconditionFailed');
+  });
+
   it('returns OData error payloads for invalid filters', async () => {
     const res = await client
       .get('/odata/Products')
