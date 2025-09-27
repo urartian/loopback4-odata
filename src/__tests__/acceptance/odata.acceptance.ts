@@ -196,6 +196,45 @@ describe('OData component acceptance', () => {
     await client.get(`/odata/Products(${createdId})`).expect(404);
   });
 
+  it('requires If-Match header for deletes when concurrency is enabled', async () => {
+    const created = await client
+      .post('/odata/Products')
+      .send({name: 'Controller', price: 99})
+      .expect(200);
+
+    const productId = created.body.value.id;
+    const etag = created.headers['etag'] as string;
+    expect(etag).to.be.String();
+
+    await client.del(`/odata/Products(${productId})`).expect(428);
+
+    const mismatched = await client
+      .post('/odata/Products')
+      .send({name: 'Temp', price: 42})
+      .expect(200);
+
+    const mismatchedId = mismatched.body.value.id;
+    const mismatchedEtag = mismatched.headers['etag'] as string;
+
+    await client
+      .del(`/odata/Products(${productId})`)
+      .set('If-Match', mismatchedEtag)
+      .expect(412);
+
+    const stillExists = await client.get(`/odata/Products(${productId})`).expect(200);
+    expect(stillExists.body.value.id).to.equal(productId);
+
+    await client
+      .del(`/odata/Products(${productId})`)
+      .set('If-Match', etag)
+      .expect(204);
+
+    await client
+      .del(`/odata/Products(${mismatchedId})`)
+      .set('If-Match', mismatchedEtag)
+      .expect(204);
+  });
+
   it('honors Prefer return=minimal for write operations', async () => {
     const createRes = await client
       .post('/odata/Products')
@@ -227,7 +266,12 @@ describe('OData component acceptance', () => {
     const verify = await client.get(`/odata/Products(${speakerId})`).expect(200);
     expect(verify.body.value.price).to.equal(219);
 
-    await client.del(`/odata/Products(${speakerId})`).expect(204);
+    const deleteEtag = verify.headers['etag'] as string;
+
+    await client
+      .del(`/odata/Products(${speakerId})`)
+      .set('If-Match', deleteEtag)
+      .expect(204);
   });
 
   it('rejects PATCH without If-Match header when ETag tracking is enabled', async () => {
