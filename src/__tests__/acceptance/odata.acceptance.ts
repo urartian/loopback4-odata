@@ -43,6 +43,19 @@ describe('OData component acceptance', () => {
     }
   });
 
+  it('exposes a service document listing entity sets', async () => {
+    const res = await client.get('/odata').expect(200);
+    expect(res.headers['odata-version']).to.equal('4.01');
+    expect(res.body['@odata.context']).to.equal('/odata/$metadata');
+    expect(res.body.value).to.be.Array();
+    const productsEntry = res.body.value.find(
+      (item: {name: string}) => item.name === 'Products',
+    );
+    expect(productsEntry).to.be.Object();
+    expect(productsEntry.kind).to.equal('EntitySet');
+    expect(productsEntry.url).to.equal('Products');
+  });
+
   it('serves product collections with OData metadata', async () => {
     const res = await client.get('/odata/Products').expect(200);
     expect(res.body['@odata.context']).to.match(/Products$/);

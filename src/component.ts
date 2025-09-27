@@ -5,6 +5,7 @@ import { ODATA_BINDINGS } from './keys';
 import { CsdlGenerator } from './metadata/csdl-generator';
 import { ODataMetadataController } from './controllers/metadata.controller';
 import { ODataBatchController } from './controllers/batch.controller';
+import { ODataServiceDocumentController } from './controllers/service-document.controller';
 import { EntitySetRegistry } from './registry/entityset-registry';
 import { ODataBooter } from './booters/odata.booter';
 import { OdataPathRewriterProvider } from './middleware/odata-path-rewriter.provider';
@@ -23,6 +24,6 @@ export class ODataComponent implements Component {
             .inScope(BindingScope.SINGLETON),
     ];
 
-    controllers = [ODataMetadataController, ODataBatchController];
+    controllers = [ODataMetadataController, ODataBatchController, ODataServiceDocumentController];
     booters = [ODataBooter];
 }
