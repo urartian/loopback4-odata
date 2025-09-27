@@ -18,6 +18,10 @@ describe('OData component acceptance', () => {
     const res = await client.get(`/odata/Products(${id})`).expect(200);
     return {body: res.body.value, etag: res.headers['etag'] as string};
   };
+  const getDocumentWithEtag = async (id: number) => {
+    const res = await client.get(`/odata/Documents(${id})`).expect(200);
+    return {body: res.body.value, etag: res.headers['etag'] as string};
+  };
 
   beforeEach(async function () {
     app = await givenODataApplication({port: 0, host: '127.0.0.1'});
@@ -69,6 +73,8 @@ describe('OData component acceptance', () => {
     expect(res.text.includes('<Action Name="resetInventory"')).to.be.true();
     expect(res.text.includes('<Function Name="premiumProducts"')).to.be.true();
     expect(res.text.includes('<NavigationPropertyBinding Path="orderItems"')).to.be.true();
+    expect(res.text.includes('<PropertyPath>checksum</PropertyPath>')).to.be.true();
+    expect(res.text.includes('<PropertyPath>version</PropertyPath>')).to.be.true();
   });
 
   it('invokes bound actions through generated routes', async () => {
@@ -332,6 +338,51 @@ describe('OData component acceptance', () => {
     const current = await getProductWithEtag(createdId);
     expect(current.etag).to.equal(nextEtag);
     expect(current.body.price).to.equal(329);
+  });
+
+  it('honors composite ETags across CRUD operations', async () => {
+    const created = await client
+      .post('/odata/Documents')
+      .send({title: 'Proposal', version: 1, checksum: 'draft-1'})
+      .expect(200);
+
+    const docId = created.body.value.id;
+    const initialEtag = created.headers['etag'] as string;
+    expect(initialEtag).to.be.String();
+    expect(created.body.value['@odata.etag']).to.equal(initialEtag);
+
+    const fetched = await getDocumentWithEtag(docId);
+    expect(fetched.etag).to.equal(initialEtag);
+
+    const updated = await client
+      .patch(`/odata/Documents(${docId})`)
+      .set('If-Match', initialEtag)
+      .send({title: 'Proposal', version: 2, checksum: 'draft-2'})
+      .expect(200);
+
+    const updatedEtag = updated.headers['etag'] as string;
+    expect(updatedEtag).to.be.String();
+    expect(updatedEtag).to.not.equal(initialEtag);
+    expect(updated.body.value['@odata.etag']).to.equal(updatedEtag);
+
+    await client
+      .patch(`/odata/Documents(${docId})`)
+      .set('If-Match', initialEtag)
+      .send({title: 'Proposal', checksum: 'stale-attempt'})
+      .expect(412);
+
+    const current = await getDocumentWithEtag(docId);
+    expect(current.etag).to.equal(updatedEtag);
+
+    await client
+      .del(`/odata/Documents(${docId})`)
+      .set('If-Match', initialEtag)
+      .expect(412);
+
+    await client
+      .del(`/odata/Documents(${docId})`)
+      .set('If-Match', updatedEtag)
+      .expect(204);
   });
 
   it('returns OData error payloads for invalid filters', async () => {

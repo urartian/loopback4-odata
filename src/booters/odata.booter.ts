@@ -9,6 +9,7 @@ import { ODATA_BINDINGS } from '../keys';
 import { Entity } from '@loopback/repository';
 import { getODataActions, getODataFunctions, OperationMeta } from '../decorators/action.function.decorators';
 import { pluralize } from 'inflection';
+import { normalizeEtagProperties } from '../util/etag';
 
 @injectable({ tags: { booters: 'odata' } })
 export class ODataBooter implements Booter {
@@ -45,7 +46,7 @@ export class ODataBooter implements Booter {
                 modelCtor,
                 repositoryBindingKey: repoBinding.key,
                 repositoryCtor: repoBinding.valueConstructor ?? undefined,
-                etagProperty: modelMeta?.etag,
+                etagProperties: normalizeEtagProperties(modelMeta?.etag),
             });
 
             const CrudController = defineODataCrudController(def);

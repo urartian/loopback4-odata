@@ -97,6 +97,25 @@ export class OrderItem extends Entity {
   unitPrice!: number;
 }
 
+@odataModel({etag: ['version', 'checksum']})
+@model()
+export class Document extends Entity {
+  @property({id: true, generated: true})
+  id?: number;
+
+  @property({required: true})
+  title!: string;
+
+  @property({required: true})
+  version!: number;
+
+  @property({required: true})
+  checksum!: string;
+
+  @property({type: 'date', defaultFn: 'now'})
+  updatedAt!: Date;
+}
+
 export class ProductRepository extends DefaultCrudRepository<
   Product,
   typeof Product.prototype.id
@@ -190,6 +209,23 @@ export class OrderItemRepository extends DefaultCrudRepository<
   }
 }
 
+export class DocumentRepository extends DefaultCrudRepository<
+  Document,
+  typeof Document.prototype.id
+> {
+  constructor(@inject('datasources.db') dataSource: juggler.DataSource) {
+    super(Document, dataSource);
+    this.modelClass.observe('before save', async (ctx: any) => {
+      const now = new Date();
+      if (ctx.instance) {
+        ctx.instance.updatedAt = now;
+      } else if (ctx.data) {
+        ctx.data.updatedAt = now;
+      }
+    });
+  }
+}
+
 @odataController(Product)
 class ProductODataController {
   constructor(
@@ -238,6 +274,9 @@ class OrderODataController {}
 @odataController(OrderItem)
 class OrderItemODataController {}
 
+@odataController(Document)
+class DocumentODataController {}
+
 export async function givenODataApplication(config: RestServerConfig = {}): Promise<TestApplication> {
   const app = new TestApplication(config);
   const dataSource = new juggler.DataSource(MEMORY_DS_CONFIG);
@@ -245,10 +284,12 @@ export async function givenODataApplication(config: RestServerConfig = {}): Prom
   app.repository(OrderItemRepository);
   app.repository(ProductRepository);
   app.repository(OrderRepository);
+  app.repository(DocumentRepository);
   app.component(ODataComponent);
   app.controller(ProductODataController);
   app.controller(OrderODataController);
   app.controller(OrderItemODataController);
+  app.controller(DocumentODataController);
   return app;
 }
 
@@ -256,6 +297,7 @@ export async function seedExampleData(app: TestApplication) {
   const productRepo = await app.getRepository(ProductRepository);
   const orderRepo = await app.getRepository(OrderRepository);
   const orderItemRepo = await app.getRepository(OrderItemRepository);
+  const documentRepo = await app.getRepository(DocumentRepository);
 
   const existingProducts = await productRepo.count();
   if (existingProducts.count > 0) return;
@@ -291,4 +333,12 @@ export async function seedExampleData(app: TestApplication) {
       orderRepo.updateById(Number(orderId), {total}),
     ),
   );
+
+  const existingDocs = await documentRepo.count();
+  if (existingDocs.count > 0) return;
+
+  await documentRepo.createAll([
+    {title: 'API Spec', version: 1, checksum: 'spec-v1'},
+    {title: 'User Manual', version: 3, checksum: 'manual-v3'},
+  ]);
 }

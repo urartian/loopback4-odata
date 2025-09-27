@@ -83,14 +83,22 @@ export function defineODataCrudController(def: EntitySetDef) {
     const filterExcludingWhereParam = param.filter(modelCtor, { exclude: 'where' });
     const idProperties = getIdProperties(modelDefinition);
     const modelRelations = (modelDefinition?.relations ?? {}) as RelationDefinitionMap;
-    const etagProperty = def.etagProperty;
-    const etagPropertyDef = etagProperty
-        ? (modelDefinition?.properties?.[etagProperty] as PropertyDefinition | undefined)
+    const etagProperties = def.etagProperties;
+    const etagPropertyDefs = (etagProperties ?? []).reduce<Record<string, PropertyDefinition | undefined>>(
+        (acc, prop) => {
+            acc[prop] = modelDefinition?.properties?.[prop] as PropertyDefinition | undefined;
+            return acc;
+        },
+        {},
+    );
+    const primaryEtagProperty = etagProperties?.[0];
+    const primaryEtagDef = primaryEtagProperty
+        ? (etagPropertyDefs[primaryEtagProperty] as PropertyDefinition | undefined)
         : undefined;
     const optionalProperties = Array.from(
         new Set([
             ...idProperties,
-            ...(etagProperty ? [etagProperty] : []),
+            ...(etagProperties ?? []),
         ]),
     );
 
@@ -154,12 +162,12 @@ export function defineODataCrudController(def: EntitySetDef) {
         ) { }
 
         etagEnabled(): boolean {
-            return Boolean(etagProperty);
+            return Boolean(etagProperties?.length);
         }
 
         entityEtag(entity: CrudEntity | undefined): string | undefined {
             if (!this.etagEnabled() || !entity) return undefined;
-            return encodeEtagToken(readEtagValue(entity, etagProperty));
+            return encodeEtagToken(readEtagValue(entity, etagProperties));
         }
 
         decorateEntity(entity: CrudEntity): CrudEntity {
@@ -176,7 +184,7 @@ export function defineODataCrudController(def: EntitySetDef) {
 
         ensureEtagField(filter: Filter<CrudEntity>) {
             if (!this.etagEnabled()) return;
-            const nextFields = ensureEtagField(filter.fields as any, etagProperty);
+            const nextFields = ensureEtagField(filter.fields as any, etagProperties);
             if (nextFields !== filter.fields) {
                 filter.fields = nextFields as Filter<CrudEntity>['fields'];
             }
@@ -191,9 +199,30 @@ export function defineODataCrudController(def: EntitySetDef) {
             const idWhere = this.buildIdWhere(id);
             if (!this.etagEnabled() || allowAny) return idWhere;
             if (!expected.length) return idWhere;
-            const condition = expected.length > 1
-                ? { [etagProperty!]: { inq: expected } }
-                : { [etagProperty!]: expected[0] };
+            if ((etagProperties?.length ?? 0) <= 1) {
+                const property = primaryEtagProperty!;
+                const condition = expected.length > 1
+                    ? { [property]: { inq: expected } }
+                    : { [property]: expected[0] };
+                return { and: [idWhere, condition] } as Filter<CrudEntity>['where'];
+            }
+
+            const compositeConditions = expected
+                .filter((value): value is Record<string, unknown> => typeof value === 'object' && value !== null)
+                .map(token => {
+                    const clauses = (etagProperties ?? []).map(prop => ({ [prop]: (token as Record<string, unknown>)[prop] }));
+                    if (!clauses.length) return undefined;
+                    if (clauses.length === 1) return clauses[0];
+                    return { and: clauses };
+                })
+                .filter((value): value is Record<string, unknown> => Boolean(value));
+
+            if (!compositeConditions.length) return idWhere;
+
+            const condition = compositeConditions.length === 1
+                ? compositeConditions[0]
+                : { or: compositeConditions };
+
             return { and: [idWhere, condition] } as Filter<CrudEntity>['where'];
         }
 
@@ -209,7 +238,13 @@ export function defineODataCrudController(def: EntitySetDef) {
 
         decodeEtags(rawValues: string[]): unknown[] {
             if (!rawValues.length) return [];
-            return rawValues.map(value => decodeEtagToken(value, etagPropertyDef)).filter(value => value !== undefined);
+            if (!etagProperties?.length) return [];
+            const isComposite = etagProperties.length > 1;
+            return rawValues
+                .map(value => isComposite
+                    ? decodeEtagToken(value, undefined, etagPropertyDefs)
+                    : decodeEtagToken(value, primaryEtagDef))
+                .filter(value => value !== undefined);
         }
 
         requireIfMatch(
