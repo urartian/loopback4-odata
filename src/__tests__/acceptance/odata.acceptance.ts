@@ -119,6 +119,49 @@ describe('OData component acceptance', () => {
     expect(first.orderItems).to.be.Array();
   });
 
+  it('decorates expanded related entities with @odata.etag', async () => {
+    const filter = {
+      include: [
+        {
+          relation: 'orders',
+          scope: {
+            include: [
+              {
+                relation: 'products',
+                scope: {
+                  fields: {id: true, name: true},
+                },
+              },
+            ],
+          },
+        },
+      ],
+    };
+
+    const res = await client
+      .get('/odata/Products')
+      .query({
+        $select: 'id,name',
+        $expand: 'orders',
+        filter: JSON.stringify(filter),
+      })
+      .expect(200);
+
+    expect(res.body.value).to.not.be.empty();
+    for (const product of res.body.value) {
+      expect(product['@odata.etag']).to.be.String();
+      const orders = product.orders ?? [];
+      expect(Array.isArray(orders)).to.be.true();
+      for (const order of orders) {
+        const products = order?.products ?? [];
+        expect(Array.isArray(products)).to.be.true();
+        for (const related of products) {
+          expect(related['@odata.etag']).to.be.String();
+        }
+      }
+    }
+  });
+
   it('executes unbound actions with raw responses', async () => {
     const result = await client
       .post('/odata/resetInventory')

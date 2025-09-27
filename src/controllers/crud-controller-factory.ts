@@ -170,11 +170,61 @@ export function defineODataCrudController(def: EntitySetDef) {
             return encodeEtagToken(readEtagValue(entity, etagProperties));
         }
 
+        isDecoratable(value: unknown): value is CrudEntity {
+            return Boolean(
+                value &&
+                typeof value === 'object' &&
+                !Array.isArray(value) &&
+                !(value instanceof Date) &&
+                !Buffer.isBuffer(value),
+            );
+        }
+
         decorateEntity(entity: CrudEntity): CrudEntity {
-            if (!this.etagEnabled()) return entity;
+            if (!this.etagEnabled() || !entity) return entity;
+
+            let result: CrudEntity = entity;
+            let cloned = false;
+
+            const ensureClone = () => {
+                if (!cloned) {
+                    result = { ...result } as CrudEntity;
+                    cloned = true;
+                }
+            };
+
             const etag = this.entityEtag(entity);
-            if (!etag) return entity;
-            return { ...entity, '@odata.etag': etag } as unknown as CrudEntity;
+            if (etag && entity['@odata.etag'] !== etag) {
+                ensureClone();
+                (result as CrudEntity)['@odata.etag'] = etag;
+            }
+
+            for (const key of Object.keys(entity)) {
+                const value = (entity as Record<string, unknown>)[key];
+                if (Array.isArray(value)) {
+                    let changed = false;
+                    const next = value.map(item => {
+                        if (this.isDecoratable(item)) {
+                            const decorated = this.decorateEntity(item);
+                            if (decorated !== item) changed = true;
+                            return decorated;
+                        }
+                        return item;
+                    });
+                    if (changed) {
+                        ensureClone();
+                        (result as Record<string, unknown>)[key] = next;
+                    }
+                } else if (this.isDecoratable(value)) {
+                    const decorated = this.decorateEntity(value);
+                    if (decorated !== value) {
+                        ensureClone();
+                        (result as Record<string, unknown>)[key] = decorated;
+                    }
+                }
+            }
+
+            return result;
         }
 
         decorateEntities(entities: CrudEntity[]): CrudEntity[] {
@@ -188,6 +238,26 @@ export function defineODataCrudController(def: EntitySetDef) {
             if (nextFields !== filter.fields) {
                 filter.fields = nextFields as Filter<CrudEntity>['fields'];
             }
+
+            const traverseIncludes = (includes?: InclusionFilter[] | undefined) => {
+                if (!Array.isArray(includes)) return;
+                for (const include of includes) {
+                    if (!include || typeof include === 'string') continue;
+                    const scope = include.scope;
+                    if (scope) {
+                        const scopedFields = ensureEtagField(scope.fields as any, etagProperties);
+                        if (scopedFields !== scope.fields) {
+                            include.scope = {
+                                ...scope,
+                                fields: scopedFields as Filter<CrudEntity>['fields'],
+                            };
+                        }
+                        traverseIncludes(scope.include as InclusionFilter[] | undefined);
+                    }
+                }
+            };
+
+            traverseIncludes(filter.include as InclusionFilter[] | undefined);
         }
 
         buildIdWhere(id: unknown): Filter<CrudEntity>['where'] {
