@@ -1,4 +1,4 @@
-import {PropertyDefinition} from '@loopback/repository';
+import {AnyObject, Fields, PropertyDefinition} from '@loopback/repository';
 
 type EncodedToken = {
   t: 'string' | 'number' | 'boolean' | 'date' | 'buffer' | 'bigint' | 'unknown';
@@ -136,11 +136,27 @@ export function matchesEtag(encoded: string | undefined, expected: string[]): bo
   });
 }
 
-export function ensureEtagField(fields: Record<string, boolean> | undefined, etagProperty?: string) {
-  if (!etagProperty) return fields;
-  const next = {...(fields ?? {})};
-  next[etagProperty] = true;
-  return next;
+export function ensureEtagField(
+  fields: Fields<AnyObject> | undefined,
+  etagProperty?: string,
+) {
+  if (!etagProperty || fields == null) return fields;
+
+  if (Array.isArray(fields)) {
+    return fields.includes(etagProperty) ? fields : [...fields, etagProperty];
+  }
+
+  if (typeof fields === 'object') {
+    const map = fields as Record<string, boolean>;
+    if (map[etagProperty]) return fields;
+    return {...map, [etagProperty]: true};
+  }
+
+  if (typeof fields === 'boolean') {
+    return fields ? fields : {[etagProperty]: true};
+  }
+
+  return fields;
 }
 
 export function stripEtagProperty(entity: Record<string, unknown>, etagProperty?: string) {

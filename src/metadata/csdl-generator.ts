@@ -177,11 +177,11 @@ export class CsdlGenerator {
                 `        <NavigationPropertyBinding Path="${xmlEscape(binding.path)}" Target="${xmlEscape(binding.target)}" />`,
             );
 
-            const concurrencyAnnotation = def.etagProperty
+            const concurrencyAnnotation = set.etagProperty
                 ? [
                     '        <Annotation Term="Org.OData.Core.V1.OptimisticConcurrency">',
                     '          <Collection>',
-                    `            <PropertyPath>${xmlEscape(def.etagProperty)}</PropertyPath>`,
+                    `            <PropertyPath>${xmlEscape(set.etagProperty)}</PropertyPath>`,
                     '          </Collection>',
                     '        </Annotation>',
                 ]

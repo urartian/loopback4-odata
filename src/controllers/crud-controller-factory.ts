@@ -87,6 +87,12 @@ export function defineODataCrudController(def: EntitySetDef) {
     const etagPropertyDef = etagProperty
         ? (modelDefinition?.properties?.[etagProperty] as PropertyDefinition | undefined)
         : undefined;
+    const optionalProperties = Array.from(
+        new Set([
+            ...idProperties,
+            ...(etagProperty ? [etagProperty] : []),
+        ]),
+    );
 
     const collectionResponseSchema = {
         type: 'object',
@@ -147,38 +153,41 @@ export function defineODataCrudController(def: EntitySetDef) {
             public readonly response: Response,
         ) { }
 
-        private etagEnabled(): boolean {
+        etagEnabled(): boolean {
             return Boolean(etagProperty);
         }
 
-        private entityEtag(entity: CrudEntity | undefined): string | undefined {
+        entityEtag(entity: CrudEntity | undefined): string | undefined {
             if (!this.etagEnabled() || !entity) return undefined;
             return encodeEtagToken(readEtagValue(entity, etagProperty));
         }
 
-        private decorateEntity(entity: CrudEntity): CrudEntity {
+        decorateEntity(entity: CrudEntity): CrudEntity {
             if (!this.etagEnabled()) return entity;
             const etag = this.entityEtag(entity);
             if (!etag) return entity;
-            return { ...entity, '@odata.etag': etag };
+            return { ...entity, '@odata.etag': etag } as unknown as CrudEntity;
         }
 
-        private decorateEntities(entities: CrudEntity[]): CrudEntity[] {
+        decorateEntities(entities: CrudEntity[]): CrudEntity[] {
             if (!this.etagEnabled()) return entities;
             return entities.map(entity => this.decorateEntity(entity));
         }
 
-        private ensureEtagField(filter: Filter<CrudEntity>) {
+        ensureEtagField(filter: Filter<CrudEntity>) {
             if (!this.etagEnabled()) return;
-            filter.fields = ensureEtagField(filter.fields as Record<string, boolean> | undefined, etagProperty) as Filter<CrudEntity>['fields'];
+            const nextFields = ensureEtagField(filter.fields as any, etagProperty);
+            if (nextFields !== filter.fields) {
+                filter.fields = nextFields as Filter<CrudEntity>['fields'];
+            }
         }
 
-        private buildIdWhere(id: unknown): Filter<CrudEntity>['where'] {
+        buildIdWhere(id: unknown): Filter<CrudEntity>['where'] {
             const primary = idProperties[0] ?? 'id';
             return { [primary]: id } as Filter<CrudEntity>['where'];
         }
 
-        private buildConditionalWhere(id: unknown, expected: unknown[], allowAny: boolean): Filter<CrudEntity>['where'] {
+        buildConditionalWhere(id: unknown, expected: unknown[], allowAny: boolean): Filter<CrudEntity>['where'] {
             const idWhere = this.buildIdWhere(id);
             if (!this.etagEnabled() || allowAny) return idWhere;
             if (!expected.length) return idWhere;
@@ -188,37 +197,41 @@ export function defineODataCrudController(def: EntitySetDef) {
             return { and: [idWhere, condition] } as Filter<CrudEntity>['where'];
         }
 
-        private parseIfMatchHeader() {
+        parseIfMatchHeader() {
             const raw = this.request.get('If-Match') ?? (this.request.headers?.['if-match'] as string | undefined);
             return parseIfMatch(raw);
         }
 
-        private parseIfNoneMatchHeader() {
+        parseIfNoneMatchHeader() {
             const raw = this.request.get('If-None-Match') ?? (this.request.headers?.['if-none-match'] as string | undefined);
             return parseIfNoneMatch(raw);
         }
 
-        private decodeEtags(rawValues: string[]): unknown[] {
+        decodeEtags(rawValues: string[]): unknown[] {
             if (!rawValues.length) return [];
             return rawValues.map(value => decodeEtagToken(value, etagPropertyDef)).filter(value => value !== undefined);
         }
 
-        private requireIfMatch(ifMatch: ReturnType<typeof parseIfMatch>) {
+        requireIfMatch(
+            ifMatch: ReturnType<typeof parseIfMatch>,
+            options?: { optional?: boolean },
+        ) {
             if (!this.etagEnabled()) return;
             if (!ifMatch) {
+                if (options?.optional) return;
                 const error = new HttpErrors.PreconditionRequired('Missing If-Match header for concurrency-controlled resource.');
                 (error as any).code = 'PreconditionRequired';
                 throw error;
             }
         }
 
-        private throwPreconditionFailed(message = 'ETag does not match the current resource version.') {
+        throwPreconditionFailed(message = 'ETag does not match the current resource version.') {
             const error = new HttpErrors.PreconditionFailed(message);
             (error as any).code = 'PreconditionFailed';
             throw error;
         }
 
-        private setEtagHeader(entity?: CrudEntity) {
+        setEtagHeader(entity?: CrudEntity) {
             const etag = this.entityEtag(entity);
             if (etag) {
                 this.response.set('ETag', etag);
@@ -385,7 +398,7 @@ export function defineODataCrudController(def: EntitySetDef) {
                     'application/json': {
                         schema: getModelSchemaRef(modelCtor, {
                             title: `New${modelCtor.name ?? 'Entity'}`,
-                            optional: idProperties as unknown as (keyof Entity)[],
+                            optional: optionalProperties as unknown as (keyof Entity)[],
                         }),
                     },
                 },
@@ -454,7 +467,7 @@ export function defineODataCrudController(def: EntitySetDef) {
             const options = this.repositoryOptions();
             const preference = preferences.returnPreference;
             const ifMatch = this.parseIfMatchHeader();
-            this.requireIfMatch(ifMatch);
+            this.requireIfMatch(ifMatch, { optional: preference === 'minimal' });
 
             const expected = ifMatch?.any ? [] : this.decodeEtags(ifMatch?.values ?? []);
             const where = this.buildConditionalWhere(id, expected, Boolean(ifMatch?.any));
@@ -495,7 +508,7 @@ export function defineODataCrudController(def: EntitySetDef) {
 
             const options = this.repositoryOptions();
             const ifMatch = this.parseIfMatchHeader();
-            this.requireIfMatch(ifMatch);
+            this.requireIfMatch(ifMatch, { optional: true });
 
             const expected = ifMatch?.any ? [] : this.decodeEtags(ifMatch?.values ?? []);
             const where = this.buildConditionalWhere(id, expected, Boolean(ifMatch?.any));
