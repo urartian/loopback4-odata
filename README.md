@@ -438,6 +438,7 @@ Run `npm test` to compile the TypeScript specs and execute the unit suite. Accep
 - [x] Auto-discovery of OData controllers (Booter)
 - [x] Registry of entity sets
 - [x] CRUD controller factory backed by LoopBack repositories
+- [x] Service document exposing registered entity sets
 - [x] $metadata endpoint with generated CSDL (including navigation properties for relations)
 - [x] Basic query options → LoopBack filters (`$filter`, `$orderby`, `$top`, `$skip`, `$select`)
 - [x] Relational expansion via `$expand`
