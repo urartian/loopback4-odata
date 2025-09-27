@@ -178,6 +178,8 @@ DELETE /odata/Products/1
 
 `PATCH` accepts partial payloads, and `DELETE` responds with `204 No Content` once the repository removes the entity.
 
+When you enable optimistic concurrency by configuring an ETag property (for example `@odataModel({etag: 'updatedAt'})`), the generated endpoints require clients to supply the latest ETag via the `If-Match` request header. Missing headers result in `428 Precondition Required`, while mismatched values return `412 Precondition Failed`. ETags are exposed both in response headers and as the `@odata.etag` field in response bodies so clients can round-trip them easily.
+
 ##### Query options
 
 Common OData query options are translated into LoopBack filters out of the box:
