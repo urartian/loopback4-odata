@@ -467,7 +467,7 @@ export function defineODataCrudController(def: EntitySetDef) {
             const options = this.repositoryOptions();
             const preference = preferences.returnPreference;
             const ifMatch = this.parseIfMatchHeader();
-            this.requireIfMatch(ifMatch, { optional: preference === 'minimal' });
+            this.requireIfMatch(ifMatch);
 
             const expected = ifMatch?.any ? [] : this.decodeEtags(ifMatch?.values ?? []);
             const where = this.buildConditionalWhere(id, expected, Boolean(ifMatch?.any));

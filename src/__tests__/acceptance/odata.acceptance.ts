@@ -210,11 +210,15 @@ describe('OData component acceptance', () => {
       .get('/odata/Products')
       .query({$filter: "name eq 'Speaker'"})
       .expect(200);
-    const speakerId = createdList.body.value[0]?.id;
+    const speaker = createdList.body.value[0];
+    const speakerId = speaker?.id;
+    const speakerEtag = speaker?.['@odata.etag'];
+    expect(speakerEtag).to.be.String();
 
     const updateRes = await client
       .patch(`/odata/Products(${speakerId})`)
       .set('Prefer', 'return=minimal')
+      .set('If-Match', speakerEtag)
       .send({price: 219})
       .expect(204);
     expect(updateRes.headers['preference-applied']).to.equal('return=minimal');
@@ -224,6 +228,53 @@ describe('OData component acceptance', () => {
     expect(verify.body.value.price).to.equal(219);
 
     await client.del(`/odata/Products(${speakerId})`).expect(204);
+  });
+
+  it('rejects PATCH without If-Match header when ETag tracking is enabled', async () => {
+    const created = await client
+      .post('/odata/Products')
+      .send({name: 'Tripod', price: 89})
+      .expect(200);
+
+    const createdId = created.body.value.id;
+
+    const res = await client
+      .patch(`/odata/Products(${createdId})`)
+      .send({price: 99})
+      .expect(428);
+
+    expect(res.body.error?.code).to.equal('PreconditionRequired');
+  });
+
+  it('returns 412 when If-Match does not match the current entity ETag', async () => {
+    const created = await client
+      .post('/odata/Products')
+      .send({name: 'Monitor', price: 299})
+      .expect(200);
+
+    const createdId = created.body.value.id;
+    const originalEtag = created.headers['etag'] as string;
+
+    const firstUpdate = await client
+      .patch(`/odata/Products(${createdId})`)
+      .set('If-Match', originalEtag)
+      .send({price: 329})
+      .expect(200);
+
+    const nextEtag = firstUpdate.headers['etag'] as string;
+    expect(nextEtag).to.not.equal(originalEtag);
+
+    const res = await client
+      .patch(`/odata/Products(${createdId})`)
+      .set('If-Match', originalEtag)
+      .send({price: 339})
+      .expect(412);
+
+    expect(res.body.error?.code).to.equal('PreconditionFailed');
+
+    const current = await getProductWithEtag(createdId);
+    expect(current.etag).to.equal(nextEtag);
+    expect(current.body.price).to.equal(329);
   });
 
   it('returns OData error payloads for invalid filters', async () => {
