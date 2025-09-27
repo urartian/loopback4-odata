@@ -265,3 +265,12 @@ export function readEtagValues(
   if (!entity || !etagProperties?.length) return undefined;
   return etagProperties.map(name => ({name, value: entity[name]}));
 }
+
+export function readEtagValue(
+  entity: Record<string, unknown> | undefined,
+  etagProperty?: string,
+) {
+  if (!entity || !etagProperty) return undefined;
+  const [first] = readEtagValues(entity, [etagProperty]) ?? [];
+  return first?.value;
+}

@@ -1,6 +1,7 @@
 import { inject } from '@loopback/core';
 import {
     HttpErrors,
+    Response,
     del,
     get,
     getModelSchemaRef,
@@ -25,7 +26,6 @@ import { EntitySetDef } from '../registry/entityset-registry';
 import { parseODataQuery } from '../services/odata-query-parser.service';
 import { ODATA_ATOMICITY_STATE } from '../constants';
 import { AtomicityRequestState } from '../types/batch';
-import { Response } from '@loopback/rest';
 import {
     decodeEtagToken,
     encodeEtagToken,
