@@ -261,8 +261,13 @@ export function defineODataCrudController(def: EntitySetDef) {
                 }
 
                 if (isComposite) {
-                    const isObject = typeof decoded === 'object' && decoded !== null && !Array.isArray(decoded);
-                    if (!isObject) {
+                    const isPlainObject = Boolean(
+                        decoded &&
+                        typeof decoded === 'object' &&
+                        !Array.isArray(decoded) &&
+                        Object.getPrototypeOf(decoded) === Object.prototype,
+                    );
+                    if (!isPlainObject) {
                         invalidComposite = true;
                         continue;
                     }

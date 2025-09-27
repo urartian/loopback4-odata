@@ -18,10 +18,6 @@ describe('OData component acceptance', () => {
     const res = await client.get(`/odata/Products(${id})`).expect(200);
     return {body: res.body.value, etag: res.headers['etag'] as string};
   };
-  const getDocumentWithEtag = async (id: number) => {
-    const res = await client.get(`/odata/Documents(${id})`).expect(200);
-    return {body: res.body.value, etag: res.headers['etag'] as string};
-  };
 
   beforeEach(async function () {
     app = await givenODataApplication({port: 0, host: '127.0.0.1'});
@@ -73,8 +69,8 @@ describe('OData component acceptance', () => {
     expect(res.text.includes('<Action Name="resetInventory"')).to.be.true();
     expect(res.text.includes('<Function Name="premiumProducts"')).to.be.true();
     expect(res.text.includes('<NavigationPropertyBinding Path="orderItems"')).to.be.true();
-    expect(res.text.includes('<PropertyPath>checksum</PropertyPath>')).to.be.true();
-    expect(res.text.includes('<PropertyPath>version</PropertyPath>')).to.be.true();
+    expect(res.text.includes('<PropertyPath>id</PropertyPath>')).to.be.true();
+    expect(res.text.includes('<PropertyPath>updatedAt</PropertyPath>')).to.be.true();
   });
 
   it('invokes bound actions through generated routes', async () => {
@@ -171,7 +167,9 @@ describe('OData component acceptance', () => {
 
     expect(topOne.body.value).to.have.lengthOf(1);
     expect(topOne.body.value[0].name).to.equal('Laptop');
-    expect(topOne.body.value[0]).to.not.have.property('id');
+    expect(topOne.body.value[0]).to.have.property('id');
+    expect(topOne.body.value[0]).to.have.property('updatedAt');
+    expect(topOne.body.value[0]['@odata.etag']).to.be.String();
 
     const second = await client
       .get('/odata/Products')
@@ -342,22 +340,22 @@ describe('OData component acceptance', () => {
 
   it('honors composite ETags across CRUD operations', async () => {
     const created = await client
-      .post('/odata/Documents')
-      .send({title: 'Proposal', version: 1, checksum: 'draft-1'})
+      .post('/odata/Products')
+      .send({name: 'Composite Widget', price: 199})
       .expect(200);
 
-    const docId = created.body.value.id;
+    const productId = created.body.value.id;
     const initialEtag = created.headers['etag'] as string;
     expect(initialEtag).to.be.String();
     expect(created.body.value['@odata.etag']).to.equal(initialEtag);
 
-    const fetched = await getDocumentWithEtag(docId);
+    const fetched = await getProductWithEtag(productId);
     expect(fetched.etag).to.equal(initialEtag);
 
     const updated = await client
-      .patch(`/odata/Documents(${docId})`)
+      .patch(`/odata/Products(${productId})`)
       .set('If-Match', initialEtag)
-      .send({title: 'Proposal', version: 2, checksum: 'draft-2'})
+      .send({price: 209})
       .expect(200);
 
     const updatedEtag = updated.headers['etag'] as string;
@@ -366,55 +364,54 @@ describe('OData component acceptance', () => {
     expect(updated.body.value['@odata.etag']).to.equal(updatedEtag);
 
     await client
-      .patch(`/odata/Documents(${docId})`)
+      .patch(`/odata/Products(${productId})`)
       .set('If-Match', initialEtag)
-      .send({title: 'Proposal', checksum: 'stale-attempt'})
+      .send({price: 219})
       .expect(412);
 
-    const current = await getDocumentWithEtag(docId);
+    const current = await getProductWithEtag(productId);
     expect(current.etag).to.equal(updatedEtag);
 
     await client
-      .del(`/odata/Documents(${docId})`)
+      .del(`/odata/Products(${productId})`)
       .set('If-Match', initialEtag)
       .expect(412);
 
     await client
-      .del(`/odata/Documents(${docId})`)
+      .del(`/odata/Products(${productId})`)
       .set('If-Match', updatedEtag)
       .expect(204);
   });
 
   it('rejects stale single-field If-Match tokens for composite ETags', async () => {
     const created = await client
-      .post('/odata/Documents')
-      .send({title: 'Specs', version: 1, checksum: 'draft-1'})
+      .post('/odata/Products')
+      .send({name: 'Composite Gizmo', price: 149})
       .expect(200);
 
-    const docId = created.body.value.id;
-    const initialVersion = created.body.value.version;
-    const initialChecksum = created.body.value.checksum;
-    expect(initialVersion).to.equal(1);
-    expect(initialChecksum).to.equal('draft-1');
-
+    const productId = created.body.value.id;
+    const createdBody = created.body.value;
     const initialEtag = created.headers['etag'] as string;
     expect(initialEtag).to.be.String();
 
+    const initialUpdatedAt = createdBody.updatedAt;
+    expect(initialUpdatedAt).to.be.String();
+
     const staleSingleFieldEtag = `"${Buffer.from(
-      JSON.stringify({t: 'number', v: String(initialVersion)}),
+      JSON.stringify({t: 'date', v: String(initialUpdatedAt)}),
       'utf-8',
     ).toString('base64')}"`;
 
     await client
-      .patch(`/odata/Documents(${docId})`)
+      .patch(`/odata/Products(${productId})`)
       .set('If-Match', initialEtag)
-      .send({version: 2, checksum: 'draft-2'})
+      .send({price: 159})
       .expect(200);
 
     const res = await client
-      .patch(`/odata/Documents(${docId})`)
+      .patch(`/odata/Products(${productId})`)
       .set('If-Match', staleSingleFieldEtag)
-      .send({checksum: 'draft-3'})
+      .send({price: 169})
       .expect(412);
 
     expect(res.body.error?.code).to.equal('PreconditionFailed');
