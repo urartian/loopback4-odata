@@ -97,6 +97,25 @@ export class OrderItem extends Entity {
   unitPrice!: number;
 }
 
+@odataModel({etag: ['revision', 'updatedAt']})
+@model()
+export class Inventory extends Entity {
+  @property({id: true, generated: true})
+  id?: number;
+
+  @property({required: true})
+  sku!: string;
+
+  @property({required: true})
+  quantity!: number;
+
+  @property({required: true, default: 1})
+  revision!: number;
+
+  @property({type: 'date', required: true, defaultFn: 'now'})
+  updatedAt!: Date;
+}
+
 export class ProductRepository extends DefaultCrudRepository<
   Product,
   typeof Product.prototype.id
@@ -190,6 +209,15 @@ export class OrderItemRepository extends DefaultCrudRepository<
   }
 }
 
+export class InventoryRepository extends DefaultCrudRepository<
+  Inventory,
+  typeof Inventory.prototype.id
+> {
+  constructor(@inject('datasources.db') dataSource: juggler.DataSource) {
+    super(Inventory, dataSource);
+  }
+}
+
 @odataController(Product)
 class ProductODataController {
   constructor(
@@ -238,6 +266,9 @@ class OrderODataController {}
 @odataController(OrderItem)
 class OrderItemODataController {}
 
+@odataController(Inventory)
+class InventoryODataController {}
+
 export async function givenODataApplication(config: RestServerConfig = {}): Promise<TestApplication> {
   const app = new TestApplication(config);
   const dataSource = new juggler.DataSource(MEMORY_DS_CONFIG);
@@ -245,10 +276,12 @@ export async function givenODataApplication(config: RestServerConfig = {}): Prom
   app.repository(OrderItemRepository);
   app.repository(ProductRepository);
   app.repository(OrderRepository);
+  app.repository(InventoryRepository);
   app.component(ODataComponent);
   app.controller(ProductODataController);
   app.controller(OrderODataController);
   app.controller(OrderItemODataController);
+  app.controller(InventoryODataController);
   return app;
 }
 
@@ -256,6 +289,7 @@ export async function seedExampleData(app: TestApplication) {
   const productRepo = await app.getRepository(ProductRepository);
   const orderRepo = await app.getRepository(OrderRepository);
   const orderItemRepo = await app.getRepository(OrderItemRepository);
+  const inventoryRepo = await app.getRepository(InventoryRepository);
 
   const existingProducts = await productRepo.count();
   if (existingProducts.count > 0) return;
@@ -291,4 +325,9 @@ export async function seedExampleData(app: TestApplication) {
       orderRepo.updateById(Number(orderId), {total}),
     ),
   );
+
+  await inventoryRepo.createAll([
+    {sku: 'SKU-001', quantity: 10, revision: 1},
+    {sku: 'SKU-002', quantity: 25, revision: 1},
+  ]);
 }

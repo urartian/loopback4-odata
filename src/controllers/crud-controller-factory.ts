@@ -33,7 +33,7 @@ import {
     matchesEtag,
     parseIfMatch,
     parseIfNoneMatch,
-    readEtagValue,
+    readEtagValues,
 } from '../util/etag';
 type CrudEntity = Entity & { [key: string]: unknown };
 type CrudRepo = DefaultCrudRepository<CrudEntity, unknown>;
@@ -83,14 +83,18 @@ export function defineODataCrudController(def: EntitySetDef) {
     const filterExcludingWhereParam = param.filter(modelCtor, { exclude: 'where' });
     const idProperties = getIdProperties(modelDefinition);
     const modelRelations = (modelDefinition?.relations ?? {}) as RelationDefinitionMap;
-    const etagProperty = def.etagProperty;
-    const etagPropertyDef = etagProperty
-        ? (modelDefinition?.properties?.[etagProperty] as PropertyDefinition | undefined)
-        : undefined;
+    const etagProperties = def.etagProperties ?? [];
+    const etagPropertyDefs = new Map<string, PropertyDefinition>();
+    for (const propertyName of etagProperties) {
+        const propertyDef = modelDefinition?.properties?.[propertyName] as PropertyDefinition | undefined;
+        if (propertyDef) {
+            etagPropertyDefs.set(propertyName, propertyDef);
+        }
+    }
     const optionalProperties = Array.from(
         new Set([
             ...idProperties,
-            ...(etagProperty ? [etagProperty] : []),
+            ...etagProperties,
         ]),
     );
 
@@ -154,12 +158,12 @@ export function defineODataCrudController(def: EntitySetDef) {
         ) { }
 
         etagEnabled(): boolean {
-            return Boolean(etagProperty);
+            return etagProperties.length > 0;
         }
 
         entityEtag(entity: CrudEntity | undefined): string | undefined {
             if (!this.etagEnabled() || !entity) return undefined;
-            return encodeEtagToken(readEtagValue(entity, etagProperty));
+            return encodeEtagToken(readEtagValues(entity, etagProperties));
         }
 
         decorateEntity(entity: CrudEntity): CrudEntity {
@@ -176,7 +180,7 @@ export function defineODataCrudController(def: EntitySetDef) {
 
         ensureEtagField(filter: Filter<CrudEntity>) {
             if (!this.etagEnabled()) return;
-            const nextFields = ensureEtagField(filter.fields as any, etagProperty);
+            const nextFields = ensureEtagField(filter.fields as any, etagProperties);
             if (nextFields !== filter.fields) {
                 filter.fields = nextFields as Filter<CrudEntity>['fields'];
             }
@@ -187,13 +191,25 @@ export function defineODataCrudController(def: EntitySetDef) {
             return { [primary]: id } as Filter<CrudEntity>['where'];
         }
 
-        buildConditionalWhere(id: unknown, expected: unknown[], allowAny: boolean): Filter<CrudEntity>['where'] {
+        buildConditionalWhere(
+            id: unknown,
+            expected: Record<string, unknown>[],
+            allowAny: boolean,
+        ): Filter<CrudEntity>['where'] {
             const idWhere = this.buildIdWhere(id);
             if (!this.etagEnabled() || allowAny) return idWhere;
             if (!expected.length) return idWhere;
-            const condition = expected.length > 1
-                ? { [etagProperty!]: { inq: expected } }
-                : { [etagProperty!]: expected[0] };
+            const propertyMatches = expected
+                .map(valueMap => {
+                    const comparisons = etagProperties.map(property => ({ [property]: valueMap[property] }));
+                    if (!comparisons.length) return undefined;
+                    return comparisons.length === 1 ? comparisons[0] : { and: comparisons };
+                })
+                .filter((item): item is Record<string, unknown> => Boolean(item));
+            if (!propertyMatches.length) return idWhere;
+            const condition = propertyMatches.length === 1
+                ? propertyMatches[0]
+                : { or: propertyMatches };
             return { and: [idWhere, condition] } as Filter<CrudEntity>['where'];
         }
 
@@ -207,9 +223,11 @@ export function defineODataCrudController(def: EntitySetDef) {
             return parseIfNoneMatch(raw);
         }
 
-        decodeEtags(rawValues: string[]): unknown[] {
+        decodeEtags(rawValues: string[]): Record<string, unknown>[] {
             if (!rawValues.length) return [];
-            return rawValues.map(value => decodeEtagToken(value, etagPropertyDef)).filter(value => value !== undefined);
+            return rawValues
+                .map(value => decodeEtagToken(value, etagProperties, etagPropertyDefs))
+                .filter((value): value is Record<string, unknown> => value !== undefined);
         }
 
         requireIfMatch(

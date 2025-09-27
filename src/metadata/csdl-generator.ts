@@ -89,7 +89,9 @@ function buildEntityType(
 
         const isRequired = Boolean(propertyDef.required) || Boolean(propertyDef.id);
         const nullable = isRequired ? 'false' : 'true';
-        const concurrency = def.etagProperty && def.etagProperty === propertyName ? ' ConcurrencyMode="Fixed"' : '';
+        const concurrency = def.etagProperties?.includes(propertyName)
+            ? ' ConcurrencyMode="Fixed"'
+            : '';
         propertyLines.push(
             `      <Property Name="${xmlEscape(propertyName)}" Type="${edmType}" Nullable="${nullable}"${concurrency}/>`,
         );
@@ -177,11 +179,11 @@ export class CsdlGenerator {
                 `        <NavigationPropertyBinding Path="${xmlEscape(binding.path)}" Target="${xmlEscape(binding.target)}" />`,
             );
 
-            const concurrencyAnnotation = set.etagProperty
+            const concurrencyAnnotation = set.etagProperties?.length
                 ? [
                     '        <Annotation Term="Org.OData.Core.V1.OptimisticConcurrency">',
                     '          <Collection>',
-                    `            <PropertyPath>${xmlEscape(set.etagProperty)}</PropertyPath>`,
+                    ...set.etagProperties.map(property => `            <PropertyPath>${xmlEscape(property)}</PropertyPath>`),
                     '          </Collection>',
                     '        </Annotation>',
                 ]

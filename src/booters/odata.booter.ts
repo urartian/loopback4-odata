@@ -45,7 +45,7 @@ export class ODataBooter implements Booter {
                 modelCtor,
                 repositoryBindingKey: repoBinding.key,
                 repositoryCtor: repoBinding.valueConstructor ?? undefined,
-                etagProperty: modelMeta?.etag,
+                etagProperties: modelMeta?.etag,
             });
 
             const CrudController = defineODataCrudController(def);

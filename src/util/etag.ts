@@ -5,6 +5,17 @@ type EncodedToken = {
   v: string;
 };
 
+type CompositeComponent = EncodedToken & {p: string};
+
+type CompositeToken = {
+  t: 'composite';
+  v: CompositeComponent[];
+};
+
+type SerializedToken = EncodedToken | CompositeToken;
+
+type EtagPart = {name: string; value: unknown};
+
 const HEADER_SPLIT = /\s*,\s*/g;
 
 function detectType(value: unknown): EncodedToken {
@@ -81,27 +92,85 @@ function coerceToPropertyType(value: unknown, property?: PropertyDefinition): un
   }
 }
 
-export function encodeEtagToken(value: unknown): string | undefined {
-  if (value == null) return undefined;
-  const token = detectType(value);
+function encodeSerializedToken(token: SerializedToken): string {
   const payload = Buffer.from(JSON.stringify(token), 'utf-8').toString('base64');
   return `"${payload}"`;
 }
 
-export function decodeEtagToken(headerValue: string, property?: PropertyDefinition): unknown {
+function toCompositeToken(parts: EtagPart[]): CompositeToken {
+  const normalized = parts
+    .filter(part => Boolean(part?.name))
+    .map(part => ({name: part.name, value: part.value}));
+  normalized.sort((a, b) => a.name.localeCompare(b.name));
+  return {
+    t: 'composite',
+    v: normalized.map(part => ({p: part.name, ...detectType(part.value)})),
+  };
+}
+
+function decodeSerialized(raw: string): SerializedToken {
+  const json = Buffer.from(raw, 'base64').toString('utf-8');
+  return JSON.parse(json) as SerializedToken;
+}
+
+export function encodeEtagToken(parts: EtagPart[] | undefined): string | undefined {
+  if (!parts?.length) return undefined;
+  if (parts.length === 1) {
+    const [{value}] = parts;
+    return encodeSerializedToken(detectType(value));
+  }
+  return encodeSerializedToken(toCompositeToken(parts));
+}
+
+export function decodeEtagToken(
+  headerValue: string,
+  etagProperties: string[],
+  propertyDefinitions?: Map<string, PropertyDefinition>,
+): Record<string, unknown> | undefined {
   const trimmed = headerValue.trim();
   const withoutWeak = trimmed.startsWith('W/') ? trimmed.slice(2).trim() : trimmed;
+  const firstProperty = etagProperties[0];
   if (!withoutWeak.startsWith('"') || !withoutWeak.endsWith('"')) {
-    return coerceToPropertyType(withoutWeak, property);
+    if (!firstProperty) return undefined;
+    return {
+      [firstProperty]: coerceToPropertyType(
+        withoutWeak,
+        propertyDefinitions?.get(firstProperty),
+      ),
+    };
   }
   const raw = withoutWeak.slice(1, -1);
   try {
-    const json = Buffer.from(raw, 'base64').toString('utf-8');
-    const parsed = JSON.parse(json) as EncodedToken;
-    const revived = reviveType(parsed);
-    return coerceToPropertyType(revived, property);
+    const parsed = decodeSerialized(raw);
+    if ((parsed as CompositeToken).t === 'composite' && Array.isArray((parsed as CompositeToken).v)) {
+      const entries: Record<string, unknown> = {};
+      for (const component of (parsed as CompositeToken).v) {
+        if (!component || typeof component.p !== 'string') continue;
+        const revived = reviveType(component);
+        entries[component.p] = coerceToPropertyType(
+          revived,
+          propertyDefinitions?.get(component.p),
+        );
+      }
+      if (Object.keys(entries).length) return entries;
+      return undefined;
+    }
+    if (!firstProperty) return undefined;
+    const revived = reviveType(parsed as EncodedToken);
+    return {
+      [firstProperty]: coerceToPropertyType(
+        revived,
+        propertyDefinitions?.get(firstProperty),
+      ),
+    };
   } catch {
-    return coerceToPropertyType(raw, property);
+    if (!firstProperty) return undefined;
+    return {
+      [firstProperty]: coerceToPropertyType(
+        raw,
+        propertyDefinitions?.get(firstProperty),
+      ),
+    };
   }
 }
 
@@ -138,35 +207,61 @@ export function matchesEtag(encoded: string | undefined, expected: string[]): bo
 
 export function ensureEtagField(
   fields: Fields<AnyObject> | undefined,
-  etagProperty?: string,
+  etagProperties: string[] | undefined,
 ) {
-  if (!etagProperty || fields == null) return fields;
+  if (!etagProperties?.length || fields == null) return fields;
 
   if (Array.isArray(fields)) {
-    return fields.includes(etagProperty) ? fields : [...fields, etagProperty];
+    const missing = etagProperties.filter(property => !fields.includes(property));
+    return missing.length ? [...fields, ...missing] : fields;
   }
 
   if (typeof fields === 'object') {
     const map = fields as Record<string, boolean>;
-    if (map[etagProperty]) return fields;
-    return {...map, [etagProperty]: true};
+    let changed = false;
+    const result: Record<string, boolean> = {...map};
+    for (const property of etagProperties) {
+      if (!result[property]) {
+        result[property] = true;
+        changed = true;
+      }
+    }
+    return changed ? result : fields;
   }
 
   if (typeof fields === 'boolean') {
-    return fields ? fields : {[etagProperty]: true};
+    if (fields) return fields;
+    const result: Record<string, boolean> = {};
+    for (const property of etagProperties) {
+      result[property] = true;
+    }
+    return result;
   }
 
   return fields;
 }
 
-export function stripEtagProperty(entity: Record<string, unknown>, etagProperty?: string) {
-  if (!etagProperty) return entity;
+export function stripEtagProperty(
+  entity: Record<string, unknown>,
+  etagProperties?: string | string[],
+) {
+  const names = Array.isArray(etagProperties)
+    ? etagProperties
+    : etagProperties
+    ? [etagProperties]
+    : [];
+  if (!names.length) return entity;
   const cloned = {...entity};
-  delete cloned[etagProperty];
+  for (const name of names) {
+    delete cloned[name];
+  }
   return cloned;
 }
 
-export function readEtagValue(entity: Record<string, unknown> | undefined, etagProperty?: string) {
-  if (!entity || !etagProperty) return undefined;
-  return entity[etagProperty];
+export function readEtagValues(
+  entity: Record<string, unknown> | undefined,
+  etagProperties: string[] | undefined,
+): EtagPart[] | undefined {
+  if (!entity || !etagProperties?.length) return undefined;
+  return etagProperties.map(name => ({name, value: entity[name]}));
 }

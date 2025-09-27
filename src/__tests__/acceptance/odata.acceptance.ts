@@ -18,6 +18,10 @@ describe('OData component acceptance', () => {
     const res = await client.get(`/odata/Products(${id})`).expect(200);
     return {body: res.body.value, etag: res.headers['etag'] as string};
   };
+  const getInventoryWithEtag = async (id: number) => {
+    const res = await client.get(`/odata/Inventories(${id})`).expect(200);
+    return {body: res.body.value, etag: res.headers['etag'] as string};
+  };
 
   beforeEach(async function () {
     app = await givenODataApplication({port: 0, host: '127.0.0.1'});
@@ -56,6 +60,8 @@ describe('OData component acceptance', () => {
     expect(res.text.includes('<Action Name="resetInventory"')).to.be.true();
     expect(res.text.includes('<Function Name="premiumProducts"')).to.be.true();
     expect(res.text.includes('<NavigationPropertyBinding Path="orderItems"')).to.be.true();
+    expect(res.text.includes('<PropertyPath>revision</PropertyPath>')).to.be.true();
+    expect(res.text.includes('<PropertyPath>updatedAt</PropertyPath>')).to.be.true();
   });
 
   it('invokes bound actions through generated routes', async () => {
@@ -194,6 +200,47 @@ describe('OData component acceptance', () => {
       .set('If-Match', updatedEtag)
       .expect(204);
     await client.get(`/odata/Products(${createdId})`).expect(404);
+  });
+
+  it('honors composite ETags for inventory entities', async () => {
+    const createRes = await client
+      .post('/odata/Inventories')
+      .send({sku: 'SKU-999', quantity: 5, revision: 2})
+      .expect(200);
+
+    const createdId = createRes.body.value.id as number;
+    const createdRevision = createRes.body.value.revision as number;
+    const createdEtag = createRes.headers['etag'] as string;
+    expect(createdEtag).to.be.String();
+    expect(createRes.body.value['@odata.etag']).to.equal(createdEtag);
+
+    const fetched = await getInventoryWithEtag(createdId);
+    expect(fetched.etag).to.equal(createdEtag);
+
+    const nextTimestamp = new Date(Date.now() + 1000).toISOString();
+    const updateRes = await client
+      .patch(`/odata/Inventories(${createdId})`)
+      .set('If-Match', createdEtag)
+      .send({quantity: 7, revision: createdRevision + 1, updatedAt: nextTimestamp})
+      .expect(200);
+
+    const updatedEtag = updateRes.headers['etag'] as string;
+    expect(updatedEtag).to.be.String();
+    expect(updatedEtag).to.not.equal(createdEtag);
+    expect(updateRes.body.value['@odata.etag']).to.equal(updatedEtag);
+
+    await client
+      .patch(`/odata/Inventories(${createdId})`)
+      .set('If-Match', createdEtag)
+      .send({quantity: 9})
+      .expect(412);
+
+    await client
+      .del(`/odata/Inventories(${createdId})`)
+      .set('If-Match', updatedEtag)
+      .expect(204);
+
+    await client.get(`/odata/Inventories(${createdId})`).expect(404);
   });
 
   it('honors Prefer return=minimal for write operations', async () => {
