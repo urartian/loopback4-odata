@@ -87,6 +87,12 @@ export function defineODataCrudController(def: EntitySetDef) {
     const etagPropertyDef = etagProperty
         ? (modelDefinition?.properties?.[etagProperty] as PropertyDefinition | undefined)
         : undefined;
+    const optionalProperties = Array.from(
+        new Set([
+            ...idProperties,
+            ...(etagProperty ? [etagProperty] : []),
+        ]),
+    );
 
     const collectionResponseSchema = {
         type: 'object',
@@ -170,7 +176,10 @@ export function defineODataCrudController(def: EntitySetDef) {
 
         ensureEtagField(filter: Filter<CrudEntity>) {
             if (!this.etagEnabled()) return;
-            filter.fields = ensureEtagField(filter.fields as Record<string, boolean> | undefined, etagProperty) as Filter<CrudEntity>['fields'];
+            const nextFields = ensureEtagField(filter.fields as any, etagProperty);
+            if (nextFields !== filter.fields) {
+                filter.fields = nextFields as Filter<CrudEntity>['fields'];
+            }
         }
 
         buildIdWhere(id: unknown): Filter<CrudEntity>['where'] {
@@ -203,9 +212,13 @@ export function defineODataCrudController(def: EntitySetDef) {
             return rawValues.map(value => decodeEtagToken(value, etagPropertyDef)).filter(value => value !== undefined);
         }
 
-        requireIfMatch(ifMatch: ReturnType<typeof parseIfMatch>) {
+        requireIfMatch(
+            ifMatch: ReturnType<typeof parseIfMatch>,
+            options?: { optional?: boolean },
+        ) {
             if (!this.etagEnabled()) return;
             if (!ifMatch) {
+                if (options?.optional) return;
                 const error = new HttpErrors.PreconditionRequired('Missing If-Match header for concurrency-controlled resource.');
                 (error as any).code = 'PreconditionRequired';
                 throw error;
@@ -385,7 +398,7 @@ export function defineODataCrudController(def: EntitySetDef) {
                     'application/json': {
                         schema: getModelSchemaRef(modelCtor, {
                             title: `New${modelCtor.name ?? 'Entity'}`,
-                            optional: idProperties as unknown as (keyof Entity)[],
+                            optional: optionalProperties as unknown as (keyof Entity)[],
                         }),
                     },
                 },
@@ -454,7 +467,7 @@ export function defineODataCrudController(def: EntitySetDef) {
             const options = this.repositoryOptions();
             const preference = preferences.returnPreference;
             const ifMatch = this.parseIfMatchHeader();
-            this.requireIfMatch(ifMatch);
+            this.requireIfMatch(ifMatch, { optional: preference === 'minimal' });
 
             const expected = ifMatch?.any ? [] : this.decodeEtags(ifMatch?.values ?? []);
             const where = this.buildConditionalWhere(id, expected, Boolean(ifMatch?.any));
@@ -495,7 +508,7 @@ export function defineODataCrudController(def: EntitySetDef) {
 
             const options = this.repositoryOptions();
             const ifMatch = this.parseIfMatchHeader();
-            this.requireIfMatch(ifMatch);
+            this.requireIfMatch(ifMatch, { optional: true });
 
             const expected = ifMatch?.any ? [] : this.decodeEtags(ifMatch?.values ?? []);
             const where = this.buildConditionalWhere(id, expected, Boolean(ifMatch?.any));
