@@ -428,6 +428,37 @@ Content-Type: application/json
 
 If the datasource behind the repositories cannot create transactions (for example, the in-memory connector), the OData component returns `501 Not Implemented` with a `BatchExecutionError` explaining that the changeset could not be guaranteed. Use a transactional connector or omit `atomicityGroup` to execute requests independently.
 
+## Optimistic Concurrency (ETags)
+
+Add an ETag column to your LoopBack model and opt in by passing it to `@odataModel`. The property is typically a timestamp or version counter that you update whenever the record changes.
+
+```ts
+@odataModel({etag: 'updatedAt'})
+@model()
+export class Product extends Entity {
+  @property({id: true})
+  id!: number;
+
+  @property()
+  name!: string;
+
+  @property()
+  price!: number;
+
+  @property({type: 'date', required: true, defaultFn: 'now'})
+  updatedAt!: Date;
+}
+```
+
+Keep the field fresh in your repository (for example, by stamping `updatedAt` in `create`/`update` hooks). The generated CRUD controller then:
+
+- Emits `ETag: W/"…"` headers and `@odata.etag` payload metadata on `GET /odata/Products(…)`.
+- Accepts optional `If-Match` headers on `PATCH`/`DELETE`. When present, the update succeeds only if the token still matches the stored value; stale tokens return `412 Precondition Failed`.
+- Supports caching via `If-None-Match` on reads (`GET` responds `304 Not Modified` when the token matches).
+- Treats related expansions the same way as SAP CAP: the ETag covers only the root entity unless you choose to update the parent token whenever child rows change.
+
+You can pass an array of property names (`@odataModel({etag: ['id', 'updatedAt']})`) to build a composite token; the header value becomes a key/value list such as `W/"id=42&updatedAt=2025-04-01T10%3A00%3A00.000Z"`.
+
 ## Testing
 
 Run `npm test` to compile the TypeScript specs and execute the unit suite. Acceptance specs leverage `@loopback/testlab` and will be skipped automatically in environments that disallow binding HTTP ports (for example, certain sandboxes). When running locally, the acceptance suite exercises the generated REST endpoints against a seeded in-memory datasource.
@@ -450,10 +481,10 @@ Run `npm test` to compile the TypeScript specs and execute the unit suite. Accep
 - [x] Actions & Functions decorators with auto CSDL generation
 - [x] Proper pluralization of entity sets (via inflection)
 - [x] Transaction-backed `$batch` changesets (when datasource supports transactions)
+- [x] Optimistic concurrency with OData ETags (`If-Match` / `If-None-Match` support on generated CRUD routes)
 
 ## Roadmap
 
-- [ ] Optimistic concurrency & ETag headers to align with enterprise clients (If-Match/If-None-Match validation)
 - [ ] Full OData filter grammar: nested groups, numeric/date functions, `$search`, `any`/`all`
 - [ ] Configuration plumbing for base path, `$top` limits, and `$count` toggles exposed by `ODataConfig`
 - [ ] Robust path rewriting for GUID, quoted, and alternate keys without `\w+` heuristics

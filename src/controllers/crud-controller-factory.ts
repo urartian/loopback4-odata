@@ -20,6 +20,7 @@ import {
     Options,
     RelationDefinitionMap,
     PropertyDefinition,
+    AnyObject,
 } from '@loopback/repository';
 import { EntitySetDef } from '../registry/entityset-registry';
 import { parseODataQuery } from '../services/odata-query-parser.service';
@@ -27,10 +28,11 @@ import { ODATA_ATOMICITY_STATE } from '../constants';
 import { AtomicityRequestState } from '../types/batch';
 import { Response } from '@loopback/rest';
 import {
-    decodeEtagToken,
+    decodeIfMatchValues,
     encodeEtagToken,
     ensureEtagField,
     matchesEtag,
+    normalizeEtagProperties,
     parseIfMatch,
     parseIfNoneMatch,
     readEtagValue,
@@ -83,7 +85,7 @@ export function defineODataCrudController(def: EntitySetDef) {
     const filterExcludingWhereParam = param.filter(modelCtor, { exclude: 'where' });
     const idProperties = getIdProperties(modelDefinition);
     const modelRelations = (modelDefinition?.relations ?? {}) as RelationDefinitionMap;
-    const etagProperties = def.etagProperties;
+    const etagProperties = normalizeEtagProperties(def.etagProperties);
     const etagPropertyDefs = (etagProperties ?? []).reduce<Record<string, PropertyDefinition | undefined>>(
         (acc, prop) => {
             acc[prop] = modelDefinition?.properties?.[prop] as PropertyDefinition | undefined;
@@ -92,9 +94,6 @@ export function defineODataCrudController(def: EntitySetDef) {
         {},
     );
     const primaryEtagProperty = etagProperties?.[0];
-    const primaryEtagDef = primaryEtagProperty
-        ? (etagPropertyDefs[primaryEtagProperty] as PropertyDefinition | undefined)
-        : undefined;
     const optionalProperties = Array.from(
         new Set([
             ...idProperties,
@@ -165,21 +164,42 @@ export function defineODataCrudController(def: EntitySetDef) {
             return Boolean(etagProperties?.length);
         }
 
-        entityEtag(entity: CrudEntity | undefined): string | undefined {
-            if (!this.etagEnabled() || !entity) return undefined;
-            return encodeEtagToken(readEtagValue(entity, etagProperties));
+        toPlainEntity(entity: CrudEntity | AnyObject | undefined): AnyObject | undefined {
+            if (!entity) return undefined;
+            const candidate = entity as AnyObject & {
+                toObject?: (options?: AnyObject) => AnyObject;
+                toJSON?: () => AnyObject;
+            };
+
+            if (typeof candidate.toObject === 'function') {
+                return candidate.toObject({}) ?? undefined;
+            }
+            if (typeof candidate.toJSON === 'function') {
+                return candidate.toJSON() ?? undefined;
+            }
+            if (typeof entity === 'object') {
+                return { ...(entity as AnyObject) };
+            }
+            return undefined;
         }
 
-        decorateEntity(entity: CrudEntity): CrudEntity {
-            if (!this.etagEnabled()) return entity;
-            const etag = this.entityEtag(entity);
-            if (!etag) return entity;
-            return { ...entity, '@odata.etag': etag } as unknown as CrudEntity;
+        computeEtagFromPlain(plain: AnyObject | undefined): string | undefined {
+            if (!this.etagEnabled() || !plain) return undefined;
+            const value = readEtagValue(plain, etagProperties);
+            if (value === undefined) return undefined;
+            return encodeEtagToken(value, etagProperties);
         }
 
-        decorateEntities(entities: CrudEntity[]): CrudEntity[] {
-            if (!this.etagEnabled()) return entities;
-            return entities.map(entity => this.decorateEntity(entity));
+        decoratePlainEntity(plain: AnyObject, etag?: string): AnyObject {
+            if (!etag) return { ...plain };
+            return { ...plain, '@odata.etag': etag };
+        }
+
+        decoratePlainEntities(plainEntities: AnyObject[]): AnyObject[] {
+            if (!this.etagEnabled()) {
+                return plainEntities.map(entity => ({ ...entity }));
+            }
+            return plainEntities.map(plain => this.decoratePlainEntity(plain, this.computeEtagFromPlain(plain)));
         }
 
         ensureEtagField(filter: Filter<CrudEntity>) {
@@ -199,12 +219,9 @@ export function defineODataCrudController(def: EntitySetDef) {
             id: unknown,
             expected: unknown[],
             allowAny: boolean,
-            options?: { invalidComposite?: boolean },
         ): Filter<CrudEntity>['where'] {
             const idWhere = this.buildIdWhere(id);
-            if (!this.etagEnabled() || allowAny) return idWhere;
-            if (options?.invalidComposite) this.throwPreconditionFailed();
-            if (!expected.length) this.throwPreconditionFailed();
+            if (!this.etagEnabled() || allowAny || !expected.length) return idWhere;
             if ((etagProperties?.length ?? 0) <= 1) {
                 const property = primaryEtagProperty!;
                 const condition = expected.length > 1
@@ -242,69 +259,18 @@ export function defineODataCrudController(def: EntitySetDef) {
             return parseIfNoneMatch(raw);
         }
 
-        decodeEtags(rawValues: string[]): { values: unknown[]; invalidComposite: boolean } {
-            const values: unknown[] = [];
-            if (!rawValues.length) return { values, invalidComposite: false };
-            if (!etagProperties?.length) return { values, invalidComposite: false };
-
-            const isComposite = etagProperties.length > 1;
-            let invalidComposite = false;
-
-            for (const raw of rawValues) {
-                const decoded = isComposite
-                    ? decodeEtagToken(raw, undefined, etagPropertyDefs)
-                    : decodeEtagToken(raw, primaryEtagDef);
-
-                if (decoded === undefined) {
-                    if (isComposite) invalidComposite = true;
-                    continue;
-                }
-
-                if (isComposite) {
-                    const isPlainObject = Boolean(
-                        decoded &&
-                        typeof decoded === 'object' &&
-                        !Array.isArray(decoded) &&
-                        Object.getPrototypeOf(decoded) === Object.prototype,
-                    );
-                    if (!isPlainObject) {
-                        invalidComposite = true;
-                        continue;
-                    }
-                    values.push(decoded);
-                    continue;
-                }
-
-                values.push(decoded);
-            }
-
-            return { values, invalidComposite };
-        }
-
-        requireIfMatch(
-            ifMatch: ReturnType<typeof parseIfMatch>,
-            options?: { optional?: boolean },
-        ) {
-            if (!this.etagEnabled()) return;
-            if (!ifMatch) {
-                if (options?.optional) return;
-                const error = new HttpErrors.PreconditionRequired('Missing If-Match header for concurrency-controlled resource.');
-                (error as any).code = 'PreconditionRequired';
-                throw error;
-            }
-        }
-
         throwPreconditionFailed(message = 'ETag does not match the current resource version.') {
             const error = new HttpErrors.PreconditionFailed(message);
             (error as any).code = 'PreconditionFailed';
             throw error;
         }
 
-        setEtagHeader(entity?: CrudEntity) {
-            const etag = this.entityEtag(entity);
+        setEtagHeaderFromPlain(plain?: AnyObject) {
+            const etag = this.computeEtagFromPlain(plain);
             if (etag) {
                 this.response.set('ETag', etag);
             }
+            return etag;
         }
 
         @get(`/odata/${setName}`, {
@@ -341,6 +307,7 @@ export function defineODataCrudController(def: EntitySetDef) {
 
             const options = this.repositoryOptions();
             const results = await this.repository.find(baseFilter, options);
+            const plainResults = results.map(entity => this.toPlainEntity(entity) ?? {});
             let totalCount: number | undefined;
 
             if (inlineCountRequested) {
@@ -353,7 +320,7 @@ export function defineODataCrudController(def: EntitySetDef) {
             return {
                 '@odata.context': contextBase,
                 ...(inlineCountRequested ? { '@odata.count': totalCount ?? results.length } : {}),
-                value: this.decorateEntities(results),
+                value: this.decoratePlainEntities(plainResults),
             };
         }
 
@@ -433,23 +400,21 @@ export function defineODataCrudController(def: EntitySetDef) {
             }
 
             const entity = await this.repository.findById(id as any, baseFilter, options);
-            const entityEtag = this.entityEtag(entity);
+            const plain = this.toPlainEntity(entity) ?? {};
+            const etag = this.computeEtagFromPlain(plain);
 
-            if (ifNoneMatch) {
-                const skipResponse = ifNoneMatch.any || (entityEtag && matchesEtag(entityEtag, ifNoneMatch.values));
-                if (skipResponse) {
-                    this.ensureODataHeaders();
-                    if (entityEtag) this.response.set('ETag', entityEtag);
-                    this.response.status(304).end();
-                    return;
-                }
+            if (ifNoneMatch && !ifNoneMatch.any && etag && matchesEtag(etag, ifNoneMatch.values)) {
+                this.ensureODataHeaders();
+                this.setEtagHeaderFromPlain(plain);
+                this.response.status(304).end();
+                return;
             }
 
             this.ensureODataHeaders();
-            this.setEtagHeader(entity);
+            this.setEtagHeaderFromPlain(plain);
             return {
                 '@odata.context': entityContext,
-                value: this.decorateEntity(entity),
+                value: this.decoratePlainEntity(plain, etag),
             };
         }
 
@@ -480,20 +445,24 @@ export function defineODataCrudController(def: EntitySetDef) {
             const options = this.repositoryOptions();
             const preference = preferences.returnPreference;
             const created = await this.repository.create(payload as any, options);
-            let entityForResponse: CrudEntity = created;
+            let entityForResponse: AnyObject | undefined = this.toPlainEntity(created);
+
             if (this.etagEnabled()) {
-                const currentEtag = this.entityEtag(created);
-                if (!currentEtag) {
+                const hasEtag = this.computeEtagFromPlain(entityForResponse);
+                if (!hasEtag) {
                     const idKey = idProperties[0] ?? 'id';
-                    const idValue = (created as Record<string, unknown>)[idKey];
+                    const idValue = entityForResponse?.[idKey];
                     if (idValue != null) {
-                        entityForResponse = await this.repository.findById(idValue as any, undefined, options);
+                        const fetched = await this.repository.findById(idValue as any, undefined, options);
+                        entityForResponse = this.toPlainEntity(fetched);
                     }
                 }
             }
-            const decorated = this.decorateEntity(entityForResponse);
+
+            const etag = this.computeEtagFromPlain(entityForResponse);
+            const decorated = this.decoratePlainEntity(entityForResponse ?? {}, etag);
             this.ensureODataHeaders();
-            this.setEtagHeader(entityForResponse);
+            this.setEtagHeaderFromPlain(entityForResponse);
 
             if (preference === 'minimal') {
                 this.applyPreference(preference);
@@ -536,25 +505,23 @@ export function defineODataCrudController(def: EntitySetDef) {
             const options = this.repositoryOptions();
             const preference = preferences.returnPreference;
             const ifMatch = this.parseIfMatchHeader();
-            this.requireIfMatch(ifMatch);
 
-            const decoded = ifMatch?.any ? { values: [], invalidComposite: false } : this.decodeEtags(ifMatch?.values ?? []);
-            const where = this.buildConditionalWhere(
-                id,
-                decoded.values,
-                Boolean(ifMatch?.any),
-                { invalidComposite: decoded.invalidComposite },
-            );
-            const { count } = await this.repository.updateAll(payload as any, where, options);
-
-            if (!count) {
-                this.throwPreconditionFailed();
+            if (ifMatch && !ifMatch.any) {
+                const { values, invalidComposite } = decodeIfMatchValues(ifMatch.values ?? [], etagProperties, etagPropertyDefs);
+                if (invalidComposite || !values.length) this.throwPreconditionFailed();
+                const where = this.buildConditionalWhere(id, values, false);
+                const { count } = await this.repository.updateAll(payload as any, where, options);
+                if (!count) this.throwPreconditionFailed();
+            } else {
+                await this.repository.updateById(id as any, payload as any, options);
             }
 
             const updated = await this.repository.findById(id as any, undefined, options);
-            const decorated = this.decorateEntity(updated);
+            const plain = this.toPlainEntity(updated) ?? {};
+            const etag = this.computeEtagFromPlain(plain);
+            const decorated = this.decoratePlainEntity(plain, etag);
             this.ensureODataHeaders();
-            this.setEtagHeader(updated);
+            this.setEtagHeaderFromPlain(plain);
 
             if (preference === 'minimal') {
                 this.applyPreference(preference);
@@ -582,19 +549,15 @@ export function defineODataCrudController(def: EntitySetDef) {
 
             const options = this.repositoryOptions();
             const ifMatch = this.parseIfMatchHeader();
-            this.requireIfMatch(ifMatch);
 
-            const decoded = ifMatch?.any ? { values: [], invalidComposite: false } : this.decodeEtags(ifMatch?.values ?? []);
-            const where = this.buildConditionalWhere(
-                id,
-                decoded.values,
-                Boolean(ifMatch?.any),
-                { invalidComposite: decoded.invalidComposite },
-            );
-            const { count } = await this.repository.deleteAll(where, options);
-
-            if (!count) {
-                this.throwPreconditionFailed();
+            if (ifMatch && !ifMatch.any) {
+                const { values, invalidComposite } = decodeIfMatchValues(ifMatch.values ?? [], etagProperties, etagPropertyDefs);
+                if (invalidComposite || !values.length) this.throwPreconditionFailed();
+                const where = this.buildConditionalWhere(id, values, false);
+                const { count } = await this.repository.deleteAll(where, options);
+                if (!count) this.throwPreconditionFailed();
+            } else {
+                await this.repository.deleteById(id as any, options);
             }
             this.ensureODataHeaders();
         }
