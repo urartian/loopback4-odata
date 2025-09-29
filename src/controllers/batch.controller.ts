@@ -223,7 +223,7 @@ export class ODataBatchController {
     for (const group of grouped) {
       if (group.atomicityGroup) {
         try {
-          const {entries, failure} = await this.executeAtomicGroup(group.requests, group.atomicityGroup);
+          const {entries, failure} = await this.executeAtomicGroup(group.requests, group.atomicityGroup, request);
           if (failure) {
             responses.push({
               atomicityGroup: group.atomicityGroup,
@@ -252,7 +252,7 @@ export class ODataBatchController {
           });
         }
       } else {
-        const entries = await this.executeGroup(group.requests);
+        const entries = await this.executeGroup(group.requests, undefined, request);
         responses.push(...entries);
       }
     }
@@ -291,11 +291,12 @@ export class ODataBatchController {
 
   private async executeGroup(
     requests: BatchRequest[],
-    context?: AtomicityGroupContext,
+    context: AtomicityGroupContext | undefined,
+    parentRequest: Request,
   ): Promise<BatchResponseEntry[]> {
     const entries: BatchResponseEntry[] = [];
     for (const request of requests) {
-      const entry = await this.executeSingle(request, context);
+      const entry = await this.executeSingle(request, context, parentRequest);
       entries.push(entry);
       if (entry.status >= 400) break;
     }
@@ -305,10 +306,11 @@ export class ODataBatchController {
   private async executeAtomicGroup(
     requests: BatchRequest[],
     groupId: string,
+    parentRequest: Request,
   ): Promise<{entries?: BatchResponseEntry[]; failure?: BatchResponseEntry}> {
     const context = await this.createAtomicGroupContext(groupId, requests);
     try {
-      const entries = await this.executeGroup(requests, context);
+      const entries = await this.executeGroup(requests, context, parentRequest);
       const failed = entries.find(entry => entry.status >= 400);
       if (failed) {
         await context.rollback();
@@ -419,6 +421,7 @@ export class ODataBatchController {
   private async executeWithHandler(
     request: BatchRequest,
     context: AtomicityGroupContext,
+    parentRequest: Request,
   ): Promise<BatchResponseEntry> {
     const url = this.sanitizeUrl(request.url);
     if (!url) {
@@ -453,14 +456,13 @@ export class ODataBatchController {
     const req = new IncomingMessage(socket);
     req.method = method;
     req.url = url;
-    (req as any).headers = Object.fromEntries(
-      Object.entries(request.headers ?? {}).map(([key, value]) => [key.toLowerCase(), value]),
-    );
-    if (bodyBuffer.length && !(req as any).headers['content-type']) {
-      (req as any).headers['content-type'] = 'application/json';
+    const combinedHeaders = this.buildHeadersForRequest(request, parentRequest);
+    (req as any).headers = combinedHeaders;
+    if (bodyBuffer.length && !combinedHeaders['content-type']) {
+      combinedHeaders['content-type'] = 'application/json';
     }
     if (bodyBuffer.length) {
-      (req as any).headers['content-length'] = String(bodyBuffer.length);
+      combinedHeaders['content-length'] = String(bodyBuffer.length);
     }
 
     // minimal Express-style helpers used by LB4
@@ -537,6 +539,10 @@ export class ODataBatchController {
       return res;
     };
 
+    if ((parentRequest as any)?.user !== undefined) {
+      (req as any).user = (parentRequest as any).user;
+    }
+
     context.applyTo(req);
     const handlerPromise = this.httpHandler.handleRequest(req as any, res as any);
 
@@ -564,7 +570,7 @@ export class ODataBatchController {
     }
   }
 
-  private async executeViaFetch(request: BatchRequest): Promise<BatchResponseEntry> {
+  private async executeViaFetch(request: BatchRequest, parentRequest: Request): Promise<BatchResponseEntry> {
     const path = this.sanitizeUrl(request.url);
     if (!path) {
       return {id: request.id, status: 400, body: this.odataError('InvalidUrl', `Invalid request URL: ${request.url}`)};
@@ -575,11 +581,11 @@ export class ODataBatchController {
     }
     try {
       const target = new URL(path, this.serverUrl).toString();
-      const headers: Record<string, string> = {...(request.headers ?? {})};
+      const headers = this.buildHeadersForRequest(request, parentRequest);
       let body: string | undefined;
       if (request.body !== undefined) {
         body = typeof request.body === 'string' ? request.body : JSON.stringify(request.body);
-        if (!headers['content-type'] && !headers['Content-Type']) headers['Content-Type'] = 'application/json';
+        if (!headers['content-type']) headers['content-type'] = 'application/json';
       }
       const resp = await fetch(target, {method, headers, body} as any);
       const text = await resp.text();
@@ -595,10 +601,11 @@ export class ODataBatchController {
 
   private async executeSingle(
     request: BatchRequest,
-    context?: AtomicityGroupContext,
+    context: AtomicityGroupContext | undefined,
+    parentRequest: Request,
   ): Promise<BatchResponseEntry> {
-    if (context) return this.executeWithHandler(request, context);
-    return this.executeViaFetch(request);
+    if (context) return this.executeWithHandler(request, context, parentRequest);
+    return this.executeViaFetch(request, parentRequest);
   }
 
   private sanitizeUrl(rawUrl: string): string | undefined {
@@ -613,6 +620,28 @@ export class ODataBatchController {
     }
     if (!rawUrl.startsWith('/')) return undefined;
     return rawUrl;
+  }
+
+  private buildHeadersForRequest(request: BatchRequest, parentRequest: Request): Record<string, string> {
+    const merged: Record<string, string> = {};
+    const parentHeaders = parentRequest?.headers ?? {};
+
+    for (const [key, value] of Object.entries(parentHeaders)) {
+      if (value == null) continue;
+      const normalized = key.toLowerCase();
+      if (Array.isArray(value)) {
+        merged[normalized] = value.filter(v => v != null).map(v => String(v)).join(',');
+      } else {
+        merged[normalized] = String(value);
+      }
+    }
+
+    for (const [key, value] of Object.entries(request.headers ?? {})) {
+      if (value == null) continue;
+      merged[key.toLowerCase()] = String(value);
+    }
+
+    return merged;
   }
 
   private resolveErrorStatus(error: unknown, fallback: number): number {

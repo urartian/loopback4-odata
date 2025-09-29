@@ -37,6 +37,7 @@ import {
     parseIfNoneMatch,
     readEtagValue,
 } from '../util/etag';
+import { applyControllerSecurityMetadata } from '../util/security-metadata';
 type CrudEntity = Entity & { [key: string]: unknown };
 type CrudRepo = DefaultCrudRepository<CrudEntity, unknown>;
 
@@ -651,6 +652,12 @@ export function defineODataCrudController(def: EntitySetDef) {
             this.ensureEtagField(target);
         }
     }
+
+    applyControllerSecurityMetadata(
+        ODataCrudController,
+        def.securityMetadata,
+        ['list', 'count', 'findById', 'create', 'update', 'delete'],
+    );
 
     Object.defineProperty(ODataCrudController, 'name', {
         value: `${setName}ODataController`,

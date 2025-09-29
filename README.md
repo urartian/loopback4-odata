@@ -99,6 +99,26 @@ export class ProductODataController {}
 
 That’s it — the extension generates repository-backed CRUD endpoints automatically.
 
+### Authentication & Authorization
+
+The component mirrors LoopBack’s authentication and authorization metadata from your controller onto every generated CRUD endpoint. Decorate your OData controller exactly as you would a regular REST controller and the extension takes care of the rest:
+
+```ts
+import {authenticate} from '@loopback/authentication';
+import {authorize} from '@loopback/authorization';
+
+@odataController(Product)
+@authenticate('jwt')
+@authorize({scopes: ['product.read']})
+export class ProductODataController {
+  // Stubbing a method is enough to apply fine-grained metadata.
+  @authorize({scopes: ['product.summary']})
+  async find() {}
+}
+```
+
+Generated routes (list, findById, create, update, delete) will enforce the same strategies and scopes. `$batch` requests automatically reuse the caller’s headers and resolved user profile, so you don’t have to repeat credentials for each entry.
+
 ## Endpoints (Phase 3)
 
 Start your app and test:
