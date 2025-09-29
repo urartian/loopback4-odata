@@ -89,8 +89,11 @@ function buildEntityType(
 
         const isRequired = Boolean(propertyDef.required) || Boolean(propertyDef.id);
         const nullable = isRequired ? 'false' : 'true';
+        const concurrency = def.etagProperties?.includes(propertyName)
+            ? ' ConcurrencyMode="Fixed"'
+            : '';
         propertyLines.push(
-            `      <Property Name="${xmlEscape(propertyName)}" Type="${edmType}" Nullable="${nullable}"/>`,
+            `      <Property Name="${xmlEscape(propertyName)}" Type="${edmType}" Nullable="${nullable}"${concurrency}/>`,
         );
     }
 
@@ -176,14 +179,26 @@ export class CsdlGenerator {
                 `        <NavigationPropertyBinding Path="${xmlEscape(binding.path)}" Target="${xmlEscape(binding.target)}" />`,
             );
 
+            const concurrencyAnnotation = (set.etagProperties?.length ?? 0) > 0
+                ? [
+                    '        <Annotation Term="Org.OData.Core.V1.OptimisticConcurrency">',
+                    '          <Collection>',
+                    ...set.etagProperties!.map(prop => `            <PropertyPath>${xmlEscape(prop)}</PropertyPath>`),
+                    '          </Collection>',
+                    '        </Annotation>',
+                ]
+                : [];
+
             const entitySetLines = [
                 `      <EntitySet Name="${xmlEscape(set.name)}" EntityType="${namespace}.${xmlEscape(entityType.name)}">`,
                 ...navigationBindings,
+                ...concurrencyAnnotation,
                 '      </EntitySet>',
             ];
 
+            const hasChildren = navigationBindings.length || concurrencyAnnotation.length;
             containerSets.push(
-                navigationBindings.length ? entitySetLines.join('\n') : entitySetLines[0].replace(/>$/, '/>'),
+                hasChildren ? entitySetLines.join('\n') : entitySetLines[0].replace(/>$/, '/>'),
             );
 
             const entityName = (set.modelCtor as typeof Entity).definition?.name ?? set.modelCtor.name;

@@ -4,10 +4,13 @@ import {RestApplication, RestServerConfig} from '@loopback/rest';
 import {Getter, inject} from '@loopback/core';
 import {
   BelongsToAccessor,
+  AnyObject,
+  DataObject,
   DefaultCrudRepository,
   Entity,
   HasManyRepositoryFactory,
   HasManyThroughRepositoryFactory,
+  Options,
   RepositoryMixin,
   belongsTo,
   hasMany,
@@ -36,7 +39,7 @@ export class TestApplication extends BootMixin(RepositoryMixin(RestApplication))
   }
 }
 
-@odataModel()
+@odataModel({etag: 'updatedAt'})
 @model()
 export class Product extends Entity {
   @property({id: true})
@@ -47,6 +50,9 @@ export class Product extends Entity {
 
   @property()
   price!: number;
+
+  @property({type: 'date', required: true, defaultFn: 'now'})
+  updatedAt!: Date;
 
   @hasMany(() => OrderItem)
   orderItems?: OrderItem[];
@@ -105,6 +111,10 @@ export class ProductRepository extends DefaultCrudRepository<
     OrderItem,
     typeof Product.prototype.id
   >;
+  private touch(entity?: AnyObject) {
+    if (!entity) return;
+    entity.updatedAt = new Date();
+  }
 
   constructor(
     @inject('datasources.db') dataSource: juggler.DataSource,
@@ -122,6 +132,36 @@ export class ProductRepository extends DefaultCrudRepository<
       orderItemRepositoryGetter,
     );
     this.registerInclusionResolver('orders', this.orders.inclusionResolver);
+  }
+
+  async create(entity: DataObject<Product>, options?: Options): Promise<Product> {
+    this.touch(entity);
+    return super.create(entity, options);
+  }
+
+  async createAll(entities: DataObject<Product>[], options?: Options): Promise<Product[]> {
+    const now = new Date();
+    for (const entity of entities) {
+      if (entity && entity.updatedAt == null) {
+        (entity as AnyObject).updatedAt = now;
+      }
+    }
+    return super.createAll(entities, options);
+  }
+
+  async updateById(id: typeof Product.prototype.id, data: DataObject<Product>, options?: Options): Promise<void> {
+    this.touch(data);
+    return super.updateById(id, data, options);
+  }
+
+  async updateAll(data: DataObject<Product>, where?: AnyObject, options?: Options): Promise<{count: number}> {
+    this.touch(data);
+    return super.updateAll(data, where, options);
+  }
+
+  async replaceById(id: typeof Product.prototype.id, data: DataObject<Product>, options?: Options): Promise<void> {
+    this.touch(data);
+    return super.replaceById(id, data, options);
   }
 }
 

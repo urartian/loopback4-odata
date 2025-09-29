@@ -14,6 +14,10 @@ if (typeof process.setMaxListeners === 'function') {
 describe('OData component acceptance', () => {
   let app: TestApplication;
   let client: Client;
+  const getProductWithEtag = async (id: number) => {
+    const res = await client.get(`/odata/Products(${id})`).expect(200);
+    return {body: res.body.value, etag: res.headers['etag'] as string};
+  };
 
   beforeEach(async function () {
     app = await givenODataApplication({port: 0, host: '127.0.0.1'});
@@ -39,6 +43,19 @@ describe('OData component acceptance', () => {
     }
   });
 
+  it('exposes a service document listing entity sets', async () => {
+    const res = await client.get('/odata').expect(200);
+    expect(res.headers['odata-version']).to.equal('4.01');
+    expect(res.body['@odata.context']).to.equal('/odata/$metadata');
+    expect(res.body.value).to.be.Array();
+    const productsEntry = res.body.value.find(
+      (item: {name: string}) => item.name === 'Products',
+    );
+    expect(productsEntry).to.be.Object();
+    expect(productsEntry.kind).to.equal('EntitySet');
+    expect(productsEntry.url).to.equal('Products');
+  });
+
   it('serves product collections with OData metadata', async () => {
     const res = await client.get('/odata/Products').expect(200);
     expect(res.body['@odata.context']).to.match(/Products$/);
@@ -52,6 +69,7 @@ describe('OData component acceptance', () => {
     expect(res.text.includes('<Action Name="resetInventory"')).to.be.true();
     expect(res.text.includes('<Function Name="premiumProducts"')).to.be.true();
     expect(res.text.includes('<NavigationPropertyBinding Path="orderItems"')).to.be.true();
+    expect(res.text.includes('<PropertyPath>updatedAt</PropertyPath>')).to.be.true();
   });
 
   it('invokes bound actions through generated routes', async () => {
@@ -149,6 +167,8 @@ describe('OData component acceptance', () => {
     expect(topOne.body.value).to.have.lengthOf(1);
     expect(topOne.body.value[0].name).to.equal('Laptop');
     expect(topOne.body.value[0]).to.not.have.property('id');
+    expect(topOne.body.value[0]).to.have.property('updatedAt');
+    expect(topOne.body.value[0]['@odata.etag']).to.be.String();
 
     const second = await client
       .get('/odata/Products')
@@ -167,18 +187,55 @@ describe('OData component acceptance', () => {
 
     const createdId = created.body.value.id;
     expect(created.body.value.name).to.equal('Camera');
+    const createdEtag = created.headers['etag'] as string;
+    expect(createdEtag).to.be.String();
+    expect(created.body.value['@odata.etag']).to.equal(createdEtag);
 
     const updated = await client
       .patch(`/odata/Products(${createdId})`)
+      .set('If-Match', createdEtag)
       .send({price: 500})
       .expect(200);
     expect(updated.body.value.price).to.equal(500);
+    const updatedEtag = updated.headers['etag'] as string;
+    expect(updatedEtag).to.be.String();
+    expect(updatedEtag).to.not.equal(createdEtag);
 
     const fetched = await client.get(`/odata/Products(${createdId})`).expect(200);
     expect(fetched.body.value.name).to.equal('Camera');
+    expect(fetched.headers['etag']).to.equal(updatedEtag);
 
-    await client.del(`/odata/Products(${createdId})`).expect(204);
+    await client
+      .del(`/odata/Products(${createdId})`)
+      .set('If-Match', updatedEtag)
+      .expect(204);
     await client.get(`/odata/Products(${createdId})`).expect(404);
+  });
+
+  it('allows deletes without If-Match but rejects stale tokens', async () => {
+    const created = await client
+      .post('/odata/Products')
+      .send({name: 'Controller', price: 99})
+      .expect(200);
+
+    const productId = created.body.value.id;
+    const originalEtag = created.headers['etag'] as string;
+
+    const updated = await client
+      .patch(`/odata/Products(${productId})`)
+      .set('If-Match', originalEtag)
+      .send({price: 129})
+      .expect(200);
+
+    const currentEtag = updated.headers['etag'] as string;
+
+    await client
+      .del(`/odata/Products(${productId})`)
+      .set('If-Match', originalEtag)
+      .expect(412);
+
+    await client.del(`/odata/Products(${productId})`).expect(204);
+    await client.get(`/odata/Products(${productId})`).expect(404);
   });
 
   it('honors Prefer return=minimal for write operations', async () => {
@@ -195,11 +252,15 @@ describe('OData component acceptance', () => {
       .get('/odata/Products')
       .query({$filter: "name eq 'Speaker'"})
       .expect(200);
-    const speakerId = createdList.body.value[0]?.id;
+    const speaker = createdList.body.value[0];
+    const speakerId = speaker?.id;
+    const speakerEtag = speaker?.['@odata.etag'];
+    expect(speakerEtag).to.be.String();
 
     const updateRes = await client
       .patch(`/odata/Products(${speakerId})`)
       .set('Prefer', 'return=minimal')
+      .set('If-Match', speakerEtag)
       .send({price: 219})
       .expect(204);
     expect(updateRes.headers['preference-applied']).to.equal('return=minimal');
@@ -208,7 +269,41 @@ describe('OData component acceptance', () => {
     const verify = await client.get(`/odata/Products(${speakerId})`).expect(200);
     expect(verify.body.value.price).to.equal(219);
 
-    await client.del(`/odata/Products(${speakerId})`).expect(204);
+    const deleteEtag = verify.headers['etag'] as string;
+
+    await client
+      .del(`/odata/Products(${speakerId})`)
+      .set('If-Match', deleteEtag)
+      .expect(204);
+  });
+
+  it('returns 412 when If-Match does not match the current entity ETag', async () => {
+    const created = await client
+      .post('/odata/Products')
+      .send({name: 'Monitor', price: 299})
+      .expect(200);
+
+    const createdId = created.body.value.id;
+    const originalEtag = created.headers['etag'] as string;
+
+    const firstUpdate = await client
+      .patch(`/odata/Products(${createdId})`)
+      .set('If-Match', originalEtag)
+      .send({price: 329})
+      .expect(200);
+
+    const nextEtag = firstUpdate.headers['etag'] as string;
+    expect(nextEtag).to.not.equal(originalEtag);
+
+    await client
+      .patch(`/odata/Products(${createdId})`)
+      .set('If-Match', originalEtag)
+      .send({price: 339})
+      .expect(412);
+
+    const current = await getProductWithEtag(createdId);
+    expect(current.etag).to.equal(nextEtag);
+    expect(current.body.price).to.equal(329);
   });
 
   it('returns OData error payloads for invalid filters', async () => {

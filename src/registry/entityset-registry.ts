@@ -10,6 +10,7 @@ export interface EntitySetDef<T extends Entity = Entity> {
     repositoryCtor?: Function;                         // repository class constructor
     actions?: OperationMeta[];
     functions?: OperationMeta[];
+    etagProperties?: string[];
 }
 
 @injectable({ scope: BindingScope.SINGLETON })
