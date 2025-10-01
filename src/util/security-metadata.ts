@@ -10,6 +10,8 @@ interface MetadataAlias {
     methodKeys?: MethodMetadataKey[];
 }
 
+export type MethodAliasMap = Record<string, string | string[]>;
+
 const AUTHENTICATION_CLASS_KEY = MetadataAccessor.create<unknown, ClassDecorator>('authentication:class');
 const AUTHENTICATION_METHOD_KEY = MetadataAccessor.create<unknown, MethodDecorator>('authentication:method');
 const AUTHORIZATION_CLASS_KEY = MetadataAccessor.create<unknown, ClassDecorator>('authorization:class');
@@ -90,10 +92,12 @@ export function applyControllerSecurityMetadata(
     targetCtor: Function,
     metadata: ControllerSecurityMetadata | undefined,
     availableMethods?: string[],
+    methodNameRemap?: MethodAliasMap,
 ) {
     if (!metadata) return;
     const { classMetadata, methodMetadata } = metadata;
     const allowedMethods = new Set<string>(availableMethods ?? Object.keys(methodMetadata ?? {}));
+    const restrictToAllowed = Boolean(availableMethods?.length);
 
     for (const mapping of METADATA_ALIASES) {
         const classValue = classMetadata?.[mapping.alias];
@@ -108,11 +112,14 @@ export function applyControllerSecurityMetadata(
         const methodValues: Record<string, unknown> = {};
 
         for (const [methodName, aliasValues] of Object.entries(methodMetadata)) {
-            if (!allowedMethods.has(methodName)) continue;
-            if (!Object.getOwnPropertyDescriptor(targetCtor.prototype, methodName)) continue;
+            const targetNames = resolveMethodAliasNames(methodName, methodNameRemap);
             const value = aliasValues?.[mapping.alias];
-            if (value !== undefined) {
-                methodValues[methodName] = value;
+            if (value === undefined) continue;
+            for (const targetName of targetNames) {
+                if (restrictToAllowed && !allowedMethods.has(targetName)) continue;
+                if (!Object.getOwnPropertyDescriptor(targetCtor.prototype, targetName)) continue;
+                if (methodValues[targetName] !== undefined) continue;
+                methodValues[targetName] = value;
             }
         }
 
@@ -156,4 +163,38 @@ function readMethodMetadata(target: object, methodName: string, keys?: MethodMet
         if (value !== undefined) return value;
     }
     return undefined;
+}
+
+function resolveMethodAliasNames(methodName: string, aliasMap?: MethodAliasMap): string[] {
+    const mapped = aliasMap?.[methodName];
+    const targets = Array.isArray(mapped) ? mapped : mapped != null ? [mapped] : [];
+    return Array.from(new Set<string>([methodName, ...targets]));
+}
+
+export function mergeMethodAliasMaps(...maps: (MethodAliasMap | undefined)[]): MethodAliasMap | undefined {
+    const aggregated = new Map<string, string[]>();
+
+    for (const map of maps) {
+        if (!map) continue;
+        for (const [source, aliases] of Object.entries(map)) {
+            if (aliases === undefined) continue;
+            const normalized = (Array.isArray(aliases) ? aliases : [aliases])
+                .map(name => name?.trim())
+                .filter((name): name is string => Boolean(name));
+            if (!normalized.length) {
+                aggregated.delete(source);
+                continue;
+            }
+            const unique = Array.from(new Set(normalized));
+            aggregated.set(source, unique);
+        }
+    }
+
+    if (!aggregated.size) return undefined;
+
+    const result: MethodAliasMap = {};
+    for (const [source, aliases] of aggregated.entries()) {
+        result[source] = aliases.length === 1 ? aliases[0] : aliases;
+    }
+    return result;
 }

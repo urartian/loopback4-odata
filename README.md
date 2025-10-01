@@ -119,6 +119,22 @@ export class ProductODataController {
 
 Generated routes (list, findById, create, update, delete) will enforce the same strategies and scopes. `$batch` requests automatically reuse the caller’s headers and resolved user profile, so you don’t have to repeat credentials for each entry.
 
+LoopBack’s built-in methods (`find`, `deleteById`, `updateById`, `replaceById`) are remapped to the OData CRUD handlers automatically. If you expose differently named controller methods, supply custom aliases when registering the entity set so the security metadata still flows through:
+
+```ts
+import {ODATA_BINDINGS} from '@loopback/odata';
+
+const registry = await app.get(ODATA_BINDINGS.ENTITY_SET_REGISTRY);
+registry.register({
+  name: 'Products',
+  modelCtor: Product,
+  repositoryBindingKey: 'repositories.ProductRepository',
+  securityMethodAliases: {
+    deleteById: 'remove',
+  },
+});
+```
+
 ## Endpoints (Phase 3)
 
 Start your app and test:

@@ -1,7 +1,7 @@
 import { BindingScope, injectable } from '@loopback/core';
 import { Entity } from '@loopback/repository';
 import { OperationMeta } from '../decorators/action.function.decorators';
-import { ControllerSecurityMetadata } from '../util/security-metadata';
+import { ControllerSecurityMetadata, MethodAliasMap } from '../util/security-metadata';
 
 export interface EntitySetDef<T extends Entity = Entity> {
     name: string;                                      // e.g. "Products"
@@ -13,6 +13,7 @@ export interface EntitySetDef<T extends Entity = Entity> {
     functions?: OperationMeta[];
     etagProperties?: string[];
     securityMetadata?: ControllerSecurityMetadata;
+    securityMethodAliases?: MethodAliasMap;
 }
 
 @injectable({ scope: BindingScope.SINGLETON })
