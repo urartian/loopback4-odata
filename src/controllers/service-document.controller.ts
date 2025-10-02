@@ -3,6 +3,7 @@ import {get, Response, RestBindings} from '@loopback/rest';
 import {ODATA_BINDINGS} from '../keys';
 import {EntitySetRegistry} from '../registry/entityset-registry';
 import {ODataConfig} from '../types';
+import {ODATA_VERSION} from '../constants';
 
 interface ServiceDocumentEntry {
     name: string;
@@ -14,8 +15,6 @@ interface ServiceDocumentPayload {
     '@odata.context': string;
     value: ServiceDocumentEntry[];
 }
-
-const ODATA_VERSION = '4.01';
 
 function normalizeBasePath(configured?: string): string {
     let basePath = configured?.trim() ?? '';
