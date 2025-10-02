@@ -6,7 +6,7 @@ import {PassThrough} from 'stream';
 import {IsolationLevel, Transaction} from '@loopback/repository';
 import {ODATA_BINDINGS} from '../keys';
 import {EntitySetRegistry} from '../registry/entityset-registry';
-import {ODATA_ATOMICITY_STATE} from '../constants';
+import {ODATA_ATOMICITY_STATE, ODATA_VERSION} from '../constants';
 import {AtomicityRequestState} from '../types/batch';
 import {parseMultipartBatch} from '../services/multipart-batch.parser';
 import {serializeMultipartBatch} from '../services/multipart-batch.serializer';
@@ -257,7 +257,7 @@ export class ODataBatchController {
       }
     }
 
-    response.set('OData-Version', '4.01');
+    response.set('OData-Version', ODATA_VERSION);
 
     if (isMultipart) {
       const {body, boundary: responseBoundary} = serializeMultipartBatch(responses);

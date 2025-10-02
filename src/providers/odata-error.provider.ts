@@ -5,6 +5,7 @@ import {
   ErrorWriterOptions,
   writeErrorToResponse,
 } from 'strong-error-handler';
+import {ODATA_VERSION} from '../constants';
 
 type ExtendedHttpError = HttpError & {
   statusCode?: number;
@@ -46,7 +47,7 @@ export class ODataErrorProvider implements Provider<Reject> {
 
       response.status(statusCode);
       if (!response.getHeader('OData-Version')) {
-        response.set('OData-Version', '4.01');
+        response.set('OData-Version', ODATA_VERSION);
       }
       response.contentType('application/json; charset=utf-8');
 

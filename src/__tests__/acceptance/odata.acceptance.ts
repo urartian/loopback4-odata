@@ -45,7 +45,7 @@ describe('OData component acceptance', () => {
 
   it('exposes a service document listing entity sets', async () => {
     const res = await client.get('/odata').expect(200);
-    expect(res.headers['odata-version']).to.equal('4.01');
+    expect(res.headers['odata-version']).to.equal('4.0');
     expect(res.body['@odata.context']).to.equal('/odata/$metadata');
     expect(res.body.value).to.be.Array();
     const productsEntry = res.body.value.find(
@@ -246,7 +246,7 @@ describe('OData component acceptance', () => {
       .expect(204);
 
     expect(createRes.headers['preference-applied']).to.equal('return=minimal');
-    expect(createRes.headers['odata-version']).to.equal('4.01');
+    expect(createRes.headers['odata-version']).to.equal('4.0');
 
     const createdList = await client
       .get('/odata/Products')
@@ -264,7 +264,7 @@ describe('OData component acceptance', () => {
       .send({price: 219})
       .expect(204);
     expect(updateRes.headers['preference-applied']).to.equal('return=minimal');
-    expect(updateRes.headers['odata-version']).to.equal('4.01');
+    expect(updateRes.headers['odata-version']).to.equal('4.0');
 
     const verify = await client.get(`/odata/Products(${speakerId})`).expect(200);
     expect(verify.body.value.price).to.equal(219);
@@ -312,7 +312,7 @@ describe('OData component acceptance', () => {
       .query({$filter: 'invalid eq'})
       .expect(400);
 
-    expect(res.headers['odata-version']).to.equal('4.01');
+    expect(res.headers['odata-version']).to.equal('4.0');
     expect(res.body.error).to.be.Object();
     expect(res.body.error.code).to.equal('BadRequest');
     expect(res.body.error.message).to.match(/Invalid (OData )?query|Invalid filter expression/i);
@@ -325,7 +325,7 @@ describe('OData component acceptance', () => {
       .send({name: 'AsyncWidget', price: 5})
       .expect(501);
 
-    expect(res.headers['odata-version']).to.equal('4.01');
+    expect(res.headers['odata-version']).to.equal('4.0');
     expect(res.body.error.code).to.equal('PreferenceNotSupported');
     expect(res.body.error.target).to.equal('respond-async');
     expect(res.body.error.message).to.match(/not supported/i);

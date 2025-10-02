@@ -3,6 +3,7 @@ import { inject } from '@loopback/core';
 import { ODATA_BINDINGS } from '../keys';
 import { CsdlGenerator } from '../metadata/csdl-generator';
 import { ODataConfig } from '../types';
+import { ODATA_VERSION } from '../constants';
 
 export class ODataMetadataController {
     constructor(
@@ -22,8 +23,11 @@ export class ODataMetadataController {
     })
     getMetadata(
         @inject(RestBindings.Http.RESPONSE) res: Response,
-    ): string {
-        res.type(this.csdl.contentType(this.cfg.csdlFormat ?? 'xml'));
-        return this.csdl.generate();
+    ): Response {
+        const body = this.csdl.generate();
+        const mime = this.csdl.contentType(this.cfg.csdlFormat ?? 'xml');
+        res.type(mime);
+        res.send(body);
+        return res;
     }
 }

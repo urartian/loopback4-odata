@@ -24,7 +24,7 @@ import {
 } from '@loopback/repository';
 import { EntitySetDef } from '../registry/entityset-registry';
 import { parseODataQuery } from '../services/odata-query-parser.service';
-import { ODATA_ATOMICITY_STATE } from '../constants';
+import { ODATA_ATOMICITY_STATE, ODATA_VERSION } from '../constants';
 import { AtomicityRequestState } from '../types/batch';
 import { Response } from '@loopback/rest';
 import {
@@ -617,7 +617,7 @@ export function defineODataCrudController(def: EntitySetDef) {
         ensureODataHeaders() {
             if (this.response.headersSent) return;
             if (!this.response.getHeader('OData-Version')) {
-                this.response.set('OData-Version', '4.01');
+                this.response.set('OData-Version', ODATA_VERSION);
             }
         }
 
