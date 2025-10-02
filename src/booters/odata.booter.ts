@@ -10,6 +10,7 @@ import { Entity } from '@loopback/repository';
 import { getODataActions, getODataFunctions, OperationMeta } from '../decorators/action.function.decorators';
 import { pluralize } from 'inflection';
 import { normalizeEtagProperties } from '../util/etag';
+import { collectControllerSecurityMetadata } from '../util/security-metadata';
 
 @injectable({ tags: { booters: 'odata' } })
 export class ODataBooter implements Booter {
@@ -41,12 +42,15 @@ export class ODataBooter implements Booter {
                 );
             }
 
+            const securityMetadata = collectControllerSecurityMetadata(ctor);
+
             const def = this.registry.register({
                 name: setName,
                 modelCtor,
                 repositoryBindingKey: repoBinding.key,
                 repositoryCtor: repoBinding.valueConstructor ?? undefined,
                 etagProperties: normalizeEtagProperties(modelMeta?.etag),
+                securityMetadata,
             });
 
             const CrudController = defineODataCrudController(def);

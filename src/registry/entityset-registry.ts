@@ -1,6 +1,7 @@
 import { BindingScope, injectable } from '@loopback/core';
 import { Entity } from '@loopback/repository';
 import { OperationMeta } from '../decorators/action.function.decorators';
+import { ControllerSecurityMetadata, MethodAliasMap } from '../util/security-metadata';
 
 export interface EntitySetDef<T extends Entity = Entity> {
     name: string;                                      // e.g. "Products"
@@ -11,6 +12,8 @@ export interface EntitySetDef<T extends Entity = Entity> {
     actions?: OperationMeta[];
     functions?: OperationMeta[];
     etagProperties?: string[];
+    securityMetadata?: ControllerSecurityMetadata;
+    securityMethodAliases?: MethodAliasMap;
 }
 
 @injectable({ scope: BindingScope.SINGLETON })
@@ -19,9 +22,12 @@ export class EntitySetRegistry {
 
     register<T extends Entity>(def: EntitySetDef<T>): EntitySetDef<T> {
         const existing = this.sets.get(def.modelCtor);
-        const merged = { ...(existing ?? {}), ...def } as EntitySetDef;
-        this.sets.set(def.modelCtor, merged);
-        return merged as EntitySetDef<T>;
+        const next: EntitySetDef = { ...(existing ?? {}), ...def };
+        if (!def.securityMetadata && existing?.securityMetadata) {
+            next.securityMetadata = existing.securityMetadata;
+        }
+        this.sets.set(def.modelCtor, next);
+        return next as EntitySetDef<T>;
     }
 
     attachRepository(modelCtor: typeof Entity, bindingKey: string, repositoryCtor?: Function) {

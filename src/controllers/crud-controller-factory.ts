@@ -37,6 +37,12 @@ import {
     parseIfNoneMatch,
     readEtagValue,
 } from '../util/etag';
+import {
+    applyControllerSecurityMetadata,
+    mergeMethodAliasMaps,
+    MethodAliasMap,
+    ControllerSecurityMetadata,
+} from '../util/security-metadata';
 type CrudEntity = Entity & { [key: string]: unknown };
 type CrudRepo = DefaultCrudRepository<CrudEntity, unknown>;
 
@@ -651,10 +657,77 @@ export function defineODataCrudController(def: EntitySetDef) {
             this.ensureEtagField(target);
         }
     }
+    const controllerMethodSet = collectControllerMethodNames(ODataCrudController);
+    const derivedMethodAliases = deriveDefaultMethodAliases(controllerMethodSet, def.securityMetadata);
+    const methodNameRemap = mergeMethodAliasMaps(derivedMethodAliases, def.securityMethodAliases);
+
+    applyControllerSecurityMetadata(
+        ODataCrudController,
+        def.securityMetadata,
+        Array.from(controllerMethodSet),
+        methodNameRemap,
+    );
 
     Object.defineProperty(ODataCrudController, 'name', {
         value: `${setName}ODataController`,
     });
     def.controllerCtor = ODataCrudController;
     return ODataCrudController;
+}
+
+function collectControllerMethodNames(controllerCtor: Function): Set<string> {
+    const prototype = controllerCtor.prototype ?? {};
+    const methods = new Set<string>();
+
+    for (const name of Object.getOwnPropertyNames(prototype)) {
+        if (name === 'constructor') continue;
+        const descriptor = Object.getOwnPropertyDescriptor(prototype, name);
+        if (typeof descriptor?.value === 'function') {
+            methods.add(name);
+        }
+    }
+
+    return methods;
+}
+
+function deriveDefaultMethodAliases(
+    controllerMethods: Set<string>,
+    metadata: ControllerSecurityMetadata | undefined,
+): MethodAliasMap | undefined {
+    const methodMetadata = metadata?.methodMetadata;
+    if (!methodMetadata) return undefined;
+
+    const derived = new Map<string, string[]>();
+
+    for (const methodName of Object.keys(methodMetadata)) {
+        if (controllerMethods.has(methodName)) continue;
+
+        const candidates: string[] = [];
+
+        if (methodName === 'find' && controllerMethods.has('list')) {
+            candidates.push('list');
+        }
+
+        if (methodName.endsWith('ById')) {
+            const base = methodName.substring(0, methodName.length - 'ById'.length);
+            if (base && controllerMethods.has(base)) {
+                candidates.push(base);
+            } else if (base === 'replace' && controllerMethods.has('update')) {
+                candidates.push('update');
+            }
+        }
+
+        if (!candidates.length) continue;
+
+        const uniqueCandidates = Array.from(new Set(candidates));
+        derived.set(methodName, uniqueCandidates);
+    }
+
+    if (!derived.size) return undefined;
+
+    const result: MethodAliasMap = {};
+    for (const [source, aliases] of derived.entries()) {
+        result[source] = aliases.length === 1 ? aliases[0] : aliases;
+    }
+    return result;
 }
