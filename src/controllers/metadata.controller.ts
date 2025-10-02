@@ -26,9 +26,6 @@ export class ODataMetadataController {
     ): Response {
         const body = this.csdl.generate();
         const mime = this.csdl.contentType(this.cfg.csdlFormat ?? 'xml');
-        if (!res.getHeader('OData-Version')) {
-            res.set('OData-Version', ODATA_VERSION);
-        }
         res.type(mime);
         res.send(body);
         return res;
