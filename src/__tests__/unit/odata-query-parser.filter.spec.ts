@@ -9,7 +9,7 @@ describe('parseODataQuery string functions', () => {
       '$filter': "contains(name,'Lap')",
     });
     assert.deepStrictEqual(parsed.where, {
-      name: {like: '%Lap%', escape: '\\'},
+      name: {like: '%Lap%', escape: '\\', options: 'i'},
     });
   });
 
@@ -18,7 +18,7 @@ describe('parseODataQuery string functions', () => {
       '$filter': "contains(tolower(title),tolower('Lap'))",
     });
     assert.deepStrictEqual(parsed.where, {
-      title: {like: '%lap%', escape: '\\'},
+      title: {like: '%lap%', escape: '\\', options: 'i'},
     });
   });
 
@@ -27,7 +27,7 @@ describe('parseODataQuery string functions', () => {
       '$filter': "startswith(code,'PR-')",
     });
     assert.deepStrictEqual(parsed.where, {
-      code: {like: 'PR-%', escape: '\\'},
+      code: {like: 'PR-%', escape: '\\', options: 'i'},
     });
   });
 
@@ -36,7 +36,7 @@ describe('parseODataQuery string functions', () => {
       '$filter': "endswith(description,'X')",
     });
     assert.deepStrictEqual(parsed.where, {
-      description: {like: '%X', escape: '\\'},
+      description: {like: '%X', escape: '\\', options: 'i'},
     });
   });
 

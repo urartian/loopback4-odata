@@ -22,6 +22,24 @@ describe('parseODataQuery basics', () => {
     });
   });
 
+  it('parses grouped contains filters with additional predicates', () => {
+    const result = parseODataQuery({
+      '$filter': "(contains(tolower(title),tolower('test')) or contains(tolower(descr),tolower('test'))) and genreId eq 'abc'",
+    });
+
+    assert.deepStrictEqual(result.where, {
+      and: [
+        {
+          or: [
+            {title: {like: '%test%', escape: '\\', options: 'i'}},
+            {descr: {like: '%test%', escape: '\\', options: 'i'}},
+          ],
+        },
+        {genreId: 'abc'},
+      ],
+    });
+  });
+
   it('parses $orderby, $top, $skip, and $select', () => {
     const query = parseODataQuery({
       '$orderby': 'price desc,name asc',

@@ -14,6 +14,7 @@ type FunctionExpression = {
   name: 'contains' | 'startswith' | 'endswith';
   field: string;
   args: unknown[];
+  caseInsensitive: boolean;
 };
 
 type OperandTransform = 'tolower' | 'toupper';
@@ -184,6 +185,7 @@ function parseFunction(tokens: string[], index: number): [FunctionExpression, nu
       name,
       field: fieldOperand.name,
       args: [value],
+      caseInsensitive: true,
     },
     afterValue + 1,
   ];
@@ -237,42 +239,44 @@ function parseLiteral(token: string): unknown {
   return token;
 }
 
-function parseFilter(tokens: string[], startIndex = 0): [ParsedExpression, number] {
-  let index = startIndex;
-  const expressions: ParsedExpression[] = [];
-  let currentLogical: 'and' | 'or' | null = null;
-
-  while (index < tokens.length) {
-    const token = tokens[index];
-    const lower = token.toLowerCase();
-
-    if (lower === 'and' || lower === 'or') {
-      currentLogical = lower;
-      index++;
-      continue;
+function parsePrimary(tokens: string[], index: number): [ParsedExpression, number] {
+  const token = tokens[index];
+  if (token === '(') {
+    const [expr, nextIndex] = parseExpression(tokens, index + 1);
+    if (tokens[nextIndex] !== ')') {
+      throw new Error('Unmatched parenthesis in filter expression.');
     }
-
-    const [comparison, nextIndex] = parseComparison(tokens, index);
-    expressions.push(comparison);
-    index = nextIndex;
-
-    if (currentLogical && expressions.length >= 2) {
-      const right = expressions.pop()!;
-      const left = expressions.pop()!;
-      expressions.push({
-        operator: 'logical',
-        type: currentLogical,
-        expressions: [left, right],
-      });
-      currentLogical = null;
-    }
+    return [expr, nextIndex + 1];
   }
 
-  if (expressions.length === 0) {
+  return parseComparison(tokens, index);
+}
+
+function parseExpression(tokens: string[], index: number): [ParsedExpression, number] {
+  let [left, nextIndex] = parsePrimary(tokens, index);
+
+  while (nextIndex < tokens.length) {
+    const logical = tokens[nextIndex]?.toLowerCase();
+    if (logical !== 'and' && logical !== 'or') break;
+
+    const [right, afterRight] = parsePrimary(tokens, nextIndex + 1);
+    left = {
+      operator: 'logical',
+      type: logical,
+      expressions: [left, right],
+    };
+    nextIndex = afterRight;
+  }
+
+  return [left, nextIndex];
+}
+
+function parseFilter(tokens: string[], startIndex = 0): [ParsedExpression, number] {
+  if (startIndex >= tokens.length) {
     throw new Error('Empty filter expression');
   }
 
-  return [expressions[0], index];
+  return parseExpression(tokens, startIndex);
 }
 
 function buildWhere(expr: ParsedExpression): Where<AnyObject> {
@@ -295,11 +299,13 @@ function buildWhere(expr: ParsedExpression): Where<AnyObject> {
       : expr.name === 'startswith'
         ? `${escaped}%`
         : `%${escaped}`;
+    const clause: AnyObject = {
+      like: pattern,
+      escape: '\\',
+    };
+    if (expr.caseInsensitive) clause.options = 'i';
     return {
-      [expr.field]: {
-        like: pattern,
-        escape: '\\',
-      },
+      [expr.field]: clause,
     };
   }
 
