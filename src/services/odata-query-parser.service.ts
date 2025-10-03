@@ -515,6 +515,45 @@ function mergeInclusionList(
   );
 }
 
+function projectRelationField(
+  fields: Filter<AnyObject>['fields'] | undefined,
+  relation: string,
+): Filter<AnyObject>['fields'] | undefined {
+  if (!fields) return fields;
+  if (Array.isArray(fields)) {
+    if (!fields.includes(relation)) fields.push(relation);
+    return fields;
+  }
+  if (typeof fields === 'object') {
+    fields[relation] = true;
+    return fields;
+  }
+  if (typeof fields === 'string') {
+    if (fields !== relation) {
+      return [fields, relation];
+    }
+    return fields;
+  }
+  return fields;
+}
+
+function ensureFieldsIncludeRelations(
+  target: Filter<AnyObject> | undefined,
+  includes?: InclusionFilter[],
+) {
+  if (!target || !includes?.length) return;
+  for (const include of includes) {
+    const normalized = normalizeInclude(include);
+    const nextFields = projectRelationField(target.fields, normalized.relation);
+    if (nextFields !== undefined || target.fields !== undefined) {
+      target.fields = nextFields;
+    }
+    if (normalized.scope) {
+      ensureFieldsIncludeRelations(normalized.scope, normalized.scope.include as InclusionFilter[] | undefined);
+    }
+  }
+}
+
 function mergeScopes(
   target: Filter<AnyObject> | undefined,
   incoming?: Filter<AnyObject>,
@@ -551,6 +590,7 @@ function mergeScopes(
   if (incoming.include && incoming.include.length) {
     const existing = result.include ?? [];
     result.include = mergeInclusionList(existing, incoming.include);
+    ensureFieldsIncludeRelations(result, result.include);
   }
 
   return result;
@@ -758,6 +798,7 @@ export function parseODataQuery(query: QueryObject, options: ParseOptions = {}):
   const include = parseExpand(expand, relations);
   if (include) {
     filter.include = include;
+    ensureFieldsIncludeRelations(filter, include);
   }
 
   const inlineCount = typeof query['$count'] === 'string' && query['$count'].toLowerCase() === 'true';

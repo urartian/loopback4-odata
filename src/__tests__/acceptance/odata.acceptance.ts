@@ -134,6 +134,22 @@ describe('OData component acceptance', () => {
     }
   });
 
+  it('keeps expanded navigation when root $select omits relation property', async () => {
+    const res = await client
+      .get('/odata/Products')
+      .query({
+        $select: 'id,name,price',
+        $expand: 'orders($select=id,total)',
+        $orderby: 'name',
+        $top: '1',
+      })
+      .expect(200);
+
+    const first = res.body.value[0];
+    expect(first).to.have.property('orders');
+    expect(first.orders).to.be.Array();
+  });
+
   it('executes unbound actions with raw responses', async () => {
     const result = await client
       .post('/odata/resetInventory')

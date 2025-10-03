@@ -74,12 +74,38 @@ describe('parseODataQuery expansions & counts', () => {
     ]);
   });
 
+  it('keeps expanded relation when root $select omits navigation property', () => {
+    const result = parse({'$select': 'id,name', '$expand': 'customer'});
+    assert.deepStrictEqual(result.include, [{relation: 'customer'}]);
+    assert.deepStrictEqual(result.fields, {id: true, name: true, customer: true});
+  });
+
   it('parses nested expand options recursively', () => {
     const result = parse({'$expand': 'items($expand=product($select=id))'});
     assert.deepStrictEqual(result.include, [
       {
         relation: 'items',
         scope: {
+          include: [
+            {
+              relation: 'product',
+              scope: {
+                fields: {id: true},
+              },
+            },
+          ],
+        },
+      },
+    ]);
+  });
+
+  it('preserves nested relation fields within scoped $select', () => {
+    const result = parse({'$expand': 'items($select=id;$expand=product($select=id))'});
+    assert.deepStrictEqual(result.include, [
+      {
+        relation: 'items',
+        scope: {
+          fields: {id: true, product: true},
           include: [
             {
               relation: 'product',
