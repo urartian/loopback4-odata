@@ -187,11 +187,10 @@ GET /odata/Products(1)
 ```json
 {
   "@odata.context": "/odata/$metadata#Products/$entity",
-  "value": {
-    "id": 1,
-    "name": "Laptop",
-    "price": 1299
-  }
+  "@odata.etag": "W/\"01FZJH6G9E7AM4\"",
+  "id": 1,
+  "name": "Laptop",
+  "price": 1299
 }
 ```
 
@@ -203,7 +202,7 @@ curl -X POST /odata/Products \
   -d '{"name":"Laptop","price":1299}'
 ```
 
-Returns the persisted entity in the body under `value`.
+Returns the persisted entity at the top level with standard OData annotations.
 
 ##### Update & Delete
 
@@ -371,7 +370,7 @@ You can publish custom OData operations on top of the generated CRUD surface by 
 - `binding` selects the scope: `entity` (default), `collection`, or `unbound`.
 - `params` describes parameters for `$metadata` (each entry has `name` and optional `type`).
 - `returnType` sets the CSDL return type hint. Functions default to `Edm.String` when omitted.
-- `rawResponse` skips the default `{ "@odata.context": ..., "value": ... }` envelope so you can return a bespoke payload.
+- `rawResponse` skips the default OData annotations (like `@odata.context`/`@odata.etag`) so you can return a bespoke payload.
 
 At runtime the framework resolves method arguments this way:
 
@@ -416,7 +415,7 @@ class ProductController {
 
 - Actions map to `POST /odata/Products({id})/discount` (body contains parameters) and registered routes respect the usual LoopBack interceptors/middleware.
 - Functions map to `GET /odata/Products/premiumProducts?minPrice=1000` and return a collection via GET.
-- Set `rawResponse: true` in the decorator if you want to return a custom payload instead of the default `{ "@odata.context": ..., "value": ... }` envelope.
+- Set `rawResponse: true` in the decorator if you want to return a custom payload instead of the standard OData-formatted entity.
 - Decorated operations are listed automatically in `$metadata` (CSDL) as bound/unbound actions and functions.
 
 #### Example: unbound action with a raw response
