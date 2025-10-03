@@ -118,6 +118,22 @@ describe('OData component acceptance', () => {
     expect(first.orderItems).to.be.Array();
   });
 
+  it('supports $expand options with select clauses', async () => {
+    const res = await client
+      .get('/odata/Products')
+      .query({$expand: 'orders($select=id,total)', $top: '1'})
+      .expect(200);
+
+    const first = res.body.value[0];
+    expect(first.orders).to.be.Array();
+    if (first.orders.length) {
+      const order = first.orders[0];
+      expect(order).to.have.property('id');
+      expect(order).to.have.property('total');
+      expect(order).to.not.have.property('items');
+    }
+  });
+
   it('executes unbound actions with raw responses', async () => {
     const result = await client
       .post('/odata/resetInventory')
