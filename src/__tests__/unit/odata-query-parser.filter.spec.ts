@@ -13,6 +13,15 @@ describe('parseODataQuery string functions', () => {
     });
   });
 
+  it('parses contains with tolower wrappers', () => {
+    const parsed = parseODataQuery({
+      '$filter': "contains(tolower(title),tolower('Lap'))",
+    });
+    assert.deepStrictEqual(parsed.where, {
+      title: {like: '%lap%', escape: '\\'},
+    });
+  });
+
   it('translates startswith() into like suffix wildcard', () => {
     const parsed = parseODataQuery({
       '$filter': "startswith(code,'PR-')",

@@ -16,6 +16,22 @@ type FunctionExpression = {
   args: unknown[];
 };
 
+type OperandTransform = 'tolower' | 'toupper';
+
+interface FieldOperand {
+  kind: 'field';
+  name: string;
+  transform?: OperandTransform;
+}
+
+interface LiteralOperand {
+  kind: 'literal';
+  value: unknown;
+  transform?: OperandTransform;
+}
+
+type Operand = FieldOperand | LiteralOperand;
+
 type ParsedExpression =
   | {operator: 'comparison'; field: string; comparator: string; value: unknown}
   | {operator: 'logical'; type: 'and' | 'or'; expressions: ParsedExpression[]}
@@ -67,6 +83,64 @@ function tokenize(filter: string): string[] {
   return tokens;
 }
 
+function applyTransform(operand: Operand, transform: OperandTransform): Operand {
+  if (operand.kind === 'field') {
+    return {...operand, transform};
+  }
+
+  if (operand.kind === 'literal' && typeof operand.value === 'string') {
+    const value = transform === 'tolower'
+      ? operand.value.toLowerCase()
+      : operand.value.toUpperCase();
+    return {...operand, value, transform};
+  }
+
+  return {...operand, transform};
+}
+
+function parseOperand(tokens: string[], index: number): [Operand, number] {
+  const token = tokens[index];
+  if (token == null) {
+    throw new Error('Unexpected end of function arguments.');
+  }
+
+  const lower = token.toLowerCase();
+  if ((lower === 'tolower' || lower === 'toupper') && tokens[index + 1] === '(') {
+    const [inner, nextIndex] = parseOperand(tokens, index + 2);
+    if (tokens[nextIndex] !== ')') {
+      throw new Error(`Malformed ${lower} invocation. Expected closing parenthesis.`);
+    }
+    return [applyTransform(inner, lower as OperandTransform), nextIndex + 1];
+  }
+
+  if (token === '(') {
+    const [inner, nextIndex] = parseOperand(tokens, index + 1);
+    if (tokens[nextIndex] !== ')') {
+      throw new Error('Unmatched parenthesis in function argument.');
+    }
+    return [inner, nextIndex + 1];
+  }
+
+  if (token.startsWith("'") && token.endsWith("'")) {
+    return [{kind: 'literal', value: token.slice(1, -1)}, index + 1];
+  }
+
+  if (token === 'null') {
+    return [{kind: 'literal', value: null}, index + 1];
+  }
+
+  if (token === 'true' || token === 'false') {
+    return [{kind: 'literal', value: token === 'true'}, index + 1];
+  }
+
+  const numeric = Number(token);
+  if (!Number.isNaN(numeric)) {
+    return [{kind: 'literal', value: numeric}, index + 1];
+  }
+
+  return [{kind: 'field', name: token}, index + 1];
+}
+
 function parseFunction(tokens: string[], index: number): [FunctionExpression, number] | undefined {
   const name = tokens[index]?.toLowerCase();
   if (name !== 'contains' && name !== 'startswith' && name !== 'endswith') {
@@ -77,34 +151,41 @@ function parseFunction(tokens: string[], index: number): [FunctionExpression, nu
     throw new Error(`Malformed ${name} invocation. Expected opening parenthesis.`);
   }
 
-  const field = tokens[index + 2];
-  if (!field) {
-    throw new Error(`${name} requires a target field.`);
+  const [fieldOperand, afterField] = parseOperand(tokens, index + 2);
+  if (fieldOperand.kind !== 'field') {
+    throw new Error(`${name} requires the first argument to be a field.`);
   }
 
-  if (tokens[index + 3] !== ',') {
+  if (tokens[afterField] !== ',') {
     throw new Error(`${name} requires a value argument.`);
   }
 
-  const valueToken = tokens[index + 4];
-  if (valueToken === undefined) {
-    throw new Error(`${name} requires a value argument.`);
+  const [valueOperand, afterValue] = parseOperand(tokens, afterField + 1);
+  if (valueOperand.kind !== 'literal') {
+    throw new Error(`${name} requires the second argument to be a literal.`);
   }
 
-  if (tokens[index + 5] !== ')') {
+  if (tokens[afterValue] !== ')') {
     throw new Error(`Malformed ${name} invocation. Expected closing parenthesis.`);
   }
 
-  const value = parseLiteral(valueToken);
+  let value = valueOperand.value;
+  if (typeof value === 'string') {
+    if (fieldOperand.transform === 'tolower' || valueOperand.transform === 'tolower') {
+      value = value.toLowerCase();
+    } else if (fieldOperand.transform === 'toupper' || valueOperand.transform === 'toupper') {
+      value = value.toUpperCase();
+    }
+  }
 
   return [
     {
       operator: 'function',
       name,
-      field,
+      field: fieldOperand.name,
       args: [value],
     },
-    index + 6,
+    afterValue + 1,
   ];
 }
 
