@@ -121,12 +121,17 @@ export function defineODataCrudController(def: EntitySetDef) {
     };
 
     const entityResponseSchema = {
-        type: 'object',
-        required: ['@odata.context', 'value'],
-        properties: {
-            '@odata.context': { type: 'string' },
-            value: getModelSchemaRef(modelCtor, { includeRelations: true }),
-        },
+        allOf: [
+            {
+                type: 'object',
+                required: ['@odata.context'],
+                properties: {
+                    '@odata.context': { type: 'string' },
+                    '@odata.etag': { type: 'string' },
+                },
+            },
+            getModelSchemaRef(modelCtor, { includeRelations: true }),
+        ],
     };
 
     const mergeIncludes = (
@@ -418,9 +423,10 @@ export function defineODataCrudController(def: EntitySetDef) {
 
             this.ensureODataHeaders();
             this.setEtagHeaderFromPlain(plain);
+            const decorated = this.decoratePlainEntity(plain, etag);
             return {
                 '@odata.context': entityContext,
-                value: this.decoratePlainEntity(plain, etag),
+                ...decorated,
             };
         }
 
@@ -479,7 +485,7 @@ export function defineODataCrudController(def: EntitySetDef) {
             this.applyPreference(preference);
             return {
                 '@odata.context': entityContext,
-                value: decorated,
+                ...decorated,
             };
         }
 
@@ -538,7 +544,7 @@ export function defineODataCrudController(def: EntitySetDef) {
             this.applyPreference(preference);
             return {
                 '@odata.context': entityContext,
-                value: decorated,
+                ...decorated,
             };
         }
 

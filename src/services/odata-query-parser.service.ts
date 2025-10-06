@@ -1,4 +1,11 @@
-import {Filter, Where, AnyObject, InclusionFilter, RelationDefinitionMap} from '@loopback/repository';
+import {
+  Filter,
+  Where,
+  AnyObject,
+  InclusionFilter,
+  RelationDefinitionMap,
+  Entity,
+} from '@loopback/repository';
 
 const comparisonOperators: Record<string, string> = {
   eq: 'eq',
@@ -14,7 +21,24 @@ type FunctionExpression = {
   name: 'contains' | 'startswith' | 'endswith';
   field: string;
   args: unknown[];
+  caseInsensitive: boolean;
 };
+
+type OperandTransform = 'tolower' | 'toupper';
+
+interface FieldOperand {
+  kind: 'field';
+  name: string;
+  transform?: OperandTransform;
+}
+
+interface LiteralOperand {
+  kind: 'literal';
+  value: unknown;
+  transform?: OperandTransform;
+}
+
+type Operand = FieldOperand | LiteralOperand;
 
 type ParsedExpression =
   | {operator: 'comparison'; field: string; comparator: string; value: unknown}
@@ -67,6 +91,64 @@ function tokenize(filter: string): string[] {
   return tokens;
 }
 
+function applyTransform(operand: Operand, transform: OperandTransform): Operand {
+  if (operand.kind === 'field') {
+    return {...operand, transform};
+  }
+
+  if (operand.kind === 'literal' && typeof operand.value === 'string') {
+    const value = transform === 'tolower'
+      ? operand.value.toLowerCase()
+      : operand.value.toUpperCase();
+    return {...operand, value, transform};
+  }
+
+  return {...operand, transform};
+}
+
+function parseOperand(tokens: string[], index: number): [Operand, number] {
+  const token = tokens[index];
+  if (token == null) {
+    throw new Error('Unexpected end of function arguments.');
+  }
+
+  const lower = token.toLowerCase();
+  if ((lower === 'tolower' || lower === 'toupper') && tokens[index + 1] === '(') {
+    const [inner, nextIndex] = parseOperand(tokens, index + 2);
+    if (tokens[nextIndex] !== ')') {
+      throw new Error(`Malformed ${lower} invocation. Expected closing parenthesis.`);
+    }
+    return [applyTransform(inner, lower as OperandTransform), nextIndex + 1];
+  }
+
+  if (token === '(') {
+    const [inner, nextIndex] = parseOperand(tokens, index + 1);
+    if (tokens[nextIndex] !== ')') {
+      throw new Error('Unmatched parenthesis in function argument.');
+    }
+    return [inner, nextIndex + 1];
+  }
+
+  if (token.startsWith("'") && token.endsWith("'")) {
+    return [{kind: 'literal', value: token.slice(1, -1)}, index + 1];
+  }
+
+  if (token === 'null') {
+    return [{kind: 'literal', value: null}, index + 1];
+  }
+
+  if (token === 'true' || token === 'false') {
+    return [{kind: 'literal', value: token === 'true'}, index + 1];
+  }
+
+  const numeric = Number(token);
+  if (!Number.isNaN(numeric)) {
+    return [{kind: 'literal', value: numeric}, index + 1];
+  }
+
+  return [{kind: 'field', name: token}, index + 1];
+}
+
 function parseFunction(tokens: string[], index: number): [FunctionExpression, number] | undefined {
   const name = tokens[index]?.toLowerCase();
   if (name !== 'contains' && name !== 'startswith' && name !== 'endswith') {
@@ -77,34 +159,42 @@ function parseFunction(tokens: string[], index: number): [FunctionExpression, nu
     throw new Error(`Malformed ${name} invocation. Expected opening parenthesis.`);
   }
 
-  const field = tokens[index + 2];
-  if (!field) {
-    throw new Error(`${name} requires a target field.`);
+  const [fieldOperand, afterField] = parseOperand(tokens, index + 2);
+  if (fieldOperand.kind !== 'field') {
+    throw new Error(`${name} requires the first argument to be a field.`);
   }
 
-  if (tokens[index + 3] !== ',') {
+  if (tokens[afterField] !== ',') {
     throw new Error(`${name} requires a value argument.`);
   }
 
-  const valueToken = tokens[index + 4];
-  if (valueToken === undefined) {
-    throw new Error(`${name} requires a value argument.`);
+  const [valueOperand, afterValue] = parseOperand(tokens, afterField + 1);
+  if (valueOperand.kind !== 'literal') {
+    throw new Error(`${name} requires the second argument to be a literal.`);
   }
 
-  if (tokens[index + 5] !== ')') {
+  if (tokens[afterValue] !== ')') {
     throw new Error(`Malformed ${name} invocation. Expected closing parenthesis.`);
   }
 
-  const value = parseLiteral(valueToken);
+  let value = valueOperand.value;
+  if (typeof value === 'string') {
+    if (fieldOperand.transform === 'tolower' || valueOperand.transform === 'tolower') {
+      value = value.toLowerCase();
+    } else if (fieldOperand.transform === 'toupper' || valueOperand.transform === 'toupper') {
+      value = value.toUpperCase();
+    }
+  }
 
   return [
     {
       operator: 'function',
       name,
-      field,
+      field: fieldOperand.name,
       args: [value],
+      caseInsensitive: true,
     },
-    index + 6,
+    afterValue + 1,
   ];
 }
 
@@ -156,42 +246,44 @@ function parseLiteral(token: string): unknown {
   return token;
 }
 
-function parseFilter(tokens: string[], startIndex = 0): [ParsedExpression, number] {
-  let index = startIndex;
-  const expressions: ParsedExpression[] = [];
-  let currentLogical: 'and' | 'or' | null = null;
-
-  while (index < tokens.length) {
-    const token = tokens[index];
-    const lower = token.toLowerCase();
-
-    if (lower === 'and' || lower === 'or') {
-      currentLogical = lower;
-      index++;
-      continue;
+function parsePrimary(tokens: string[], index: number): [ParsedExpression, number] {
+  const token = tokens[index];
+  if (token === '(') {
+    const [expr, nextIndex] = parseExpression(tokens, index + 1);
+    if (tokens[nextIndex] !== ')') {
+      throw new Error('Unmatched parenthesis in filter expression.');
     }
-
-    const [comparison, nextIndex] = parseComparison(tokens, index);
-    expressions.push(comparison);
-    index = nextIndex;
-
-    if (currentLogical && expressions.length >= 2) {
-      const right = expressions.pop()!;
-      const left = expressions.pop()!;
-      expressions.push({
-        operator: 'logical',
-        type: currentLogical,
-        expressions: [left, right],
-      });
-      currentLogical = null;
-    }
+    return [expr, nextIndex + 1];
   }
 
-  if (expressions.length === 0) {
+  return parseComparison(tokens, index);
+}
+
+function parseExpression(tokens: string[], index: number): [ParsedExpression, number] {
+  let [left, nextIndex] = parsePrimary(tokens, index);
+
+  while (nextIndex < tokens.length) {
+    const logical = tokens[nextIndex]?.toLowerCase();
+    if (logical !== 'and' && logical !== 'or') break;
+
+    const [right, afterRight] = parsePrimary(tokens, nextIndex + 1);
+    left = {
+      operator: 'logical',
+      type: logical,
+      expressions: [left, right],
+    };
+    nextIndex = afterRight;
+  }
+
+  return [left, nextIndex];
+}
+
+function parseFilter(tokens: string[], startIndex = 0): [ParsedExpression, number] {
+  if (startIndex >= tokens.length) {
     throw new Error('Empty filter expression');
   }
 
-  return [expressions[0], index];
+  return parseExpression(tokens, startIndex);
 }
 
 function buildWhere(expr: ParsedExpression): Where<AnyObject> {
@@ -214,11 +306,13 @@ function buildWhere(expr: ParsedExpression): Where<AnyObject> {
       : expr.name === 'startswith'
         ? `${escaped}%`
         : `%${escaped}`;
+    const clause: AnyObject = {
+      like: pattern,
+      escape: '\\',
+    };
+    if (expr.caseInsensitive) clause.options = 'i';
     return {
-      [expr.field]: {
-        like: pattern,
-        escape: '\\',
-      },
+      [expr.field]: clause,
     };
   }
 
@@ -245,6 +339,381 @@ function parseSelect(select?: string): AnyObject | undefined {
   }, {});
 }
 
+function splitTopLevel(value: string, delimiter: string): string[] {
+  const results: string[] = [];
+  let current = '';
+  let depth = 0;
+  let inString = false;
+
+  for (let i = 0; i < value.length; i++) {
+    const char = value[i];
+
+    if (char === "'") {
+      current += char;
+      if (inString) {
+        if (i + 1 < value.length && value[i + 1] === "'") {
+          current += value[i + 1];
+          i++;
+        } else {
+          inString = false;
+        }
+      } else {
+        inString = true;
+      }
+      continue;
+    }
+
+    if (inString) {
+      current += char;
+      continue;
+    }
+
+    if (char === '(') {
+      depth++;
+      current += char;
+      continue;
+    }
+    if (char === ')') {
+      depth--;
+      if (depth < 0) {
+        throw new Error('Malformed expand expression: unmatched closing parenthesis.');
+      }
+      current += char;
+      continue;
+    }
+
+    if (char === delimiter && depth === 0) {
+      const trimmed = current.trim();
+      if (trimmed) results.push(trimmed);
+      current = '';
+      continue;
+    }
+
+    current += char;
+  }
+
+  if (inString) {
+    throw new Error('Malformed expand expression: unterminated string literal.');
+  }
+  if (depth !== 0) {
+    throw new Error('Malformed expand expression: unmatched parentheses.');
+  }
+
+  const trimmed = current.trim();
+  if (trimmed) results.push(trimmed);
+  return results;
+}
+
+function extractPathAndOptions(segment: string): {path: string; options?: string} {
+  const trimmed = segment.trim();
+  let start = -1;
+  let depth = 0;
+  let inString = false;
+
+  for (let i = 0; i < trimmed.length; i++) {
+    const char = trimmed[i];
+
+    if (char === "'") {
+      if (inString) {
+        if (i + 1 < trimmed.length && trimmed[i + 1] === "'") {
+          i++;
+        } else {
+          inString = false;
+        }
+      } else {
+        inString = true;
+      }
+      continue;
+    }
+
+    if (inString) continue;
+
+    if (char === '(') {
+      if (start === -1) start = i;
+      depth++;
+      continue;
+    }
+
+    if (char === ')') {
+      depth--;
+      if (depth < 0) {
+        throw new Error('Malformed expand segment: unmatched closing parenthesis.');
+      }
+      if (depth === 0) {
+        const options = trimmed.slice(start + 1, i).trim();
+        const remainder = trimmed.slice(i + 1).trim();
+        if (remainder) {
+          throw new Error('Malformed expand segment: trailing characters after options.');
+        }
+        const path = trimmed.slice(0, start).trim();
+        return options ? {path, options} : {path};
+      }
+      continue;
+    }
+  }
+
+  if (depth !== 0) {
+    throw new Error('Malformed expand segment: unmatched parentheses.');
+  }
+
+  return {path: trimmed};
+}
+
+function getTargetRelations(definition: unknown): RelationDefinitionMap | undefined {
+  const resolver = (definition as {target?: () => typeof Entity} | undefined)?.target;
+  if (typeof resolver !== 'function') return undefined;
+  try {
+    const target = resolver();
+    const modelDef = (target as typeof Entity | undefined)?.definition as
+      | {relations?: RelationDefinitionMap}
+      | undefined;
+    return modelDef?.relations as RelationDefinitionMap | undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+interface NormalizedInclude {
+  relation: string;
+  scope?: Filter<AnyObject>;
+}
+
+function normalizeInclude(include: InclusionFilter): NormalizedInclude {
+  if (typeof include === 'string') {
+    return {relation: include};
+  }
+  return {
+    relation: include.relation,
+    scope: include.scope as Filter<AnyObject> | undefined,
+  };
+}
+
+function mergeInclusionList(
+  existing: InclusionFilter[],
+  additions: InclusionFilter[],
+): InclusionFilter[] {
+  const map = new Map<string, NormalizedInclude>();
+
+  const upsert = (entry: InclusionFilter) => {
+    const normalized = normalizeInclude(entry);
+    const current = map.get(normalized.relation);
+    if (current) {
+      current.scope = mergeScopes(current.scope, normalized.scope);
+    } else {
+      map.set(normalized.relation, {
+        relation: normalized.relation,
+        scope: mergeScopes(undefined, normalized.scope),
+      });
+    }
+  };
+
+  existing.forEach(upsert);
+  additions.forEach(upsert);
+
+  return Array.from(map.values()).map(item =>
+    item.scope ? {relation: item.relation, scope: item.scope} : {relation: item.relation},
+  );
+}
+
+function projectRelationField(
+  fields: Filter<AnyObject>['fields'] | undefined,
+  relation: string,
+): Filter<AnyObject>['fields'] | undefined {
+  if (!fields) return fields;
+  if (Array.isArray(fields)) {
+    if (!fields.includes(relation)) fields.push(relation);
+    return fields;
+  }
+  if (typeof fields === 'object') {
+    fields[relation] = true;
+    return fields;
+  }
+  if (typeof fields === 'string') {
+    if (fields !== relation) {
+      return [fields, relation];
+    }
+    return fields;
+  }
+  return fields;
+}
+
+function ensureFieldsIncludeRelations(
+  target: Filter<AnyObject> | undefined,
+  includes?: InclusionFilter[],
+) {
+  if (!target || !includes?.length) return;
+  for (const include of includes) {
+    const normalized = normalizeInclude(include);
+    const nextFields = projectRelationField(target.fields, normalized.relation);
+    if (nextFields !== undefined || target.fields !== undefined) {
+      target.fields = nextFields;
+    }
+    if (normalized.scope) {
+      ensureFieldsIncludeRelations(normalized.scope, normalized.scope.include as InclusionFilter[] | undefined);
+    }
+  }
+}
+
+function mergeScopes(
+  target: Filter<AnyObject> | undefined,
+  incoming?: Filter<AnyObject>,
+): Filter<AnyObject> | undefined {
+  if (!incoming) return target;
+  const result = target ?? {};
+
+  if (incoming.fields) {
+    result.fields = {...(result.fields ?? {}), ...incoming.fields};
+  }
+
+  if (incoming.where) {
+    if (result.where) {
+      result.where = {
+        and: [result.where, incoming.where],
+      } as unknown as Filter<AnyObject>['where'];
+    } else {
+      result.where = incoming.where;
+    }
+  }
+
+  if (incoming.order) {
+    result.order = incoming.order;
+  }
+
+  if (incoming.limit !== undefined) {
+    result.limit = incoming.limit;
+  }
+
+  if (incoming.offset !== undefined) {
+    result.offset = incoming.offset;
+  }
+
+  if (incoming.include && incoming.include.length) {
+    const existing = result.include ?? [];
+    result.include = mergeInclusionList(existing, incoming.include);
+    ensureFieldsIncludeRelations(result, result.include);
+  }
+
+  return result;
+}
+
+function parseExpandOptions(
+  options: string,
+  relations?: RelationDefinitionMap,
+): {scope?: Filter<AnyObject>; includes?: InclusionFilter[]} {
+  const tokens = splitTopLevel(options, ';');
+  let scope: Filter<AnyObject> | undefined;
+  let nestedIncludes: InclusionFilter[] | undefined;
+
+  for (const token of tokens) {
+    const entry = token.trim();
+    if (!entry) continue;
+    const eqIndex = entry.indexOf('=');
+    if (eqIndex === -1) {
+      throw new Error(`Invalid expand option: ${entry}`);
+    }
+
+    const key = entry.slice(0, eqIndex).trim().toLowerCase();
+    const rawValue = entry.slice(eqIndex + 1).trim();
+    if (!rawValue) {
+      throw new Error(`Expand option ${key} requires a value.`);
+    }
+
+    switch (key) {
+      case '$select': {
+        const fields = parseSelect(rawValue);
+        if (fields) {
+          scope = mergeScopes(scope, {fields});
+        }
+        break;
+      }
+      case '$expand': {
+        const includes = parseExpand(rawValue, relations);
+        if (includes && includes.length) {
+          nestedIncludes = nestedIncludes
+            ? mergeInclusionList(nestedIncludes, includes)
+            : includes;
+        }
+        break;
+      }
+      case '$filter': {
+        const parsed = parseODataQuery({'$filter': rawValue}, {relations});
+        if (parsed.where) {
+          scope = mergeScopes(scope, {where: parsed.where});
+        }
+        break;
+      }
+      case '$orderby': {
+        const order = parseOrder(rawValue);
+        if (order && order.length) {
+          scope = mergeScopes(scope, {order});
+        }
+        break;
+      }
+      case '$top': {
+        const limit = Number(rawValue);
+        if (!Number.isFinite(limit)) {
+          throw new Error(`Invalid $top value: ${rawValue}`);
+        }
+        scope = mergeScopes(scope, {limit});
+        break;
+      }
+      case '$skip': {
+        const offset = Number(rawValue);
+        if (!Number.isFinite(offset)) {
+          throw new Error(`Invalid $skip value: ${rawValue}`);
+        }
+        scope = mergeScopes(scope, {offset});
+        break;
+      }
+      case '$count': {
+        // Nested $count is currently ignored; LoopBack filter does not surface inline counts for includes.
+        break;
+      }
+      default:
+        throw new Error(`Unsupported expand option: ${key}`);
+    }
+  }
+
+  return {scope, includes: nestedIncludes};
+}
+
+function buildIncludeFromParts(
+  parts: string[],
+  options: string | undefined,
+  relations?: RelationDefinitionMap,
+): InclusionFilter {
+  const [current, ...rest] = parts;
+  if (!current) {
+    throw new Error('Invalid $expand segment: missing relation name.');
+  }
+
+  const relationDef = relations?.[current];
+  if (relations && !relationDef) {
+    throw new Error(`Unknown expand relation: ${current}`);
+  }
+
+  const include: InclusionFilter = {relation: current};
+  const nextRelations = getTargetRelations(relationDef);
+
+  if (rest.length) {
+    const child = buildIncludeFromParts(rest, options, nextRelations);
+    include.scope = mergeScopes(include.scope, {include: [child]});
+    return include;
+  }
+
+  if (options) {
+    const {scope, includes} = parseExpandOptions(options, nextRelations);
+    if (scope) {
+      include.scope = mergeScopes(include.scope, scope);
+    }
+    if (includes && includes.length) {
+      include.scope = mergeScopes(include.scope, {include: includes});
+    }
+  }
+
+  return include;
+}
+
 function parseExpand(
   expand?: string | string[],
   relations?: RelationDefinitionMap,
@@ -252,28 +721,40 @@ function parseExpand(
   if (!expand) return undefined;
 
   const normalized = Array.isArray(expand) ? expand.join(',') : expand;
-  const names = normalized
-    .split(',')
-    .map(item => item.trim())
-    .filter(Boolean);
+  const segments = splitTopLevel(normalized, ',');
+  if (!segments.length) return undefined;
 
-  if (!names.length) return undefined;
+  const includeMap = new Map<string, NormalizedInclude>();
 
-  const includes: InclusionFilter[] = [];
-  const seen = new Set<string>();
+  for (const segment of segments) {
+    const {path, options} = extractPathAndOptions(segment);
+    const parts = path
+      .split('/')
+      .map(part => part.trim())
+      .filter(Boolean);
 
-  for (const name of names) {
-    if (seen.has(name)) continue;
-
-    if (relations && !relations[name]) {
-      throw new Error(`Unknown expand relation: ${name}`);
+    if (!parts.length) {
+      throw new Error('Invalid $expand segment: missing relation name.');
     }
 
-    includes.push({relation: name});
-    seen.add(name);
+    const include = buildIncludeFromParts(parts, options, relations);
+    const normalized = normalizeInclude(include);
+    const existing = includeMap.get(normalized.relation);
+    if (existing) {
+      existing.scope = mergeScopes(existing.scope, normalized.scope);
+    } else {
+      includeMap.set(normalized.relation, {
+        relation: normalized.relation,
+        scope: mergeScopes(undefined, normalized.scope),
+      });
+    }
   }
 
-  return includes.length ? includes : undefined;
+  return includeMap.size
+    ? Array.from(includeMap.values()).map(item =>
+        item.scope ? {relation: item.relation, scope: item.scope} : {relation: item.relation},
+      )
+    : undefined;
 }
 
 export interface ParsedODataQuery extends Filter<AnyObject> {
@@ -317,6 +798,7 @@ export function parseODataQuery(query: QueryObject, options: ParseOptions = {}):
   const include = parseExpand(expand, relations);
   if (include) {
     filter.include = include;
+    ensureFieldsIncludeRelations(filter, include);
   }
 
   const inlineCount = typeof query['$count'] === 'string' && query['$count'].toLowerCase() === 'true';

@@ -4,9 +4,22 @@ import {strict as assert} from 'assert';
 import {RelationDefinitionMap} from '@loopback/repository';
 import {parseODataQuery} from '../../services/odata-query-parser.service';
 
+class Customer {}
+(Customer as any).definition = {relations: {}};
+
+class Product {}
+(Product as any).definition = {relations: {}};
+
+class Item {}
+(Item as any).definition = {
+  relations: {
+    product: {name: 'product', target: () => Product},
+  },
+};
+
 const relations = {
-  customer: {name: 'customer'},
-  items: {name: 'items'},
+  customer: {name: 'customer', target: () => Customer},
+  items: {name: 'items', target: () => Item},
 } as unknown as RelationDefinitionMap;
 
 const parse = (query: Record<string, unknown>) =>
@@ -46,6 +59,89 @@ describe('parseODataQuery expansions & counts', () => {
     assert.throws(
       () => parse({'$expand': 'unknown'}),
       /Unknown expand relation: unknown/,
+    );
+  });
+
+  it('parses expand options with $select', () => {
+    const result = parse({'$expand': 'customer($select=id,name)'});
+    assert.deepStrictEqual(result.include, [
+      {
+        relation: 'customer',
+        scope: {
+          fields: {id: true, name: true},
+        },
+      },
+    ]);
+  });
+
+  it('keeps expanded relation when root $select omits navigation property', () => {
+    const result = parse({'$select': 'id,name', '$expand': 'customer'});
+    assert.deepStrictEqual(result.include, [{relation: 'customer'}]);
+    assert.deepStrictEqual(result.fields, {id: true, name: true, customer: true});
+  });
+
+  it('parses nested expand options recursively', () => {
+    const result = parse({'$expand': 'items($expand=product($select=id))'});
+    assert.deepStrictEqual(result.include, [
+      {
+        relation: 'items',
+        scope: {
+          include: [
+            {
+              relation: 'product',
+              scope: {
+                fields: {id: true},
+              },
+            },
+          ],
+        },
+      },
+    ]);
+  });
+
+  it('preserves nested relation fields within scoped $select', () => {
+    const result = parse({'$expand': 'items($select=id;$expand=product($select=id))'});
+    assert.deepStrictEqual(result.include, [
+      {
+        relation: 'items',
+        scope: {
+          fields: {id: true, product: true},
+          include: [
+            {
+              relation: 'product',
+              scope: {
+                fields: {id: true},
+              },
+            },
+          ],
+        },
+      },
+    ]);
+  });
+
+  it('supports slash-separated navigation paths', () => {
+    const result = parse({'$expand': 'items/product($select=id)'});
+    assert.deepStrictEqual(result.include, [
+      {
+        relation: 'items',
+        scope: {
+          include: [
+            {
+              relation: 'product',
+              scope: {
+                fields: {id: true},
+              },
+            },
+          ],
+        },
+      },
+    ]);
+  });
+
+  it('throws for unsupported options', () => {
+    assert.throws(
+      () => parse({'$expand': 'customer($levels=2)'}),
+      /Unsupported expand option/,
     );
   });
 

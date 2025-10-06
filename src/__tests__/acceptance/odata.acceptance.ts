@@ -16,7 +16,7 @@ describe('OData component acceptance', () => {
   let client: Client;
   const getProductWithEtag = async (id: number) => {
     const res = await client.get(`/odata/Products(${id})`).expect(200);
-    return {body: res.body.value, etag: res.headers['etag'] as string};
+    return {body: res.body, etag: res.headers['etag'] as string};
   };
 
   beforeEach(async function () {
@@ -118,6 +118,38 @@ describe('OData component acceptance', () => {
     expect(first.orderItems).to.be.Array();
   });
 
+  it('supports $expand options with select clauses', async () => {
+    const res = await client
+      .get('/odata/Products')
+      .query({$expand: 'orders($select=id,total)', $top: '1'})
+      .expect(200);
+
+    const first = res.body.value[0];
+    expect(first.orders).to.be.Array();
+    if (first.orders.length) {
+      const order = first.orders[0];
+      expect(order).to.have.property('id');
+      expect(order).to.have.property('total');
+      expect(order).to.not.have.property('items');
+    }
+  });
+
+  it('keeps expanded navigation when root $select omits relation property', async () => {
+    const res = await client
+      .get('/odata/Products')
+      .query({
+        $select: 'id,name,price',
+        $expand: 'orders($select=id,total)',
+        $orderby: 'name',
+        $top: '1',
+      })
+      .expect(200);
+
+    const first = res.body.value[0];
+    expect(first).to.have.property('orders');
+    expect(first.orders).to.be.Array();
+  });
+
   it('executes unbound actions with raw responses', async () => {
     const result = await client
       .post('/odata/resetInventory')
@@ -185,24 +217,24 @@ describe('OData component acceptance', () => {
       .send({name: 'Camera', price: 450})
       .expect(200);
 
-    const createdId = created.body.value.id;
-    expect(created.body.value.name).to.equal('Camera');
+    const createdId = created.body.id;
+    expect(created.body.name).to.equal('Camera');
     const createdEtag = created.headers['etag'] as string;
     expect(createdEtag).to.be.String();
-    expect(created.body.value['@odata.etag']).to.equal(createdEtag);
+    expect(created.body['@odata.etag']).to.equal(createdEtag);
 
     const updated = await client
       .patch(`/odata/Products(${createdId})`)
       .set('If-Match', createdEtag)
       .send({price: 500})
       .expect(200);
-    expect(updated.body.value.price).to.equal(500);
+    expect(updated.body.price).to.equal(500);
     const updatedEtag = updated.headers['etag'] as string;
     expect(updatedEtag).to.be.String();
     expect(updatedEtag).to.not.equal(createdEtag);
 
     const fetched = await client.get(`/odata/Products(${createdId})`).expect(200);
-    expect(fetched.body.value.name).to.equal('Camera');
+    expect(fetched.body.name).to.equal('Camera');
     expect(fetched.headers['etag']).to.equal(updatedEtag);
 
     await client
@@ -218,7 +250,7 @@ describe('OData component acceptance', () => {
       .send({name: 'Controller', price: 99})
       .expect(200);
 
-    const productId = created.body.value.id;
+    const productId = created.body.id;
     const originalEtag = created.headers['etag'] as string;
 
     const updated = await client
@@ -267,7 +299,7 @@ describe('OData component acceptance', () => {
     expect(updateRes.headers['odata-version']).to.equal('4.0');
 
     const verify = await client.get(`/odata/Products(${speakerId})`).expect(200);
-    expect(verify.body.value.price).to.equal(219);
+    expect(verify.body.price).to.equal(219);
 
     const deleteEtag = verify.headers['etag'] as string;
 
@@ -283,7 +315,7 @@ describe('OData component acceptance', () => {
       .send({name: 'Monitor', price: 299})
       .expect(200);
 
-    const createdId = created.body.value.id;
+    const createdId = created.body.id;
     const originalEtag = created.headers['etag'] as string;
 
     const firstUpdate = await client
