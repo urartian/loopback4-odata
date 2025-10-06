@@ -418,6 +418,76 @@ class ProductController {
 - Set `rawResponse: true` in the decorator if you want to return a custom payload instead of the standard OData-formatted entity.
 - Decorated operations are listed automatically in `$metadata` (CSDL) as bound/unbound actions and functions.
 
+### Controller Hooks & Overrides
+
+Declare OData hooks right inside your LB4 controller using `@odata.before`, `@odata.after`, and `@odata.on`. These attach to the generated CRUD routes for your model and let you implement `before/after` logic or fully override an operation.
+
+Import from the package root:
+
+```ts
+import {odata, CrudHookContext, CrudOnContext} from '@loopback/odata';
+```
+
+Supported operations and scopes:
+- Operations: `READ`, `CREATE`, `UPDATE`, `DELETE`
+- Scopes for `READ`: `collection`, `entity`, `count`
+
+Example usage:
+
+```ts
+@odataController(Product)
+export class ProductODataController {
+  constructor(@repository(ProductRepository) private products: ProductRepository) {}
+
+  // Validate and normalize payload before create
+  @odata.before('CREATE')
+  ensureName(ctx: CrudHookContext) {
+    const body = ctx.payload as any;
+    if (!body?.name) throw new HttpErrors.BadRequest('name is required');
+    body.name = String(body.name).trim();
+  }
+
+  // Enforce default ordering on list
+  @odata.before('READ', 'collection')
+  defaultOrder(ctx: CrudHookContext) {
+    ctx.filter = ctx.filter ?? {};
+    if (!ctx.filter.order) ctx.filter.order = ['updatedAt DESC'];
+  }
+
+  // Redact a field when returning a single entity
+  @odata.after('READ', 'entity')
+  redact(ctx: CrudHookContext) {
+    const entity = ctx.result as any;
+    if (entity) delete entity.secret;
+  }
+
+  // Override UPDATE. Call next() to delegate to default CRUD logic,
+  // or skip next() to fully replace the implementation.
+  @odata.on('UPDATE')
+  async customUpdate(ctx: CrudOnContext, next: () => Promise<any>) {
+    if ((ctx.payload as any)?.blocked) {
+      throw new HttpErrors.Forbidden('Blocked field');
+    }
+    // Augment default logic
+    return next();
+  }
+
+  // Fully custom collection read using helpers
+  @odata.on('READ', 'collection')
+  async customList(ctx: CrudOnContext, next: () => Promise<any>) {
+    if (!ctx.request.query['featured']) return next();
+    const items = await this.products.find({where: {featured: true}}, ctx.options);
+    return ctx.helpers.collection(items);
+  }
+}
+```
+
+Notes:
+- `before → on → after` is the execution order.
+- `@odata.on` can replace the generated logic by not calling `next()`. Use `ctx.helpers.entity`, `ctx.helpers.collection`, `ctx.helpers.count`, or `ctx.helpers.noContent` to produce OData-correct responses when you override.
+- Hooks receive `CrudHookContext` with `request`, `response`, `repository`, `options` (including active transactions for `$batch`), `payload/filter/id`, and a mutable `state` bag for passing data between phases.
+- Only one `@odata.on` is allowed per operation/scope per controller; duplicates fail at boot.
+
 #### Example: unbound action with a raw response
 
 ```ts

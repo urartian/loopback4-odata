@@ -1,6 +1,7 @@
 import { BindingScope, injectable } from '@loopback/core';
 import { Entity } from '@loopback/repository';
 import { OperationMeta } from '../decorators/action.function.decorators';
+import type {CrudHookBundle} from '../types/crud-hooks';
 import { ControllerSecurityMetadata, MethodAliasMap } from '../util/security-metadata';
 
 export interface EntitySetDef<T extends Entity = Entity> {
@@ -14,6 +15,8 @@ export interface EntitySetDef<T extends Entity = Entity> {
     etagProperties?: string[];
     securityMetadata?: ControllerSecurityMetadata;
     securityMethodAliases?: MethodAliasMap;
+    hooks?: CrudHookBundle;                            // controller-declared hooks
+    sourceControllerBindingKey?: string;               // binding key to resolve controller instance
 }
 
 @injectable({ scope: BindingScope.SINGLETON })

@@ -10,6 +10,7 @@ import {
     requestBody,
     Request,
     RestBindings,
+    RequestContext,
 } from '@loopback/rest';
 import {
     DefaultCrudRepository,
@@ -43,6 +44,7 @@ import {
     MethodAliasMap,
     ControllerSecurityMetadata,
 } from '../util/security-metadata';
+import {CrudHookBundle, CrudHookContext, CrudOnContext, CrudOperation, CrudScope} from '../types/crud-hooks';
 type CrudEntity = Entity & { [key: string]: unknown };
 type CrudRepo = DefaultCrudRepository<CrudEntity, unknown>;
 
@@ -161,6 +163,9 @@ export function defineODataCrudController(def: EntitySetDef) {
         return Array.from(merged.values());
     };
 
+    const hooks: CrudHookBundle | undefined = def.hooks;
+    const sourceCtrlBindingKey: string | undefined = def.sourceControllerBindingKey;
+
     class ODataCrudController {
         constructor(
             @inject(repoBindingKey)
@@ -169,6 +174,8 @@ export function defineODataCrudController(def: EntitySetDef) {
             public readonly request: Request,
             @inject(RestBindings.Http.RESPONSE)
             public readonly response: Response,
+            @inject(RestBindings.Http.CONTEXT)
+            public readonly httpCtx: RequestContext,
         ) { }
 
         etagEnabled(): boolean {
@@ -284,6 +291,131 @@ export function defineODataCrudController(def: EntitySetDef) {
             return etag;
         }
 
+        async resolveSourceController(): Promise<any | undefined> {
+            if (!sourceCtrlBindingKey) return undefined;
+            try {
+                return await this.httpCtx.get(sourceCtrlBindingKey as any);
+            } catch {
+                return undefined;
+            }
+        }
+
+        hookMatches(op: CrudOperation, scope: CrudScope | undefined, meta: {op: CrudOperation; scope?: CrudScope}): boolean {
+            if (meta.op !== op) return false;
+            if (op !== 'READ') return true;
+            if (!meta.scope) return true;
+            return meta.scope === scope;
+        }
+
+        getHookMethods(op: CrudOperation, scope?: CrudScope) {
+            const before = (hooks?.before ?? []).filter(h => this.hookMatches(op, scope, h)).map(h => h.methodName);
+            const after = (hooks?.after ?? []).filter(h => this.hookMatches(op, scope, h)).map(h => h.methodName);
+            const on = (hooks?.on ?? []).find(h => this.hookMatches(op, scope, h))?.methodName;
+            return {before, after, on};
+        }
+
+        buildHookContext(base: Partial<CrudHookContext>): CrudHookContext {
+            return {
+                operation: base.operation!,
+                scope: base.scope,
+                entitySet: (def as unknown) as any,
+                repository: this.repository,
+                options: base.options,
+                request: this.request,
+                response: this.response,
+                state: {},
+                id: (base as any).id,
+                payload: (base as any).payload,
+                filter: (base as any).filter,
+                result: undefined,
+            } as CrudHookContext;
+        }
+
+        buildOnContext(ctx: CrudHookContext, helpers: CrudOnContext['helpers']): CrudOnContext {
+            return Object.assign({} as CrudOnContext, ctx, {helpers});
+        }
+
+        helpersForEntity(entityContextStr: string) {
+            const self = this;
+            return {
+                entity(plain: AnyObject | undefined) {
+                    self.ensureODataHeaders();
+                    if (plain) self.setEtagHeaderFromPlain(plain);
+                    const decorated = self.decoratePlainEntity(plain ?? {}, self.computeEtagFromPlain(plain));
+                    return {
+                        '@odata.context': entityContextStr,
+                        ...decorated,
+                    } as AnyObject;
+                },
+                collection(items: Array<AnyObject | Entity>, totalCount?: number) {
+                    self.ensureODataHeaders();
+                    const values = items.map(it => self.toPlainEntity(it as any) ?? (it as AnyObject));
+                    const decorated = self.decoratePlainEntities(values);
+                    return {
+                        '@odata.context': contextBase,
+                        ...(totalCount !== undefined ? {'@odata.count': totalCount} : {}),
+                        value: decorated,
+                    } as AnyObject;
+                },
+                count(n: number) {
+                    self.ensureODataHeaders();
+                    return String(n);
+                },
+                noContent() {
+                    self.ensureODataHeaders();
+                    self.response.status(204).end();
+                },
+            };
+        }
+
+        async runBefore(op: CrudOperation, scope: CrudScope | undefined, ctx: CrudHookContext) {
+            if (!hooks || (!hooks.before?.length)) return;
+            const source = await this.resolveSourceController();
+            if (!source) return;
+            const names = this.getHookMethods(op, scope).before;
+            for (const name of names) {
+                if (typeof source[name] === 'function') {
+                    await source[name](ctx);
+                }
+            }
+        }
+
+        async runOn(
+            op: CrudOperation,
+            scope: CrudScope | undefined,
+            onCtx: CrudOnContext,
+            next: () => Promise<unknown>,
+        ): Promise<unknown> {
+            const source = await this.resolveSourceController();
+            const name = this.getHookMethods(op, scope).on;
+            if (!source || !name || typeof source[name] !== 'function') {
+                return next();
+            }
+            let nextCalled = false;
+            const wrappedNext = async () => {
+                nextCalled = true;
+                return next();
+            };
+            const result = await source[name](onCtx, wrappedNext);
+            if (!nextCalled) return result;
+            return result ?? onCtx.result;
+        }
+
+        async runAfter(op: CrudOperation, scope: CrudScope | undefined, ctx: CrudHookContext) {
+            if (this.response.headersSent) return; // don't mutate after commit
+            if (!hooks || (!hooks.after?.length)) return;
+            const source = await this.resolveSourceController();
+            if (!source) return;
+            const names = this.getHookMethods(op, scope).after;
+            for (const name of names) {
+                if (typeof source[name] !== 'function') continue;
+                const maybe = await source[name](ctx);
+                if (maybe !== undefined) {
+                    ctx.result = maybe;
+                }
+            }
+        }
+
         @get(`/odata/${setName}`, {
             responses: {
                 '200': {
@@ -316,23 +448,39 @@ export function defineODataCrudController(def: EntitySetDef) {
 
             this.ensureEtagField(baseFilter);
 
-            const options = this.repositoryOptions();
-            const results = await this.repository.find(baseFilter, options);
-            const plainResults = results.map(entity => this.toPlainEntity(entity) ?? {});
-            let totalCount: number | undefined;
+            const op: CrudOperation = 'READ';
+            const scope: CrudScope = 'collection';
+            const ctx = this.buildHookContext({operation: op, scope, filter: baseFilter as any, options: this.repositoryOptions()});
+            await this.runBefore(op, scope, ctx);
 
-            if (inlineCountRequested) {
-                const where = baseFilter.where as Filter<CrudEntity>['where'];
-                const { count } = await this.repository.count(where as any, options);
-                totalCount = count;
-            }
+            const execDefault = async () => {
+                const options = this.repositoryOptions();
+                const results = await this.repository.find(baseFilter, options);
+                const plainResults = results.map(entity => this.toPlainEntity(entity) ?? {});
+                let totalCount: number | undefined;
 
-            this.ensureODataHeaders();
-            return {
-                '@odata.context': contextBase,
-                ...(inlineCountRequested ? { '@odata.count': totalCount ?? results.length } : {}),
-                value: this.decoratePlainEntities(plainResults),
+                if (inlineCountRequested) {
+                    const where = baseFilter.where as Filter<CrudEntity>['where'];
+                    const { count } = await this.repository.count(where as any, options);
+                    totalCount = count;
+                }
+
+                this.ensureODataHeaders();
+                const result = {
+                    '@odata.context': contextBase,
+                    ...(inlineCountRequested ? { '@odata.count': totalCount ?? results.length } : {}),
+                    value: this.decoratePlainEntities(plainResults),
+                } as AnyObject;
+                ctx.result = result;
+                return result;
             };
+
+            const helpers = this.helpersForEntity(entityContext);
+            const onCtx = this.buildOnContext(ctx, helpers);
+            const res = await this.runOn(op, scope, onCtx, execDefault);
+            ctx.result = res;
+            await this.runAfter(op, scope, ctx);
+            return ctx.result as AnyObject;
         }
 
         @get(`/odata/${setName}/$count`, {
@@ -354,7 +502,6 @@ export function defineODataCrudController(def: EntitySetDef) {
             if (preferences.respondAsync) this.throwPreferenceNotSupported('respond-async');
 
             const baseFilter: Filter<CrudEntity> = {};
-            const options = this.repositoryOptions();
 
             try {
                 const parsed = parseODataQuery(
@@ -369,10 +516,27 @@ export function defineODataCrudController(def: EntitySetDef) {
                 throw new HttpErrors.BadRequest(message);
             }
 
-            const where = baseFilter.where as Filter<CrudEntity>['where'];
-            const { count } = await this.repository.count(where as any, options);
-            this.ensureODataHeaders();
-            return `${count}`;
+            const op: CrudOperation = 'READ';
+            const scope: CrudScope = 'count';
+            const ctx = this.buildHookContext({operation: op, scope, filter: baseFilter as any, options: this.repositoryOptions()});
+            await this.runBefore(op, scope, ctx);
+
+            const execDefault = async () => {
+                const options = this.repositoryOptions();
+                const where = baseFilter.where as Filter<CrudEntity>['where'];
+                const { count } = await this.repository.count(where as any, options);
+                this.ensureODataHeaders();
+                const result = `${count}`;
+                ctx.result = result;
+                return result;
+            };
+
+            const helpers = this.helpersForEntity(entityContext);
+            const onCtx = this.buildOnContext(ctx, helpers);
+            const res = await this.runOn(op, scope, onCtx, execDefault);
+            ctx.result = res;
+            await this.runAfter(op, scope, ctx);
+            return ctx.result as string;
         }
 
         @get(`/odata/${setName}/{id}`, {
@@ -410,24 +574,43 @@ export function defineODataCrudController(def: EntitySetDef) {
                 throw new HttpErrors.BadRequest(message);
             }
 
-            const entity = await this.repository.findById(id as any, baseFilter, options);
-            const plain = this.toPlainEntity(entity) ?? {};
-            const etag = this.computeEtagFromPlain(plain);
+            const op: CrudOperation = 'READ';
+            const scope: CrudScope = 'entity';
+            const ctx = this.buildHookContext({operation: op, scope, id, filter: baseFilter as any, options: this.repositoryOptions()});
+            await this.runBefore(op, scope, ctx);
 
-            if (ifNoneMatch && !ifNoneMatch.any && etag && matchesEtag(etag, ifNoneMatch.values)) {
+            const execDefault = async () => {
+                const options = this.repositoryOptions();
+                const entity = await this.repository.findById(id as any, baseFilter, options);
+                const plain = this.toPlainEntity(entity) ?? {};
+                const etag = this.computeEtagFromPlain(plain);
+
+                if (ifNoneMatch && !ifNoneMatch.any && etag && matchesEtag(etag, ifNoneMatch.values)) {
+                    this.ensureODataHeaders();
+                    this.setEtagHeaderFromPlain(plain);
+                    this.response.status(304).end();
+                    return undefined;
+                }
+
                 this.ensureODataHeaders();
                 this.setEtagHeaderFromPlain(plain);
-                this.response.status(304).end();
-                return;
-            }
-
-            this.ensureODataHeaders();
-            this.setEtagHeaderFromPlain(plain);
-            const decorated = this.decoratePlainEntity(plain, etag);
-            return {
-                '@odata.context': entityContext,
-                ...decorated,
+                const decorated = this.decoratePlainEntity(plain, etag);
+                const result = {
+                    '@odata.context': entityContext,
+                    ...decorated,
+                } as AnyObject;
+                ctx.result = result;
+                return result;
             };
+
+            const helpers = this.helpersForEntity(entityContext);
+            const onCtx = this.buildOnContext(ctx, helpers);
+            const res = await this.runOn(op, scope, onCtx, execDefault);
+            ctx.result = res;
+            if (!this.response.headersSent) {
+                await this.runAfter(op, scope, ctx);
+            }
+            return ctx.result as AnyObject | undefined;
         }
 
         @post(`/odata/${setName}`, {
@@ -454,39 +637,57 @@ export function defineODataCrudController(def: EntitySetDef) {
             const preferences = this.parsePreferenceHeader();
             if (preferences.respondAsync) this.throwPreferenceNotSupported('respond-async');
 
-            const options = this.repositoryOptions();
-            const preference = preferences.returnPreference;
-            const created = await this.repository.create(payload as any, options);
-            let entityForResponse: AnyObject | undefined = this.toPlainEntity(created);
+            const op: CrudOperation = 'CREATE';
+            const scope: CrudScope | undefined = undefined;
+            const ctx = this.buildHookContext({operation: op, scope, payload: payload as AnyObject, options: this.repositoryOptions()});
+            await this.runBefore(op, scope, ctx);
 
-            if (this.etagEnabled()) {
-                const hasEtag = this.computeEtagFromPlain(entityForResponse);
-                if (!hasEtag) {
-                    const idKey = idProperties[0] ?? 'id';
-                    const idValue = entityForResponse?.[idKey];
-                    if (idValue != null) {
-                        const fetched = await this.repository.findById(idValue as any, undefined, options);
-                        entityForResponse = this.toPlainEntity(fetched);
+            const execDefault = async () => {
+                const options = this.repositoryOptions();
+                const preference = preferences.returnPreference;
+                const created = await this.repository.create((ctx.payload ?? payload) as any, options);
+                let entityForResponse: AnyObject | undefined = this.toPlainEntity(created);
+
+                if (this.etagEnabled()) {
+                    const hasEtag = this.computeEtagFromPlain(entityForResponse);
+                    if (!hasEtag) {
+                        const idKey = idProperties[0] ?? 'id';
+                        const idValue = entityForResponse?.[idKey];
+                        if (idValue != null) {
+                            const fetched = await this.repository.findById(idValue as any, undefined, options);
+                            entityForResponse = this.toPlainEntity(fetched);
+                        }
                     }
                 }
-            }
 
-            const etag = this.computeEtagFromPlain(entityForResponse);
-            const decorated = this.decoratePlainEntity(entityForResponse ?? {}, etag);
-            this.ensureODataHeaders();
-            this.setEtagHeaderFromPlain(entityForResponse);
+                const etag = this.computeEtagFromPlain(entityForResponse);
+                const decorated = this.decoratePlainEntity(entityForResponse ?? {}, etag);
+                this.ensureODataHeaders();
+                this.setEtagHeaderFromPlain(entityForResponse);
 
-            if (preference === 'minimal') {
+                if (preference === 'minimal') {
+                    this.applyPreference(preference);
+                    this.response.status(204).end();
+                    return undefined;
+                }
+
                 this.applyPreference(preference);
-                this.response.status(204).end();
-                return;
-            }
-
-            this.applyPreference(preference);
-            return {
-                '@odata.context': entityContext,
-                ...decorated,
+                const result = {
+                    '@odata.context': entityContext,
+                    ...decorated,
+                } as AnyObject;
+                ctx.result = result;
+                return result;
             };
+
+            const helpers = this.helpersForEntity(entityContext);
+            const onCtx = this.buildOnContext(ctx, helpers);
+            const res = await this.runOn(op, scope, onCtx, execDefault);
+            ctx.result = res;
+            if (!this.response.headersSent) {
+                await this.runAfter(op, scope, ctx);
+            }
+            return ctx.result as AnyObject | undefined;
         }
 
         @patch(`/odata/${setName}/{id}`, {
@@ -514,38 +715,56 @@ export function defineODataCrudController(def: EntitySetDef) {
             const preferences = this.parsePreferenceHeader();
             if (preferences.respondAsync) this.throwPreferenceNotSupported('respond-async');
 
-            const options = this.repositoryOptions();
-            const preference = preferences.returnPreference;
-            const ifMatch = this.parseIfMatchHeader();
+            const op: CrudOperation = 'UPDATE';
+            const scope: CrudScope | undefined = undefined;
+            const ctx = this.buildHookContext({operation: op, scope, id, payload: payload as AnyObject, options: this.repositoryOptions()});
+            await this.runBefore(op, scope, ctx);
 
-            if (ifMatch && !ifMatch.any) {
-                const { values, invalidComposite } = decodeIfMatchValues(ifMatch.values ?? [], etagProperties, etagPropertyDefs);
-                if (invalidComposite || !values.length) this.throwPreconditionFailed();
-                const where = this.buildConditionalWhere(id, values, false);
-                const { count } = await this.repository.updateAll(payload as any, where, options);
-                if (!count) this.throwPreconditionFailed();
-            } else {
-                await this.repository.updateById(id as any, payload as any, options);
-            }
+            const execDefault = async () => {
+                const options = this.repositoryOptions();
+                const preference = preferences.returnPreference;
+                const ifMatch = this.parseIfMatchHeader();
 
-            const updated = await this.repository.findById(id as any, undefined, options);
-            const plain = this.toPlainEntity(updated) ?? {};
-            const etag = this.computeEtagFromPlain(plain);
-            const decorated = this.decoratePlainEntity(plain, etag);
-            this.ensureODataHeaders();
-            this.setEtagHeaderFromPlain(plain);
+                if (ifMatch && !ifMatch.any) {
+                    const { values, invalidComposite } = decodeIfMatchValues(ifMatch.values ?? [], etagProperties, etagPropertyDefs);
+                    if (invalidComposite || !values.length) this.throwPreconditionFailed();
+                    const where = this.buildConditionalWhere(id, values, false);
+                    const { count } = await this.repository.updateAll((ctx.payload ?? payload) as any, where, options);
+                    if (!count) this.throwPreconditionFailed();
+                } else {
+                    await this.repository.updateById(id as any, (ctx.payload ?? payload) as any, options);
+                }
 
-            if (preference === 'minimal') {
+                const updated = await this.repository.findById(id as any, undefined, options);
+                const plain = this.toPlainEntity(updated) ?? {};
+                const etag = this.computeEtagFromPlain(plain);
+                const decorated = this.decoratePlainEntity(plain, etag);
+                this.ensureODataHeaders();
+                this.setEtagHeaderFromPlain(plain);
+
+                if (preference === 'minimal') {
+                    this.applyPreference(preference);
+                    this.response.status(204).end();
+                    return undefined;
+                }
+
                 this.applyPreference(preference);
-                this.response.status(204).end();
-                return;
-            }
-
-            this.applyPreference(preference);
-            return {
-                '@odata.context': entityContext,
-                ...decorated,
+                const result = {
+                    '@odata.context': entityContext,
+                    ...decorated,
+                } as AnyObject;
+                ctx.result = result;
+                return result;
             };
+
+            const helpers = this.helpersForEntity(entityContext);
+            const onCtx = this.buildOnContext(ctx, helpers);
+            const res = await this.runOn(op, scope, onCtx, execDefault);
+            ctx.result = res;
+            if (!this.response.headersSent) {
+                await this.runAfter(op, scope, ctx);
+            }
+            return ctx.result as AnyObject | undefined;
         }
 
         @del(`/odata/${setName}/{id}`, {
@@ -559,19 +778,35 @@ export function defineODataCrudController(def: EntitySetDef) {
             const preferences = this.parsePreferenceHeader();
             if (preferences.respondAsync) this.throwPreferenceNotSupported('respond-async');
 
-            const options = this.repositoryOptions();
-            const ifMatch = this.parseIfMatchHeader();
+            const op: CrudOperation = 'DELETE';
+            const scope: CrudScope | undefined = undefined;
+            const ctx = this.buildHookContext({operation: op, scope, id, options: this.repositoryOptions()});
+            await this.runBefore(op, scope, ctx);
 
-            if (ifMatch && !ifMatch.any) {
-                const { values, invalidComposite } = decodeIfMatchValues(ifMatch.values ?? [], etagProperties, etagPropertyDefs);
-                if (invalidComposite || !values.length) this.throwPreconditionFailed();
-                const where = this.buildConditionalWhere(id, values, false);
-                const { count } = await this.repository.deleteAll(where, options);
-                if (!count) this.throwPreconditionFailed();
-            } else {
-                await this.repository.deleteById(id as any, options);
+            const execDefault = async () => {
+                const options = this.repositoryOptions();
+                const ifMatch = this.parseIfMatchHeader();
+
+                if (ifMatch && !ifMatch.any) {
+                    const { values, invalidComposite } = decodeIfMatchValues(ifMatch.values ?? [], etagProperties, etagPropertyDefs);
+                    if (invalidComposite || !values.length) this.throwPreconditionFailed();
+                    const where = this.buildConditionalWhere(id, values, false);
+                    const { count } = await this.repository.deleteAll(where, options);
+                    if (!count) this.throwPreconditionFailed();
+                } else {
+                    await this.repository.deleteById(id as any, options);
+                }
+                this.ensureODataHeaders();
+                return undefined;
+            };
+
+            const helpers = this.helpersForEntity(entityContext);
+            const onCtx = this.buildOnContext(ctx, helpers);
+            const res = await this.runOn(op, scope, onCtx, execDefault);
+            ctx.result = res;
+            if (!this.response.headersSent) {
+                await this.runAfter(op, scope, ctx);
             }
-            this.ensureODataHeaders();
         }
 
         atomicityState(): AtomicityRequestState | undefined {
