@@ -5,5 +5,7 @@ export * from './component';
 export * from './decorators/model.decorator';
 export * from './decorators/controller.decorator';
 export * from './decorators/action.function.decorators';
+export * from './decorators/hook.decorators';
+export * from './types/crud-hooks';
 export * from './services/odata-query-parser.service';
 export * from './controllers/service-document.controller';

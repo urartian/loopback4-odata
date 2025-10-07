@@ -11,6 +11,8 @@ import { getODataActions, getODataFunctions, OperationMeta } from '../decorators
 import { pluralize } from 'inflection';
 import { normalizeEtagProperties } from '../util/etag';
 import { collectControllerSecurityMetadata } from '../util/security-metadata';
+import {getODataHooks} from '../decorators/hook.decorators';
+import type {CrudHookBundle} from '../types/crud-hooks';
 
 @injectable({ tags: { booters: 'odata' } })
 export class ODataBooter implements Booter {
@@ -43,6 +45,21 @@ export class ODataBooter implements Booter {
             }
 
             const securityMetadata = collectControllerSecurityMetadata(ctor);
+            const hooks = getODataHooks(ctor);
+
+            // Validate @odata.on uniqueness per (op, scope)
+            if (hooks.on?.length) {
+                const seen = new Set<string>();
+                for (const h of hooks.on) {
+                    const key = `${h.op}:${h.scope ?? '-'}`;
+                    if (seen.has(key)) {
+                        throw new Error(
+                            `Duplicate @odata.on for ${key} on controller ${ctor.name}. Only one override per operation/scope is allowed.`,
+                        );
+                    }
+                    seen.add(key);
+                }
+            }
 
             const def = this.registry.register({
                 name: setName,
@@ -51,6 +68,8 @@ export class ODataBooter implements Booter {
                 repositoryCtor: repoBinding.valueConstructor ?? undefined,
                 etagProperties: normalizeEtagProperties(modelMeta?.etag),
                 securityMetadata,
+                hooks: hooks as CrudHookBundle,
+                sourceControllerBindingKey: binding.key,
             });
 
             const CrudController = defineODataCrudController(def);
