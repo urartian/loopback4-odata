@@ -116,4 +116,25 @@ describe('parseODataQuery extended filter grammar', () => {
       name: {nlike: '%Lap%', escape: '\\', options: 'i'},
     });
   });
+
+  it('maps indexof presence to contains and absence to not contains', () => {
+    const present = parseODataQuery({'$filter': "indexof(name,'Lap') ge 0"});
+    assert.deepStrictEqual(present.where, {name: {like: '%Lap%', escape: '\\', options: 'i'}});
+    const absent = parseODataQuery({'$filter': "indexof(name,'Lap') eq -1"});
+    assert.deepStrictEqual(absent.where, {name: {nlike: '%Lap%', escape: '\\', options: 'i'}});
+  });
+
+  it('supports substring eq/ne with start and optional length', () => {
+    const eqStart = parseODataQuery({'$filter': "substring(code,2) eq 'ABC'"});
+    assert.deepStrictEqual(eqStart.where, {code: {like: '__ABC', escape: '\\'}});
+    const neStartLen = parseODataQuery({'$filter': "substring(code,4,3) ne 'XYZ'"});
+    assert.deepStrictEqual(neStartLen.where, {code: {nlike: '____XYZ%', escape: '\\'}});
+  });
+
+  it('supports minimal length() comparisons', () => {
+    const empty = parseODataQuery({'$filter': 'length(description) eq 0'});
+    assert.deepStrictEqual(empty.where, {description: ''});
+    const nonEmpty = parseODataQuery({'$filter': 'length(description) gt 0'});
+    assert.deepStrictEqual(nonEmpty.where, {description: {neq: ''}});
+  });
 });

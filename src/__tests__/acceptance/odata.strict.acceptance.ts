@@ -96,4 +96,26 @@ describe('OData strict mode acceptance', () => {
       .query({$skip: '100'})
       .expect(400);
   });
+
+  it('rejects unsupported indexof comparator in strict mode', async function () {
+    // default strict app from beforeEach
+    await client
+      .get('/odata/Products')
+      .query({$filter: "indexof(name,'Lap') eq 2"})
+      .expect(400);
+  });
+
+  it('rejects unsupported substring comparator in strict mode', async function () {
+    await client
+      .get('/odata/Products')
+      .query({$filter: "substring(name,1) gt 'A'"})
+      .expect(400);
+  });
+
+  it('rejects unsupported length comparator in strict mode', async function () {
+    await client
+      .get('/odata/Products')
+      .query({$filter: 'length(name) eq 5'})
+      .expect(400);
+  });
 });

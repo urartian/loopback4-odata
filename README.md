@@ -339,6 +339,43 @@ GET /odata/Products?$search=Laptop
 
 Performs a case‑insensitive substring search across all string properties of the model. Multiple terms are OR’ed. Quoted phrases are treated as a single token. Boolean operators are not yet interpreted.
 
+- String position: `indexof`
+
+```http
+GET /odata/Products?$filter=indexof(name,'Lap') ge 0
+```
+
+Equivalent to `contains(name,'Lap')`. To test absence use `eq -1`:
+
+```http
+GET /odata/Products?$filter=indexof(name,'Lap') eq -1
+```
+
+Strict limitations: only presence/absence forms are supported (`ge 0`, `gt -1`, `eq -1`). Exact position comparisons like `indexof(name,'Lap') eq 2` are rejected with 400 in strict mode.
+
+- Substring at position: `substring`
+
+```http
+GET /odata/Products?$filter=substring(code,2) eq 'ABC'
+```
+
+Checks that `code` has `ABC` starting at index 2 (0‑based). With explicit length:
+
+```http
+GET /odata/Products?$filter=substring(code,4,3) ne 'XYZ'
+```
+
+Strict limitations: supports only `eq` / `ne` with a string literal on the right‑hand side. Other comparators or non‑string RHS are rejected (400).
+
+- Minimal string length checks: `length`
+
+```http
+GET /odata/Products?$filter=length(description) eq 0
+GET /odata/Products?$filter=length(description) gt 0
+```
+
+Strict limitations: only `eq 0` (empty) and `gt 0` (non‑empty) are supported. Other comparisons like `length(field) eq 5` are rejected (400).
+
 ### Searchable Fields
 
 Control which fields participate in `$search`:

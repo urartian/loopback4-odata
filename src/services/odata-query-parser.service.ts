@@ -46,7 +46,10 @@ type ParsedExpression =
   | {operator: 'logical'; type: 'and' | 'or'; expressions: ParsedExpression[]}
   | {operator: 'not'; expr: ParsedExpression}
   | FunctionExpression
-  | {operator: 'fncmp'; name: 'round' | 'floor' | 'ceiling' | 'year'; field: string; comparator: string; value: number};
+  | {operator: 'fncmp'; name: 'round' | 'floor' | 'ceiling' | 'year'; field: string; comparator: string; value: number}
+  | {operator: 'indexofcmp'; field: string; comparator: string; value: number; needle: string}
+  | {operator: 'substrcmp'; field: string; start: number; length?: number; comparator: 'eq' | 'neq'; literal: string}
+  | {operator: 'lengthcmp'; field: string; comparator: string; value: number};
 
 type QueryObject = Record<string, string | string[] | undefined>;
 
@@ -230,11 +233,88 @@ function parseFieldFunctionComparison(tokens: string[], index: number): [{operat
   return [{operator: 'fncmp', name: name as any, field: fieldOperand.name, comparator: comparisonOperators[comparator], value: numeric}, afterField + 3];
 }
 
+function parseIndexOfComparison(tokens: string[], index: number): [{operator: 'indexofcmp'; field: string; comparator: string; value: number; needle: string}, number] | undefined {
+  const name = tokens[index]?.toLowerCase();
+  if (name !== 'indexof') return undefined;
+  if (tokens[index + 1] !== '(') throw new Error('Malformed indexof invocation. Expected opening parenthesis.');
+  const [fieldOperand, afterField] = parseOperand(tokens, index + 2);
+  if (fieldOperand.kind !== 'field') throw new Error('indexof requires the first argument to be a field.');
+  if (tokens[afterField] !== ',') throw new Error('indexof requires a search literal.');
+  const [litOperand, afterLit] = parseOperand(tokens, afterField + 1);
+  if (litOperand.kind !== 'literal' || typeof litOperand.value !== 'string') {
+    throw new Error('indexof requires a string literal as second argument.');
+  }
+  if (tokens[afterLit] !== ')') throw new Error('Malformed indexof invocation. Expected closing parenthesis.');
+  const comparator = tokens[afterLit + 1]?.toLowerCase();
+  const valueToken = tokens[afterLit + 2];
+  if (!comparator || valueToken == null) throw new Error('Invalid indexof comparison.');
+  if (!(comparator in comparisonOperators)) throw new Error(`Unsupported comparator: ${comparator}`);
+  const numeric = Number(valueToken);
+  if (!Number.isFinite(numeric)) throw new Error('indexof comparison requires a numeric value.');
+  return [{operator: 'indexofcmp', field: fieldOperand.name, comparator: comparisonOperators[comparator], value: numeric, needle: String(litOperand.value)}, afterLit + 3];
+}
+
+function parseSubstringComparison(tokens: string[], index: number): [{operator: 'substrcmp'; field: string; start: number; length?: number; comparator: 'eq' | 'neq'; literal: string}, number] | undefined {
+  const name = tokens[index]?.toLowerCase();
+  if (name !== 'substring') return undefined;
+  if (tokens[index + 1] !== '(') throw new Error('Malformed substring invocation. Expected opening parenthesis.');
+  const [fieldOperand, afterField] = parseOperand(tokens, index + 2);
+  if (fieldOperand.kind !== 'field') throw new Error('substring requires the first argument to be a field.');
+  if (tokens[afterField] !== ',') throw new Error('substring requires a start argument.');
+  const [startOperand, afterStart] = parseOperand(tokens, afterField + 1);
+  if (startOperand.kind !== 'literal' || typeof startOperand.value !== 'number') {
+    throw new Error('substring start must be a numeric literal.');
+  }
+  let length: number | undefined;
+  let afterArgs = afterStart;
+  if (tokens[afterStart] === ',') {
+    const [lenOperand, afterLen] = parseOperand(tokens, afterStart + 1);
+    if (lenOperand.kind !== 'literal' || typeof lenOperand.value !== 'number') {
+      throw new Error('substring length must be a numeric literal.');
+    }
+    length = Number(lenOperand.value);
+    afterArgs = afterLen;
+  }
+  if (tokens[afterArgs] !== ')') throw new Error('Malformed substring invocation. Expected closing parenthesis.');
+  const comparator = tokens[afterArgs + 1]?.toLowerCase();
+  const rhs = tokens[afterArgs + 2];
+  if (!comparator || rhs == null) throw new Error('Invalid substring comparison.');
+  if (comparator !== 'eq' && comparator !== 'ne') throw new Error(`Unsupported comparator for substring: ${comparator}`);
+  const literal = parseLiteral(rhs);
+  if (typeof literal !== 'string') throw new Error('substring comparison requires a string literal.');
+  return [{operator: 'substrcmp', field: fieldOperand.name, start: Number(startOperand.value), length, comparator: comparator === 'eq' ? 'eq' : 'neq', literal}, afterArgs + 3];
+}
+
+function parseLengthComparison(tokens: string[], index: number): [{operator: 'lengthcmp'; field: string; comparator: string; value: number}, number] | undefined {
+  const name = tokens[index]?.toLowerCase();
+  if (name !== 'length') return undefined;
+  if (tokens[index + 1] !== '(') throw new Error('Malformed length invocation. Expected opening parenthesis.');
+  const [fieldOperand, afterField] = parseOperand(tokens, index + 2);
+  if (fieldOperand.kind !== 'field') throw new Error('length requires the first argument to be a field.');
+  if (tokens[afterField] !== ')') throw new Error('Malformed length invocation. Expected closing parenthesis.');
+  const comparator = tokens[afterField + 1]?.toLowerCase();
+  const valueToken = tokens[afterField + 2];
+  if (!comparator || valueToken == null) throw new Error('Invalid length comparison.');
+  if (!(comparator in comparisonOperators)) throw new Error(`Unsupported comparator: ${comparator}`);
+  const numeric = Number(valueToken);
+  if (!Number.isFinite(numeric)) throw new Error('length comparison requires a numeric value.');
+  return [{operator: 'lengthcmp', field: fieldOperand.name, comparator: comparisonOperators[comparator], value: numeric}, afterField + 3];
+}
+
 function parseComparison(tokens: string[], index: number): [ParsedExpression, number] {
   const fn = parseFunction(tokens, index);
   if (fn) {
     return [fn[0], fn[1]];
   }
+
+  const idx = parseIndexOfComparison(tokens, index);
+  if (idx) return [idx[0], idx[1]];
+
+  const sub = parseSubstringComparison(tokens, index);
+  if (sub) return [sub[0], sub[1]];
+
+  const len = parseLengthComparison(tokens, index);
+  if (len) return [len[0], len[1]];
 
   const fncmp = parseFieldFunctionComparison(tokens, index);
   if (fncmp) {
@@ -378,6 +458,44 @@ function buildWhere(expr: ParsedExpression): Where<AnyObject> {
     return {
       [expr.field]: clause,
     };
+  }
+
+  if (expr.operator === 'indexofcmp') {
+    const {field, comparator, value, needle} = expr;
+    // Presence: ge 0 or gt -1
+    if ((comparator === 'gte' && value >= 0) || (comparator === 'gt' && value > -1)) {
+      const lit = needle.replace(/%/g, '\\%').replace(/_/g, '\\_');
+      return {[field]: {like: `%${lit}%`, escape: '\\', options: 'i'}} as Where<AnyObject>;
+    }
+    // Absent: eq -1
+    if (comparator === 'eq' && value === -1) {
+      const lit = needle.replace(/%/g, '\\%').replace(/_/g, '\\_');
+      return {[field]: {nlike: `%${lit}%`, escape: '\\', options: 'i'}} as Where<AnyObject>;
+    }
+    throw new Error('Unsupported indexof comparison. Supported: ge 0, gt -1, eq -1.');
+  }
+
+  if (expr.operator === 'substrcmp') {
+    const {field, start, length, comparator, literal} = expr;
+    const lit = literal.replace(/%/g, '\\%').replace(/_/g, '\\_');
+    const underscores = '_'.repeat(Math.max(0, start));
+    // With explicit length: position match, remainder free → trailing %
+    const pattern = length !== undefined ? `${underscores}${lit}%` : `${underscores}${lit}`;
+    const clause: AnyObject = comparator === 'eq'
+      ? {like: pattern, escape: '\\'}
+      : {nlike: pattern, escape: '\\'};
+    return {[field]: clause} as Where<AnyObject>;
+  }
+
+  if (expr.operator === 'lengthcmp') {
+    const {field, comparator, value} = expr;
+    if (comparator === 'eq' && value === 0) {
+      return {[field]: ''} as Where<AnyObject>;
+    }
+    if ((comparator === 'gt' || comparator === 'gte') && value >= 0) {
+      if (value <= 0) return {[field]: {neq: ''}} as Where<AnyObject>;
+    }
+    throw new Error('Unsupported length comparison. Supported: length(field) eq 0, length(field) gt 0.');
   }
 
   if (expr.operator === 'fncmp') {
