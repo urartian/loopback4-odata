@@ -6,6 +6,8 @@ import {
   writeErrorToResponse,
 } from 'strong-error-handler';
 import {ODATA_VERSION} from '../constants';
+import {ODATA_BINDINGS} from '../keys';
+import {ODataConfig} from '../types';
 
 type ExtendedHttpError = HttpError & {
   statusCode?: number;
@@ -22,13 +24,22 @@ export class ODataErrorProvider implements Provider<Reject> {
   constructor(
     @inject(RestBindings.ERROR_WRITER_OPTIONS, {optional: true})
     private readonly options: ErrorWriterOptions = {},
+    @inject(ODATA_BINDINGS.CONFIG)
+    private readonly cfg: ODataConfig,
   ) {}
 
   value(): Reject {
     return ({request, response}, err: Error) => {
       const url = request.originalUrl ?? request.url ?? '';
-
-      if (!url.startsWith('/odata')) {
+      const normalizeBasePath = (configured?: string): string => {
+        let basePath = configured?.trim() ?? '';
+        if (!basePath) return '/odata';
+        if (!basePath.startsWith('/')) basePath = `/${basePath}`;
+        if (basePath.length > 1 && basePath.endsWith('/')) basePath = basePath.slice(0, -1);
+        return basePath || '/';
+      };
+      const basePath = normalizeBasePath(this.cfg?.basePath);
+      if (!url.startsWith('/odata') && !url.startsWith(basePath)) {
         writeErrorToResponse(err, request, response, this.options);
         return;
       }

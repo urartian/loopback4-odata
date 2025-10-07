@@ -45,6 +45,8 @@ import {
     ControllerSecurityMetadata,
 } from '../util/security-metadata';
 import {CrudHookBundle, CrudHookContext, CrudOnContext, CrudOperation, CrudScope} from '../types/crud-hooks';
+import { ODATA_BINDINGS } from '../keys';
+import { ODataConfig } from '../types';
 type CrudEntity = Entity & { [key: string]: unknown };
 type CrudRepo = DefaultCrudRepository<CrudEntity, unknown>;
 
@@ -176,6 +178,8 @@ export function defineODataCrudController(def: EntitySetDef) {
             public readonly response: Response,
             @inject(RestBindings.Http.CONTEXT)
             public readonly httpCtx: RequestContext,
+            @inject(ODATA_BINDINGS.CONFIG)
+            public readonly cfg: ODataConfig,
         ) { }
 
         etagEnabled(): boolean {
@@ -437,6 +441,9 @@ export function defineODataCrudController(def: EntitySetDef) {
                     { relations: modelRelations },
                 );
                 inlineCountRequested = parsed.inlineCount === true;
+                if (inlineCountRequested && this.cfg && this.cfg.enableCount === false) {
+                    throw new HttpErrors.BadRequest('The $count option is disabled by server configuration.');
+                }
                 const parsedFilter = { ...parsed } as Filter<CrudEntity> & { inlineCount?: boolean };
                 delete (parsedFilter as { inlineCount?: boolean }).inlineCount;
                 this.mergeFilters(baseFilter, parsedFilter);
@@ -444,6 +451,14 @@ export function defineODataCrudController(def: EntitySetDef) {
             } catch (error) {
                 const message = (error as Error).message ?? 'Invalid OData query.';
                 throw new HttpErrors.BadRequest(message);
+            }
+
+            // Enforce maxTop if configured
+            const maxTop = this.cfg?.maxTop;
+            if (Number.isFinite(maxTop as number) && (maxTop as number) > 0) {
+                const cap = Number(maxTop);
+                const current = typeof baseFilter.limit === 'number' ? baseFilter.limit : undefined;
+                baseFilter.limit = current == null ? cap : Math.min(current, cap);
             }
 
             this.ensureEtagField(baseFilter);
@@ -500,6 +515,10 @@ export function defineODataCrudController(def: EntitySetDef) {
         async count() {
             const preferences = this.parsePreferenceHeader();
             if (preferences.respondAsync) this.throwPreferenceNotSupported('respond-async');
+
+            if (this.cfg && this.cfg.enableCount === false) {
+                throw new HttpErrors.NotImplemented('Standalone $count is disabled by server configuration.');
+            }
 
             const baseFilter: Filter<CrudEntity> = {};
 

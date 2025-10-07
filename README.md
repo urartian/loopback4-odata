@@ -589,6 +589,38 @@ Run `npm test` to compile the TypeScript specs and execute the unit suite. Accep
 - [x] Optimistic concurrency with OData ETags (`If-Match` / `If-None-Match` support on generated CRUD routes)
 - [x] `$batch` execution runs through the LoopBack pipeline so interceptors/auth apply; changesets use per-datasource transactions and commit/rollback as a unit
 
+## Configuration
+
+Customize the OData component via `ODataConfig` bound at `odata.config` (the component registers a default). You can override it in your application before boot:
+
+```ts
+import {ODATA_BINDINGS} from '@loopback/odata';
+import {ODataConfig} from '@loopback/odata';
+
+// inside your app setup
+this.bind(ODATA_BINDINGS.CONFIG).to({
+  basePath: '/api/odata',  // default: '/odata'
+  csdlFormat: 'xml',       // 'xml' | 'json' (default 'xml')
+  maxTop: 100,             // clamp `$top` to at most 100
+  enableCount: true,       // enable inline and standalone $count
+  strict: false,           // reserved for stricter parsing/mode
+} as ODataConfig);
+```
+
+- `basePath`: Externally visible service root. All OData routes are served under this path (via middleware rewrite) while internal routes remain at `/odata`. Response metadata (`@odata.context`) uses this value.
+- `maxTop`: Caps `$top` for collection reads. The server may return fewer results than requested per OData v4. Requests with larger `$top` are clamped to the configured maximum.
+- `enableCount`:
+  - When `false`, inline counts (`?$count=true`) return `400 Bad Request` with an OData error.
+  - The standalone path (`GET <basePath>/<EntitySet>/$count`) returns `501 Not Implemented`.
+- `csdlFormat`: Selects `$metadata` content type (`application/xml` vs `application/json`) once JSON CSDL is supported; currently used for MIME.
+- `strict`: Reserved for future validation modes.
+
+Example: With `{basePath: '/api/odata', maxTop: 100, enableCount: false}`
+- Routes mount at `/api/odata/...`.
+- `GET /api/odata/Products?$top=1000` returns at most 100 records.
+- `GET /api/odata/Products?$count=true` → `400 Bad Request` (unsupported option).
+- `GET /api/odata/Products/$count` → `501 Not Implemented`.
+
 ## Roadmap
 
 - [ ] Full OData filter grammar: nested groups, numeric/date functions, `$search`, `any`/`all`
