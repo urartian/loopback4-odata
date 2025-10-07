@@ -656,6 +656,23 @@ export class ODataBatchController {
       merged[key.toLowerCase()] = String(value);
     }
 
+    // Drop hop-by-hop and forbidden headers for sub-requests
+    const forbidden = new Set([
+      'host',
+      'connection',
+      'content-length',
+      'transfer-encoding',
+      'proxy-connection',
+      'keep-alive',
+      'upgrade',
+      'te',
+      'trailer',
+      'content-transfer-encoding',
+    ]);
+    for (const name of Object.keys(merged)) {
+      if (forbidden.has(name)) delete merged[name];
+    }
+
     return merged;
   }
 
