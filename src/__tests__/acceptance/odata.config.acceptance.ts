@@ -20,6 +20,7 @@ describe('OData config plumbing acceptance', () => {
       basePath: '/api/odata',
       maxTop: 1,
       enableCount: false,
+      strict: false,
     } as ODataConfig);
 
     await app.boot();
@@ -50,13 +51,35 @@ describe('OData config plumbing acceptance', () => {
     expect(res.body['@odata.context']).to.equal('/api/odata/$metadata');
   });
 
-  it('clamps $top according to maxTop', async () => {
+  it('clamps $top according to maxTop when strict=false', async () => {
     const res = await client
       .get('/api/odata/Products')
       .query({$top: '5'})
       .expect(200);
     expect(res.body.value).to.be.Array();
     expect(res.body.value.length).to.be.lessThanOrEqual(1);
+  });
+
+  it('rejects $top above maxTop when strict=true', async function () {
+    // Rebind config with strict=true and restart app to test strict behavior
+    if (app.state === 'started') await app.stop();
+    app = await givenODataApplication({port: 0, host: '127.0.0.1'});
+    app.bind(ODATA_BINDINGS.CONFIG).to({
+      basePath: '/api/odata',
+      maxTop: 1,
+      enableCount: false,
+      strict: true,
+    } as ODataConfig);
+    await app.boot();
+    await seedExampleData(app);
+    await app.start();
+    client = createRestAppClient(app);
+
+    const res = await client
+      .get('/api/odata/Products')
+      .query({$top: '5'})
+      .expect(400);
+    expect(res.body?.error?.code).to.equal('BadRequest');
   });
 
   it('rejects inline $count when disabled', async () => {
@@ -81,4 +104,3 @@ describe('OData config plumbing acceptance', () => {
     expect(res.body.id).to.equal(id);
   });
 });
-

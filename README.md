@@ -588,6 +588,7 @@ Run `npm test` to compile the TypeScript specs and execute the unit suite. Accep
 - [x] Transaction-backed `$batch` changesets (when datasource supports transactions)
 - [x] Optimistic concurrency with OData ETags (`If-Match` / `If-None-Match` support on generated CRUD routes)
 - [x] `$batch` execution runs through the LoopBack pipeline so interceptors/auth apply; changesets use per-datasource transactions and commit/rollback as a unit
+- [x] Configurable base path (`basePath`), `$top` limit (`maxTop`), `$count` toggle (`enableCount`), and strict mode validations
 
 ## Configuration
 
@@ -601,19 +602,24 @@ import {ODataConfig} from '@loopback/odata';
 this.bind(ODATA_BINDINGS.CONFIG).to({
   basePath: '/api/odata',  // default: '/odata'
   csdlFormat: 'xml',       // 'xml' | 'json' (default 'xml')
-  maxTop: 100,             // clamp `$top` to at most 100
+  maxTop: 100,             // server paging cap
   enableCount: true,       // enable inline and standalone $count
-  strict: false,           // reserved for stricter parsing/mode
+  strict: true,            // enable strict validations (default: true)
 } as ODataConfig);
 ```
 
 - `basePath`: Externally visible service root. All OData routes are served under this path (via middleware rewrite) while internal routes remain at `/odata`. Response metadata (`@odata.context`) uses this value.
-- `maxTop`: Caps `$top` for collection reads. The server may return fewer results than requested per OData v4. Requests with larger `$top` are clamped to the configured maximum.
+- `maxTop`: Caps `$top` for collection reads. The server may return fewer results than requested per OData v4. In strict mode, requests with `$top` above the cap return 400; otherwise the value is clamped to the maximum.
 - `enableCount`:
   - When `false`, inline counts (`?$count=true`) return `400 Bad Request` with an OData error.
   - The standalone path (`GET <basePath>/<EntitySet>/$count`) returns `501 Not Implemented`.
 - `csdlFormat`: Selects `$metadata` content type (`application/xml` vs `application/json`) once JSON CSDL is supported; currently used for MIME.
-- `strict`: Reserved for future validation modes.
+- `strict` (default: true): Enables stricter validations and policies:
+  - Requires `If-Match` on `PATCH`/`DELETE` when ETags are enabled (428 if missing).
+  - If `maxTop` is set, `$top` above the cap returns `400 Bad Request` instead of being clamped.
+  - Rejects unknown system query options (e.g., `$search`, `$levels`) with `400 Bad Request`.
+  - Validates `$select`, `$orderby`, `$filter` fields against model properties; unknown fields return `400 Bad Request`.
+  - Enforces content negotiation: `Accept` must allow `application/json` for CRUD; `$metadata` must allow `application/xml` (or JSON if configured); non‑JSON `Content-Type` on writes returns `415`.
 
 Example: With `{basePath: '/api/odata', maxTop: 100, enableCount: false}`
 - Routes mount at `/api/odata/...`.
@@ -624,7 +630,6 @@ Example: With `{basePath: '/api/odata', maxTop: 100, enableCount: false}`
 ## Roadmap
 
 - [ ] Full OData filter grammar: nested groups, numeric/date functions, `$search`, `any`/`all`
-- [ ] Configuration plumbing for base path, `$top` limits, and `$count` toggles exposed by `ODataConfig`
 - [ ] Robust path rewriting for GUID, quoted, and alternate keys without `\w+` heuristics
 - [ ] Richer EDMX output (complex/collection types, precision metadata, annotations, navigation partners)
 - [ ] Draft/deep insert workflows, localized fields, and SAP Fiori-friendly annotations

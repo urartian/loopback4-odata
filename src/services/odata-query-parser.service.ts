@@ -49,6 +49,7 @@ type QueryObject = Record<string, string | string[] | undefined>;
 
 interface ParseOptions {
   relations?: RelationDefinitionMap;
+  strict?: boolean;
 }
 
 function tokenize(filter: string): string[] {
@@ -764,6 +765,15 @@ export interface ParsedODataQuery extends Filter<AnyObject> {
 export function parseODataQuery(query: QueryObject, options: ParseOptions = {}): ParsedODataQuery {
   const filter: ParsedODataQuery = {};
   const {relations} = options;
+
+  if (options.strict) {
+    const allowed = new Set(['$filter', '$orderby', '$top', '$skip', '$select', '$expand', '$count']);
+    for (const key of Object.keys(query ?? {})) {
+      if (key.startsWith('$') && !allowed.has(key)) {
+        throw new Error(`Unsupported query option: ${key}`);
+      }
+    }
+  }
 
   const filterExpr = typeof query['$filter'] === 'string' ? query['$filter'] : undefined;
   if (filterExpr) {

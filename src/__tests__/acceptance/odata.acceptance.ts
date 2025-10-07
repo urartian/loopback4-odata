@@ -244,7 +244,7 @@ describe('OData component acceptance', () => {
     await client.get(`/odata/Products(${createdId})`).expect(404);
   });
 
-  it('allows deletes without If-Match but rejects stale tokens', async () => {
+  it('requires If-Match and rejects stale tokens when ETags are enabled', async () => {
     const created = await client
       .post('/odata/Products')
       .send({name: 'Controller', price: 99})
@@ -266,7 +266,11 @@ describe('OData component acceptance', () => {
       .set('If-Match', originalEtag)
       .expect(412);
 
-    await client.del(`/odata/Products(${productId})`).expect(204);
+    // Delete requires current If-Match token in strict mode
+    await client
+      .del(`/odata/Products(${productId})`)
+      .set('If-Match', currentEtag)
+      .expect(204);
     await client.get(`/odata/Products(${productId})`).expect(404);
   });
 

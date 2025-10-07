@@ -232,6 +232,84 @@ export function defineODataCrudController(def: EntitySetDef) {
             }
         }
 
+        allowedProperties(): {props: Set<string>; relations: Set<string>} {
+            const props = new Set<string>(Object.keys(modelDefinition?.properties ?? {}));
+            const relations = new Set<string>(Object.keys(modelRelations ?? {}));
+            return {props, relations};
+        }
+
+        collectWhereFields(where: AnyObject | undefined, out: Set<string>) {
+            if (!where || typeof where !== 'object') return;
+            for (const [key, value] of Object.entries(where)) {
+                if (key === 'and' || key === 'or') {
+                    const list = Array.isArray(value) ? value : [];
+                    for (const entry of list) this.collectWhereFields(entry as AnyObject, out);
+                    continue;
+                }
+                out.add(key);
+            }
+        }
+
+        validateFieldsStrict(filter: Filter<CrudEntity>) {
+            if (!this.cfg?.strict) return;
+            const {props, relations} = this.allowedProperties();
+
+            if (filter.fields && typeof filter.fields === 'object' && !Array.isArray(filter.fields)) {
+                for (const key of Object.keys(filter.fields as AnyObject)) {
+                    if (!props.has(key) && !relations.has(key)) {
+                        throw new HttpErrors.BadRequest(`Unknown property in $select: ${key}`);
+                    }
+                }
+            }
+
+            if (filter.order) {
+                const list = Array.isArray(filter.order) ? filter.order : [filter.order];
+                for (const item of list) {
+                    const raw = String(item ?? '').trim();
+                    const field = raw.split(/\s+/)[0];
+                    if (field && !props.has(field)) {
+                        throw new HttpErrors.BadRequest(`Unknown property in $orderby: ${field}`);
+                    }
+                }
+            }
+
+            if (filter.where) {
+                const used = new Set<string>();
+                this.collectWhereFields(filter.where as AnyObject, used);
+                for (const field of used) {
+                    if (!props.has(field)) {
+                        throw new HttpErrors.BadRequest(`Unknown property in $filter: ${field}`);
+                    }
+                }
+            }
+        }
+
+        ensureAcceptsJson() {
+            if (!this.cfg?.strict) return;
+            const accept = this.request.get('Accept') ?? (this.request.headers?.['accept'] as string | undefined);
+            if (!accept || !accept.trim()) return; // no Accept means accept anything
+            const lower = accept.toLowerCase();
+            const ok = lower.includes('application/json') || lower.includes('*/*') || /application\s*\/\s*\*/.test(lower);
+            if (!ok) {
+                const err = new HttpErrors.NotAcceptable('Accept header must allow application/json.');
+                (err as any).code = 'NotAcceptable';
+                throw err;
+            }
+        }
+
+        ensureJsonContentType() {
+            if (!this.cfg?.strict) return;
+            const type = this.request.get('Content-Type') ?? (this.request.headers?.['content-type'] as string | undefined);
+            if (!type || !type.trim()) return; // let framework handle missing content-type
+            const lower = type.toLowerCase();
+            const ok = lower.includes('application/json') || lower.endsWith('+json');
+            if (!ok) {
+                const err = new HttpErrors.UnsupportedMediaType('Content-Type must be application/json.');
+                (err as any).code = 'UnsupportedMediaType';
+                throw err;
+            }
+        }
+
         buildIdWhere(id: unknown): Filter<CrudEntity>['where'] {
             const primary = idProperties[0] ?? 'id';
             return { [primary]: id } as Filter<CrudEntity>['where'];
@@ -438,7 +516,7 @@ export function defineODataCrudController(def: EntitySetDef) {
             try {
                 const parsed = parseODataQuery(
                     this.request.query as Record<string, string | string[] | undefined>,
-                    { relations: modelRelations },
+                    { relations: modelRelations, strict: Boolean(this.cfg?.strict) },
                 );
                 inlineCountRequested = parsed.inlineCount === true;
                 if (inlineCountRequested && this.cfg && this.cfg.enableCount === false) {
@@ -457,11 +535,20 @@ export function defineODataCrudController(def: EntitySetDef) {
             const maxTop = this.cfg?.maxTop;
             if (Number.isFinite(maxTop as number) && (maxTop as number) > 0) {
                 const cap = Number(maxTop);
-                const current = typeof baseFilter.limit === 'number' ? baseFilter.limit : undefined;
-                baseFilter.limit = current == null ? cap : Math.min(current, cap);
+                const requestedTopRaw = (this.request.query?.['$top'] as string | undefined) ?? undefined;
+                const requested = requestedTopRaw != null ? Number(requestedTopRaw) : undefined;
+                if (this.cfg?.strict && Number.isFinite(requested) && (requested as number) > cap) {
+                    throw new HttpErrors.BadRequest(`The $top value (${requested}) exceeds the maximum allowed (${cap}).`);
+                }
+                if (!this.cfg?.strict) {
+                    const current = typeof baseFilter.limit === 'number' ? baseFilter.limit : undefined;
+                    baseFilter.limit = current == null ? cap : Math.min(current, cap);
+                }
             }
 
             this.ensureEtagField(baseFilter);
+            this.ensureAcceptsJson();
+            this.validateFieldsStrict(baseFilter);
 
             const op: CrudOperation = 'READ';
             const scope: CrudScope = 'collection';
@@ -525,7 +612,7 @@ export function defineODataCrudController(def: EntitySetDef) {
             try {
                 const parsed = parseODataQuery(
                     this.request.query as Record<string, string | string[] | undefined>,
-                    { relations: modelRelations },
+                    { relations: modelRelations, strict: Boolean(this.cfg?.strict) },
                 );
                 const parsedFilter = { ...parsed } as Filter<CrudEntity> & { inlineCount?: boolean };
                 delete (parsedFilter as { inlineCount?: boolean }).inlineCount;
@@ -534,6 +621,9 @@ export function defineODataCrudController(def: EntitySetDef) {
                 const message = (error as Error).message ?? 'Invalid OData query.';
                 throw new HttpErrors.BadRequest(message);
             }
+
+            this.ensureAcceptsJson();
+            this.validateFieldsStrict(baseFilter);
 
             const op: CrudOperation = 'READ';
             const scope: CrudScope = 'count';
@@ -581,7 +671,7 @@ export function defineODataCrudController(def: EntitySetDef) {
             try {
                 const parsed = parseODataQuery(
                     this.request.query as Record<string, string | string[] | undefined>,
-                    { relations: modelRelations },
+                    { relations: modelRelations, strict: Boolean(this.cfg?.strict) },
                 );
                 const sanitized: Filter<CrudEntity> = {};
                 if (parsed.fields) sanitized.fields = parsed.fields;
@@ -592,6 +682,9 @@ export function defineODataCrudController(def: EntitySetDef) {
                 const message = (error as Error).message ?? 'Invalid OData query.';
                 throw new HttpErrors.BadRequest(message);
             }
+
+            this.ensureAcceptsJson();
+            this.validateFieldsStrict(baseFilter as Filter<CrudEntity>);
 
             const op: CrudOperation = 'READ';
             const scope: CrudScope = 'entity';
@@ -655,6 +748,8 @@ export function defineODataCrudController(def: EntitySetDef) {
         ) {
             const preferences = this.parsePreferenceHeader();
             if (preferences.respondAsync) this.throwPreferenceNotSupported('respond-async');
+            this.ensureAcceptsJson();
+            this.ensureJsonContentType();
 
             const op: CrudOperation = 'CREATE';
             const scope: CrudScope | undefined = undefined;
@@ -733,6 +828,8 @@ export function defineODataCrudController(def: EntitySetDef) {
         ) {
             const preferences = this.parsePreferenceHeader();
             if (preferences.respondAsync) this.throwPreferenceNotSupported('respond-async');
+            this.ensureAcceptsJson();
+            this.ensureJsonContentType();
 
             const op: CrudOperation = 'UPDATE';
             const scope: CrudScope | undefined = undefined;
@@ -744,6 +841,11 @@ export function defineODataCrudController(def: EntitySetDef) {
                 const preference = preferences.returnPreference;
                 const ifMatch = this.parseIfMatchHeader();
 
+                if (this.etagEnabled() && this.cfg?.strict && !ifMatch) {
+                    const error = new HttpErrors.PreconditionRequired('If-Match header is required when ETags are enabled.');
+                    (error as any).code = 'PreconditionRequired';
+                    throw error;
+                }
                 if (ifMatch && !ifMatch.any) {
                     const { values, invalidComposite } = decodeIfMatchValues(ifMatch.values ?? [], etagProperties, etagPropertyDefs);
                     if (invalidComposite || !values.length) this.throwPreconditionFailed();
@@ -806,6 +908,11 @@ export function defineODataCrudController(def: EntitySetDef) {
                 const options = this.repositoryOptions();
                 const ifMatch = this.parseIfMatchHeader();
 
+                if (this.etagEnabled() && this.cfg?.strict && !ifMatch) {
+                    const error = new HttpErrors.PreconditionRequired('If-Match header is required when ETags are enabled.');
+                    (error as any).code = 'PreconditionRequired';
+                    throw error;
+                }
                 if (ifMatch && !ifMatch.any) {
                     const { values, invalidComposite } = decodeIfMatchValues(ifMatch.values ?? [], etagProperties, etagPropertyDefs);
                     if (invalidComposite || !values.length) this.throwPreconditionFailed();
