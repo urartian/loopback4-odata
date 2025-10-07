@@ -7,7 +7,7 @@ An extension for [LoopBack 4](https://loopback.io/doc/en/lb4/) that adds **OData
 - Provides `$metadata` endpoint.  
 - Simple developer experience with decorators.  
 
-Currently in **phase 4** — CRUD endpoints are stable and the first advanced feature (`$expand`) is available. Inline related models through LoopBack include filters while we continue building the remaining enterprise capabilities (`$count`, `$batch`, actions/functions, pluralization).  
+Currently in **phase 4** — CRUD endpoints are stable and advanced features like `$expand`, `$count`, `$batch`, and Actions/Functions are available. Focus is now on rounding out the filter grammar, improving configurability, enriching the CSDL, and hardening path rewriting.  
 
 ---
 
@@ -587,6 +587,7 @@ Run `npm test` to compile the TypeScript specs and execute the unit suite. Accep
 - [x] Proper pluralization of entity sets (via inflection)
 - [x] Transaction-backed `$batch` changesets (when datasource supports transactions)
 - [x] Optimistic concurrency with OData ETags (`If-Match` / `If-None-Match` support on generated CRUD routes)
+- [x] `$batch` execution runs through the LoopBack pipeline so interceptors/auth apply; changesets use per-datasource transactions and commit/rollback as a unit
 
 ## Roadmap
 
@@ -594,7 +595,6 @@ Run `npm test` to compile the TypeScript specs and execute the unit suite. Accep
 - [ ] Configuration plumbing for base path, `$top` limits, and `$count` toggles exposed by `ODataConfig`
 - [ ] Robust path rewriting for GUID, quoted, and alternate keys without `\w+` heuristics
 - [ ] Richer EDMX output (complex/collection types, precision metadata, annotations, navigation partners)
-- [ ] Batch execution via LoopBack pipeline so interceptors/auth run for changesets across datasources
 - [ ] Draft/deep insert workflows, localized fields, and SAP Fiori-friendly annotations
 
 ## Contributing
