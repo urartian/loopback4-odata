@@ -330,6 +330,9 @@ export class ODataBatchController {
   ): Promise<AtomicityGroupContext> {
     const setNames = new Set<string>();
     for (const request of requests) {
+      const method = (request.method ?? 'GET').toUpperCase();
+      // Only open transactions for write operations. GET/HEAD must not require a transaction.
+      if (method === 'GET' || method === 'HEAD') continue;
       const setName = this.resolveEntitySetName(request.url);
       if (setName) setNames.add(setName);
     }
@@ -385,7 +388,7 @@ export class ODataBatchController {
   }
 
   private resolveEntitySetName(rawUrl: string): string | undefined {
-    const sanitized = this.sanitizeUrl(rawUrl);
+    const sanitized = this.sanitizeUrl(rawUrl, true);
     if (!sanitized) return undefined;
     const [path] = sanitized.split('?');
     const segments = path.split('/').filter(Boolean);
@@ -423,7 +426,7 @@ export class ODataBatchController {
     context: AtomicityGroupContext,
     parentRequest: Request,
   ): Promise<BatchResponseEntry> {
-    const url = this.sanitizeUrl(request.url);
+    const url = this.sanitizeUrl(request.url, true);
     if (!url) {
       return {
         id: request.id,
@@ -570,8 +573,13 @@ export class ODataBatchController {
     }
   }
 
-  private async executeViaFetch(request: BatchRequest, parentRequest: Request): Promise<BatchResponseEntry> {
-    const path = this.sanitizeUrl(request.url);
+  private async executeViaFetch(request: BatchRequest, parentRequest?: Request): Promise<BatchResponseEntry> {
+    const parentContentTypeRaw = typeof (parentRequest as any)?.get === 'function'
+      ? ((parentRequest as any).get('content-type') as string | undefined)
+      : ((parentRequest as any)?.headers?.['content-type'] as string | undefined);
+    const parentContentType = parentContentTypeRaw ?? '';
+    const allowRelative = /multipart\/mixed/i.test(parentContentType);
+    const path = this.sanitizeUrl(request.url, allowRelative);
     if (!path) {
       return {id: request.id, status: 400, body: this.odataError('InvalidUrl', `Invalid request URL: ${request.url}`)};
     }
@@ -608,7 +616,7 @@ export class ODataBatchController {
     return this.executeViaFetch(request, parentRequest);
   }
 
-  private sanitizeUrl(rawUrl: string): string | undefined {
+  private sanitizeUrl(rawUrl: string, allowRelative = false): string | undefined {
     if (!rawUrl) return undefined;
     if (/^https?:\/\//i.test(rawUrl)) {
       try {
@@ -618,11 +626,18 @@ export class ODataBatchController {
         return undefined;
       }
     }
-    if (!rawUrl.startsWith('/')) return undefined;
-    return rawUrl;
+    // Accept absolute app paths as-is
+    if (rawUrl.startsWith('/')) return rawUrl;
+    // Optionally resolve relative OData paths (e.g. "Books", "Books(1)?$select=...")
+    if (allowRelative) {
+      const trimmed = String(rawUrl).trim().replace(/^\/?/, '');
+      return `/odata/${trimmed}`;
+    }
+    // Otherwise, treat relative URLs as invalid in JSON $batch
+    return undefined;
   }
 
-  private buildHeadersForRequest(request: BatchRequest, parentRequest: Request): Record<string, string> {
+  private buildHeadersForRequest(request: BatchRequest, parentRequest?: Request): Record<string, string> {
     const merged: Record<string, string> = {};
     const parentHeaders = parentRequest?.headers ?? {};
 
@@ -639,6 +654,23 @@ export class ODataBatchController {
     for (const [key, value] of Object.entries(request.headers ?? {})) {
       if (value == null) continue;
       merged[key.toLowerCase()] = String(value);
+    }
+
+    // Drop hop-by-hop and forbidden headers for sub-requests
+    const forbidden = new Set([
+      'host',
+      'connection',
+      'content-length',
+      'transfer-encoding',
+      'proxy-connection',
+      'keep-alive',
+      'upgrade',
+      'te',
+      'trailer',
+      'content-transfer-encoding',
+    ]);
+    for (const name of Object.keys(merged)) {
+      if (forbidden.has(name)) delete merged[name];
     }
 
     return merged;
