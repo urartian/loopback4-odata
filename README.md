@@ -700,9 +700,12 @@ Example: With `{basePath: '/api/odata', maxTop: 100, enableCount: false}`
 
 ## Roadmap
 
-- [ ] Remaining filter grammar: `any`/`all` (lambdas), additional string/date functions (`length`, `indexof`, `substring`, `trim`, `concat`, `month`, `day`, `hour`, `minute`, `second`), and advanced `$search` (boolean operators, precedence)
-- [ ] Robust path rewriting for GUID, quoted, and alternate keys without `\w+` heuristics
-- [ ] Richer EDMX output (complex/collection types, precision metadata, annotations, navigation partners)
+- [ ] any/all (lambdas): parse `<nav>/(any|all)(x: <expr>)` and translate via related repositories (hasMany / through) with acceptance tests
+- [ ] Filter functions: add string (`length`, `indexof`, `substring`, `trim`, `concat`) and date/time parts (`month`, `day`, `hour`, `minute`, `second`); return 400 in strict mode when unsupported by connector
+- [ ] $search hardening: boolean operators (AND/OR/NOT), quoted phrases with correct precedence; enforce `maxSearchFields` / `maxSearchTerms`; connector hooks for FTS
+- [ ] Limits & safety: `maxExpandDepth` (and optional `maxSkip`) to prevent heavy queries in strict mode
+- [ ] CSDL improvements: emit Capabilities annotations (e.g., `Org.OData.Capabilities.*`, `SearchRestrictions.Searchable`), support JSON CSDL, and enrich types/precision/annotations/navigation partners
+- [ ] Path rewriting polish: alternate/compound keys and robust quoting beyond `\w+` heuristics
 - [ ] Draft/deep insert workflows, localized fields, and SAP Fiori-friendly annotations
 
 ## Contributing
