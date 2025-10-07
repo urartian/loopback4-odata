@@ -358,6 +358,41 @@ export function defineODataCrudController(def: EntitySetDef) {
             }
         }
 
+        computeIncludeDepth(includes?: InclusionFilter[]): number {
+            if (!includes || !includes.length) return 0;
+            const depthOf = (inc: InclusionFilter): number => {
+                const obj = typeof inc === 'string' ? {relation: inc} : inc;
+                const child = (obj as any)?.scope?.include as InclusionFilter[] | undefined;
+                const childDepth = this.computeIncludeDepth(child);
+                return 1 + childDepth;
+            };
+            return includes.reduce((max, inc) => Math.max(max, depthOf(inc)), 0);
+        }
+
+        enforceExpandDepth(include?: InclusionFilter[]) {
+            if (!this.cfg?.strict) return;
+            const limit = this.cfg?.maxExpandDepth;
+            if (!Number.isFinite(limit as number) || (limit as number) <= 0) return;
+            const depth = this.computeIncludeDepth(include);
+            if (depth > (limit as number)) {
+                throw new HttpErrors.BadRequest(`$expand exceeds maximum depth of ${limit}.`);
+            }
+        }
+
+        enforceSkipLimit(filter: Filter<CrudEntity>) {
+            const limit = this.cfg?.maxSkip;
+            if (!Number.isFinite(limit as number) || (limit as number) < 0) return;
+            const cap = Number(limit);
+            const requested = typeof filter.offset === 'number' ? filter.offset : undefined;
+            if (requested == null) return;
+            if (this.cfg?.strict && requested > cap) {
+                throw new HttpErrors.BadRequest(`$skip exceeds maximum allowed (${cap}).`);
+            }
+            if (!this.cfg?.strict && requested > cap) {
+                filter.offset = cap;
+            }
+        }
+
         ensureAcceptsJson() {
             if (!this.cfg?.strict) return;
             const accept = this.request.get('Accept') ?? (this.request.headers?.['accept'] as string | undefined);
@@ -602,6 +637,8 @@ export function defineODataCrudController(def: EntitySetDef) {
                 this.ensureEtagField(baseFilter);
                 // apply $search if present
                 this.applySearch(baseFilter, (parsed as any).search);
+                // enforce expand depth
+                this.enforceExpandDepth((parsed as any).include as InclusionFilter[] | undefined);
             } catch (error) {
                 const message = (error as Error).message ?? 'Invalid OData query.';
                 throw new HttpErrors.BadRequest(message);
@@ -625,6 +662,7 @@ export function defineODataCrudController(def: EntitySetDef) {
             this.ensureEtagField(baseFilter);
             this.ensureAcceptsJson();
             this.validateFieldsStrict(baseFilter);
+            this.enforceSkipLimit(baseFilter);
 
             const op: CrudOperation = 'READ';
             const scope: CrudScope = 'collection';
@@ -694,6 +732,7 @@ export function defineODataCrudController(def: EntitySetDef) {
                 delete (parsedFilter as { inlineCount?: boolean }).inlineCount;
                 this.mergeFilters(baseFilter, parsedFilter);
                 this.applySearch(baseFilter, (parsed as any).search);
+                this.enforceExpandDepth((parsed as any).include as InclusionFilter[] | undefined);
             } catch (error) {
                 const message = (error as Error).message ?? 'Invalid OData query.';
                 throw new HttpErrors.BadRequest(message);
@@ -756,6 +795,7 @@ export function defineODataCrudController(def: EntitySetDef) {
                 this.mergeFilters(baseFilter as Filter<CrudEntity>, sanitized);
                 this.ensureEtagField(baseFilter as Filter<CrudEntity>);
                 this.applySearch(baseFilter as Filter<CrudEntity>, (parsed as any).search);
+                this.enforceExpandDepth((parsed as any).include as InclusionFilter[] | undefined);
             } catch (error) {
                 const message = (error as Error).message ?? 'Invalid OData query.';
                 throw new HttpErrors.BadRequest(message);
@@ -763,6 +803,7 @@ export function defineODataCrudController(def: EntitySetDef) {
 
             this.ensureAcceptsJson();
             this.validateFieldsStrict(baseFilter as Filter<CrudEntity>);
+            this.enforceSkipLimit(baseFilter as Filter<CrudEntity>);
 
             const op: CrudOperation = 'READ';
             const scope: CrudScope = 'entity';

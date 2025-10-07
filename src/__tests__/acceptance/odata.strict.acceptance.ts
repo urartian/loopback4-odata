@@ -65,4 +65,35 @@ describe('OData strict mode acceptance', () => {
     const res = await client.get('/odata/$metadata').set('Accept', 'application/json').expect(406);
     expect(res.body?.error?.code).to.equal('NotAcceptable');
   });
+
+  it('rejects $expand deeper than maxExpandDepth', async function () {
+    if (app.state === 'started') await app.stop();
+    app = await givenODataApplication({port: 0, host: '127.0.0.1'});
+    app.bind(ODATA_BINDINGS.CONFIG).to({ basePath: '/odata', strict: true, maxExpandDepth: 2 } as ODataConfig);
+    await app.boot();
+    await seedExampleData(app);
+    await app.start();
+    client = createRestAppClient(app);
+
+    // Depth 3: orders -> items -> product
+    await client
+      .get('/odata/Products')
+      .query({$expand: 'orders($expand=items($expand=product))'})
+      .expect(400);
+  });
+
+  it('rejects $skip greater than maxSkip', async function () {
+    if (app.state === 'started') await app.stop();
+    app = await givenODataApplication({port: 0, host: '127.0.0.1'});
+    app.bind(ODATA_BINDINGS.CONFIG).to({ basePath: '/odata', strict: true, maxSkip: 5 } as ODataConfig);
+    await app.boot();
+    await seedExampleData(app);
+    await app.start();
+    client = createRestAppClient(app);
+
+    await client
+      .get('/odata/Products')
+      .query({$skip: '100'})
+      .expect(400);
+  });
 });

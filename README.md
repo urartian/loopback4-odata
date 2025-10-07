@@ -670,6 +670,8 @@ this.bind(ODATA_BINDINGS.CONFIG).to({
   basePath: '/api/odata',  // default: '/odata'
   csdlFormat: 'xml',       // 'xml' | 'json' (default 'xml')
   maxTop: 100,             // server paging cap
+  maxSkip: 1000,           // max skip allowed
+  maxExpandDepth: 2,       // max $expand nesting depth
   enableCount: true,       // enable inline and standalone $count
   strict: true,            // enable strict validations (default: true)
 } as ODataConfig);
@@ -677,6 +679,8 @@ this.bind(ODATA_BINDINGS.CONFIG).to({
 
 - `basePath`: Externally visible service root. All OData routes are served under this path (via middleware rewrite) while internal routes remain at `/odata`. Response metadata (`@odata.context`) uses this value.
 - `maxTop`: Caps `$top` for collection reads. The server may return fewer results than requested per OData v4. In strict mode, requests with `$top` above the cap return 400; otherwise the value is clamped to the maximum.
+- `maxSkip`: Maximum allowed `$skip`. In strict mode, requests with `$skip` above the cap return 400; otherwise it is clamped.
+- `maxExpandDepth`: Maximum allowed `$expand` nesting depth. In strict mode, deeper expansions return 400.
 - `enableCount`:
   - When `false`, inline counts (`?$count=true`) return `400 Bad Request` with an OData error.
   - The standalone path (`GET <basePath>/<EntitySet>/$count`) returns `501 Not Implemented`.
@@ -687,6 +691,7 @@ this.bind(ODATA_BINDINGS.CONFIG).to({
   - Rejects unknown system query options (e.g., `$levels`, `$apply`) with `400 Bad Request`.
   - Validates `$select`, `$orderby`, `$filter` fields against model properties; unknown fields return `400 Bad Request`.
   - Enforces content negotiation: `Accept` must allow `application/json` for CRUD; `$metadata` must allow `application/xml` (or JSON if configured); non‑JSON `Content-Type` on writes returns `415`.
+  - Limits & safety: `maxExpandDepth` restricts `$expand` nesting; `maxSkip` caps `$skip` (both enforced with 400 in strict mode).
   - Search:
     - `searchMode`: `'annotated' | 'config-only' | 'all' | 'disabled'` (default: `annotated`)
     - `searchFields`: `{[entitySet: string]: string[]}` overrides decorator scope
