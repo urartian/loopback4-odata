@@ -339,6 +339,33 @@ GET /odata/Products?$search=Laptop
 
 Performs a case‑insensitive substring search across all string properties of the model. Multiple terms are OR’ed. Quoted phrases are treated as a single token. Boolean operators are not yet interpreted.
 
+### Searchable Fields
+
+Control which fields participate in `$search`:
+
+- Decorate properties with `@odataSearchable()` in your model.
+- Or configure per–entity set in `ODataConfig.searchFields`.
+- Default : `$search` is opt-in and uses only annotated fields. If no searchable fields are configured, strict mode returns `400 Bad Request`.
+
+Example:
+
+```ts
+@odataModel()
+@model()
+export class Product extends Entity {
+  @property({id: true}) id!: number;
+  @odataSearchable() @property() name!: string;
+  @odataSearchable() @property() sku!: string;
+  @property() price!: number;
+}
+
+// Or centrally via config
+this.bind(ODATA_BINDINGS.CONFIG).to({
+  searchMode: 'config-only',
+  searchFields: {Products: ['name', 'sku']},
+} as ODataConfig);
+```
+
 Enable inline counts by passing `$count=true` alongside other query options:
 
 ```http
@@ -628,6 +655,7 @@ Run `npm test` to compile the TypeScript specs and execute the unit suite. Accep
 - [x] Optimistic concurrency with OData ETags (`If-Match` / `If-None-Match` support on generated CRUD routes)
 - [x] `$batch` execution runs through the LoopBack pipeline so interceptors/auth apply; changesets use per-datasource transactions and commit/rollback as a unit
 - [x] Configurable base path (`basePath`), `$top` limit (`maxTop`), `$count` toggle (`enableCount`), and strict mode validations
+- [x] Opt-in `$search` with field-level decorators and configuration
 
 ## Configuration
 
@@ -659,6 +687,10 @@ this.bind(ODATA_BINDINGS.CONFIG).to({
   - Rejects unknown system query options (e.g., `$levels`, `$apply`) with `400 Bad Request`.
   - Validates `$select`, `$orderby`, `$filter` fields against model properties; unknown fields return `400 Bad Request`.
   - Enforces content negotiation: `Accept` must allow `application/json` for CRUD; `$metadata` must allow `application/xml` (or JSON if configured); non‑JSON `Content-Type` on writes returns `415`.
+  - Search:
+    - `searchMode`: `'annotated' | 'config-only' | 'all' | 'disabled'` (default: `annotated`)
+    - `searchFields`: `{[entitySet: string]: string[]}` overrides decorator scope
+    - `maxSearchFields` / `maxSearchTerms`: caps to prevent overly broad queries
 
 Example: With `{basePath: '/api/odata', maxTop: 100, enableCount: false}`
 - Routes mount at `/api/odata/...`.

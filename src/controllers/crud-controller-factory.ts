@@ -47,6 +47,7 @@ import {
 import {CrudHookBundle, CrudHookContext, CrudOnContext, CrudOperation, CrudScope} from '../types/crud-hooks';
 import { ODATA_BINDINGS } from '../keys';
 import { ODataConfig } from '../types';
+import { getODataSearchableProps } from '../decorators/search.decorators';
 type CrudEntity = Entity & { [key: string]: unknown };
 type CrudRepo = DefaultCrudRepository<CrudEntity, unknown>;
 
@@ -249,12 +250,37 @@ export function defineODataCrudController(def: EntitySetDef) {
             return out;
         }
 
+        resolveSearchableFields(): string[] {
+            const mode = this.cfg?.searchMode ?? 'annotated';
+            if (mode === 'disabled') return [];
+            const set = def.name;
+            const cfgFields = this.cfg?.searchFields?.[set];
+            if (cfgFields && cfgFields.length) return cfgFields.slice();
+            if (mode === 'config-only') return [];
+            const annotated = getODataSearchableProps(modelCtor) ?? [];
+            if (annotated.length) return annotated.slice();
+            if (mode === 'all') return this.stringPropertyNames();
+            return [];
+        }
+
         applySearch(base: Filter<CrudEntity>, search?: string) {
             if (!search) return;
-            const terms = this.tokenizeSearch(String(search));
+            const termsAll = this.tokenizeSearch(String(search));
+            const maxTerms = Number.isFinite(this.cfg?.maxSearchTerms as number) ? Number(this.cfg?.maxSearchTerms) : undefined;
+            const terms = maxTerms ? termsAll.slice(0, maxTerms) : termsAll;
             if (!terms.length) return;
-            const fields = this.stringPropertyNames();
-            if (!fields.length) return;
+            let fields = this.resolveSearchableFields();
+            const maxFields = Number.isFinite(this.cfg?.maxSearchFields as number) ? Number(this.cfg?.maxSearchFields) : undefined;
+            if (maxFields && fields.length > maxFields) fields = fields.slice(0, maxFields);
+
+            if (!fields.length) {
+                const mode = this.cfg?.searchMode ?? 'annotated';
+                if (this.cfg?.strict || mode !== 'all') {
+                    throw new HttpErrors.BadRequest('No searchable fields configured for $search.');
+                }
+                return; // non-strict/no-op fallback if ever needed
+            }
+
             const likeClauses = terms.flatMap(term =>
                 fields.map(f => ({ [f]: { like: `%${term.replace(/%/g, '\\%').replace(/_/g, '\\_')}%`, escape: '\\', options: 'i' } } as AnyObject)),
             );
