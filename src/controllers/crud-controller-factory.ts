@@ -238,6 +238,54 @@ export function defineODataCrudController(def: EntitySetDef) {
             return {props, relations};
         }
 
+        stringPropertyNames(): string[] {
+            const props = modelDefinition?.properties ?? {};
+            const out: string[] = [];
+            for (const [name, def] of Object.entries(props)) {
+                const type = (def as any)?.type;
+                const typeName = typeof type === 'function' ? type.name.toLowerCase() : String(type ?? '').toLowerCase();
+                if (type === String || typeName === 'string') out.push(name);
+            }
+            return out;
+        }
+
+        applySearch(base: Filter<CrudEntity>, search?: string) {
+            if (!search) return;
+            const terms = this.tokenizeSearch(String(search));
+            if (!terms.length) return;
+            const fields = this.stringPropertyNames();
+            if (!fields.length) return;
+            const likeClauses = terms.flatMap(term =>
+                fields.map(f => ({ [f]: { like: `%${term.replace(/%/g, '\\%').replace(/_/g, '\\_')}%`, escape: '\\', options: 'i' } } as AnyObject)),
+            );
+            const orWhere = { or: likeClauses } as Filter<CrudEntity>['where'];
+            if (base.where) {
+                base.where = { and: [base.where, orWhere] } as any;
+            } else {
+                base.where = orWhere;
+            }
+        }
+
+        tokenizeSearch(text: string): string[] {
+            const tokens: string[] = [];
+            let current = '';
+            let inQuote = false;
+            for (let i = 0; i < text.length; i++) {
+                const ch = text[i];
+                if (ch === '"' || ch === '\'') {
+                    inQuote = !inQuote;
+                    continue;
+                }
+                if (!inQuote && /\s/.test(ch)) {
+                    if (current) { tokens.push(current); current = ''; }
+                    continue;
+                }
+                current += ch;
+            }
+            if (current) tokens.push(current);
+            return tokens.filter(Boolean);
+        }
+
         collectWhereFields(where: AnyObject | undefined, out: Set<string>) {
             if (!where || typeof where !== 'object') return;
             for (const [key, value] of Object.entries(where)) {
@@ -526,6 +574,8 @@ export function defineODataCrudController(def: EntitySetDef) {
                 delete (parsedFilter as { inlineCount?: boolean }).inlineCount;
                 this.mergeFilters(baseFilter, parsedFilter);
                 this.ensureEtagField(baseFilter);
+                // apply $search if present
+                this.applySearch(baseFilter, (parsed as any).search);
             } catch (error) {
                 const message = (error as Error).message ?? 'Invalid OData query.';
                 throw new HttpErrors.BadRequest(message);
@@ -617,6 +667,7 @@ export function defineODataCrudController(def: EntitySetDef) {
                 const parsedFilter = { ...parsed } as Filter<CrudEntity> & { inlineCount?: boolean };
                 delete (parsedFilter as { inlineCount?: boolean }).inlineCount;
                 this.mergeFilters(baseFilter, parsedFilter);
+                this.applySearch(baseFilter, (parsed as any).search);
             } catch (error) {
                 const message = (error as Error).message ?? 'Invalid OData query.';
                 throw new HttpErrors.BadRequest(message);
@@ -678,6 +729,7 @@ export function defineODataCrudController(def: EntitySetDef) {
                 if (parsed.include) sanitized.include = parsed.include;
                 this.mergeFilters(baseFilter as Filter<CrudEntity>, sanitized);
                 this.ensureEtagField(baseFilter as Filter<CrudEntity>);
+                this.applySearch(baseFilter as Filter<CrudEntity>, (parsed as any).search);
             } catch (error) {
                 const message = (error as Error).message ?? 'Invalid OData query.';
                 throw new HttpErrors.BadRequest(message);

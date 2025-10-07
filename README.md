@@ -301,6 +301,44 @@ The extension validates relation names against the model metadata and produces t
 
 > **Note:** OData identifiers are case-sensitive. Use the exact navigation property names exposed in `$metadata` (for example, `$expand=orders` not `$expand=Orders`).
 
+Advanced filter helpers supported:
+
+- Logical NOT
+
+```http
+GET /odata/Products?$filter=not price gt 100
+```
+
+```json
+{"where": {"price": {"lte": 100}}}
+```
+
+- Numeric functions: `round`, `floor`, `ceiling`
+
+```http
+GET /odata/Products?$filter=round(price) eq 10
+```
+
+```json
+{"where": {"and": [{"price": {"gte": 9.5}}, {"price": {"lt": 10.5}}]}}
+```
+
+- Date extraction: `year(<DateTimeOffset>) eq <year>`
+
+```http
+GET /odata/Orders?$filter=year(updatedAt) eq 2024
+```
+
+Translates to a UTC date range for that year.
+
+- Basic `$search`
+
+```http
+GET /odata/Products?$search=Laptop
+```
+
+Performs a case‑insensitive substring search across all string properties of the model. Multiple terms are OR’ed. Quoted phrases are treated as a single token. Boolean operators are not yet interpreted.
+
 Enable inline counts by passing `$count=true` alongside other query options:
 
 ```http
@@ -577,6 +615,7 @@ Run `npm test` to compile the TypeScript specs and execute the unit suite. Accep
 - [x] Service document exposing registered entity sets
 - [x] $metadata endpoint with generated CSDL (including navigation properties for relations)
 - [x] Basic query options → LoopBack filters (`$filter`, `$orderby`, `$top`, `$skip`, `$select`)
+- [x] Extended filter support: `not`, numeric functions (`round`, `floor`, `ceiling`), date extraction (`year`), and basic `$search` across string fields
 - [x] Relational expansion via `$expand`
 - [x] Inline and standalone `$count`
 - [x] `$batch` endpoint (JSON and multipart/mixed)
@@ -617,7 +656,7 @@ this.bind(ODATA_BINDINGS.CONFIG).to({
 - `strict` (default: true): Enables stricter validations and policies:
   - Requires `If-Match` on `PATCH`/`DELETE` when ETags are enabled (428 if missing).
   - If `maxTop` is set, `$top` above the cap returns `400 Bad Request` instead of being clamped.
-  - Rejects unknown system query options (e.g., `$search`, `$levels`) with `400 Bad Request`.
+  - Rejects unknown system query options (e.g., `$levels`, `$apply`) with `400 Bad Request`.
   - Validates `$select`, `$orderby`, `$filter` fields against model properties; unknown fields return `400 Bad Request`.
   - Enforces content negotiation: `Accept` must allow `application/json` for CRUD; `$metadata` must allow `application/xml` (or JSON if configured); non‑JSON `Content-Type` on writes returns `415`.
 
@@ -629,7 +668,7 @@ Example: With `{basePath: '/api/odata', maxTop: 100, enableCount: false}`
 
 ## Roadmap
 
-- [ ] Full OData filter grammar: nested groups, numeric/date functions, `$search`, `any`/`all`
+- [ ] Remaining filter grammar: `any`/`all` (lambdas), additional string/date functions (`length`, `indexof`, `substring`, `trim`, `concat`, `month`, `day`, `hour`, `minute`, `second`), and advanced `$search` (boolean operators, precedence)
 - [ ] Robust path rewriting for GUID, quoted, and alternate keys without `\w+` heuristics
 - [ ] Richer EDMX output (complex/collection types, precision metadata, annotations, navigation partners)
 - [ ] Draft/deep insert workflows, localized fields, and SAP Fiori-friendly annotations

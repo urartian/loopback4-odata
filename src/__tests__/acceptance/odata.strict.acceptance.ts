@@ -36,7 +36,7 @@ describe('OData strict mode acceptance', () => {
   });
 
   it('rejects unknown $ query options', async () => {
-    const res = await client.get('/odata/Products').query({$search: 'foo'}).expect(400);
+    const res = await client.get('/odata/Products').query({$levels: '2'} as any).expect(400);
     expect(res.body?.error?.code).to.equal('BadRequest');
     expect(String(res.body?.error?.message || '')).to.match(/Unsupported query option/i);
   });
@@ -66,4 +66,3 @@ describe('OData strict mode acceptance', () => {
     expect(res.body?.error?.code).to.equal('NotAcceptable');
   });
 });
-
