@@ -463,6 +463,8 @@ export class ODataBatchController {
     req.url = url;
     const combinedHeaders = this.buildHeadersForRequest(request, parentRequest);
     (req as any).headers = combinedHeaders;
+    const [pathOnly] = url.split('?');
+    (req as any).path = pathOnly;
     if (bodyBuffer.length && !combinedHeaders['content-type']) {
       combinedHeaders['content-type'] = 'application/json';
     }
