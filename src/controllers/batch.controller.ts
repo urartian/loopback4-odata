@@ -549,16 +549,19 @@ export class ODataBatchController {
     }
 
     context.applyTo(req);
-    const handlerPromise = this.httpHandler.handleRequest(req as any, res as any);
+    const handlerPromise = this.httpHandler.handleRequest(req as any, res as any).catch(() => undefined);
 
-    socket.end(bodyBuffer.length ? bodyBuffer : undefined);
+    // Feed request body to the IncomingMessage stream directly
+    if (bodyBuffer.length) {
+      (req as any).push(bodyBuffer);
+    }
+    (req as any).push(null);
 
     try {
-      // Add per-request timeout to avoid hangs
+      // Add per-request timeout to avoid hangs; wait for finish/close
       const TIMEOUT_MS = 30000;
       const timeoutPromise = new Promise<never>((_, reject) => setTimeout(() => reject(new Error('Batch sub-request timeout')), TIMEOUT_MS));
-      await Promise.race([handlerPromise, timeoutPromise]);
-      const result = await finishPromise;
+      const result = await Promise.race([finishPromise, timeoutPromise]);
       context.clearFrom(req);
       return result;
     } catch (error) {
