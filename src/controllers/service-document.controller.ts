@@ -1,5 +1,5 @@
 import {inject} from '@loopback/core';
-import {get, Response, RestBindings} from '@loopback/rest';
+import {get, Response, RestBindings, Request} from '@loopback/rest';
 import {ODATA_BINDINGS} from '../keys';
 import {EntitySetRegistry} from '../registry/entityset-registry';
 import {ODataConfig} from '../types';
@@ -66,7 +66,21 @@ export class ODataServiceDocumentController {
     })
     getServiceDocument(
         @inject(RestBindings.Http.RESPONSE) response: Response,
+        @inject(RestBindings.Http.REQUEST) request: Request,
     ): ServiceDocumentPayload {
+        if (this.config?.strict) {
+            const accept = request.get('Accept') ?? (request.headers?.['accept'] as string | undefined);
+            if (accept && accept.trim()) {
+                const lower = accept.toLowerCase();
+                const ok = lower.includes('application/json') || lower.includes('*/*') || /application\s*\/\s*\*/.test(lower);
+                if (!ok) {
+                    const err: any = new Error('NotAcceptable');
+                    err.statusCode = 406;
+                    err.code = 'NotAcceptable';
+                    throw err;
+                }
+            }
+        }
         if (!response.getHeader('OData-Version')) {
             response.set('OData-Version', ODATA_VERSION);
         }

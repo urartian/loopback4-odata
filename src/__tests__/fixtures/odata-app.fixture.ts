@@ -25,6 +25,7 @@ import {
   odataController,
   odataFunction,
   odataModel,
+  odataSearchable,
 } from '../../index';
 
 const MEMORY_DS_CONFIG = {
@@ -46,6 +47,7 @@ export class Product extends Entity {
   id!: number;
 
   @property()
+  @odataSearchable()
   name!: string;
 
   @property()
