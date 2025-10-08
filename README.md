@@ -694,6 +694,7 @@ Run `npm test` to compile the TypeScript specs and execute the unit suite. Accep
 - [x] Configurable base path (`basePath`), `$top` limit (`maxTop`), `$count` toggle (`enableCount`), and strict mode validations
 - [x] Opt-in `$search` with field-level decorators and configuration
 - [x] Configurable CSDL namespace/container names and JSON CSDL output with enriched primitive facets
+- [x] Complex types, enum types, and referential constraints reflected in generated CSDL (XML & JSON)
 
 ## Configuration
 
@@ -751,7 +752,7 @@ Example: With `{basePath: '/api/odata', maxTop: 100, enableCount: false}`
 - [ ] Filter functions: add string (`length`, `indexof`, `substring`, `trim`, `concat`) and date/time parts (`month`, `day`, `hour`, `minute`, `second`); return 400 in strict mode when unsupported by connector
 - [ ] $search hardening: boolean operators (AND/OR/NOT), quoted phrases with correct precedence; enforce `maxSearchFields` / `maxSearchTerms`; connector hooks for FTS
 - [ ] Limits & safety: `maxExpandDepth` (and optional `maxSkip`) to prevent heavy queries in strict mode
-- [ ] CSDL improvements: emit Capabilities annotations (e.g., `Org.OData.Capabilities.*`, `SearchRestrictions.Searchable`), surface navigation partners/referential constraints, and add complex/enum type support
+- [ ] CSDL improvements: emit Capabilities annotations (e.g., `Org.OData.Capabilities.*`, `SearchRestrictions.Searchable`), add navigation metadata (HasStream, annotations), and support complex type inheritance
 - [ ] Path rewriting polish: alternate/compound keys and robust quoting beyond `\w+` heuristics
 - [ ] Draft/deep insert workflows, localized fields, and SAP Fiori-friendly annotations
 

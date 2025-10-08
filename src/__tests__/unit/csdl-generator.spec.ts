@@ -2,6 +2,7 @@ import 'reflect-metadata';
 import {expect} from '@loopback/testlab';
 import {
   Entity,
+  Model,
   model,
   property,
   hasMany,
@@ -9,6 +10,15 @@ import {
 } from '@loopback/repository';
 import {CsdlGenerator} from '../../metadata/csdl-generator';
 import {EntitySetRegistry, EntitySetDef} from '../../registry/entityset-registry';
+
+@model()
+class Dimensions extends Model {
+  @property({type: 'number'})
+  width!: number;
+
+  @property({type: 'number'})
+  height!: number;
+}
 
 @model()
 class Gadget extends Entity {
@@ -43,10 +53,17 @@ class Widget extends Entity {
   @property({type: 'array', itemType: 'string'})
   tags?: string[];
 
+  @property({type: () => Dimensions})
+  dimensions?: Dimensions;
+
   @property({type: 'date', required: true})
   updatedAt!: Date;
 
-  @property({type: 'string', default: 'draft'})
+  @property({
+    type: 'string',
+    default: 'draft',
+    jsonSchema: {enum: ['draft', 'active', 'discontinued']},
+  })
   status?: string;
 
   @hasMany(() => Gadget)
@@ -107,7 +124,6 @@ describe('CsdlGenerator', () => {
 
   it('produces enriched XML metadata', () => {
     const xml = generator.generate('xml');
-
     expect(xml.includes('<Schema Namespace="Catalog"')).to.be.true();
     expect(xml.includes('<EntityType Name="Widget">')).to.be.true();
     expect(
@@ -121,10 +137,22 @@ describe('CsdlGenerator', () => {
     expect(xml.includes('Scale="2"')).to.be.true();
     expect(xml.includes('<Property Name="sku" Type="Edm.Guid" Nullable="true"')).to.be.true();
     expect(
-      xml.includes('<Property Name="status" Type="Edm.String" Nullable="true" DefaultValue="draft"'),
+      xml.includes(
+        '<Property Name="status" Type="Catalog.WidgetStatusEnum" Nullable="true" DefaultValue="draft"',
+      ),
     ).to.be.true();
+    expect(xml.includes('<ComplexType Name="Dimensions">')).to.be.true();
+    expect(xml.includes('<Property Name="dimensions" Type="Catalog.Dimensions" Nullable="true"')).to.be.true();
+    expect(xml.includes('<EnumType Name="WidgetStatusEnum"')).to.be.true();
+    expect(xml.includes('Type="Catalog.WidgetStatusEnum"')).to.be.true();
     expect(
       xml.includes('<NavigationProperty Name="gadgets" Type="Collection(Catalog.Gadget)"'),
+    ).to.be.true();
+    expect(
+      xml.includes('<NavigationProperty Name="gadgets" Type="Collection(Catalog.Gadget)" Partner="widget">'),
+    ).to.be.true();
+    expect(
+      xml.includes('<ReferentialConstraint Property="widgetId" ReferencedProperty="id" />'),
     ).to.be.true();
     expect(xml.includes('PropertyPath>updatedAt</PropertyPath>')).to.be.true();
     expect(xml.includes('<Action Name="resetInventory" IsBound="true">')).to.be.true();
@@ -150,10 +178,25 @@ describe('CsdlGenerator', () => {
     expect(schema.Widget.price.Scale).to.equal(2);
     expect(schema.Widget.sku.$Type).to.equal('Edm.Guid');
     expect(schema.Widget.tags.$Type).to.equal('Collection(Edm.String)');
+    expect(schema.Widget.dimensions.$Type).to.equal('Catalog.Dimensions');
     expect(schema.Widget['updatedAt@ConcurrencyMode']).to.equal('Fixed');
+    expect(schema.Dimensions.$Kind).to.equal('ComplexType');
+    expect(schema.Dimensions.width.$Type).to.equal('Edm.Double');
+    expect(schema.Widget.status.$Type).to.equal('Catalog.WidgetStatusEnum');
+    expect(schema.WidgetStatusEnum.$Kind).to.equal('EnumType');
+    expect(schema.WidgetStatusEnum.Members).to.have.length(3);
     expect(schema.Widget.status.DefaultValue).to.equal('draft');
     expect(schema.Widget.gadgets.$Kind).to.equal('NavigationProperty');
     expect(schema.Widget.gadgets.$Type).to.equal('Collection(Catalog.Gadget)');
+    expect(schema.Widget.gadgets.$Partner).to.equal('widget');
+    expect(schema.Widget.gadgets.$ReferentialConstraint[0]).to.containDeep({
+      Property: 'widgetId',
+      ReferencedProperty: 'id',
+    });
+    expect(schema.Gadget.widget.$ReferentialConstraint[0]).to.containDeep({
+      Property: 'widgetId',
+      ReferencedProperty: 'id',
+    });
 
     expect(schema).to.have.property('resetInventory');
     expect(schema.resetInventory.$Kind).to.equal('Action');

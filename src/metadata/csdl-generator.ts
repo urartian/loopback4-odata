@@ -8,6 +8,27 @@ import { ODataConfig } from '../types';
 const EDM_NAMESPACE = 'http://docs.oasis-open.org/odata/ns/edm';
 const EDMX_NAMESPACE = 'http://docs.oasis-open.org/odata/ns/edmx';
 
+interface ComplexTypeResult {
+    name: string;
+    xml: string;
+    json: Record<string, unknown>;
+    ctor: Function;
+}
+
+interface EnumTypeResult {
+    name: string;
+    xml: string;
+    json: Record<string, unknown>;
+}
+
+interface SchemaBuildContext {
+    namespace: string;
+    complexTypes: Map<Function, ComplexTypeResult>;
+    enumTypes: Map<string, EnumTypeResult>;
+    visitingComplex: Set<Function>;
+    usedTypeNames: Set<string>;
+}
+
 const PRIMITIVE_TYPE_MAP = new Map<unknown, string>([
     [String, 'Edm.String'],
     ['string', 'Edm.String'],
@@ -29,6 +50,145 @@ interface ResolvedEdmType {
     facets?: Record<string, unknown>;
 }
 
+function registerEnumType(
+    context: SchemaBuildContext,
+    ownerName: string,
+    propertyName: string,
+    values: unknown[],
+): string | undefined {
+    if (!values.length) return undefined;
+    const nonNullValues = values.filter(v => v !== undefined && v !== null);
+    if (!nonNullValues.length) return undefined;
+
+    const isNumeric = nonNullValues.every(v => typeof v === 'number' && Number.isFinite(v as number));
+    const isString = nonNullValues.every(v => typeof v === 'string');
+    if (!isNumeric && !isString) return undefined;
+
+    const baseName = `${ownerName}${capitalize(propertyName)}Enum`;
+    const enumName = reserveTypeName(context, baseName);
+    const underlyingType = isNumeric
+        ? nonNullValues.some(v => Math.abs(v as number) > 2147483647)
+            ? 'Edm.Int64'
+            : 'Edm.Int32'
+        : 'Edm.String';
+
+    const numericValues = isNumeric ? (nonNullValues as number[]) : [];
+    const hasNonZero = numericValues.some(v => v !== 0);
+    const isFlags = isNumeric && numericValues.every(v => v === 0 || (v & (v - 1)) === 0) && hasNonZero;
+
+    const seenNames = new Set<string>();
+    const membersXml: string[] = [];
+    const membersJson: Array<Record<string, unknown>> = [];
+
+    nonNullValues.forEach((value, index) => {
+        const nameCandidate = sanitizeEnumMemberName(value ?? index);
+        let memberName = nameCandidate;
+        let counter = 1;
+        while (seenNames.has(memberName)) {
+            memberName = `${nameCandidate}_${++counter}`;
+        }
+        seenNames.add(memberName);
+        const valueAttr = isNumeric ? String(value) : xmlEscape(String(value));
+        membersXml.push(
+            `    <Member Name="${xmlEscape(memberName)}"${isNumeric ? ` Value="${valueAttr}"` : ` Value="${valueAttr}"`} />`,
+        );
+        const memberJson: Record<string, unknown> = { Name: memberName };
+        if (isNumeric || isString) {
+            memberJson.Value = value;
+        }
+        membersJson.push(memberJson);
+    });
+
+    const attributes: string[] = [`Name="${xmlEscape(enumName)}"`];
+    if (underlyingType !== 'Edm.Int32') {
+        attributes.push(`UnderlyingType="${underlyingType}"`);
+    }
+    if (isFlags) {
+        attributes.push('IsFlags="true"');
+    }
+
+    const xml = [
+        `    <EnumType ${attributes.join(' ')}>`,
+        ...membersXml,
+        '    </EnumType>',
+    ].join('\n');
+
+    const enumJson: Record<string, unknown> = {
+        $Kind: 'EnumType',
+    };
+    if (underlyingType !== 'Edm.Int32') {
+        enumJson.$UnderlyingType = underlyingType;
+    }
+    if (isFlags) {
+        enumJson.$IsFlags = true;
+    }
+    enumJson.Members = membersJson;
+
+    context.enumTypes.set(enumName, { name: enumName, xml, json: enumJson });
+    return `${context.namespace}.${enumName}`;
+}
+
+function ensureComplexType(ctor: Function, context: SchemaBuildContext): ComplexTypeResult | undefined {
+    const existing = context.complexTypes.get(ctor);
+    if (existing) return existing;
+    if (context.visitingComplex.has(ctor)) return undefined;
+
+    const definition = (ctor as typeof Entity).definition as ModelDefinition | undefined;
+    if (!definition) return undefined;
+
+    context.visitingComplex.add(ctor);
+    const preferredName = definition.name ?? (ctor as { name?: string }).name ?? 'ComplexType';
+    const name = reserveTypeName(context, preferredName);
+    const result = buildComplexType(name, definition, ctor, context);
+    context.complexTypes.set(ctor, result);
+    context.visitingComplex.delete(ctor);
+    return result;
+}
+
+function buildComplexType(
+    name: string,
+    definition: ModelDefinition,
+    ctor: Function,
+    context: SchemaBuildContext,
+): ComplexTypeResult {
+    const propertyLines: string[] = [];
+    const json: Record<string, unknown> = {$Kind: 'ComplexType'};
+    const properties = definition.properties ?? {};
+
+    for (const [propertyName, propertyMeta] of Object.entries(properties)) {
+        const propertyDef = propertyMeta as PropertyDefinition;
+        const resolved = resolveEdmType(propertyDef, context, name, propertyName);
+        if (!resolved) continue;
+
+        const isRequired = Boolean(propertyDef.required) || Boolean(propertyDef.id);
+        const nullable = isRequired ? 'false' : 'true';
+        const attrs: string[] = [
+            `Name="${xmlEscape(propertyName)}"`,
+            `Type="${xmlEscape(resolved.type)}"`,
+            `Nullable="${nullable}"`,
+        ];
+        const propertySchema: Record<string, unknown> = {$Type: resolved.type};
+        if (isRequired) {
+            propertySchema.Nullable = false;
+        }
+        if (resolved.facets) {
+            for (const [facetName, facetValue] of Object.entries(resolved.facets)) {
+                attrs.push(`${facetName}="${xmlEscape(String(facetValue))}"`);
+                propertySchema[facetName] = facetValue;
+            }
+        }
+        propertyLines.push(`      <Property ${attrs.join(' ')} />`);
+        json[propertyName] = propertySchema;
+    }
+
+    const xml = [
+        `    <ComplexType Name="${xmlEscape(name)}">`,
+        ...propertyLines,
+        '    </ComplexType>',
+    ].join('\n');
+
+    return { name, xml, json, ctor };
+}
 function normalizeJsonSchema(def: PropertyDefinition): Record<string, unknown> | undefined {
     const schema = def.jsonSchema as Record<string, unknown> | undefined;
     if (schema) return schema;
@@ -124,49 +284,58 @@ function resolvePrimitiveType(
     return { type: 'Edm.String' };
 }
 
-function resolveCollectionItem(def: PropertyDefinition): ResolvedEdmType | undefined {
-    const schema = normalizeJsonSchema(def);
-    const items = schema?.items as Record<string, unknown> | undefined;
-    if (items) {
-        const itemDef: PropertyDefinition = {
-            type: items?.type as any,
-            jsonSchema: items,
-        };
-        // Preserve nested metadata such as format
-        const resolved = resolvePrimitiveType(itemDef.type, items);
-        if (resolved) return resolved;
-    }
-
-    const itemType = (def as unknown as { itemType?: unknown }).itemType;
-    if (itemType) {
-        return resolvePrimitiveType(itemType, typeof itemType === 'object' ? itemType as any : undefined);
-    }
-
-    return undefined;
-}
-
-function resolveEdmType(def: PropertyDefinition): ResolvedEdmType | undefined {
+function resolveEdmType(
+    def: PropertyDefinition,
+    context: SchemaBuildContext,
+    ownerName: string,
+    propertyName: string,
+): ResolvedEdmType | undefined {
     const schema = normalizeJsonSchema(def);
     const schemaAny = schema as Record<string, unknown> | undefined;
     const type = def.type;
+    const effectiveType = unwrapPropertyType(type);
+    const defaultValue = (def as { default?: unknown }).default ?? schemaAny?.default;
 
     if (Array.isArray(type) || type === 'array' || (schemaAny?.type === 'array')) {
-        const arrayItemDef: PropertyDefinition = {
-            ...(typeof type === 'object' && !Array.isArray(type) ? type : {}),
-            type: Array.isArray(type) ? type[0] : undefined,
-            jsonSchema: (schemaAny?.items as Record<string, unknown> | undefined) ?? undefined,
+        const itemsSchema = schemaAny?.items as Record<string, unknown> | undefined;
+        const explicitItemType = Array.isArray(type) ? type[0] : (def as unknown as { itemType?: unknown }).itemType;
+        const effectiveItemType = unwrapPropertyType(explicitItemType ?? (itemsSchema?.type as unknown));
+        const nestedDef: PropertyDefinition = {
+            ...(itemsSchema as Record<string, unknown> | undefined),
+            type: effectiveItemType ?? explicitItemType ?? (itemsSchema?.type as unknown),
         } as PropertyDefinition;
-        const item = resolveCollectionItem(def) ?? resolveEdmType(arrayItemDef);
-        if (!item) return undefined;
-        return { type: `Collection(${item.type})` };
+        const item = resolveEdmType(
+            nestedDef,
+            context,
+            ownerName,
+            propertyName,
+        );
+        const itemType = item?.type ?? 'Edm.String';
+        return { type: `Collection(${itemType})` };
     }
 
-    if (typeof type === 'function' && 'modelName' in type) {
-        // relations / complex types handled later
-        return undefined;
+    if (schemaAny && Array.isArray(schemaAny.enum) && schemaAny.enum.length) {
+        const fqEnum = registerEnumType(context, ownerName, propertyName, schemaAny.enum);
+        if (fqEnum) {
+            const facets = defaultValue !== undefined ? { DefaultValue: defaultValue } : undefined;
+            return { type: fqEnum, facets };
+        }
     }
 
-    const resolved = resolvePrimitiveType(type, schema);
+    if (typeof effectiveType === 'function') {
+        const ctor = effectiveType as Function;
+        const proto = (ctor as any)?.prototype;
+        if (!(proto && proto instanceof Entity)) {
+            if ((ctor as any)?.definition) {
+                const complex = ensureComplexType(ctor, context);
+                if (complex) {
+                    return { type: `${context.namespace}.${complex.name}` };
+                }
+            }
+        }
+    }
+
+    const resolved = resolvePrimitiveType(effectiveType, schema);
     if (!resolved) return undefined;
 
     const facets: Record<string, unknown> = {};
@@ -188,7 +357,6 @@ function resolveEdmType(def: PropertyDefinition): ResolvedEdmType | undefined {
     if (typeof unicode === 'boolean') {
         facets.Unicode = unicode;
     }
-    const defaultValue = (def as { default?: unknown }).default ?? schemaAny?.default;
     if (defaultValue !== undefined) {
         facets.DefaultValue = defaultValue;
     }
@@ -224,6 +392,7 @@ function buildEntityType(
     def: EntitySetDef,
     namespace: string,
     setLookup: Map<typeof Entity, EntitySetDef>,
+    context: SchemaBuildContext,
 ): EntityTypeResult | undefined {
     const modelDefinition = (def.modelCtor as typeof Entity).definition as ModelDefinition | undefined;
     if (!modelDefinition) return undefined;
@@ -241,7 +410,7 @@ function buildEntityType(
 
     for (const [propertyName, propertyMeta] of Object.entries(properties)) {
         const propertyDef = propertyMeta as PropertyDefinition;
-        const resolved = resolveEdmType(propertyDef);
+        const resolved = resolveEdmType(propertyDef, context, entityName, propertyName);
         if (!resolved) continue;
 
         const isRequired = Boolean(propertyDef.required) || Boolean(propertyDef.id);
@@ -289,14 +458,47 @@ function buildEntityType(
             ? `Collection(${namespace}.${xmlEscape(targetEntityName)})`
             : `${namespace}.${xmlEscape(targetEntityName)}`;
 
-        navigationLines.push(
-            `      <NavigationProperty Name="${xmlEscape(relationName)}" Type="${qualifiedType}" />`,
+        const partnerInfo = resolvePartnerRelation(targetDefinition, def.modelCtor as typeof Entity);
+        const partnerName = partnerInfo.name;
+        const constraints = collectReferentialConstraints(
+            relationDef as RelationDefinitionMap[string],
+            partnerInfo.relation,
+            targetDefinition,
         );
+
+        const navAttrs: string[] = [
+            `Name="${xmlEscape(relationName)}"`,
+            `Type="${qualifiedType}"`,
+        ];
+        if (partnerName) {
+            navAttrs.push(`Partner="${xmlEscape(partnerName)}"`);
+        }
+
+        if (constraints.length) {
+            navigationLines.push(`      <NavigationProperty ${navAttrs.join(' ')}>`);
+            for (const constraint of constraints) {
+                navigationLines.push(
+                    `        <ReferentialConstraint Property="${xmlEscape(constraint.property)}" ReferencedProperty="${xmlEscape(constraint.referencedProperty)}" />`,
+                );
+            }
+            navigationLines.push('      </NavigationProperty>');
+        } else {
+            navigationLines.push(`      <NavigationProperty ${navAttrs.join(' ')} />`);
+        }
+
         navigationBindings.push({ path: relationName, target: targetSet.name });
-        json[relationName] = {
+        const navJson: Record<string, unknown> = {
             $Kind: 'NavigationProperty',
             $Type: qualifiedType,
         };
+        if (partnerName) navJson.$Partner = partnerName;
+        if (constraints.length) {
+            navJson.$ReferentialConstraint = constraints.map(item => ({
+                Property: item.property,
+                ReferencedProperty: item.referencedProperty,
+            }));
+        }
+        json[relationName] = navJson;
     }
 
     if (!propertyLines.length && !navigationLines.length) return undefined;
@@ -338,11 +540,15 @@ export class CsdlGenerator {
     generate(format: 'xml' | 'json' = 'xml'): string {
         const entitySets = this.registry.list();
         const entityTypesXml: string[] = [];
+        const complexTypesXml: string[] = [];
+        const enumTypesXml: string[] = [];
         const containerSetsXml: string[] = [];
         const actionXml: string[] = [];
         const functionXml: string[] = [];
         const operationImportsXml: string[] = [];
 
+        const jsonComplexTypes: Record<string, unknown> = {};
+        const jsonEnumTypes: Record<string, unknown> = {};
         const jsonEntityTypes: Record<string, unknown> = {};
         const jsonEntitySets: Record<string, unknown> = {};
         const jsonActions: Record<string, unknown> = {};
@@ -352,13 +558,27 @@ export class CsdlGenerator {
         const namespace = this.normalizeNamespace(this.cfg?.namespace);
         const containerName = this.normalizeContainerName(this.cfg?.entityContainerName);
 
+        const context: SchemaBuildContext = {
+            namespace,
+            complexTypes: new Map(),
+            enumTypes: new Map(),
+            visitingComplex: new Set(),
+            usedTypeNames: new Set(),
+        };
+
         const setLookup = new Map<typeof Entity, EntitySetDef>();
         for (const set of entitySets) {
             setLookup.set(set.modelCtor, set);
         }
 
         for (const set of entitySets) {
-            const entityType = buildEntityType(set, namespace, setLookup);
+            const definition = (set.modelCtor as typeof Entity).definition as ModelDefinition | undefined;
+            const entityName = definition?.name ?? set.modelCtor.name;
+            if (entityName) context.usedTypeNames.add(entityName);
+        }
+
+        for (const set of entitySets) {
+            const entityType = buildEntityType(set, namespace, setLookup, context);
             if (!entityType) continue;
 
             entityTypesXml.push(entityType.xml);
@@ -428,8 +648,30 @@ export class CsdlGenerator {
             }
         }
 
+        const complexList = Array.from(context.complexTypes.values()).sort((a, b) => a.name.localeCompare(b.name));
+        for (const complex of complexList) {
+            complexTypesXml.push(complex.xml);
+            jsonComplexTypes[complex.name] = complex.json;
+        }
+
+        const enumList = Array.from(context.enumTypes.values()).sort((a, b) => a.name.localeCompare(b.name));
+        for (const enumType of enumList) {
+            enumTypesXml.push(enumType.xml);
+            jsonEnumTypes[enumType.name] = enumType.json;
+        }
+
         if (format === 'json') {
-            return this.buildJsonDocument(namespace, containerName, jsonEntityTypes, jsonEntitySets, jsonActions, jsonFunctions, jsonImports);
+            return this.buildJsonDocument(
+                namespace,
+                containerName,
+                jsonEntityTypes,
+                jsonEntitySets,
+                jsonActions,
+                jsonFunctions,
+                jsonImports,
+                jsonComplexTypes,
+                jsonEnumTypes,
+            );
         }
 
         return [
@@ -437,6 +679,8 @@ export class CsdlGenerator {
             `<edmx:Edmx Version="4.0" xmlns:edmx="${EDMX_NAMESPACE}">`,
             '  <edmx:DataServices>',
             `    <Schema Namespace="${namespace}" xmlns="${EDM_NAMESPACE}">`,
+            ...complexTypesXml,
+            ...enumTypesXml,
             ...entityTypesXml,
             ...actionXml,
             ...functionXml,
@@ -470,10 +714,14 @@ export class CsdlGenerator {
         actions: Record<string, unknown>,
         functions: Record<string, unknown>,
         imports: Record<string, unknown>,
+        complexTypes: Record<string, unknown>,
+        enumTypes: Record<string, unknown>,
     ): string {
         const schema: Record<string, unknown> = {
             $Kind: 'Schema',
             EntityContainer: `${namespace}.${containerName}`,
+            ...complexTypes,
+            ...enumTypes,
             ...entityTypes,
         };
 
@@ -590,4 +838,99 @@ export class CsdlGenerator {
             jsonImport,
         };
     }
+}
+function capitalize(name: string): string {
+    return name ? name.charAt(0).toUpperCase() + name.slice(1) : name;
+}
+
+function sanitizeEnumMemberName(value: unknown): string {
+    const str = String(value ?? '');
+    const sanitized = str
+        .replace(/[^A-Za-z0-9]/g, '_')
+        .replace(/_{2,}/g, '_')
+        .replace(/^_+|_+$/g, '');
+    const candidate = sanitized || 'Value';
+    return candidate[0].match(/[A-Za-z]/) ? candidate : `Value_${candidate}`;
+}
+
+function reserveTypeName(context: SchemaBuildContext, preferred: string): string {
+    let base = preferred && preferred.trim().length ? preferred : 'Type';
+    base = base.replace(/[^A-Za-z0-9]/g, '');
+    if (!base.length) base = 'Type';
+    let name = base;
+    let counter = 1;
+    while (context.usedTypeNames.has(name)) {
+        name = `${base}${++counter}`;
+    }
+    context.usedTypeNames.add(name);
+    return name;
+}
+
+function unwrapPropertyType(type: unknown): unknown {
+    if (typeof type === 'function') {
+        const candidate = type as Function;
+        if (candidate.prototype !== undefined && candidate !== Function.prototype) {
+            return candidate;
+        }
+        try {
+            const resolved = candidate();
+            if (typeof resolved === 'function') return resolved;
+            return resolved;
+        } catch {
+            return undefined;
+        }
+    }
+    return type;
+}
+
+function resolvePartnerRelation(
+    targetDefinition: ModelDefinition | undefined,
+    sourceCtor: typeof Entity,
+): { name?: string; relation?: RelationDefinitionMap[string] } {
+    if (!targetDefinition?.relations) return {};
+    const relations = targetDefinition.relations as RelationDefinitionMap;
+    for (const [name, rel] of Object.entries(relations)) {
+        const resolver = rel?.target;
+        if (typeof resolver !== 'function') continue;
+        let candidate: typeof Entity | undefined;
+        try {
+            candidate = resolver() as typeof Entity | undefined;
+        } catch {
+            candidate = undefined;
+        }
+        if (candidate === sourceCtor) {
+            return { name, relation: rel };
+        }
+    }
+    return {};
+}
+
+function collectReferentialConstraints(
+    relation: RelationDefinitionMap[string],
+    inverse: RelationDefinitionMap[string] | undefined,
+    targetDefinition: ModelDefinition | undefined,
+): Array<{ property: string; referencedProperty: string }> {
+    const constraints: Array<{ property: string; referencedProperty: string }> = [];
+    const addConstraint = (property?: string | string[]) => {
+        if (!property) return;
+        const list = Array.isArray(property) ? property : [property];
+        for (const prop of list) {
+            if (!prop) continue;
+            if (constraints.some(c => c.property === prop)) continue;
+            constraints.push({ property: prop, referencedProperty: '' });
+        }
+    };
+
+    addConstraint((relation as any)?.keyFrom);
+    addConstraint((relation as any)?.keyTo);
+    if (inverse) {
+        addConstraint((inverse as any)?.keyFrom);
+        addConstraint((inverse as any)?.keyTo);
+    }
+
+    if (!constraints.length) return constraints;
+
+    const targetKeys = targetDefinition?.idProperties?.() ?? ['id'];
+    const referenced = targetKeys[0] ?? 'id';
+    return constraints.map(item => ({ property: item.property, referencedProperty: referenced }));
 }
