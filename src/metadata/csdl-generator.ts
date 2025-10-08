@@ -3,7 +3,7 @@ import { Entity, ModelDefinition, PropertyDefinition, RelationDefinitionMap } fr
 import { EntitySetDef, EntitySetRegistry } from '../registry/entityset-registry';
 import { ODATA_BINDINGS } from '../keys';
 import { getODataActions, getODataFunctions, OperationMeta } from '../decorators/action.function.decorators';
-import { ODataConfig } from '../types';
+import { ODataConfig, ODataCapabilitiesConfig, ODataCapabilityDefaults, ODataNavigationRestriction, ODataEntityPermission } from '../types';
 
 const EDM_NAMESPACE = 'http://docs.oasis-open.org/odata/ns/edm';
 const EDMX_NAMESPACE = 'http://docs.oasis-open.org/odata/ns/edmx';
@@ -48,6 +48,42 @@ const PRIMITIVE_TYPE_MAP = new Map<unknown, string>([
 interface ResolvedEdmType {
     type: string;
     facets?: Record<string, unknown>;
+}
+
+type EffectiveCapabilities = ODataCapabilitiesConfig & {
+    navigationRestrictionDefaults?: ODataNavigationRestriction;
+};
+
+const DEFAULT_FILTER_FUNCTIONS = [
+    'contains',
+    'startswith',
+    'endswith',
+    'indexof',
+    'substring',
+    'length',
+    'round',
+    'floor',
+    'ceiling',
+    'year',
+];
+
+function mergeCapabilities(
+    defaults: ODataCapabilityDefaults | undefined,
+    overrides: ODataCapabilitiesConfig | undefined,
+): EffectiveCapabilities {
+    const navigationRestrictions = {
+        ...(defaults?.navigationRestrictions ?? {}),
+        ...(overrides?.navigationRestrictions ?? {}),
+    };
+
+    return {
+        filterFunctions: overrides?.filterFunctions ?? defaults?.filterFunctions,
+        countable: overrides?.countable ?? defaults?.countable,
+        navigationRestrictions: Object.keys(navigationRestrictions).length ? navigationRestrictions : undefined,
+        navigationRestrictionDefaults: defaults?.navigationRestrictionDefaults,
+        permissions: overrides?.permissions ?? defaults?.permissions,
+        hasStream: overrides?.hasStream ?? defaults?.hasStream,
+    };
 }
 
 function registerEnumType(
@@ -386,6 +422,7 @@ interface EntityTypeResult {
     xml: string;
     navigationBindings: NavigationBinding[];
     json: Record<string, unknown>;
+    relations: string[];
 }
 
 function buildEntityType(
@@ -393,6 +430,7 @@ function buildEntityType(
     namespace: string,
     setLookup: Map<typeof Entity, EntitySetDef>,
     context: SchemaBuildContext,
+    hasStream: boolean,
 ): EntityTypeResult | undefined {
     const modelDefinition = (def.modelCtor as typeof Entity).definition as ModelDefinition | undefined;
     if (!modelDefinition) return undefined;
@@ -405,8 +443,10 @@ function buildEntityType(
     if (keyProps.length) {
         json.$Key = keyProps;
     }
+    const annotationLines: string[] = [];
     const navigationLines: string[] = [];
     const navigationBindings: NavigationBinding[] = [];
+    const relationNames: string[] = [];
 
     for (const [propertyName, propertyMeta] of Object.entries(properties)) {
         const propertyDef = propertyMeta as PropertyDefinition;
@@ -440,6 +480,11 @@ function buildEntityType(
         json[propertyName] = propertySchema;
     }
 
+    if (hasStream) {
+        annotationLines.push('      <Annotation Term="Org.OData.Core.V1.HasStream" Bool="true"/>');
+        json['@Org.OData.Core.V1.HasStream'] = true;
+    }
+
     const relations = (modelDefinition.relations ?? {}) as RelationDefinitionMap;
     for (const [relationName, relationDef] of Object.entries(relations)) {
         const resolver = relationDef?.target;
@@ -453,6 +498,8 @@ function buildEntityType(
         const targetDefinition = (targetModel as typeof Entity).definition as ModelDefinition | undefined;
         const targetEntityName = targetDefinition?.name ?? targetModel.name;
         if (!targetEntityName) continue;
+
+        relationNames.push(relationName);
 
         const qualifiedType = relationDef.targetsMany
             ? `Collection(${namespace}.${xmlEscape(targetEntityName)})`
@@ -515,13 +562,14 @@ function buildEntityType(
         `    <EntityType Name="${xmlEscape(entityName)}">`,
         keySection,
         ...propertyLines,
+        ...annotationLines,
         ...navigationLines,
         '    </EntityType>',
     ]
         .filter(Boolean)
         .join('\n');
 
-    return { name: entityName, xml, navigationBindings, json };
+    return { name: entityName, xml, navigationBindings, json, relations: relationNames };
 }
 
 @injectable({ scope: BindingScope.SINGLETON })
@@ -556,7 +604,9 @@ export class CsdlGenerator {
         const jsonImports: Record<string, unknown> = {};
 
         const namespace = this.normalizeNamespace(this.cfg?.namespace);
+        const namespaceAlias = this.cfg?.namespaceAlias?.trim();
         const containerName = this.normalizeContainerName(this.cfg?.entityContainerName);
+        const defaultCapabilities = this.cfg?.capabilities;
 
         const context: SchemaBuildContext = {
             namespace,
@@ -578,7 +628,9 @@ export class CsdlGenerator {
         }
 
         for (const set of entitySets) {
-            const entityType = buildEntityType(set, namespace, setLookup, context);
+            const capabilities = mergeCapabilities(defaultCapabilities, set.capabilities);
+            const hasStream = Boolean(set.hasStream ?? capabilities.hasStream);
+            const entityType = buildEntityType(set, namespace, setLookup, context, hasStream);
             if (!entityType) continue;
 
             entityTypesXml.push(entityType.xml);
@@ -602,13 +654,162 @@ export class CsdlGenerator {
                 `      <EntitySet Name="${xmlEscape(set.name)}" EntityType="${namespace}.${xmlEscape(entityType.name)}">`,
                 ...navigationBindings,
                 ...concurrencyAnnotation,
-                '      </EntitySet>',
             ];
 
-            const hasChildren = navigationBindings.length || concurrencyAnnotation.length;
-            containerSetsXml.push(
-                hasChildren ? entitySetLines.join('\n') : entitySetLines[0].replace(/>$/, '/>'),
-            );
+            const capabilityAnnotationsXml: string[] = [];
+            const capabilityAnnotationsJson: Record<string, unknown> = {};
+
+            if (capabilities.countable === false) {
+                capabilityAnnotationsXml.push(
+                    '        <Annotation Term="Org.OData.Capabilities.V1.CountRestrictions">',
+                    '          <Record>',
+                    '            <PropertyValue Property="Countable" Bool="false"/>',
+                    '          </Record>',
+                    '        </Annotation>',
+                );
+                capabilityAnnotationsJson['@Org.OData.Capabilities.V1.CountRestrictions'] = {
+                    Countable: false,
+                };
+            }
+
+            const filterFunctions = capabilities.filterFunctions ?? DEFAULT_FILTER_FUNCTIONS;
+            if (filterFunctions && filterFunctions.length) {
+                capabilityAnnotationsXml.push(
+                    '        <Annotation Term="Org.OData.Capabilities.V1.FilterFunctions">',
+                    '          <Collection>',
+                    ...filterFunctions.map(fn => `            <String>${xmlEscape(fn)}</String>`),
+                    '          </Collection>',
+                    '        </Annotation>',
+                );
+                capabilityAnnotationsJson['@Org.OData.Capabilities.V1.FilterFunctions'] = filterFunctions;
+            }
+
+            const navigationRestrictions: Record<string, ODataNavigationRestriction> = {
+                ...(capabilities.navigationRestrictions ?? {}),
+            };
+            const relationSet = new Set(entityType.relations);
+            if (capabilities.navigationRestrictionDefaults) {
+                for (const relationName of relationSet) {
+                    if (navigationRestrictions[relationName]) continue;
+                    navigationRestrictions[relationName] = capabilities.navigationRestrictionDefaults;
+                }
+            }
+            const restrictedEntries = Object.entries(navigationRestrictions)
+                .filter(([name, config]) => relationSet.has(name) && config != null && config.navigable !== undefined);
+
+            if (restrictedEntries.length) {
+                const restrictedXml: string[] = [];
+                const restrictedJson: Array<Record<string, unknown>> = [];
+                for (const [name, config] of restrictedEntries) {
+                    const navigable = config?.navigable;
+                    if (navigable === undefined) continue;
+                    const enumMember = navigable === false
+                        ? 'Org.OData.Capabilities.V1.NavigationType/None'
+                        : 'Org.OData.Capabilities.V1.NavigationType/Recursive';
+                    restrictedXml.push(
+                        '                <Record>',
+                        `                  <PropertyValue Property="NavigationProperty" NavigationPropertyPath="${xmlEscape(name)}"/>`,
+                        `                  <PropertyValue Property="Navigability" EnumMember="${enumMember}"/>`,
+                        '                </Record>',
+                    );
+                    restrictedJson.push({
+                        NavigationProperty: name,
+                        Navigability: enumMember,
+                    });
+                }
+
+                if (restrictedXml.length) {
+                    capabilityAnnotationsXml.push(
+                        '        <Annotation Term="Org.OData.Capabilities.V1.NavigationRestrictions">',
+                        '          <Record>',
+                        '            <PropertyValue Property="RestrictedProperties">',
+                        '              <Collection>',
+                        ...restrictedXml,
+                        '              </Collection>',
+                        '            </PropertyValue>',
+                        '          </Record>',
+                        '        </Annotation>',
+                    );
+                    capabilityAnnotationsJson['@Org.OData.Capabilities.V1.NavigationRestrictions'] = {
+                        RestrictedProperties: restrictedJson,
+                    };
+                }
+            }
+
+            if (capabilities.permissions?.length) {
+                const permissionItemsXml: string[] = [];
+                const permissionItemsJson: Array<Record<string, unknown>> = [];
+
+                for (const permission of capabilities.permissions) {
+                    const scopes = permission.scopes ?? [];
+                    if (!scopes.length) continue;
+                    const scopeXml: string[] = [];
+                    const scopeJson: Array<Record<string, unknown>> = [];
+                    for (const scopeEntry of scopes) {
+                        if (typeof scopeEntry === 'string') {
+                            scopeXml.push(
+                                '                <Record Type="Org.OData.Core.V1.PermissionScope">',
+                                `                  <PropertyValue Property="Scope" String="${xmlEscape(scopeEntry)}"/>`,
+                                '                </Record>',
+                            );
+                            scopeJson.push({Scope: scopeEntry});
+                        } else if (scopeEntry && typeof scopeEntry === 'object') {
+                            const jsonScope: Record<string, unknown> = {Scope: scopeEntry.scope};
+                            const xmlLines = [
+                                '                <Record Type="Org.OData.Core.V1.PermissionScope">',
+                                `                  <PropertyValue Property="Scope" String="${xmlEscape(scopeEntry.scope)}"/>`,
+                            ];
+                            if (scopeEntry.description) {
+                                xmlLines.push(
+                                    `                  <PropertyValue Property="Description" String="${xmlEscape(scopeEntry.description)}"/>`,
+                                );
+                                jsonScope.Description = scopeEntry.description;
+                            }
+                            xmlLines.push('                </Record>');
+                            scopeXml.push(...xmlLines);
+                            scopeJson.push(jsonScope);
+                        }
+                    }
+                    if (!scopeXml.length) continue;
+
+                    const permissionXml: string[] = ['          <Record Type="Org.OData.Core.V1.PermissionType">'];
+                    const permissionJson: Record<string, unknown> = {};
+                    if (permission.scheme) {
+                        permissionXml.push(`            <PropertyValue Property="SchemeName" String="${xmlEscape(permission.scheme)}"/>`);
+                        permissionJson.SchemeName = permission.scheme;
+                    }
+                    permissionXml.push(
+                        '            <PropertyValue Property="Scopes">',
+                        '              <Collection>',
+                        ...scopeXml,
+                        '              </Collection>',
+                        '            </PropertyValue>',
+                        '          </Record>',
+                    );
+                    permissionJson.Scopes = scopeJson;
+                    permissionItemsXml.push(...permissionXml);
+                    permissionItemsJson.push(permissionJson);
+                }
+
+                if (permissionItemsXml.length) {
+                    capabilityAnnotationsXml.push(
+                        '        <Annotation Term="Org.OData.Core.V1.Permissions">',
+                        '          <Collection>',
+                        ...permissionItemsXml,
+                        '          </Collection>',
+                        '        </Annotation>',
+                    );
+                    capabilityAnnotationsJson['@Org.OData.Core.V1.Permissions'] = permissionItemsJson;
+                }
+            }
+
+            if (capabilityAnnotationsXml.length) {
+                entitySetLines.push(...capabilityAnnotationsXml);
+            }
+
+            entitySetLines.push('      </EntitySet>');
+
+            containerSetsXml.push(entitySetLines.join('\n'));
 
             const entitySetJson: Record<string, unknown> = {
                 $Collection: true,
@@ -626,6 +827,7 @@ export class CsdlGenerator {
                     $PropertyPath: prop,
                 }));
             }
+            Object.assign(entitySetJson, capabilityAnnotationsJson);
             jsonEntitySets[set.name] = entitySetJson;
 
             const entityName = (set.modelCtor as typeof Entity).definition?.name ?? set.modelCtor.name;
@@ -663,6 +865,7 @@ export class CsdlGenerator {
         if (format === 'json') {
             return this.buildJsonDocument(
                 namespace,
+                namespaceAlias,
                 containerName,
                 jsonEntityTypes,
                 jsonEntitySets,
@@ -674,11 +877,15 @@ export class CsdlGenerator {
             );
         }
 
+        const schemaOpenTag = namespaceAlias
+            ? `    <Schema Namespace="${namespace}" Alias="${xmlEscape(namespaceAlias)}" xmlns="${EDM_NAMESPACE}">`
+            : `    <Schema Namespace="${namespace}" xmlns="${EDM_NAMESPACE}">`;
+
         return [
             '<?xml version="1.0" encoding="UTF-8"?>',
             `<edmx:Edmx Version="4.0" xmlns:edmx="${EDMX_NAMESPACE}">`,
             '  <edmx:DataServices>',
-            `    <Schema Namespace="${namespace}" xmlns="${EDM_NAMESPACE}">`,
+            schemaOpenTag,
             ...complexTypesXml,
             ...enumTypesXml,
             ...entityTypesXml,
@@ -708,6 +915,7 @@ export class CsdlGenerator {
 
     private buildJsonDocument(
         namespace: string,
+        alias: string | undefined,
         containerName: string,
         entityTypes: Record<string, unknown>,
         entitySets: Record<string, unknown>,
@@ -724,6 +932,9 @@ export class CsdlGenerator {
             ...enumTypes,
             ...entityTypes,
         };
+        if (alias) {
+            schema.$Alias = alias;
+        }
 
         if (Object.keys(actions).length) {
             Object.assign(schema, actions);

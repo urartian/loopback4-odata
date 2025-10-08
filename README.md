@@ -695,6 +695,7 @@ Run `npm test` to compile the TypeScript specs and execute the unit suite. Accep
 - [x] Opt-in `$search` with field-level decorators and configuration
 - [x] Configurable CSDL namespace/container names and JSON CSDL output with enriched primitive facets
 - [x] Complex types, enum types, and referential constraints reflected in generated CSDL (XML & JSON)
+- [x] Capabilities annotations (filter functions, count/navigation restrictions, permissions, streams) to describe service behaviors to OData clients
 
 ## Configuration
 
@@ -710,6 +711,11 @@ this.bind(ODATA_BINDINGS.CONFIG).to({
   csdlFormat: 'xml',       // 'xml' | 'json' (default 'xml')
   namespace: 'Catalog',    // default: 'Default'
   entityContainerName: 'CatalogService', // default: 'DefaultContainer'
+  namespaceAlias: 'CatalogNS',
+  capabilities: {
+    filterFunctions: ['contains', 'startswith', 'endswith'],
+    countable: true,
+  },
   maxTop: 100,             // server paging cap
   maxSkip: 1000,           // max skip allowed
   maxExpandDepth: 2,       // max $expand nesting depth
@@ -728,6 +734,8 @@ this.bind(ODATA_BINDINGS.CONFIG).to({
 - `csdlFormat`: Selects `$metadata` content type (`application/xml` vs `application/json`). JSON output now emits a standards-compliant CSDL JSON document.
 - `namespace`: Overrides the CSDL schema namespace (`Default` by default). All generated types live under this namespace.
 - `entityContainerName`: Controls the `<EntityContainer>` / JSON entity container name (`DefaultContainer` by default).
+- `namespaceAlias`: Adds the optional `Alias` attribute to the CSDL schema so clients can refer to types using a short prefix.
+- `capabilities`: Sets default service-level annotations such as supported filter functions, countability, permissions, and stream support. Values can be overridden per entity set via `EntitySetDef.capabilities`.
 - `strict` (default: true): Enables stricter validations and policies:
   - Requires `If-Match` on `PATCH`/`DELETE` when ETags are enabled (428 if missing).
   - If `maxTop` is set, `$top` above the cap returns `400 Bad Request` instead of being clamped.
@@ -746,13 +754,18 @@ Example: With `{basePath: '/api/odata', maxTop: 100, enableCount: false}`
 - `GET /api/odata/Products?$count=true` → `400 Bad Request` (unsupported option).
 - `GET /api/odata/Products/$count` → `501 Not Implemented`.
 
+Entity-set specific overrides are available via `EntitySetRegistry.register`:
+
+- `capabilities`: refine or override filter functions, countability, navigation restrictions, permissions, or stream support for a single entity set.
+- `hasStream`: mark the backing entity type as streaming (`Org.OData.Core.V1.HasStream`).
+
 ## Roadmap
 
 - [ ] any/all (lambdas): parse `<nav>/(any|all)(x: <expr>)` and translate via related repositories (hasMany / through) with acceptance tests
 - [ ] Filter functions: add string (`length`, `indexof`, `substring`, `trim`, `concat`) and date/time parts (`month`, `day`, `hour`, `minute`, `second`); return 400 in strict mode when unsupported by connector
 - [ ] $search hardening: boolean operators (AND/OR/NOT), quoted phrases with correct precedence; enforce `maxSearchFields` / `maxSearchTerms`; connector hooks for FTS
 - [ ] Limits & safety: `maxExpandDepth` (and optional `maxSkip`) to prevent heavy queries in strict mode
-- [ ] CSDL improvements: emit Capabilities annotations (e.g., `Org.OData.Capabilities.*`, `SearchRestrictions.Searchable`), add navigation metadata (HasStream, annotations), and support complex type inheritance
+- [ ] Advanced CSDL polish: extend annotations with insert/update restrictions, expose search annotations, and support complex type inheritance
 - [ ] Path rewriting polish: alternate/compound keys and robust quoting beyond `\w+` heuristics
 - [ ] Draft/deep insert workflows, localized fields, and SAP Fiori-friendly annotations
 

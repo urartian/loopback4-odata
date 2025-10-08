@@ -81,6 +81,24 @@ describe('CsdlGenerator', () => {
       name: 'Widgets',
       modelCtor: Widget,
       etagProperties: ['updatedAt'],
+      hasStream: true,
+      capabilities: {
+        countable: false,
+        filterFunctions: ['contains', 'startswith'],
+        navigationRestrictions: {
+          gadgets: {navigable: false},
+        },
+        permissions: [
+          {
+            scheme: 'OAuth2',
+            scopes: [
+              'widget.read',
+              {scope: 'widget.write', description: 'Modify widgets'},
+            ],
+          },
+        ],
+        hasStream: true,
+      },
       actions: [
         {
           name: 'resetInventory',
@@ -117,6 +135,10 @@ describe('CsdlGenerator', () => {
     generator = new CsdlGenerator(registry, {
       namespace: 'Catalog',
       entityContainerName: 'CatalogService',
+      namespaceAlias: 'CatalogNS',
+      capabilities: {
+        filterFunctions: ['contains', 'startswith', 'endswith'],
+      },
     });
 
     expect(widgets).to.be.ok();
@@ -124,7 +146,7 @@ describe('CsdlGenerator', () => {
 
   it('produces enriched XML metadata', () => {
     const xml = generator.generate('xml');
-    expect(xml.includes('<Schema Namespace="Catalog"')).to.be.true();
+    expect(xml.includes('<Schema Namespace="Catalog" Alias="CatalogNS"')).to.be.true();
     expect(xml.includes('<EntityType Name="Widget">')).to.be.true();
     expect(
       xml.includes(
@@ -145,6 +167,10 @@ describe('CsdlGenerator', () => {
     expect(xml.includes('<Property Name="dimensions" Type="Catalog.Dimensions" Nullable="true"')).to.be.true();
     expect(xml.includes('<EnumType Name="WidgetStatusEnum"')).to.be.true();
     expect(xml.includes('Type="Catalog.WidgetStatusEnum"')).to.be.true();
+    expect(xml.includes('Annotation Term="Org.OData.Core.V1.HasStream" Bool="true"')).to.be.true();
+    expect(xml.includes('Annotation Term="Org.OData.Capabilities.V1.CountRestrictions"')).to.be.true();
+    expect(xml.includes('Annotation Term="Org.OData.Capabilities.V1.FilterFunctions"')).to.be.true();
+    expect(xml.includes('Annotation Term="Org.OData.Capabilities.V1.NavigationRestrictions"')).to.be.true();
     expect(
       xml.includes('<NavigationProperty Name="gadgets" Type="Collection(Catalog.Gadget)"'),
     ).to.be.true();
@@ -158,6 +184,7 @@ describe('CsdlGenerator', () => {
     expect(xml.includes('<Action Name="resetInventory" IsBound="true">')).to.be.true();
     expect(xml.includes('<Function Name="topWidgets" IsBound="true">')).to.be.true();
     expect(xml.includes('<Function Name="ping"')).to.be.true();
+    expect(xml.includes('Annotation Term="Org.OData.Core.V1.Permissions"')).to.be.true();
     expect(xml.includes('<EntityContainer Name="CatalogService">')).to.be.true();
   });
 
@@ -168,6 +195,7 @@ describe('CsdlGenerator', () => {
     expect(parsed).to.have.property('$Version', '4.0');
     expect(parsed).to.have.property('Catalog');
     const schema = parsed.Catalog;
+    expect(schema.$Alias).to.equal('CatalogNS');
     expect(schema.Widget.$Kind).to.equal('EntityType');
     expect(schema.Widget.$Key).to.eql(['id']);
     expect(schema.Widget.name.$Type).to.equal('Edm.String');
@@ -188,6 +216,7 @@ describe('CsdlGenerator', () => {
     expect(schema.Widget.status.DefaultValue).to.equal('draft');
     expect(schema.Widget.gadgets.$Kind).to.equal('NavigationProperty');
     expect(schema.Widget.gadgets.$Type).to.equal('Collection(Catalog.Gadget)');
+    expect(schema.Widget['@Org.OData.Core.V1.HasStream']).to.equal(true);
     expect(schema.Widget.gadgets.$Partner).to.equal('widget');
     expect(schema.Widget.gadgets.$ReferentialConstraint[0]).to.containDeep({
       Property: 'widgetId',
@@ -197,7 +226,6 @@ describe('CsdlGenerator', () => {
       Property: 'widgetId',
       ReferencedProperty: 'id',
     });
-
     expect(schema).to.have.property('resetInventory');
     expect(schema.resetInventory.$Kind).to.equal('Action');
     expect(schema.resetInventory.$IsBound).to.equal(true);
@@ -214,6 +242,14 @@ describe('CsdlGenerator', () => {
     expect(container.Widgets.$Type).to.equal('Catalog.Widget');
     expect(container.Widgets.$NavigationPropertyBinding.gadgets).to.equal('Gadgets');
     expect(container.Widgets['@Org.OData.Core.V1.OptimisticConcurrency'][0].$PropertyPath).to.equal('updatedAt');
+    expect(container.Widgets['@Org.OData.Capabilities.V1.FilterFunctions']).to.deepEqual(['contains', 'startswith']);
+    expect(container.Widgets['@Org.OData.Capabilities.V1.CountRestrictions'].Countable).to.equal(false);
+    expect(container.Widgets['@Org.OData.Capabilities.V1.NavigationRestrictions'].RestrictedProperties[0]).to.containDeep({
+      NavigationProperty: 'gadgets',
+      Navigability: 'Org.OData.Capabilities.V1.NavigationType/None',
+    });
+    expect(container.Widgets['@Org.OData.Core.V1.Permissions'][0].SchemeName).to.equal('OAuth2');
+    expect(container.Widgets['@Org.OData.Core.V1.Permissions'][0].Scopes).to.have.length(2);
     expect(container.Gadgets.$Type).to.equal('Catalog.Gadget');
     expect(container.ping.$Function).to.equal('Catalog.ping');
   });
