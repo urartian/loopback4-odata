@@ -23,7 +23,21 @@ export class ODataMetadataController {
     })
     getMetadata(
         @inject(RestBindings.Http.RESPONSE) res: Response,
+        @inject(RestBindings.Http.REQUEST) req: any,
     ): Response {
+        if (this.cfg?.strict) {
+            const accept = (req?.get?.('Accept') ?? req?.headers?.['accept'] ?? '').toString().toLowerCase();
+            if (accept && accept.trim()) {
+                const desired = (this.cfg?.csdlFormat ?? 'xml') === 'json' ? 'application/json' : 'application/xml';
+                const ok = accept.includes(desired) || accept.includes('*/*') || /application\s*\/\s*\*/.test(accept);
+                if (!ok) {
+                    const err = new Error('NotAcceptable');
+                    (err as any).statusCode = 406;
+                    (err as any).code = 'NotAcceptable';
+                    throw err;
+                }
+            }
+        }
         const body = this.csdl.generate();
         const mime = this.csdl.contentType(this.cfg.csdlFormat ?? 'xml');
         res.type(mime);

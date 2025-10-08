@@ -301,6 +301,108 @@ The extension validates relation names against the model metadata and produces t
 
 > **Note:** OData identifiers are case-sensitive. Use the exact navigation property names exposed in `$metadata` (for example, `$expand=orders` not `$expand=Orders`).
 
+Advanced filter helpers supported:
+
+- Logical NOT
+
+```http
+GET /odata/Products?$filter=not price gt 100
+```
+
+```json
+{"where": {"price": {"lte": 100}}}
+```
+
+- Numeric functions: `round`, `floor`, `ceiling`
+
+```http
+GET /odata/Products?$filter=round(price) eq 10
+```
+
+```json
+{"where": {"and": [{"price": {"gte": 9.5}}, {"price": {"lt": 10.5}}]}}
+```
+
+- Date extraction: `year(<DateTimeOffset>) eq <year>`
+
+```http
+GET /odata/Orders?$filter=year(updatedAt) eq 2024
+```
+
+Translates to a UTC date range for that year.
+
+- Basic `$search`
+
+```http
+GET /odata/Products?$search=Laptop
+```
+
+Performs a case‑insensitive substring search across all string properties of the model. Multiple terms are OR’ed. Quoted phrases are treated as a single token. Boolean operators are not yet interpreted.
+
+- String position: `indexof`
+
+```http
+GET /odata/Products?$filter=indexof(name,'Lap') ge 0
+```
+
+Equivalent to `contains(name,'Lap')`. To test absence use `eq -1`:
+
+```http
+GET /odata/Products?$filter=indexof(name,'Lap') eq -1
+```
+
+Strict limitations: only presence/absence forms are supported (`ge 0`, `gt -1`, `eq -1`). Exact position comparisons like `indexof(name,'Lap') eq 2` are rejected with 400 in strict mode.
+
+- Substring at position: `substring`
+
+```http
+GET /odata/Products?$filter=substring(code,2) eq 'ABC'
+```
+
+Checks that `code` has `ABC` starting at index 2 (0‑based). With explicit length:
+
+```http
+GET /odata/Products?$filter=substring(code,4,3) ne 'XYZ'
+```
+
+Strict limitations: supports only `eq` / `ne` with a string literal on the right‑hand side. Other comparators or non‑string RHS are rejected (400).
+
+- Minimal string length checks: `length`
+
+```http
+GET /odata/Products?$filter=length(description) eq 0
+GET /odata/Products?$filter=length(description) gt 0
+```
+
+Strict limitations: only `eq 0` (empty) and `gt 0` (non‑empty) are supported. Other comparisons like `length(field) eq 5` are rejected (400).
+
+### Searchable Fields
+
+Control which fields participate in `$search`:
+
+- Decorate properties with `@odataSearchable()` in your model.
+- Or configure per–entity set in `ODataConfig.searchFields`.
+- Default : `$search` is opt-in and uses only annotated fields. If no searchable fields are configured, strict mode returns `400 Bad Request`.
+
+Example:
+
+```ts
+@odataModel()
+@model()
+export class Product extends Entity {
+  @property({id: true}) id!: number;
+  @odataSearchable() @property() name!: string;
+  @odataSearchable() @property() sku!: string;
+  @property() price!: number;
+}
+
+// Or centrally via config
+this.bind(ODATA_BINDINGS.CONFIG).to({
+  searchMode: 'config-only',
+  searchFields: {Products: ['name', 'sku']},
+} as ODataConfig);
+```
+
 Enable inline counts by passing `$count=true` alongside other query options:
 
 ```http
@@ -577,6 +679,7 @@ Run `npm test` to compile the TypeScript specs and execute the unit suite. Accep
 - [x] Service document exposing registered entity sets
 - [x] $metadata endpoint with generated CSDL (including navigation properties for relations)
 - [x] Basic query options → LoopBack filters (`$filter`, `$orderby`, `$top`, `$skip`, `$select`)
+- [x] Extended filter support: `not`, numeric functions (`round`, `floor`, `ceiling`), date extraction (`year`), and basic `$search` across string fields
 - [x] Relational expansion via `$expand`
 - [x] Inline and standalone `$count`
 - [x] `$batch` endpoint (JSON and multipart/mixed)
@@ -588,6 +691,8 @@ Run `npm test` to compile the TypeScript specs and execute the unit suite. Accep
 - [x] Transaction-backed `$batch` changesets (when datasource supports transactions)
 - [x] Optimistic concurrency with OData ETags (`If-Match` / `If-None-Match` support on generated CRUD routes)
 - [x] `$batch` execution runs through the LoopBack pipeline so interceptors/auth apply; changesets use per-datasource transactions and commit/rollback as a unit
+- [x] Configurable base path (`basePath`), `$top` limit (`maxTop`), `$count` toggle (`enableCount`), and strict mode validations
+- [x] Opt-in `$search` with field-level decorators and configuration
 
 ## Configuration
 
@@ -601,19 +706,33 @@ import {ODataConfig} from '@loopback/odata';
 this.bind(ODATA_BINDINGS.CONFIG).to({
   basePath: '/api/odata',  // default: '/odata'
   csdlFormat: 'xml',       // 'xml' | 'json' (default 'xml')
-  maxTop: 100,             // clamp `$top` to at most 100
+  maxTop: 100,             // server paging cap
+  maxSkip: 1000,           // max skip allowed
+  maxExpandDepth: 2,       // max $expand nesting depth
   enableCount: true,       // enable inline and standalone $count
-  strict: false,           // reserved for stricter parsing/mode
+  strict: true,            // enable strict validations (default: true)
 } as ODataConfig);
 ```
 
 - `basePath`: Externally visible service root. All OData routes are served under this path (via middleware rewrite) while internal routes remain at `/odata`. Response metadata (`@odata.context`) uses this value.
-- `maxTop`: Caps `$top` for collection reads. The server may return fewer results than requested per OData v4. Requests with larger `$top` are clamped to the configured maximum.
+- `maxTop`: Caps `$top` for collection reads. The server may return fewer results than requested per OData v4. In strict mode, requests with `$top` above the cap return 400; otherwise the value is clamped to the maximum.
+- `maxSkip`: Maximum allowed `$skip`. In strict mode, requests with `$skip` above the cap return 400; otherwise it is clamped.
+- `maxExpandDepth`: Maximum allowed `$expand` nesting depth. In strict mode, deeper expansions return 400.
 - `enableCount`:
   - When `false`, inline counts (`?$count=true`) return `400 Bad Request` with an OData error.
   - The standalone path (`GET <basePath>/<EntitySet>/$count`) returns `501 Not Implemented`.
 - `csdlFormat`: Selects `$metadata` content type (`application/xml` vs `application/json`) once JSON CSDL is supported; currently used for MIME.
-- `strict`: Reserved for future validation modes.
+- `strict` (default: true): Enables stricter validations and policies:
+  - Requires `If-Match` on `PATCH`/`DELETE` when ETags are enabled (428 if missing).
+  - If `maxTop` is set, `$top` above the cap returns `400 Bad Request` instead of being clamped.
+  - Rejects unknown system query options (e.g., `$levels`, `$apply`) with `400 Bad Request`.
+  - Validates `$select`, `$orderby`, `$filter` fields against model properties; unknown fields return `400 Bad Request`.
+  - Enforces content negotiation: `Accept` must allow `application/json` for CRUD; `$metadata` must allow `application/xml` (or JSON if configured); non‑JSON `Content-Type` on writes returns `415`.
+  - Limits & safety: `maxExpandDepth` restricts `$expand` nesting; `maxSkip` caps `$skip` (both enforced with 400 in strict mode).
+  - Search:
+    - `searchMode`: `'annotated' | 'config-only' | 'all' | 'disabled'` (default: `annotated`)
+    - `searchFields`: `{[entitySet: string]: string[]}` overrides decorator scope
+    - `maxSearchFields` / `maxSearchTerms`: caps to prevent overly broad queries
 
 Example: With `{basePath: '/api/odata', maxTop: 100, enableCount: false}`
 - Routes mount at `/api/odata/...`.
@@ -623,10 +742,12 @@ Example: With `{basePath: '/api/odata', maxTop: 100, enableCount: false}`
 
 ## Roadmap
 
-- [ ] Full OData filter grammar: nested groups, numeric/date functions, `$search`, `any`/`all`
-- [ ] Configuration plumbing for base path, `$top` limits, and `$count` toggles exposed by `ODataConfig`
-- [ ] Robust path rewriting for GUID, quoted, and alternate keys without `\w+` heuristics
-- [ ] Richer EDMX output (complex/collection types, precision metadata, annotations, navigation partners)
+- [ ] any/all (lambdas): parse `<nav>/(any|all)(x: <expr>)` and translate via related repositories (hasMany / through) with acceptance tests
+- [ ] Filter functions: add string (`length`, `indexof`, `substring`, `trim`, `concat`) and date/time parts (`month`, `day`, `hour`, `minute`, `second`); return 400 in strict mode when unsupported by connector
+- [ ] $search hardening: boolean operators (AND/OR/NOT), quoted phrases with correct precedence; enforce `maxSearchFields` / `maxSearchTerms`; connector hooks for FTS
+- [ ] Limits & safety: `maxExpandDepth` (and optional `maxSkip`) to prevent heavy queries in strict mode
+- [ ] CSDL improvements: emit Capabilities annotations (e.g., `Org.OData.Capabilities.*`, `SearchRestrictions.Searchable`), support JSON CSDL, and enrich types/precision/annotations/navigation partners
+- [ ] Path rewriting polish: alternate/compound keys and robust quoting beyond `\w+` heuristics
 - [ ] Draft/deep insert workflows, localized fields, and SAP Fiori-friendly annotations
 
 ## Contributing
