@@ -190,6 +190,49 @@ describe('OData component acceptance', () => {
     expect(Number(count.body)).to.be.a.Number();
   });
 
+  it('returns per-request responses when atomic changeset fails', async () => {
+    const dataSource = await app.get('datasources.db');
+    (dataSource as any).beginTransaction = async (_isolation?: unknown) => ({
+      commit: async () => undefined,
+      rollback: async () => undefined,
+    });
+
+    const res = await client
+      .post('/odata/$batch')
+      .send({
+        requests: [
+          {
+            id: 'create-1',
+            method: 'POST',
+            url: '/odata/Products',
+            atomicityGroup: 'set-1',
+            body: {price: 5},
+          },
+          {
+            id: 'create-2',
+            method: 'POST',
+            url: '/odata/Products',
+            atomicityGroup: 'set-1',
+            body: {name: 'Valid', price: 8},
+          },
+        ],
+      })
+      .expect(200);
+
+    const responses = res.body.responses;
+    expect(responses).to.be.Array();
+    expect(responses).to.have.lengthOf(2);
+    const [first, second] = responses;
+    expect(first.id).to.equal('create-1');
+    expect(first.atomicityGroup).to.equal('set-1');
+    expect(first.status).to.equal(422);
+    expect(first.body?.error?.code).to.equal('UnprocessableEntity');
+    expect(second.id).to.equal('create-2');
+    expect(second.atomicityGroup).to.equal('set-1');
+    expect(second.status).to.equal(424);
+    expect(second.body?.error?.code).to.equal('FailedDependency');
+  });
+
   it('applies string predicates through REST filter', async () => {
     const res = await client
       .get('/odata/Products')

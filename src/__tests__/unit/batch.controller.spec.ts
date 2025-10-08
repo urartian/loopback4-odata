@@ -71,7 +71,7 @@ describe('$batch controller', () => {
     assert.deepStrictEqual(second.body, {value: []});
   });
 
-  it('stops at failing request inside changeset', async () => {
+  it('returns all executed responses up to failing request inside changeset', async () => {
     const controller = createController({
       a1: {status: 200, body: {value: [{id: 10}]}},
       a2: {status: 409, body: {error: {code: 'Conflict'}}},
@@ -97,12 +97,16 @@ describe('$batch controller', () => {
       requestStub('application/json'),
     )) as BatchResponsePayload;
 
-    assert.equal(batchResult.responses.length, 1);
-    const [failure] = batchResult.responses;
-    assert.equal(failure.atomicityGroup, 'changeset-1');
-    assert.equal(failure.id, 'a2');
-    assert.equal(failure.status, 409);
-    assert.deepStrictEqual(failure.body, {error: {code: 'Conflict'}});
+    assert.equal(batchResult.responses.length, 2);
+    const first = batchResult.responses[0];
+    const second = batchResult.responses[1];
+    assert.equal(first.atomicityGroup, 'changeset-1');
+    assert.equal(first.id, 'a1');
+    assert.equal(first.status, 200);
+    assert.equal(second.atomicityGroup, 'changeset-1');
+    assert.equal(second.id, 'a2');
+    assert.equal(second.status, 409);
+    assert.deepStrictEqual(second.body, {error: {code: 'Conflict'}});
     assert.equal(rollbackCalled, true);
   });
 
@@ -183,6 +187,49 @@ describe('$batch controller', () => {
       assert.equal(entry.atomicityGroup, 'group-1');
       assert.equal(entry.status, 200);
     }
+  });
+
+  it('appends 424 Failed Dependency for unexecuted requests after a failure in a changeset', async () => {
+    const controller = createController({
+      b1: {status: 200, body: {value: [{id: 1}]}},
+      b2: {status: 409, body: {error: {code: 'Conflict'}}},
+      // Note: no stub for b3 -> it should not be executed, server should synthesize 424
+    });
+    let rolledBack = false;
+    (controller as any).createAtomicGroupContext = async () => ({
+      applyTo: () => undefined,
+      clearFrom: () => undefined,
+      commit: async () => undefined,
+      rollback: async () => {
+        rolledBack = true;
+      },
+    });
+
+    const result = (await controller.handleBatch(
+      {
+        requests: [
+          {id: 'b1', method: 'POST', url: '/odata/Products', atomicityGroup: 'g2'},
+          {id: 'b2', method: 'POST', url: '/odata/Products', atomicityGroup: 'g2'},
+          {id: 'b3', method: 'POST', url: '/odata/Products', atomicityGroup: 'g2'},
+        ],
+      },
+      responseStub,
+      requestStub('application/json'),
+    )) as BatchResponsePayload;
+
+    assert.equal(rolledBack, true);
+    assert.equal(result.responses.length, 3);
+    const [r1, r2, r3] = result.responses;
+    assert.equal(r1.id, 'b1');
+    assert.equal(r1.atomicityGroup, 'g2');
+    assert.equal(r1.status, 200);
+    assert.equal(r2.id, 'b2');
+    assert.equal(r2.atomicityGroup, 'g2');
+    assert.equal(r2.status, 409);
+    assert.equal(r3.id, 'b3');
+    assert.equal(r3.atomicityGroup, 'g2');
+    assert.equal(r3.status, 424);
+    assert.equal((r3.body as any)?.error?.code, 'FailedDependency');
   });
 
   it('returns 501 when atomicity group cannot start a transaction', async () => {

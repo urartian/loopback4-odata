@@ -1,6 +1,6 @@
 import 'reflect-metadata';
 import {BootMixin} from '@loopback/boot';
-import {RestApplication, RestServerConfig} from '@loopback/rest';
+import {HttpErrors, RestApplication, RestServerConfig} from '@loopback/rest';
 import {Getter, inject} from '@loopback/core';
 import {
   BelongsToAccessor,
@@ -21,10 +21,12 @@ import {
 } from '@loopback/repository';
 import {
   ODataComponent,
+  odata,
   odataAction,
   odataController,
   odataFunction,
   odataModel,
+  CrudHookContext,
   odataSearchable,
 } from '../../index';
 
@@ -259,6 +261,15 @@ class ProductODataController {
     if (!body.confirm) return {status: 'skipped'};
     const count = await this.products.count();
     return {status: 'ok', total: count.count};
+  }
+
+  @odata.before('CREATE')
+  validateCreate(ctx: CrudHookContext) {
+    const payload = ctx.payload as AnyObject | undefined;
+    const name = typeof payload?.name === 'string' ? payload.name.trim() : '';
+    if (!name) {
+      throw new HttpErrors.UnprocessableEntity('Product name is required.');
+    }
   }
 }
 

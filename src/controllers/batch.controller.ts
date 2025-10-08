@@ -223,16 +223,8 @@ export class ODataBatchController {
     for (const group of grouped) {
       if (group.atomicityGroup) {
         try {
-          const {entries, failure} = await this.executeAtomicGroup(group.requests, group.atomicityGroup, request);
-          if (failure) {
-            responses.push({
-              atomicityGroup: group.atomicityGroup,
-              id: failure.id,
-              status: failure.status,
-              headers: failure.headers,
-              body: failure.body,
-            });
-          } else if (entries?.length) {
+          const entries = await this.executeAtomicGroup(group.requests, group.atomicityGroup, request);
+          if (entries?.length) {
             responses.push(
               ...entries.map(entry => ({
                 ...entry,
@@ -307,17 +299,27 @@ export class ODataBatchController {
     requests: BatchRequest[],
     groupId: string,
     parentRequest: Request,
-  ): Promise<{entries?: BatchResponseEntry[]; failure?: BatchResponseEntry}> {
+  ): Promise<BatchResponseEntry[]> {
     const context = await this.createAtomicGroupContext(groupId, requests);
     try {
       const entries = await this.executeGroup(requests, context, parentRequest);
-      const failed = entries.find(entry => entry.status >= 400);
-      if (failed) {
+      const failedIndex = entries.findIndex(entry => entry.status >= 400);
+      if (failedIndex >= 0) {
         await context.rollback();
-        return {failure: failed};
+        // Append synthetic responses for any requests that were not executed due to failure
+        if (entries.length < requests.length) {
+          for (const req of requests.slice(entries.length)) {
+            entries.push({
+              id: req.id,
+              status: 424, // Failed Dependency – request aborted due to earlier failure
+              body: this.odataError('FailedDependency', 'Request not executed due to prior failure in changeset.'),
+            });
+          }
+        }
+        return entries;
       }
       await context.commit();
-      return {entries};
+      return entries;
     } catch (error) {
       await context.rollback();
       throw error;
@@ -461,6 +463,8 @@ export class ODataBatchController {
     req.url = url;
     const combinedHeaders = this.buildHeadersForRequest(request, parentRequest);
     (req as any).headers = combinedHeaders;
+    const [pathOnly] = url.split('?');
+    (req as any).path = pathOnly;
     if (bodyBuffer.length && !combinedHeaders['content-type']) {
       combinedHeaders['content-type'] = 'application/json';
     }
@@ -547,16 +551,19 @@ export class ODataBatchController {
     }
 
     context.applyTo(req);
-    const handlerPromise = this.httpHandler.handleRequest(req as any, res as any);
+    const handlerPromise = this.httpHandler.handleRequest(req as any, res as any).catch(() => undefined);
 
-    socket.end(bodyBuffer.length ? bodyBuffer : undefined);
+    // Feed request body to the IncomingMessage stream directly
+    if (bodyBuffer.length) {
+      (req as any).push(bodyBuffer);
+    }
+    (req as any).push(null);
 
     try {
-      // Add per-request timeout to avoid hangs
+      // Add per-request timeout to avoid hangs; wait for finish/close
       const TIMEOUT_MS = 30000;
       const timeoutPromise = new Promise<never>((_, reject) => setTimeout(() => reject(new Error('Batch sub-request timeout')), TIMEOUT_MS));
-      await Promise.race([handlerPromise, timeoutPromise]);
-      const result = await finishPromise;
+      const result = await Promise.race([finishPromise, timeoutPromise]);
       context.clearFrom(req);
       return result;
     } catch (error) {
