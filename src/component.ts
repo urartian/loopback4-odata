@@ -16,6 +16,8 @@ export class ODataComponent implements Component {
         Binding.bind(ODATA_BINDINGS.CONFIG).to({
             basePath: '/odata',
             strict: true,
+            namespace: 'Default',
+            entityContainerName: 'DefaultContainer',
             searchMode: 'annotated',
             maxSearchFields: 5,
             maxSearchTerms: 5,

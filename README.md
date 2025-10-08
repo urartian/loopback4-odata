@@ -693,6 +693,7 @@ Run `npm test` to compile the TypeScript specs and execute the unit suite. Accep
 - [x] `$batch` execution runs through the LoopBack pipeline so interceptors/auth apply; changesets use per-datasource transactions and commit/rollback as a unit
 - [x] Configurable base path (`basePath`), `$top` limit (`maxTop`), `$count` toggle (`enableCount`), and strict mode validations
 - [x] Opt-in `$search` with field-level decorators and configuration
+- [x] Configurable CSDL namespace/container names and JSON CSDL output with enriched primitive facets
 
 ## Configuration
 
@@ -706,6 +707,8 @@ import {ODataConfig} from '@loopback/odata';
 this.bind(ODATA_BINDINGS.CONFIG).to({
   basePath: '/api/odata',  // default: '/odata'
   csdlFormat: 'xml',       // 'xml' | 'json' (default 'xml')
+  namespace: 'Catalog',    // default: 'Default'
+  entityContainerName: 'CatalogService', // default: 'DefaultContainer'
   maxTop: 100,             // server paging cap
   maxSkip: 1000,           // max skip allowed
   maxExpandDepth: 2,       // max $expand nesting depth
@@ -721,7 +724,9 @@ this.bind(ODATA_BINDINGS.CONFIG).to({
 - `enableCount`:
   - When `false`, inline counts (`?$count=true`) return `400 Bad Request` with an OData error.
   - The standalone path (`GET <basePath>/<EntitySet>/$count`) returns `501 Not Implemented`.
-- `csdlFormat`: Selects `$metadata` content type (`application/xml` vs `application/json`) once JSON CSDL is supported; currently used for MIME.
+- `csdlFormat`: Selects `$metadata` content type (`application/xml` vs `application/json`). JSON output now emits a standards-compliant CSDL JSON document.
+- `namespace`: Overrides the CSDL schema namespace (`Default` by default). All generated types live under this namespace.
+- `entityContainerName`: Controls the `<EntityContainer>` / JSON entity container name (`DefaultContainer` by default).
 - `strict` (default: true): Enables stricter validations and policies:
   - Requires `If-Match` on `PATCH`/`DELETE` when ETags are enabled (428 if missing).
   - If `maxTop` is set, `$top` above the cap returns `400 Bad Request` instead of being clamped.
@@ -746,7 +751,7 @@ Example: With `{basePath: '/api/odata', maxTop: 100, enableCount: false}`
 - [ ] Filter functions: add string (`length`, `indexof`, `substring`, `trim`, `concat`) and date/time parts (`month`, `day`, `hour`, `minute`, `second`); return 400 in strict mode when unsupported by connector
 - [ ] $search hardening: boolean operators (AND/OR/NOT), quoted phrases with correct precedence; enforce `maxSearchFields` / `maxSearchTerms`; connector hooks for FTS
 - [ ] Limits & safety: `maxExpandDepth` (and optional `maxSkip`) to prevent heavy queries in strict mode
-- [ ] CSDL improvements: emit Capabilities annotations (e.g., `Org.OData.Capabilities.*`, `SearchRestrictions.Searchable`), support JSON CSDL, and enrich types/precision/annotations/navigation partners
+- [ ] CSDL improvements: emit Capabilities annotations (e.g., `Org.OData.Capabilities.*`, `SearchRestrictions.Searchable`), surface navigation partners/referential constraints, and add complex/enum type support
 - [ ] Path rewriting polish: alternate/compound keys and robust quoting beyond `\w+` heuristics
 - [ ] Draft/deep insert workflows, localized fields, and SAP Fiori-friendly annotations
 

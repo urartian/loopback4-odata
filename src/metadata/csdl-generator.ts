@@ -3,6 +3,7 @@ import { Entity, ModelDefinition, PropertyDefinition, RelationDefinitionMap } fr
 import { EntitySetDef, EntitySetRegistry } from '../registry/entityset-registry';
 import { ODATA_BINDINGS } from '../keys';
 import { getODataActions, getODataFunctions, OperationMeta } from '../decorators/action.function.decorators';
+import { ODataConfig } from '../types';
 
 const EDM_NAMESPACE = 'http://docs.oasis-open.org/odata/ns/edm';
 const EDMX_NAMESPACE = 'http://docs.oasis-open.org/odata/ns/edmx';
@@ -19,32 +20,183 @@ const PRIMITIVE_TYPE_MAP = new Map<unknown, string>([
     ['Date', 'Edm.DateTimeOffset'],
     [BigInt, 'Edm.Int64'],
     ['bigint', 'Edm.Int64'],
+    [Buffer, 'Edm.Binary'],
+    ['buffer', 'Edm.Binary'],
 ]);
 
-function resolveEdmType(def: PropertyDefinition): string | undefined {
-    const { type } = def;
-    if (type == null) return undefined;
+interface ResolvedEdmType {
+    type: string;
+    facets?: Record<string, unknown>;
+}
 
-    if (Array.isArray(type)) {
-        // Arrays are not supported in Phase 2.2.
+function normalizeJsonSchema(def: PropertyDefinition): Record<string, unknown> | undefined {
+    const schema = def.jsonSchema as Record<string, unknown> | undefined;
+    if (schema) return schema;
+    if (typeof def.type === 'object' && def.type) {
+        const maybeSchema = def.type as Record<string, unknown>;
+        if ('type' in maybeSchema) return maybeSchema;
+    }
+    return undefined;
+}
+
+function resolvePrimitiveType(
+    type: unknown,
+    schema: Record<string, unknown> | undefined,
+): ResolvedEdmType | undefined {
+    const schemaAny = schema as Record<string, unknown> | undefined;
+    const schemaType = typeof schemaAny?.type === 'string' ? String(schemaAny.type).toLowerCase() : undefined;
+    const format = typeof schemaAny?.format === 'string' ? String(schemaAny.format).toLowerCase() : undefined;
+    const dataType = typeof schemaAny?.dataType === 'string' ? String(schemaAny.dataType).toLowerCase() : undefined;
+
+    const fromMap = PRIMITIVE_TYPE_MAP.get(type) ?? PRIMITIVE_TYPE_MAP.get(
+        typeof type === 'function' ? type.name : type as string,
+    );
+    if (fromMap === 'Edm.Double' && (schemaType === 'integer' || format === 'int32' || format === 'int64' || dataType === 'integer')) {
+        // fall through to schema-based detection for integers
+    } else if (fromMap && fromMap !== 'Edm.String') {
+        return { type: fromMap };
+    }
+
+    if (schemaType === 'boolean' || type === Boolean || type === 'boolean') {
+        return { type: 'Edm.Boolean' };
+    }
+
+    if (schemaType === 'integer' || format === 'int32' || dataType === 'integer') {
+        return { type: 'Edm.Int32' };
+    }
+
+    if (format === 'int16') {
+        return { type: 'Edm.Int16' };
+    }
+
+    if (format === 'int64') {
+        return { type: 'Edm.Int64' };
+    }
+
+    if (format === 'sbyte') {
+        return { type: 'Edm.SByte' };
+    }
+
+    if (format === 'byte' || schemaType === 'binary') {
+        return { type: 'Edm.Byte' };
+    }
+
+    if (format === 'decimal' || dataType === 'decimal' || schemaAny?.precision != null || schemaAny?.scale != null) {
+        return { type: 'Edm.Decimal' };
+    }
+
+    if (schemaType === 'number' && format === 'single') {
+        return { type: 'Edm.Single' };
+    }
+
+    if (schemaType === 'number' || type === Number || type === 'number') {
+        return { type: 'Edm.Double' };
+    }
+
+    if (format === 'date') {
+        return { type: 'Edm.Date' };
+    }
+
+    if (format === 'time' || format === 'time-of-day' || dataType === 'timeofday') {
+        return { type: 'Edm.TimeOfDay' };
+    }
+
+    if (format === 'duration') {
+        return { type: 'Edm.Duration' };
+    }
+
+    if (format === 'uuid' || format === 'guid') {
+        return { type: 'Edm.Guid' };
+    }
+
+    if (format === 'binary' || type === Buffer || type === 'buffer') {
+        return { type: 'Edm.Binary' };
+    }
+
+    if (format === 'date-time' || type === Date || type === 'date') {
+        return { type: 'Edm.DateTimeOffset' };
+    }
+
+    if (schemaType === 'object' || type === Object || type === 'object') {
         return undefined;
     }
 
-    if (typeof type === 'function' && 'modelName' in type) {
-        // Relations / complex types not yet supported.
-        return undefined;
+    return { type: 'Edm.String' };
+}
+
+function resolveCollectionItem(def: PropertyDefinition): ResolvedEdmType | undefined {
+    const schema = normalizeJsonSchema(def);
+    const items = schema?.items as Record<string, unknown> | undefined;
+    if (items) {
+        const itemDef: PropertyDefinition = {
+            type: items?.type as any,
+            jsonSchema: items,
+        };
+        // Preserve nested metadata such as format
+        const resolved = resolvePrimitiveType(itemDef.type, items);
+        if (resolved) return resolved;
     }
 
-    if (PRIMITIVE_TYPE_MAP.has(type)) {
-        return PRIMITIVE_TYPE_MAP.get(type);
-    }
-
-    const typeName = typeof type === 'function' ? type.name : String(type);
-    if (PRIMITIVE_TYPE_MAP.has(typeName)) {
-        return PRIMITIVE_TYPE_MAP.get(typeName);
+    const itemType = (def as unknown as { itemType?: unknown }).itemType;
+    if (itemType) {
+        return resolvePrimitiveType(itemType, typeof itemType === 'object' ? itemType as any : undefined);
     }
 
     return undefined;
+}
+
+function resolveEdmType(def: PropertyDefinition): ResolvedEdmType | undefined {
+    const schema = normalizeJsonSchema(def);
+    const schemaAny = schema as Record<string, unknown> | undefined;
+    const type = def.type;
+
+    if (Array.isArray(type) || type === 'array' || (schemaAny?.type === 'array')) {
+        const arrayItemDef: PropertyDefinition = {
+            ...(typeof type === 'object' && !Array.isArray(type) ? type : {}),
+            type: Array.isArray(type) ? type[0] : undefined,
+            jsonSchema: (schemaAny?.items as Record<string, unknown> | undefined) ?? undefined,
+        } as PropertyDefinition;
+        const item = resolveCollectionItem(def) ?? resolveEdmType(arrayItemDef);
+        if (!item) return undefined;
+        return { type: `Collection(${item.type})` };
+    }
+
+    if (typeof type === 'function' && 'modelName' in type) {
+        // relations / complex types handled later
+        return undefined;
+    }
+
+    const resolved = resolvePrimitiveType(type, schema);
+    if (!resolved) return undefined;
+
+    const facets: Record<string, unknown> = {};
+    const numeric = (value: unknown) => (typeof value === 'number' ? value : undefined);
+    const bool = (value: unknown) => (typeof value === 'boolean' ? value : undefined);
+    const maxLength = numeric(schemaAny?.maxLength) ?? numeric(schemaAny?.['maxlength']);
+    if (typeof maxLength === 'number' && Number.isInteger(maxLength) && maxLength > 0) {
+        facets.MaxLength = maxLength;
+    }
+    const precision = numeric(schemaAny?.precision);
+    if (typeof precision === 'number' && precision >= 0) {
+        facets.Precision = precision;
+    }
+    const scale = numeric(schemaAny?.scale);
+    if (typeof scale === 'number' && scale >= 0) {
+        facets.Scale = scale;
+    }
+    const unicode = bool(schemaAny?.unicode);
+    if (typeof unicode === 'boolean') {
+        facets.Unicode = unicode;
+    }
+    const defaultValue = (def as { default?: unknown }).default ?? schemaAny?.default;
+    if (defaultValue !== undefined) {
+        facets.DefaultValue = defaultValue;
+    }
+
+    return {
+        type: resolved.type,
+        facets: Object.keys(facets).length ? facets : undefined,
+    };
 }
 
 function xmlEscape(value: string): string {
@@ -65,6 +217,7 @@ interface EntityTypeResult {
     name: string;
     xml: string;
     navigationBindings: NavigationBinding[];
+    json: Record<string, unknown>;
 }
 
 function buildEntityType(
@@ -79,22 +232,43 @@ function buildEntityType(
     const { properties } = modelDefinition;
     const propertyLines: string[] = [];
     const keyProps = modelDefinition.idProperties();
+    const json: Record<string, unknown> = { $Kind: 'EntityType' };
+    if (keyProps.length) {
+        json.$Key = keyProps;
+    }
     const navigationLines: string[] = [];
     const navigationBindings: NavigationBinding[] = [];
 
     for (const [propertyName, propertyMeta] of Object.entries(properties)) {
         const propertyDef = propertyMeta as PropertyDefinition;
-        const edmType = resolveEdmType(propertyDef);
-        if (!edmType) continue;
+        const resolved = resolveEdmType(propertyDef);
+        if (!resolved) continue;
 
         const isRequired = Boolean(propertyDef.required) || Boolean(propertyDef.id);
         const nullable = isRequired ? 'false' : 'true';
-        const concurrency = def.etagProperties?.includes(propertyName)
-            ? ' ConcurrencyMode="Fixed"'
-            : '';
-        propertyLines.push(
-            `      <Property Name="${xmlEscape(propertyName)}" Type="${edmType}" Nullable="${nullable}"${concurrency}/>`,
-        );
+        const propertySchema: Record<string, unknown> = {
+            $Type: resolved.type,
+        };
+        if (isRequired) {
+            propertySchema.Nullable = false;
+        }
+        const attrs: string[] = [
+            `Name="${xmlEscape(propertyName)}"`,
+            `Type="${xmlEscape(resolved.type)}"`,
+            `Nullable="${nullable}"`,
+        ];
+        if (resolved.facets) {
+            for (const [facetName, facetValue] of Object.entries(resolved.facets)) {
+                attrs.push(`${facetName}="${xmlEscape(String(facetValue))}"`);
+                propertySchema[facetName] = facetValue;
+            }
+        }
+        if (def.etagProperties?.includes(propertyName)) {
+            attrs.push('ConcurrencyMode="Fixed"');
+            json[`${propertyName}@ConcurrencyMode`] = 'Fixed';
+        }
+        propertyLines.push(`      <Property ${attrs.join(' ')} />`);
+        json[propertyName] = propertySchema;
     }
 
     const relations = (modelDefinition.relations ?? {}) as RelationDefinitionMap;
@@ -119,6 +293,10 @@ function buildEntityType(
             `      <NavigationProperty Name="${xmlEscape(relationName)}" Type="${qualifiedType}" />`,
         );
         navigationBindings.push({ path: relationName, target: targetSet.name });
+        json[relationName] = {
+            $Kind: 'NavigationProperty',
+            $Type: qualifiedType,
+        };
     }
 
     if (!propertyLines.length && !navigationLines.length) return undefined;
@@ -141,7 +319,7 @@ function buildEntityType(
         .filter(Boolean)
         .join('\n');
 
-    return { name: entityName, xml, navigationBindings };
+    return { name: entityName, xml, navigationBindings, json };
 }
 
 @injectable({ scope: BindingScope.SINGLETON })
@@ -149,21 +327,30 @@ export class CsdlGenerator {
     constructor(
         @inject(ODATA_BINDINGS.ENTITY_SET_REGISTRY)
         private readonly registry: EntitySetRegistry,
+        @inject(ODATA_BINDINGS.CONFIG, { optional: true })
+        private readonly cfg: ODataConfig = {},
     ) { }
 
     contentType(format: 'xml' | 'json' = 'xml'): string {
         return format === 'xml' ? 'application/xml' : 'application/json';
     }
 
-    generate(): string {
+    generate(format: 'xml' | 'json' = 'xml'): string {
         const entitySets = this.registry.list();
-        const entityTypes: string[] = [];
-        const containerSets: string[] = [];
-        const actionSchemas: string[] = [];
-        const functionSchemas: string[] = [];
-        const operationImports: string[] = [];
-        const namespace = 'Default';
-        const containerName = 'DefaultContainer';
+        const entityTypesXml: string[] = [];
+        const containerSetsXml: string[] = [];
+        const actionXml: string[] = [];
+        const functionXml: string[] = [];
+        const operationImportsXml: string[] = [];
+
+        const jsonEntityTypes: Record<string, unknown> = {};
+        const jsonEntitySets: Record<string, unknown> = {};
+        const jsonActions: Record<string, unknown> = {};
+        const jsonFunctions: Record<string, unknown> = {};
+        const jsonImports: Record<string, unknown> = {};
+
+        const namespace = this.normalizeNamespace(this.cfg?.namespace);
+        const containerName = this.normalizeContainerName(this.cfg?.entityContainerName);
 
         const setLookup = new Map<typeof Entity, EntitySetDef>();
         for (const set of entitySets) {
@@ -174,7 +361,9 @@ export class CsdlGenerator {
             const entityType = buildEntityType(set, namespace, setLookup);
             if (!entityType) continue;
 
-            entityTypes.push(entityType.xml);
+            entityTypesXml.push(entityType.xml);
+            jsonEntityTypes[entityType.name] = entityType.json;
+
             const navigationBindings = entityType.navigationBindings.map(binding =>
                 `        <NavigationPropertyBinding Path="${xmlEscape(binding.path)}" Target="${xmlEscape(binding.target)}" />`,
             );
@@ -197,24 +386,50 @@ export class CsdlGenerator {
             ];
 
             const hasChildren = navigationBindings.length || concurrencyAnnotation.length;
-            containerSets.push(
+            containerSetsXml.push(
                 hasChildren ? entitySetLines.join('\n') : entitySetLines[0].replace(/>$/, '/>'),
             );
+
+            const entitySetJson: Record<string, unknown> = {
+                $Collection: true,
+                $Type: `${namespace}.${entityType.name}`,
+            };
+            if (entityType.navigationBindings.length) {
+                const bindings: Record<string, string> = {};
+                for (const binding of entityType.navigationBindings) {
+                    bindings[binding.path] = binding.target;
+                }
+                entitySetJson.$NavigationPropertyBinding = bindings;
+            }
+            if (set.etagProperties?.length) {
+                entitySetJson['@Org.OData.Core.V1.OptimisticConcurrency'] = set.etagProperties.map(prop => ({
+                    $PropertyPath: prop,
+                }));
+            }
+            jsonEntitySets[set.name] = entitySetJson;
 
             const entityName = (set.modelCtor as typeof Entity).definition?.name ?? set.modelCtor.name;
             const actions = set.actions ?? [];
             for (const action of actions) {
-                const { schema, importLine } = this.buildOperationSchema('Action', action, namespace, entityName, set.name);
-                actionSchemas.push(schema);
-                if (importLine) operationImports.push(importLine);
+                const result = this.buildOperationSchema('Action', action, namespace, entityName);
+                actionXml.push(result.xml);
+                if (result.importXml) operationImportsXml.push(result.importXml);
+                jsonActions[action.name] = result.json;
+                if (result.jsonImport) jsonImports[result.jsonImport.name] = result.jsonImport.schema;
             }
 
             const functions = set.functions ?? [];
             for (const fn of functions) {
-                const { schema, importLine } = this.buildOperationSchema('Function', fn, namespace, entityName, set.name);
-                functionSchemas.push(schema);
-                if (importLine) operationImports.push(importLine);
+                const result = this.buildOperationSchema('Function', fn, namespace, entityName);
+                functionXml.push(result.xml);
+                if (result.importXml) operationImportsXml.push(result.importXml);
+                jsonFunctions[fn.name] = result.json;
+                if (result.jsonImport) jsonImports[result.jsonImport.name] = result.jsonImport.schema;
             }
+        }
+
+        if (format === 'json') {
+            return this.buildJsonDocument(namespace, containerName, jsonEntityTypes, jsonEntitySets, jsonActions, jsonFunctions, jsonImports);
         }
 
         return [
@@ -222,12 +437,12 @@ export class CsdlGenerator {
             `<edmx:Edmx Version="4.0" xmlns:edmx="${EDMX_NAMESPACE}">`,
             '  <edmx:DataServices>',
             `    <Schema Namespace="${namespace}" xmlns="${EDM_NAMESPACE}">`,
-            ...entityTypes,
-            ...actionSchemas,
-            ...functionSchemas,
+            ...entityTypesXml,
+            ...actionXml,
+            ...functionXml,
             `      <EntityContainer Name="${containerName}">`,
-            ...containerSets,
-            ...operationImports,
+            ...containerSetsXml,
+            ...operationImportsXml,
             '      </EntityContainer>',
             '    </Schema>',
             '  </edmx:DataServices>',
@@ -235,21 +450,71 @@ export class CsdlGenerator {
         ].join('\n');
     }
 
+    private normalizeNamespace(ns?: string): string {
+        const trimmed = ns?.trim();
+        if (!trimmed) return 'Default';
+        return trimmed;
+    }
+
+    private normalizeContainerName(name?: string): string {
+        const trimmed = name?.trim();
+        if (!trimmed) return 'DefaultContainer';
+        return trimmed;
+    }
+
+    private buildJsonDocument(
+        namespace: string,
+        containerName: string,
+        entityTypes: Record<string, unknown>,
+        entitySets: Record<string, unknown>,
+        actions: Record<string, unknown>,
+        functions: Record<string, unknown>,
+        imports: Record<string, unknown>,
+    ): string {
+        const schema: Record<string, unknown> = {
+            $Kind: 'Schema',
+            EntityContainer: `${namespace}.${containerName}`,
+            ...entityTypes,
+        };
+
+        if (Object.keys(actions).length) {
+            Object.assign(schema, actions);
+        }
+        if (Object.keys(functions).length) {
+            Object.assign(schema, functions);
+        }
+
+        const container: Record<string, unknown> = {
+            $Kind: 'EntityContainer',
+            ...entitySets,
+        };
+        if (Object.keys(imports).length) {
+            Object.assign(container, imports);
+        }
+        schema[containerName] = container;
+
+        const doc = {
+            $Version: '4.0',
+            [namespace]: schema,
+        };
+        return JSON.stringify(doc, null, 2);
+    }
+
     private buildOperationSchema(
         kind: 'Action' | 'Function',
         op: OperationMeta,
         namespace: string,
         entityName: string | undefined,
-        setName: string,
     ) {
         const isBound = op.binding !== 'unbound';
         const lines: string[] = [];
-        const qualifiedEntity = entityName ? `${namespace}.${xmlEscape(entityName)}` : undefined;
+        const qualifiedEntityXml = entityName ? `${namespace}.${xmlEscape(entityName)}` : undefined;
+        const qualifiedEntityJson = entityName ? `${namespace}.${entityName}` : undefined;
 
-        if (isBound && qualifiedEntity) {
+        if (isBound && qualifiedEntityXml) {
             const bindingType = op.binding === 'collection'
-                ? `Collection(${qualifiedEntity})`
-                : qualifiedEntity;
+                ? `Collection(${qualifiedEntityXml})`
+                : qualifiedEntityXml;
             lines.push(`  <Parameter Name="bindingParameter" Type="${bindingType}" />`);
         }
 
@@ -274,11 +539,55 @@ export class CsdlGenerator {
         ].filter(Boolean);
 
         let importLine: string | undefined;
+        let jsonImport: { name: string; schema: Record<string, unknown> } | undefined;
         if (!isBound) {
             const importTag = kind === 'Action' ? 'ActionImport' : 'FunctionImport';
             importLine = `      <${importTag} Name="${name}" ${kind}="${namespace}.${name}" />`;
+            jsonImport = {
+                name: op.name,
+                schema: {
+                    [kind === 'Action' ? '$Action' : '$Function']: `${namespace}.${op.name}`,
+                },
+            };
         }
 
-        return { schema: schemaLines.join('\n'), importLine };
+        const jsonOp: Record<string, unknown> = {
+            $Kind: kind,
+        };
+        if (isBound) {
+            jsonOp.$IsBound = true;
+        }
+        const parameters: Record<string, unknown>[] = [];
+        if (isBound && qualifiedEntityJson) {
+            const bindingType = op.binding === 'collection'
+                ? `Collection(${qualifiedEntityJson})`
+                : `${qualifiedEntityJson}`;
+            parameters.push({
+                $Name: 'bindingParameter',
+                $Type: bindingType,
+            });
+        }
+        for (const param of op.parameters ?? []) {
+            parameters.push({
+                $Name: param.name,
+                $Type: param.type ?? 'Edm.String',
+            });
+        }
+        if (parameters.length) {
+            jsonOp.$Parameter = parameters;
+        }
+        const returnType = op.returnType ?? (kind === 'Function' ? 'Edm.String' : undefined);
+        if (returnType) {
+            jsonOp.$ReturnType = {
+                $Type: returnType,
+            };
+        }
+
+        return {
+            xml: schemaLines.join('\n'),
+            importXml: importLine,
+            json: jsonOp,
+            jsonImport,
+        };
     }
 }

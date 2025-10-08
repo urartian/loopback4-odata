@@ -10,7 +10,7 @@
     "build": "tsc -p tsconfig.build.json",
     "clean": "rimraf dist || true",
     "dev": "ts-node-dev --respawn --project tsconfig.dev.json examples/basic-app/index.ts",
-    "test": "rimraf dist-tests || true && tsc -p tsconfig.test.json && mocha \"dist-tests/src/__tests__/**/*.spec.js\" \"dist-tests/src/__tests__/**/*.acceptance.js\""
+    "test": "rimraf dist-tests || true && tsc -p tsconfig.test.json && mocha --exit \"dist-tests/src/__tests__/**/*.spec.js\" \"dist-tests/src/__tests__/**/*.acceptance.js\""
   },
   "keywords": [],
   "author": "Artiom Sargesjan",

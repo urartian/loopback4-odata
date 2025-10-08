@@ -1,6 +1,8 @@
 export interface ODataConfig {
     basePath?: string;             // default '/odata'
     csdlFormat?: 'xml' | 'json';   // default 'xml' 
+    namespace?: string;            // default 'Default'
+    entityContainerName?: string;  // default 'DefaultContainer'
     maxTop?: number;
     enableCount?: boolean;
     strict?: boolean;
