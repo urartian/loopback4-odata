@@ -84,6 +84,8 @@ export class ODataErrorProvider implements Provider<Reject> {
         return 'Forbidden';
       case 404:
         return 'NotFound';
+      case 422:
+        return 'UnprocessableEntity';
       case 409:
         return 'Conflict';
       case 412:
@@ -110,6 +112,8 @@ export class ODataErrorProvider implements Provider<Reject> {
         return 412;
       case 'PreconditionRequired':
         return 428;
+      case 'UnprocessableEntity':
+        return 422;
       default:
         return undefined;
     }
