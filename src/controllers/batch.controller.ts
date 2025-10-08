@@ -223,16 +223,8 @@ export class ODataBatchController {
     for (const group of grouped) {
       if (group.atomicityGroup) {
         try {
-          const {entries, failure} = await this.executeAtomicGroup(group.requests, group.atomicityGroup, request);
-          if (failure) {
-            responses.push({
-              atomicityGroup: group.atomicityGroup,
-              id: failure.id,
-              status: failure.status,
-              headers: failure.headers,
-              body: failure.body,
-            });
-          } else if (entries?.length) {
+          const entries = await this.executeAtomicGroup(group.requests, group.atomicityGroup, request);
+          if (entries?.length) {
             responses.push(
               ...entries.map(entry => ({
                 ...entry,
@@ -307,17 +299,27 @@ export class ODataBatchController {
     requests: BatchRequest[],
     groupId: string,
     parentRequest: Request,
-  ): Promise<{entries?: BatchResponseEntry[]; failure?: BatchResponseEntry}> {
+  ): Promise<BatchResponseEntry[]> {
     const context = await this.createAtomicGroupContext(groupId, requests);
     try {
       const entries = await this.executeGroup(requests, context, parentRequest);
-      const failed = entries.find(entry => entry.status >= 400);
-      if (failed) {
+      const failedIndex = entries.findIndex(entry => entry.status >= 400);
+      if (failedIndex >= 0) {
         await context.rollback();
-        return {failure: failed};
+        // Append synthetic responses for any requests that were not executed due to failure
+        if (entries.length < requests.length) {
+          for (const req of requests.slice(entries.length)) {
+            entries.push({
+              id: req.id,
+              status: 424, // Failed Dependency – request aborted due to earlier failure
+              body: this.odataError('FailedDependency', 'Request not executed due to prior failure in changeset.'),
+            });
+          }
+        }
+        return entries;
       }
       await context.commit();
-      return {entries};
+      return entries;
     } catch (error) {
       await context.rollback();
       throw error;
