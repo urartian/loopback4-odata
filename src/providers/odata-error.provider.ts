@@ -50,7 +50,9 @@ export class ODataErrorProvider implements Provider<Reject> {
         httpError.status ??
         (httpError.code ? this.mapCodeToStatus(httpError.code) : undefined) ??
         500;
-      const code = httpError.code ?? this.mapStatusToCode(statusCode);
+      const code = httpError.code === 'PreferenceNotSupported'
+        ? 'PreferenceNotSupported'
+        : this.mapStatusToCode(statusCode);
       const message = httpError.message || this.defaultMessage(statusCode);
       const target = httpError.target ?? null;
       const details = this.normalizeDetails(httpError);
@@ -78,6 +80,10 @@ export class ODataErrorProvider implements Provider<Reject> {
     switch (status) {
       case 400:
         return 'BadRequest';
+      case 406:
+        return 'NotAcceptable';
+      case 415:
+        return 'UnsupportedMediaType';
       case 401:
         return 'Unauthorized';
       case 403:

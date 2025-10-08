@@ -134,6 +134,16 @@ describe('OData component acceptance', () => {
     }
   });
 
+  it('supports $search across string fields', async () => {
+    const res = await client
+      .get('/odata/Products')
+      .query({$search: 'Lap'})
+      .expect(200);
+    expect(res.body.value).to.be.Array();
+    const names = res.body.value.map((p: any) => String(p.name || ''));
+    expect(names.some((n: string) => /lap/i.test(n))).to.be.true();
+  });
+
   it('keeps expanded navigation when root $select omits relation property', async () => {
     const res = await client
       .get('/odata/Products')
@@ -287,7 +297,7 @@ describe('OData component acceptance', () => {
     await client.get(`/odata/Products(${createdId})`).expect(404);
   });
 
-  it('allows deletes without If-Match but rejects stale tokens', async () => {
+  it('requires If-Match and rejects stale tokens when ETags are enabled', async () => {
     const created = await client
       .post('/odata/Products')
       .send({name: 'Controller', price: 99})
@@ -309,7 +319,11 @@ describe('OData component acceptance', () => {
       .set('If-Match', originalEtag)
       .expect(412);
 
-    await client.del(`/odata/Products(${productId})`).expect(204);
+    // Delete requires current If-Match token in strict mode
+    await client
+      .del(`/odata/Products(${productId})`)
+      .set('If-Match', currentEtag)
+      .expect(204);
     await client.get(`/odata/Products(${productId})`).expect(404);
   });
 
