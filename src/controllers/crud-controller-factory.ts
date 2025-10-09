@@ -18,6 +18,7 @@ import {
     Filter,
     FilterExcludingWhere,
     InclusionFilter,
+    Where,
     Options,
     RelationDefinitionMap,
     PropertyDefinition,
@@ -51,6 +52,26 @@ import { getODataSearchableProps } from '../decorators/search.decorators';
 type CrudEntity = Entity & { [key: string]: unknown };
 type CrudRepo = DefaultCrudRepository<CrudEntity, unknown>;
 type NormalizedInclusion = Exclude<InclusionFilter, string>;
+type CrudWhere = Where<CrudEntity>;
+
+type SearchAst =
+    | { kind: 'term'; value: string }
+    | { kind: 'and'; nodes: SearchAst[] }
+    | { kind: 'or'; nodes: SearchAst[] }
+    | { kind: 'not'; node: SearchAst };
+
+type SearchToken =
+    | { type: 'TERM'; value: string }
+    | { type: 'AND' }
+    | { type: 'OR' }
+    | { type: 'NOT' }
+    | { type: 'LPAREN' }
+    | { type: 'RPAREN' };
+
+interface SearchParseResult {
+    node: SearchAst;
+    termCount: number;
+}
 
 interface AggregationAccumulatorState {
     operator: AggregationOperator;
@@ -665,51 +686,326 @@ export function defineODataCrudController(def: EntitySetDef) {
 
         applySearch(base: Filter<CrudEntity>, search?: string) {
             if (!search) return;
-            const termsAll = this.tokenizeSearch(String(search));
-            const maxTerms = Number.isFinite(this.cfg?.maxSearchTerms as number) ? Number(this.cfg?.maxSearchTerms) : undefined;
-            const terms = maxTerms ? termsAll.slice(0, maxTerms) : termsAll;
-            if (!terms.length) return;
+            const parsed = this.parseSearchExpression(String(search));
+            if (!parsed) return;
+
+            const maxTermsCfg = this.cfg?.maxSearchTerms;
+            const maxTerms = Number.isFinite(maxTermsCfg as number) ? Number(maxTermsCfg) : undefined;
+            if (maxTerms && parsed.termCount > maxTerms) {
+                throw new HttpErrors.BadRequest(`$search allows at most ${maxTerms} terms.`);
+            }
+
             let fields = this.resolveSearchableFields();
-            const maxFields = Number.isFinite(this.cfg?.maxSearchFields as number) ? Number(this.cfg?.maxSearchFields) : undefined;
-            if (maxFields && fields.length > maxFields) fields = fields.slice(0, maxFields);
+            const maxFieldsCfg = this.cfg?.maxSearchFields;
+            const maxFields = Number.isFinite(maxFieldsCfg as number) ? Number(maxFieldsCfg) : undefined;
+            if (maxFields && fields.length > maxFields) {
+                fields = fields.slice(0, maxFields);
+            }
 
             if (!fields.length) {
                 const mode = this.cfg?.searchMode ?? 'annotated';
                 if (this.cfg?.strict || mode !== 'all') {
                     throw new HttpErrors.BadRequest('No searchable fields configured for $search.');
                 }
-                return; // non-strict/no-op fallback if ever needed
+                return;
             }
 
-            const likeClauses = terms.flatMap(term =>
-                fields.map(f => ({ [f]: { like: `%${term.replace(/%/g, '\\%').replace(/_/g, '\\_')}%`, escape: '\\', options: 'i' } } as AnyObject)),
-            );
-            const orWhere = { or: likeClauses } as Filter<CrudEntity>['where'];
-            if (base.where) {
-                base.where = { and: [base.where, orWhere] } as any;
-            } else {
-                base.where = orWhere;
+            const whereClause = this.buildSearchWhere(parsed.node, fields);
+            const combined = this.combineWithAnd([base.where as CrudWhere | undefined, whereClause]);
+            if (combined) {
+                base.where = combined;
             }
         }
 
-        tokenizeSearch(text: string): string[] {
-            const tokens: string[] = [];
-            let current = '';
-            let inQuote = false;
-            for (let i = 0; i < text.length; i++) {
-                const ch = text[i];
-                if (ch === '"' || ch === '\'') {
-                    inQuote = !inQuote;
-                    continue;
+        parseSearchExpression(text: string): SearchParseResult | undefined {
+            const tokens = this.scanSearchTokens(text);
+            if (!tokens.length) return undefined;
+
+            let index = 0;
+            let termCount = 0;
+
+            const peek = () => tokens[index];
+            const check = (type: SearchToken['type']) => {
+                const token = peek();
+                return token ? token.type === type : false;
+            };
+            const advance = () => tokens[index++];
+            const match = (type: SearchToken['type']) => {
+                if (check(type)) {
+                    advance();
+                    return true;
                 }
-                if (!inQuote && /\s/.test(ch)) {
-                    if (current) { tokens.push(current); current = ''; }
-                    continue;
+                return false;
+            };
+            const describeToken = (token: SearchToken | undefined) => {
+                if (!token) return 'end of expression';
+                switch (token.type) {
+                    case 'TERM':
+                        return `term "${token.value}"`;
+                    case 'AND':
+                    case 'OR':
+                    case 'NOT':
+                        return token.type;
+                    case 'LPAREN':
+                        return '(';
+                    case 'RPAREN':
+                        return ')';
+                    default:
+                        return 'unknown';
                 }
-                current += ch;
+            };
+            const error = (message: string): never => {
+                throw new HttpErrors.BadRequest(`Invalid $search expression: ${message}`);
+            };
+            const canImplicitAnd = () => {
+                const next = peek();
+                if (!next) return false;
+                return next.type === 'TERM' || next.type === 'LPAREN' || next.type === 'NOT';
+            };
+
+            function parseOr(): SearchAst {
+                const nodes: SearchAst[] = [parseAnd()];
+                while (match('OR')) {
+                    nodes.push(parseAnd());
+                }
+                return nodes.length === 1 ? nodes[0] : { kind: 'or', nodes };
             }
-            if (current) tokens.push(current);
-            return tokens.filter(Boolean);
+
+            function parseAnd(): SearchAst {
+                const nodes: SearchAst[] = [parseUnary()];
+                for (;;) {
+                    if (match('AND')) {
+                        nodes.push(parseUnary());
+                        continue;
+                    }
+                    if (canImplicitAnd()) {
+                        nodes.push(parseUnary());
+                        continue;
+                    }
+                    break;
+                }
+                return nodes.length === 1 ? nodes[0] : { kind: 'and', nodes };
+            }
+
+            function parseUnary(): SearchAst {
+                if (match('NOT')) {
+                    return { kind: 'not', node: parseUnary() };
+                }
+                return parsePrimary();
+            }
+
+            function parsePrimary(): SearchAst {
+                const token = peek();
+                if (!token) {
+                    return error('Unexpected end of expression.');
+                }
+                if (token.type === 'LPAREN') {
+                    advance();
+                    const expr = parseOr();
+                    if (!match('RPAREN')) {
+                        error('Expected ")" to close group.');
+                    }
+                    return expr;
+                }
+                if (token.type === 'TERM') {
+                    advance();
+                    termCount++;
+                    return { kind: 'term', value: token.value };
+                }
+                return error(`Unexpected token ${describeToken(token)}.`);
+            }
+
+            const ast = parseOr();
+            if (index < tokens.length) {
+                error(`Unexpected token ${describeToken(peek())}.`);
+            }
+            if (!termCount) return undefined;
+            return { node: ast, termCount };
+        }
+
+        scanSearchTokens(text: string): SearchToken[] {
+            const tokens: SearchToken[] = [];
+            let i = 0;
+            while (i < text.length) {
+                const ch = text[i];
+                if (/\s/.test(ch)) {
+                    i++;
+                    continue;
+                }
+                if (ch === '(') {
+                    tokens.push({ type: 'LPAREN' });
+                    i++;
+                    continue;
+                }
+                if (ch === ')') {
+                    tokens.push({ type: 'RPAREN' });
+                    i++;
+                    continue;
+                }
+                if (ch === '"' || ch === '\'') {
+                    const quote = ch;
+                    i++;
+                    let value = '';
+                    let closed = false;
+                    while (i < text.length) {
+                        const current = text[i];
+                        if (current === '\\') {
+                            if (i + 1 >= text.length) break;
+                            value += text[i + 1];
+                            i += 2;
+                            continue;
+                        }
+                        if (current === quote) {
+                            closed = true;
+                            i++;
+                            break;
+                        }
+                        value += current;
+                        i++;
+                    }
+                    if (!closed) {
+                        throw new HttpErrors.BadRequest('Invalid $search expression: unterminated quoted phrase.');
+                    }
+                    if (!value) {
+                        throw new HttpErrors.BadRequest('Invalid $search expression: quoted phrase cannot be empty.');
+                    }
+                    tokens.push({ type: 'TERM', value });
+                    continue;
+                }
+                let value = '';
+                while (i < text.length) {
+                    const current = text[i];
+                    if (current === '(' || current === ')' || /\s/.test(current) || current === '"' || current === '\'') {
+                        break;
+                    }
+                    if (current === '\\' && i + 1 < text.length) {
+                        value += text[i + 1];
+                        i += 2;
+                        continue;
+                    }
+                    value += current;
+                    i++;
+                }
+                value = value.trim();
+                if (!value) continue;
+                const upper = value.toUpperCase();
+                if (upper === 'AND' && value.length === 3) {
+                    tokens.push({ type: 'AND' });
+                    continue;
+                }
+                if (upper === 'OR' && value.length === 2) {
+                    tokens.push({ type: 'OR' });
+                    continue;
+                }
+                if (upper === 'NOT' && value.length === 3) {
+                    tokens.push({ type: 'NOT' });
+                    continue;
+                }
+                tokens.push({ type: 'TERM', value });
+            }
+            return tokens;
+        }
+
+        buildSearchWhere(node: SearchAst, fields: string[], negate = false): CrudWhere {
+            switch (node.kind) {
+                case 'term': {
+                    const clause = negate
+                        ? this.buildNegatedTermClause(node.value, fields)
+                        : this.buildTermClause(node.value, fields);
+                    if (!clause) {
+                        throw new HttpErrors.BadRequest('Invalid $search expression: empty term.');
+                    }
+                    return clause;
+                }
+                case 'not':
+                    return this.buildSearchWhere(node.node, fields, !negate);
+                case 'and': {
+                    const children = node.nodes.map(child => this.buildSearchWhere(child, fields, negate));
+                    const combined = negate ? this.combineWithOr(children) : this.combineWithAnd(children);
+                    if (!combined) {
+                        throw new HttpErrors.BadRequest('Invalid $search expression: empty conjunction.');
+                    }
+                    return combined;
+                }
+                case 'or': {
+                    const children = node.nodes.map(child => this.buildSearchWhere(child, fields, negate));
+                    const combined = negate ? this.combineWithAnd(children) : this.combineWithOr(children);
+                    if (!combined) {
+                        throw new HttpErrors.BadRequest('Invalid $search expression: empty disjunction.');
+                    }
+                    return combined;
+                }
+                default:
+                    throw new HttpErrors.BadRequest('Invalid $search expression: unsupported node.');
+            }
+        }
+
+        buildTermClause(term: string, fields: string[]): CrudWhere | undefined {
+            const pattern = `%${this.escapeSearchTerm(term)}%`;
+            const clauses = fields.map(field => {
+                return {
+                    [field]: { ilike: pattern, escape: '\\' },
+                } as unknown as CrudWhere;
+            });
+            if (!clauses.length) return undefined;
+            if (clauses.length === 1) return clauses[0];
+            return this.combineWithOr(clauses) ?? clauses[0];
+        }
+
+        buildNegatedTermClause(term: string, fields: string[]): CrudWhere | undefined {
+            const pattern = `%${this.escapeSearchTerm(term)}%`;
+            const clauses = fields.map(field => {
+                return {
+                    [field]: { nilike: pattern, escape: '\\' },
+                } as unknown as CrudWhere;
+            });
+            if (!clauses.length) return undefined;
+            if (clauses.length === 1) return clauses[0];
+            return this.combineWithAnd(clauses) ?? clauses[0];
+        }
+
+        escapeSearchTerm(term: string): string {
+            return term.replace(/[%_]/g, ch => `\\${ch}`);
+        }
+
+        combineWithAnd(parts: (CrudWhere | undefined)[]): CrudWhere | undefined {
+            const filtered = parts.filter((item): item is CrudWhere => item != null);
+            if (!filtered.length) return undefined;
+            if (filtered.length === 1) return filtered[0];
+            const merged: CrudWhere[] = [];
+            for (const clause of filtered) {
+                if (clause && typeof clause === 'object' && !Array.isArray(clause)) {
+                    const inner = (clause as AnyObject).and;
+                    if (Array.isArray(inner) && inner.length) {
+                        for (const entry of inner) {
+                            if (entry) merged.push(entry as CrudWhere);
+                        }
+                        continue;
+                    }
+                }
+                merged.push(clause);
+            }
+            return { and: merged };
+        }
+
+        combineWithOr(parts: (CrudWhere | undefined)[]): CrudWhere | undefined {
+            const filtered = parts.filter((item): item is CrudWhere => item != null);
+            if (!filtered.length) return undefined;
+            if (filtered.length === 1) return filtered[0];
+            const merged: CrudWhere[] = [];
+            for (const clause of filtered) {
+                if (clause && typeof clause === 'object' && !Array.isArray(clause)) {
+                    const inner = (clause as AnyObject).or;
+                    if (Array.isArray(inner) && inner.length) {
+                        for (const entry of inner) {
+                            if (entry) merged.push(entry as CrudWhere);
+                        }
+                        continue;
+                    }
+                }
+                merged.push(clause);
+            }
+            return { or: merged };
         }
 
         collectWhereFields(where: AnyObject | undefined, out: Set<string>) {

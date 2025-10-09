@@ -155,6 +155,43 @@ describe('OData component acceptance', () => {
     expect(names.some((n: string) => /lap/i.test(n))).to.be.true();
   });
 
+  it('supports boolean operators in $search', async () => {
+    const res = await client
+      .get('/odata/Products')
+      .query({$search: 'coffee AND grinder'})
+      .expect(200);
+
+    expect(res.body.value).to.be.Array();
+    const names = res.body.value.map((p: any) => String(p.name || ''));
+    expect(names).to.containEql('Coffee Grinder');
+    expect(names.every((n: string) => /coffee/i.test(n) && /grinder/i.test(n))).to.be.true();
+  });
+
+  it('supports quoted phrases and NOT operators in $search', async () => {
+    const res = await client
+      .get('/odata/Products')
+      .query({$search: '"coffee beans" AND NOT decaf'})
+      .expect(200);
+
+    expect(res.body.value).to.be.Array();
+    const names = res.body.value.map((p: any) => String(p.name || ''));
+    expect(names).to.containEql('Coffee Beans');
+    expect(names.some((n: string) => /decaf/i.test(n))).to.be.false();
+  });
+
+  it('enforces the configured $search term limit', async () => {
+    const res = await client
+      .get('/odata/Products')
+      .query({
+        $search: 'espresso OR latte OR cappuccino OR mocha OR macchiato OR ristretto',
+      })
+      .expect(400);
+
+    expect(res.body.error).to.be.Object();
+    expect(res.body.error.code).to.equal('BadRequest');
+    expect(res.body.error.message).to.match(/at most 5 terms/i);
+  });
+
   it('supports $apply groupby aggregate on collections', async () => {
     const res = await client
       .get('/odata/Orders')
@@ -315,7 +352,7 @@ describe('OData component acceptance', () => {
       .expect(200);
 
     expect(second.body.value).to.have.lengthOf(1);
-    expect(second.body.value[0].price >= 349).to.be.true();
+    expect(second.body.value[0].name).to.equal('Decaf Coffee Beans');
   });
 
   it('handles CRUD operations and path rewriting', async () => {

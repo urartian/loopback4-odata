@@ -301,10 +301,14 @@ export async function seedExampleData(app: TestApplication) {
   const existingProducts = await productRepo.count();
   if (existingProducts.count > 0) return;
 
-  const [laptop, phone, monitor] = await productRepo.createAll([
+  const [laptop, phone, monitor, coffeeGrinder, coffeeBeans] = await productRepo.createAll([
     {name: 'Laptop', price: 1299},
     {name: 'Phone', price: 799},
     {name: 'Monitor', price: 349},
+    {name: 'Coffee Grinder', price: 249},
+    {name: 'Coffee Beans', price: 24},
+    {name: 'Decaf Coffee Beans', price: 26},
+    {name: 'Espresso Machine', price: 899},
   ]);
 
   const [orderOne, orderTwo] = await orderRepo.createAll([
@@ -315,8 +319,10 @@ export async function seedExampleData(app: TestApplication) {
   const items = [
     {orderId: orderOne.id!, productId: laptop.id!, quantity: 2, unitPrice: laptop.price},
     {orderId: orderOne.id!, productId: monitor.id!, quantity: 1, unitPrice: monitor.price},
+    {orderId: orderOne.id!, productId: coffeeBeans.id!, quantity: 4, unitPrice: coffeeBeans.price},
     {orderId: orderTwo.id!, productId: phone.id!, quantity: 1, unitPrice: phone.price},
     {orderId: orderTwo.id!, productId: monitor.id!, quantity: 3, unitPrice: monitor.price},
+    {orderId: orderTwo.id!, productId: coffeeGrinder.id!, quantity: 1, unitPrice: coffeeGrinder.price},
   ];
 
   await orderItemRepo.createAll(items);
