@@ -38,6 +38,8 @@ export interface ODataCapabilitiesConfig {
     navigationRestrictions?: Record<string, ODataNavigationRestriction>;
     permissions?: ODataEntityPermission[];
     hasStream?: boolean;
+    aggregation?: boolean;
+    aggregationMethods?: string[];
 }
 
 export interface ODataCapabilityDefaults extends ODataCapabilitiesConfig {

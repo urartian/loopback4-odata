@@ -98,6 +98,8 @@ describe('CsdlGenerator', () => {
           },
         ],
         hasStream: true,
+        aggregation: true,
+        aggregationMethods: ['Sum', 'Count'],
       },
       actions: [
         {
@@ -170,6 +172,7 @@ describe('CsdlGenerator', () => {
     expect(xml.includes('Annotation Term="Org.OData.Core.V1.HasStream" Bool="true"')).to.be.true();
     expect(xml.includes('Annotation Term="Org.OData.Capabilities.V1.CountRestrictions"')).to.be.true();
     expect(xml.includes('Annotation Term="Org.OData.Capabilities.V1.FilterFunctions"')).to.be.true();
+    expect(xml.includes('Annotation Term="Org.OData.Capabilities.V1.Aggregate"')).to.be.true();
     expect(xml.includes('Annotation Term="Org.OData.Capabilities.V1.NavigationRestrictions"')).to.be.true();
     expect(
       xml.includes('<NavigationProperty Name="gadgets" Type="Collection(Catalog.Gadget)"'),
@@ -250,6 +253,7 @@ describe('CsdlGenerator', () => {
     });
     expect(container.Widgets['@Org.OData.Core.V1.Permissions'][0].SchemeName).to.equal('OAuth2');
     expect(container.Widgets['@Org.OData.Core.V1.Permissions'][0].Scopes).to.have.length(2);
+    expect(container.Widgets['@Org.OData.Capabilities.V1.Aggregate'].SupportedAggregationMethods).to.deepEqual(['Sum', 'Count']);
     expect(container.Gadgets.$Type).to.equal('Catalog.Gadget');
     expect(container.ping.$Function).to.equal('Catalog.ping');
   });

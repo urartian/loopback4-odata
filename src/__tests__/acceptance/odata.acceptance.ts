@@ -144,6 +144,23 @@ describe('OData component acceptance', () => {
     expect(names.some((n: string) => /lap/i.test(n))).to.be.true();
   });
 
+  it('supports $apply groupby aggregate on collections', async () => {
+    const res = await client
+      .get('/odata/Orders')
+      .query({
+        $apply: 'groupby((total), aggregate(id with count as OrderCount))',
+        $orderby: 'total desc',
+        $top: '1',
+      })
+      .expect(200);
+
+    expect(res.body.value).to.be.Array();
+    expect(res.body.value).to.have.length(1);
+    const first = res.body.value[0];
+    expect(first).to.have.property('total');
+    expect(first.OrderCount).to.equal(1);
+  });
+
   it('keeps expanded navigation when root $select omits relation property', async () => {
     const res = await client
       .get('/odata/Products')

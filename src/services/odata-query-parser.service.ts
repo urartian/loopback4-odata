@@ -41,6 +41,19 @@ interface LiteralOperand {
 
 type Operand = FieldOperand | LiteralOperand;
 
+export type AggregationOperator = 'sum' | 'average' | 'min' | 'max' | 'count' | 'countdistinct';
+
+export interface AggregationExpression {
+  field?: string;
+  operator: AggregationOperator;
+  alias: string;
+}
+
+export interface AggregationSpec {
+  groupBy: string[];
+  aggregates: AggregationExpression[];
+}
+
 type ParsedExpression =
   | {operator: 'comparison'; field: string; comparator: string; value: unknown}
   | {operator: 'logical'; type: 'and' | 'or'; expressions: ParsedExpression[]}
@@ -629,6 +642,149 @@ function splitTopLevel(value: string, delimiter: string): string[] {
   return results;
 }
 
+function findClosingParen(value: string, openIndex: number): number {
+  let depth = 0;
+  let inString = false;
+  for (let i = openIndex; i < value.length; i++) {
+    const char = value[i];
+    if (char === "'") {
+      if (inString) {
+        if (i + 1 < value.length && value[i + 1] === "'") {
+          i++;
+        } else {
+          inString = false;
+        }
+      } else {
+        inString = true;
+      }
+      continue;
+    }
+    if (inString) continue;
+    if (char === '(') {
+      depth++;
+      continue;
+    }
+    if (char === ')') {
+      depth--;
+      if (depth === 0) return i;
+      if (depth < 0) break;
+    }
+  }
+  throw new Error('Malformed expression: unmatched parentheses.');
+}
+
+function parseApply(apply: string): AggregationSpec {
+  const trimmed = apply.trim();
+  if (!trimmed) {
+    throw new Error('Empty $apply expression.');
+  }
+
+  const segments = splitTopLevel(trimmed, '/');
+  if (segments.length !== 1) {
+    throw new Error('Unsupported $apply pipeline. Only a single groupby(...) segment is supported.');
+  }
+
+  const segment = segments[0].trim();
+  if (!/^groupby\s*\(/i.test(segment)) {
+    throw new Error('Unsupported $apply expression. Expected groupby(...).');
+  }
+
+  const openIndex = segment.indexOf('(');
+  const closeIndex = findClosingParen(segment, openIndex);
+  if (closeIndex !== segment.length - 1) {
+    throw new Error('Unsupported $apply expression. Unexpected content after groupby(...).');
+  }
+
+  const inner = segment.substring(openIndex + 1, closeIndex).trim();
+  if (!inner.startsWith('(')) {
+    throw new Error('groupby requires a list of properties in double parentheses.');
+  }
+
+  const groupClose = findClosingParen(inner, 0);
+  const groupFieldsExpr = inner.substring(1, groupClose).trim();
+  const remainder = inner.substring(groupClose + 1).trim();
+
+  const groupFields = groupFieldsExpr
+    ? groupFieldsExpr.split(',').map(p => p.trim()).filter(Boolean)
+    : [];
+
+  if (!groupFields.length) {
+    throw new Error('groupby requires at least one property.');
+  }
+  groupFields.forEach(field => {
+    if (!/^[_A-Za-z][_A-Za-z0-9]*$/.test(field)) {
+      throw new Error(`Unsupported group-by property: ${field}`);
+    }
+  });
+
+  if (!remainder) {
+    throw new Error('aggregate(...) clause is required within groupby.');
+  }
+
+  const aggregateMatch = remainder.match(/^,?\s*aggregate\s*\((.*)\)\s*$/i);
+  if (!aggregateMatch) {
+    throw new Error('Unsupported $apply expression. Expected aggregate(...) after groupby.');
+  }
+  const aggregateBody = aggregateMatch[1];
+  const aggregateTokens = splitTopLevel(aggregateBody, ',');
+  if (!aggregateTokens.length) {
+    throw new Error('aggregate(...) must specify at least one aggregation.');
+  }
+
+  const aggregates: AggregationExpression[] = aggregateTokens.map(token => parseAggregateExpression(token));
+
+  return {groupBy: groupFields, aggregates};
+}
+
+function parseAggregateExpression(raw: string): AggregationExpression {
+  const expr = raw.trim();
+  if (!expr) {
+    throw new Error('Empty aggregate expression.');
+  }
+
+  const match = expr.match(/^([^\s]+)\s+with\s+([A-Za-z]+)\s+as\s+([A-Za-z_][A-Za-z0-9_]*)$/i);
+  if (!match) {
+    throw new Error(`Invalid aggregate expression: ${expr}`);
+  }
+
+  const fieldToken = match[1];
+  const operatorToken = match[2].toLowerCase();
+  const alias = match[3];
+
+  if (!/^[_A-Za-z][_A-Za-z0-9]*$/.test(alias)) {
+    throw new Error(`Invalid aggregate alias: ${alias}`);
+  }
+
+  const operatorMap: Record<string, AggregationOperator> = {
+    sum: 'sum',
+    min: 'min',
+    max: 'max',
+    average: 'average',
+    avg: 'average',
+    count: 'count',
+    countdistinct: 'countdistinct',
+  };
+
+  const operator = operatorMap[operatorToken];
+  if (!operator) {
+    throw new Error(`Unsupported aggregation operator: ${operatorToken}`);
+  }
+
+  if (fieldToken === '*' && operator !== 'count') {
+    throw new Error('Only count(*) is supported for the wildcard aggregator.');
+  }
+
+  if (fieldToken !== '*' && !/^[_A-Za-z][_A-Za-z0-9]*$/.test(fieldToken)) {
+    throw new Error(`Unsupported aggregate property: ${fieldToken}`);
+  }
+
+  return {
+    field: fieldToken === '*' ? undefined : fieldToken,
+    operator,
+    alias,
+  };
+}
+
 function extractPathAndOptions(segment: string): {path: string; options?: string} {
   const trimmed = segment.trim();
   let start = -1;
@@ -985,6 +1141,7 @@ function parseExpand(
 export interface ParsedODataQuery extends Filter<AnyObject> {
   inlineCount?: boolean;
   search?: string;
+  apply?: AggregationSpec;
 }
 
 export function parseODataQuery(query: QueryObject, options: ParseOptions = {}): ParsedODataQuery {
@@ -992,7 +1149,7 @@ export function parseODataQuery(query: QueryObject, options: ParseOptions = {}):
   const {relations} = options;
 
   if (options.strict) {
-    const allowed = new Set(['$filter', '$orderby', '$top', '$skip', '$select', '$expand', '$count', '$search']);
+    const allowed = new Set(['$filter', '$orderby', '$top', '$skip', '$select', '$expand', '$count', '$search', '$apply']);
     for (const key of Object.keys(query ?? {})) {
       if (key.startsWith('$') && !allowed.has(key)) {
         throw new Error(`Unsupported query option: ${key}`);
@@ -1044,6 +1201,11 @@ export function parseODataQuery(query: QueryObject, options: ParseOptions = {}):
   const search = typeof query['$search'] === 'string' ? query['$search'] : undefined;
   if (search) {
     filter.search = search;
+  }
+
+  const apply = typeof query['$apply'] === 'string' ? query['$apply'] : undefined;
+  if (apply) {
+    filter.apply = parseApply(apply);
   }
 
   return filter;

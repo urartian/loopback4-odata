@@ -24,7 +24,7 @@ import {
     AnyObject,
 } from '@loopback/repository';
 import { EntitySetDef } from '../registry/entityset-registry';
-import { parseODataQuery } from '../services/odata-query-parser.service';
+import { parseODataQuery, AggregationSpec, AggregationOperator } from '../services/odata-query-parser.service';
 import { ODATA_ATOMICITY_STATE, ODATA_VERSION } from '../constants';
 import { AtomicityRequestState } from '../types/batch';
 import { Response } from '@loopback/rest';
@@ -50,6 +50,15 @@ import { ODataConfig } from '../types';
 import { getODataSearchableProps } from '../decorators/search.decorators';
 type CrudEntity = Entity & { [key: string]: unknown };
 type CrudRepo = DefaultCrudRepository<CrudEntity, unknown>;
+
+interface AggregationAccumulatorState {
+    operator: AggregationOperator;
+    sum?: number;
+    count?: number;
+    min?: number;
+    max?: number;
+    distinct?: Set<unknown>;
+}
 
 function inferIdParamType(definition: any): 'string' | 'number' | 'boolean' {
     const idName = definition?.idProperties?.()[0];
@@ -223,6 +232,164 @@ export function defineODataCrudController(def: EntitySetDef) {
                 return plainEntities.map(entity => ({ ...entity }));
             }
             return plainEntities.map(plain => this.decoratePlainEntity(plain, this.computeEtagFromPlain(plain)));
+        }
+
+        executeAggregation(rows: AnyObject[], spec: AggregationSpec): AnyObject[] {
+            const groupMap = new Map<string, {groupValues: Record<string, unknown>; aggregates: Record<string, AggregationAccumulatorState>}>();
+
+            for (const row of rows) {
+                const groupValues = spec.groupBy.map(field => (row as AnyObject)[field]);
+                const key = JSON.stringify(groupValues);
+                let entry = groupMap.get(key);
+                if (!entry) {
+                    const values: Record<string, unknown> = {};
+                    spec.groupBy.forEach((field, idx) => {
+                        values[field] = groupValues[idx];
+                    });
+                    entry = {groupValues: values, aggregates: {}};
+                    groupMap.set(key, entry);
+                }
+
+                for (const aggregate of spec.aggregates) {
+                    let state = entry.aggregates[aggregate.alias];
+                    if (!state) {
+                        state = {
+                            operator: aggregate.operator,
+                            sum: aggregate.operator === 'sum' || aggregate.operator === 'average' ? 0 : undefined,
+                            count: aggregate.operator === 'count' || aggregate.operator === 'average' ? 0 : undefined,
+                            min: undefined,
+                            max: undefined,
+                            distinct: aggregate.operator === 'countdistinct' ? new Set<unknown>() : undefined,
+                        };
+                        entry.aggregates[aggregate.alias] = state;
+                    }
+                    const value = aggregate.field ? (row as AnyObject)[aggregate.field] : undefined;
+                    updateAccumulatorState(state, value);
+                }
+            }
+
+            const results: AnyObject[] = [];
+            for (const {groupValues, aggregates} of groupMap.values()) {
+                const record: AnyObject = {...groupValues};
+                for (const [alias, state] of Object.entries(aggregates)) {
+                    record[alias] = finalizeAccumulatorState(state);
+                }
+                results.push(record);
+            }
+
+            return results;
+
+            function updateAccumulatorState(state: AggregationAccumulatorState, rawValue: unknown) {
+                switch (state.operator) {
+                    case 'sum': {
+                        const num = typeof rawValue === 'number' ? rawValue : Number(rawValue);
+                        if (Number.isFinite(num)) {
+                            state.sum = (state.sum ?? 0) + num;
+                        }
+                        break;
+                    }
+                    case 'average': {
+                        const num = typeof rawValue === 'number' ? rawValue : Number(rawValue);
+                        if (Number.isFinite(num)) {
+                            state.sum = (state.sum ?? 0) + num;
+                            state.count = (state.count ?? 0) + 1;
+                        }
+                        break;
+                    }
+                    case 'min': {
+                        const num = typeof rawValue === 'number' ? rawValue : Number(rawValue);
+                        if (Number.isFinite(num)) {
+                            state.min = state.min === undefined ? num : Math.min(state.min, num);
+                        }
+                        break;
+                    }
+                    case 'max': {
+                        const num = typeof rawValue === 'number' ? rawValue : Number(rawValue);
+                        if (Number.isFinite(num)) {
+                            state.max = state.max === undefined ? num : Math.max(state.max, num);
+                        }
+                        break;
+                    }
+                    case 'count': {
+                        state.count = (state.count ?? 0) + 1;
+                        break;
+                    }
+                    case 'countdistinct': {
+                        if (!state.distinct) state.distinct = new Set();
+                        state.distinct.add(rawValue);
+                        break;
+                    }
+                }
+            }
+
+            function finalizeAccumulatorState(state: AggregationAccumulatorState): unknown {
+                switch (state.operator) {
+                    case 'sum':
+                        return state.sum ?? 0;
+                    case 'average':
+                        if (!state.count) return null;
+                        return (state.sum ?? 0) / state.count;
+                    case 'min':
+                        return state.min ?? null;
+                    case 'max':
+                        return state.max ?? null;
+                    case 'count':
+                        return state.count ?? 0;
+                    case 'countdistinct':
+                        return state.distinct ? state.distinct.size : 0;
+                    default:
+                        return null;
+                }
+            }
+        }
+
+        orderAggregationResults(data: AnyObject[], order?: string[]): AnyObject[] {
+            if (!order?.length) return data;
+            const descriptors = order
+                .map(entry => entry.trim())
+                .filter(Boolean)
+                .map(part => {
+                    const [field, direction] = part.split(/\s+/);
+                    return {
+                        field,
+                        direction: direction?.toUpperCase() === 'DESC' ? -1 : 1,
+                    };
+                })
+                .filter(item => item.field);
+            if (!descriptors.length) return data;
+
+            const sorted = [...data];
+            sorted.sort((a, b) => {
+                for (const descriptor of descriptors) {
+                    const av = (a as AnyObject)[descriptor.field];
+                    const bv = (b as AnyObject)[descriptor.field];
+                    if (av === bv) continue;
+                    if (av == null) return 1 * descriptor.direction;
+                    if (bv == null) return -1 * descriptor.direction;
+                    if (typeof av === 'number' && typeof bv === 'number') {
+                        if (av < bv) return -1 * descriptor.direction;
+                        if (av > bv) return 1 * descriptor.direction;
+                        continue;
+                    }
+                    const aStr = String(av);
+                    const bStr = String(bv);
+                    if (aStr < bStr) return -1 * descriptor.direction;
+                    if (aStr > bStr) return 1 * descriptor.direction;
+                }
+                return 0;
+            });
+            return sorted;
+        }
+
+        sliceAggregationResults(data: AnyObject[], offset?: number, limit?: number): AnyObject[] {
+            let result = data;
+            if (typeof offset === 'number' && offset > 0) {
+                result = result.slice(offset);
+            }
+            if (typeof limit === 'number' && limit >= 0) {
+                result = result.slice(0, limit);
+            }
+            return result;
         }
 
         ensureEtagField(filter: Filter<CrudEntity>) {
@@ -622,6 +789,7 @@ export function defineODataCrudController(def: EntitySetDef) {
             const baseFilter: Filter<CrudEntity> = filter ? { ...filter } : {};
 
             let inlineCountRequested = false;
+            let aggregationSpec: AggregationSpec | undefined;
             try {
                 const parsed = parseODataQuery(
                     this.request.query as Record<string, string | string[] | undefined>,
@@ -631,8 +799,10 @@ export function defineODataCrudController(def: EntitySetDef) {
                 if (inlineCountRequested && this.cfg && this.cfg.enableCount === false) {
                     throw new HttpErrors.BadRequest('The $count option is disabled by server configuration.');
                 }
-                const parsedFilter = { ...parsed } as Filter<CrudEntity> & { inlineCount?: boolean };
+                aggregationSpec = parsed.apply;
+                const parsedFilter = { ...parsed } as Filter<CrudEntity> & { inlineCount?: boolean; apply?: AggregationSpec };
                 delete (parsedFilter as { inlineCount?: boolean }).inlineCount;
+                delete (parsedFilter as { apply?: AggregationSpec }).apply;
                 this.mergeFilters(baseFilter, parsedFilter);
                 this.ensureEtagField(baseFilter);
                 // apply $search if present
@@ -642,6 +812,15 @@ export function defineODataCrudController(def: EntitySetDef) {
             } catch (error) {
                 const message = (error as Error).message ?? 'Invalid OData query.';
                 throw new HttpErrors.BadRequest(message);
+            }
+
+            if (aggregationSpec) {
+                if (inlineCountRequested) {
+                    throw new HttpErrors.BadRequest('The $count option cannot be combined with $apply.');
+                }
+                if (baseFilter.include) {
+                    throw new HttpErrors.BadRequest('The $expand option is not supported together with $apply.');
+                }
             }
 
             // Enforce maxTop if configured
@@ -671,6 +850,28 @@ export function defineODataCrudController(def: EntitySetDef) {
 
             const execDefault = async () => {
                 const options = this.repositoryOptions();
+
+                if (aggregationSpec) {
+                    const fetchFilter: Filter<CrudEntity> = { ...baseFilter };
+                    delete fetchFilter.order;
+                    delete fetchFilter.limit;
+                    delete fetchFilter.offset;
+
+                    const entities = await this.repository.find(fetchFilter, options);
+                    const plainEntities = entities.map(entity => this.toPlainEntity(entity) ?? {});
+                    const aggregated = this.executeAggregation(plainEntities, aggregationSpec);
+                    const ordered = this.orderAggregationResults(aggregated, baseFilter.order);
+                    const paged = this.sliceAggregationResults(ordered, baseFilter.offset, baseFilter.limit);
+
+                    this.ensureODataHeaders();
+                    const result = {
+                        '@odata.context': contextBase,
+                        value: paged,
+                    } as AnyObject;
+                    ctx.result = result;
+                    return result;
+                }
+
                 const results = await this.repository.find(baseFilter, options);
                 const plainResults = results.map(entity => this.toPlainEntity(entity) ?? {});
                 let totalCount: number | undefined;

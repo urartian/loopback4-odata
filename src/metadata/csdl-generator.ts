@@ -83,6 +83,8 @@ function mergeCapabilities(
         navigationRestrictionDefaults: defaults?.navigationRestrictionDefaults,
         permissions: overrides?.permissions ?? defaults?.permissions,
         hasStream: overrides?.hasStream ?? defaults?.hasStream,
+        aggregation: overrides?.aggregation ?? defaults?.aggregation,
+        aggregationMethods: overrides?.aggregationMethods ?? defaults?.aggregationMethods,
     };
 }
 
@@ -682,6 +684,27 @@ export class CsdlGenerator {
                     '        </Annotation>',
                 );
                 capabilityAnnotationsJson['@Org.OData.Capabilities.V1.FilterFunctions'] = filterFunctions;
+            }
+
+            if (capabilities.aggregation) {
+                const methodsForJson = (capabilities.aggregationMethods && capabilities.aggregationMethods.length
+                    ? capabilities.aggregationMethods
+                    : ['Sum', 'Average', 'Min', 'Max', 'Count', 'CountDistinct']);
+                const methodsForXml = methodsForJson.map(m => xmlEscape(m));
+                capabilityAnnotationsXml.push(
+                    '        <Annotation Term="Org.OData.Capabilities.V1.Aggregate">',
+                    '          <Record>',
+                    '            <PropertyValue Property="SupportedAggregationMethods">',
+                    '              <Collection>',
+                    ...methodsForXml.map(m => `                <String>${m}</String>`),
+                    '              </Collection>',
+                    '            </PropertyValue>',
+                    '          </Record>',
+                    '        </Annotation>',
+                );
+                capabilityAnnotationsJson['@Org.OData.Capabilities.V1.Aggregate'] = {
+                    SupportedAggregationMethods: methodsForJson,
+                };
             }
 
             const navigationRestrictions: Record<string, ODataNavigationRestriction> = {
