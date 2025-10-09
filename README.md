@@ -770,7 +770,7 @@ Run `npm test` to compile the TypeScript specs and execute the unit suite. Accep
 - [x] Transaction-backed `$batch` changesets (when datasource supports transactions)
 - [x] Optimistic concurrency with OData ETags (`If-Match` / `If-None-Match` support on generated CRUD routes)
 - [x] `$batch` execution runs through the LoopBack pipeline so interceptors/auth apply; changesets use per-datasource transactions and commit/rollback as a unit
-- [x] Configurable base path (`basePath`), `$top` limit (`maxTop`), `$count` toggle (`enableCount`), and strict mode validations
+- [x] Configurable base path (`basePath`), `$top` limit (`maxTop`), `$count` toggle (`enableCount`), and guardrails for `$skip`/`$expand` via config
 - [x] Opt-in `$search` with boolean operators (AND/OR/NOT), quoted phrases, per-field configuration, and guardrails
 - [x] Configurable CSDL namespace/container names and JSON CSDL output with enriched primitive facets
 - [x] Complex types, enum types, and referential constraints reflected in generated CSDL (XML & JSON)
@@ -814,8 +814,8 @@ this.bind(ODATA_BINDINGS.CONFIG).to({
 
 - `basePath`: Externally visible service root. All OData routes are served under this path (via middleware rewrite) while internal routes remain at `/odata`. Response metadata (`@odata.context`) uses this value.
 - `maxTop`: Caps `$top` for collection reads. The server may return fewer results than requested per OData v4. In strict mode, requests with `$top` above the cap return 400; otherwise the value is clamped to the maximum.
-- `maxSkip`: Maximum allowed `$skip`. In strict mode, requests with `$skip` above the cap return 400; otherwise it is clamped.
-- `maxExpandDepth`: Maximum allowed `$expand` nesting depth. In strict mode, deeper expansions return 400.
+- `maxSkip`: Maximum allowed `$skip`. When strict mode is disabled, requests above the cap are clamped; with strict mode enabled they return `400 Bad Request`.
+- `maxExpandDepth`: Maximum allowed `$expand` nesting depth; requests that exceed it return `400 Bad Request`.
 - `enableCount`:
   - When `false`, inline counts (`?$count=true`) return `400 Bad Request` with an OData error.
   - The standalone path (`GET <basePath>/<EntitySet>/$count`) returns `501 Not Implemented`.
@@ -832,7 +832,7 @@ this.bind(ODATA_BINDINGS.CONFIG).to({
   - Rejects unknown system query options (e.g., `$levels`, `$apply`) with `400 Bad Request`.
   - Validates `$select`, `$orderby`, `$filter` fields against model properties; unknown fields return `400 Bad Request`.
   - Enforces content negotiation: `Accept` must allow `application/json` for CRUD; `$metadata` must allow `application/xml` (or JSON if configured); non‑JSON `Content-Type` on writes returns `415`.
-  - Limits & safety: `maxExpandDepth` restricts `$expand` nesting; `maxSkip` caps `$skip` (both enforced with 400 in strict mode).
+  - Limits & safety: `maxExpandDepth` always enforces a hard ceiling (400 when exceeded); `maxSkip` still caps offsets and escalates from clamp to 400 when strict mode is enabled.
   - Search:
     - `searchMode`: `'annotated' | 'config-only' | 'all' | 'disabled'` (default: `annotated`)
     - `searchFields`: `{[entitySet: string]: string[]}` overrides decorator scope
@@ -852,7 +852,6 @@ Entity-set specific overrides are available via `EntitySetRegistry.register`:
 ## Roadmap
 
 - [ ] Filter functions: add additional string helpers (e.g. `trim`, `concat`) and date/time parts (`month`, `day`, `hour`, `minute`, `second`); return 400 in strict mode when unsupported by connector
-- [ ] Limits & safety: `maxExpandDepth` (and optional `maxSkip`) to prevent heavy queries in strict mode
 - [ ] Advanced CSDL polish: extend annotations with insert/update restrictions, expose search annotations, and support complex type inheritance
 - [ ] Path rewriting polish: alternate/compound keys and robust quoting beyond `\w+` heuristics
 - [ ] Draft/deep insert workflows, localized fields, and SAP Fiori-friendly annotations

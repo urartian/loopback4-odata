@@ -1066,19 +1066,19 @@ export function defineODataCrudController(def: EntitySetDef) {
         }
 
         enforceExpandDepth(include?: InclusionFilter[]) {
-            if (!this.cfg?.strict) return;
-            const limit = this.cfg?.maxExpandDepth;
-            if (!Number.isFinite(limit as number) || (limit as number) <= 0) return;
+            const limitRaw = this.cfg?.maxExpandDepth;
+            if (!Number.isFinite(limitRaw as number) || (limitRaw as number) <= 0) return;
+            const limit = Number(limitRaw);
             const depth = this.computeIncludeDepth(include);
-            if (depth > (limit as number)) {
+            if (depth > limit) {
                 throw new HttpErrors.BadRequest(`$expand exceeds maximum depth of ${limit}.`);
             }
         }
 
         enforceSkipLimit(filter: Filter<CrudEntity>) {
-            const limit = this.cfg?.maxSkip;
-            if (!Number.isFinite(limit as number) || (limit as number) < 0) return;
-            const cap = Number(limit);
+            const limitRaw = this.cfg?.maxSkip;
+            if (!Number.isFinite(limitRaw as number) || (limitRaw as number) < 0) return;
+            const cap = Number(limitRaw);
             const requested = typeof filter.offset === 'number' ? filter.offset : undefined;
             if (requested == null) return;
             if (this.cfg?.strict && requested > cap) {

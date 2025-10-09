@@ -19,6 +19,8 @@ describe('OData config plumbing acceptance', () => {
     app.bind(ODATA_BINDINGS.CONFIG).to({
       basePath: '/api/odata',
       maxTop: 1,
+      maxSkip: 2,
+      maxExpandDepth: 2,
       enableCount: false,
       strict: false,
     } as ODataConfig);
@@ -80,6 +82,24 @@ describe('OData config plumbing acceptance', () => {
       .query({$top: '5'})
       .expect(400);
     expect(res.body?.error?.code).to.equal('BadRequest');
+  });
+
+  it('enforces maxExpandDepth even when strict=false', async () => {
+    await client
+      .get('/api/odata/Products')
+      .query({$expand: 'orders($expand=items($expand=product))'})
+      .expect(400);
+  });
+
+  it('clamps $skip to maxSkip when strict=false', async () => {
+    const res = await client
+      .get('/api/odata/Products')
+      .query({$skip: '10', $orderby: 'id asc'})
+      .expect(200);
+
+    expect(res.body.value).to.be.Array();
+    expect(res.body.value.length).to.be.greaterThan(0);
+    expect(res.body.value[0].name).to.equal('Monitor');
   });
 
   it('rejects inline $count when disabled', async () => {
