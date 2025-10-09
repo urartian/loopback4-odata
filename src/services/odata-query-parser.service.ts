@@ -41,7 +41,35 @@ interface LiteralOperand {
 
 type Operand = FieldOperand | LiteralOperand;
 
-type ParsedExpression =
+export type AggregationOperator = 'sum' | 'average' | 'min' | 'max' | 'count' | 'countdistinct';
+
+export interface AggregationExpression {
+  field?: string;
+  operator: AggregationOperator;
+  alias: string;
+}
+
+export interface AggregationSpec {
+  groupBy: string[];
+  aggregates: AggregationExpression[];
+}
+
+interface LambdaExpressionNode {
+  operator: 'lambda';
+  lambdaType: 'any' | 'all';
+  path: string[];
+  alias: string;
+  predicate: ParsedExpression;
+}
+
+export interface LambdaExpression {
+  type: 'any' | 'all';
+  path: string[];
+  alias: string;
+  predicate: ParsedExpression;
+}
+
+export type ParsedExpression =
   | {operator: 'comparison'; field: string; comparator: string; value: unknown}
   | {operator: 'logical'; type: 'and' | 'or'; expressions: ParsedExpression[]}
   | {operator: 'not'; expr: ParsedExpression}
@@ -49,7 +77,8 @@ type ParsedExpression =
   | {operator: 'fncmp'; name: 'round' | 'floor' | 'ceiling' | 'year'; field: string; comparator: string; value: number}
   | {operator: 'indexofcmp'; field: string; comparator: string; value: number; needle: string}
   | {operator: 'substrcmp'; field: string; start: number; length?: number; comparator: 'eq' | 'neq'; literal: string}
-  | {operator: 'lengthcmp'; field: string; comparator: string; value: number};
+  | {operator: 'lengthcmp'; field: string; comparator: string; value: number}
+  | LambdaExpressionNode;
 
 type QueryObject = Record<string, string | string[] | undefined>;
 
@@ -302,6 +331,9 @@ function parseLengthComparison(tokens: string[], index: number): [{operator: 'le
 }
 
 function parseComparison(tokens: string[], index: number): [ParsedExpression, number] {
+  const lambda = tryParseLambda(tokens, index);
+  if (lambda) return lambda;
+
   const fn = parseFunction(tokens, index);
   if (fn) {
     return [fn[0], fn[1]];
@@ -347,15 +379,91 @@ function parseComparison(tokens: string[], index: number): [ParsedExpression, nu
   ];
 }
 
+function tryParseLambda(tokens: string[], index: number): [LambdaExpressionNode, number] | undefined {
+  const token = tokens[index];
+  const match = token?.match(/^([A-Za-z_][A-Za-z0-9_\/]*)\/(any|all)$/i);
+  if (!match) return undefined;
+  if (tokens[index + 1] !== '(') {
+    throw new Error(`Malformed ${match[2].toLowerCase()} expression. Expected opening parenthesis.`);
+  }
+
+  let depth = 0;
+  const innerTokens: string[] = [];
+  let i = index + 1;
+  for (; i < tokens.length; i++) {
+    const current = tokens[i];
+    if (current === '(') {
+      depth++;
+      if (depth > 1) innerTokens.push(current);
+      continue;
+    }
+    if (current === ')') {
+      depth--;
+      if (depth < 0) {
+        throw new Error('Malformed lambda expression: unmatched closing parenthesis.');
+      }
+      if (depth === 0) {
+        break;
+      }
+      innerTokens.push(current);
+      continue;
+    }
+    innerTokens.push(current);
+  }
+  if (depth !== 0) {
+    throw new Error('Malformed lambda expression: unmatched parentheses.');
+  }
+  if (i >= tokens.length) {
+    throw new Error('Malformed lambda expression.');
+  }
+
+  const aliasToken = innerTokens.shift();
+  if (!aliasToken) {
+    throw new Error('Lambda expressions require an alias before the predicate.');
+  }
+  const alias = aliasToken.endsWith(':') ? aliasToken.slice(0, -1) : aliasToken;
+  if (!alias) {
+    throw new Error('Lambda alias cannot be empty.');
+  }
+
+  if (!innerTokens.length) {
+    throw new Error('Lambda predicate is required.');
+  }
+
+  const [predicate, consumed] = parseExpression(innerTokens, 0);
+  if (consumed !== innerTokens.length) {
+    throw new Error('Unable to parse lambda predicate.');
+  }
+
+  const pathSegments = match[1].split('/').filter(Boolean);
+  if (!pathSegments.length) {
+    throw new Error('Lambda expressions must reference a navigation property.');
+  }
+
+  return [
+    {
+      operator: 'lambda',
+      lambdaType: match[2].toLowerCase() as 'any' | 'all',
+      path: pathSegments,
+      alias,
+      predicate,
+    },
+    i + 1,
+  ];
+}
+
 function parseLiteral(token: string): unknown {
   if (!token) return token;
 
   if (token.startsWith("'") && token.endsWith("'")) {
-    return token.slice(1, -1);
+    const inner = token.slice(1, -1);
+    return inner.replace(/''/g, "'");
   }
 
-  if (token === 'true') return true;
-  if (token === 'false') return false;
+  const lower = token.toLowerCase();
+  if (lower === 'true') return true;
+  if (lower === 'false') return false;
+  if (lower === 'null') return null;
 
   const numeric = Number(token);
   if (!Number.isNaN(numeric)) return numeric;
@@ -407,6 +515,147 @@ function parseFilter(tokens: string[], startIndex = 0): [ParsedExpression, numbe
   return parseExpression(tokens, startIndex);
 }
 
+function containsLambda(expr: ParsedExpression): boolean {
+  if (expr.operator === 'lambda') return true;
+  if (expr.operator === 'logical') {
+    return expr.expressions.some(containsLambda);
+  }
+  if (expr.operator === 'not') {
+    return containsLambda(expr.expr);
+  }
+  return false;
+}
+
+function splitLambdaExpression(expr: ParsedExpression): {
+  lambda?: LambdaExpressionNode;
+  predicate?: ParsedExpression;
+} {
+  if (expr.operator === 'lambda') {
+    return {lambda: expr};
+  }
+
+  if (expr.operator === 'logical') {
+    if (expr.type !== 'and') {
+      if (containsLambda(expr)) {
+        throw new Error('Lambda expressions combined with OR are not supported yet.');
+      }
+      return {predicate: expr};
+    }
+    let lambda: LambdaExpressionNode | undefined;
+    const others: ParsedExpression[] = [];
+    for (const child of expr.expressions) {
+      const result = splitLambdaExpression(child);
+      if (result.lambda) {
+        if (lambda) {
+          throw new Error('Multiple lambda expressions are not supported yet.');
+        }
+        lambda = result.lambda;
+      }
+      if (result.predicate) {
+        others.push(result.predicate);
+      }
+    }
+    let predicate: ParsedExpression | undefined;
+    if (others.length === 1) {
+      predicate = others[0];
+    } else if (others.length > 1) {
+      predicate = {
+        operator: 'logical',
+        type: 'and',
+        expressions: others,
+      };
+    }
+    return {lambda, predicate};
+  }
+
+  if (expr.operator === 'not' && containsLambda(expr)) {
+    throw new Error('Negated lambda expressions are not supported yet.');
+  }
+
+  return {predicate: expr};
+}
+
+type IndexOfExpression = Extract<ParsedExpression, {operator: 'indexofcmp'}>;
+type SubstringExpression = Extract<ParsedExpression, {operator: 'substrcmp'}>;
+type LengthExpression = Extract<ParsedExpression, {operator: 'lengthcmp'}>;
+
+function negateIndexOfExpression(expr: IndexOfExpression): IndexOfExpression {
+  const {comparator, value} = expr;
+  if (comparator === 'eq' && value === -1) {
+    return {...expr, comparator: 'gte', value: 0};
+  }
+  if (comparator === 'gte' && value >= 0) {
+    return {...expr, comparator: 'eq', value: -1};
+  }
+  if (comparator === 'gt' && value > -1) {
+    return {...expr, comparator: 'eq', value: -1};
+  }
+  throw new Error('Unsupported negated indexof comparison.');
+}
+
+function negateSubstringExpression(expr: SubstringExpression): SubstringExpression {
+  const inverted = expr.comparator === 'eq' ? 'neq' : 'eq';
+  return {...expr, comparator: inverted as SubstringExpression['comparator']};
+}
+
+function negateLengthExpression(expr: LengthExpression): LengthExpression {
+  const inverse: Record<LengthExpression['comparator'], LengthExpression['comparator']> = {
+    eq: 'neq',
+    neq: 'eq',
+    gt: 'lte',
+    gte: 'lt',
+    lt: 'gte',
+    lte: 'gt',
+  };
+  const comparator = inverse[expr.comparator];
+  if (!comparator) {
+    throw new Error('Unsupported negated length comparison.');
+  }
+  return {...expr, comparator};
+}
+
+function underscorePattern(length: number): string {
+  return '_'.repeat(Math.max(0, length));
+}
+
+function translateLengthComparison(expr: LengthExpression): Where<AnyObject> {
+  const {field, comparator, value} = expr;
+  if (!Number.isFinite(value) || value < 0) {
+    throw new Error('length comparison requires a non-negative integer value.');
+  }
+  if (!Number.isInteger(value)) {
+    throw new Error('length comparison requires an integer literal.');
+  }
+  if (comparator === 'eq') {
+    if (value === 0) return {[field]: ''} as Where<AnyObject>;
+    return {[field]: {like: underscorePattern(value), escape: '\\'}} as Where<AnyObject>;
+  }
+  if (comparator === 'neq') {
+    if (value === 0) return {[field]: {neq: ''}} as Where<AnyObject>;
+    return {[field]: {nlike: underscorePattern(value), escape: '\\'}} as Where<AnyObject>;
+  }
+  if (comparator === 'gt') {
+    if (value === 0) {
+      return {[field]: {neq: ''}} as Where<AnyObject>;
+    }
+    return {[field]: {like: `${underscorePattern(value + 1)}%`, escape: '\\'}} as Where<AnyObject>;
+  }
+  if (comparator === 'gte') {
+    if (value <= 0) {
+      return {[field]: {like: '%', escape: '\\'}} as Where<AnyObject>;
+    }
+    return {[field]: {like: `${underscorePattern(value)}%`, escape: '\\'}} as Where<AnyObject>;
+  }
+  if (comparator === 'lt') {
+    return {[field]: {nlike: `${underscorePattern(value)}%`, escape: '\\'}} as Where<AnyObject>;
+  }
+  if (comparator === 'lte') {
+    if (value === 0) return {[field]: ''} as Where<AnyObject>;
+    return {[field]: {nlike: `${underscorePattern(value + 1)}%`, escape: '\\'}} as Where<AnyObject>;
+  }
+  throw new Error('Unsupported length comparison.');
+}
+
 function buildWhere(expr: ParsedExpression): Where<AnyObject> {
   if (expr.operator === 'not') {
     const inner = expr.expr;
@@ -430,6 +679,15 @@ function buildWhere(expr: ParsedExpression): Where<AnyObject> {
     if (inner.operator === 'fncmp') {
       // Fallback to {not: ...} — connector support may vary
       return {not: buildWhere(inner)} as any;
+    }
+    if (inner.operator === 'indexofcmp') {
+      return buildWhere(negateIndexOfExpression(inner));
+    }
+    if (inner.operator === 'substrcmp') {
+      return buildWhere(negateSubstringExpression(inner));
+    }
+    if (inner.operator === 'lengthcmp') {
+      return buildWhere(negateLengthExpression(inner));
     }
   }
   if (expr.operator === 'comparison') {
@@ -488,14 +746,7 @@ function buildWhere(expr: ParsedExpression): Where<AnyObject> {
   }
 
   if (expr.operator === 'lengthcmp') {
-    const {field, comparator, value} = expr;
-    if (comparator === 'eq' && value === 0) {
-      return {[field]: ''} as Where<AnyObject>;
-    }
-    if ((comparator === 'gt' || comparator === 'gte') && value >= 0) {
-      if (value <= 0) return {[field]: {neq: ''}} as Where<AnyObject>;
-    }
-    throw new Error('Unsupported length comparison. Supported: length(field) eq 0, length(field) gt 0.');
+    return translateLengthComparison(expr);
   }
 
   if (expr.operator === 'fncmp') {
@@ -627,6 +878,149 @@ function splitTopLevel(value: string, delimiter: string): string[] {
   const trimmed = current.trim();
   if (trimmed) results.push(trimmed);
   return results;
+}
+
+function findClosingParen(value: string, openIndex: number): number {
+  let depth = 0;
+  let inString = false;
+  for (let i = openIndex; i < value.length; i++) {
+    const char = value[i];
+    if (char === "'") {
+      if (inString) {
+        if (i + 1 < value.length && value[i + 1] === "'") {
+          i++;
+        } else {
+          inString = false;
+        }
+      } else {
+        inString = true;
+      }
+      continue;
+    }
+    if (inString) continue;
+    if (char === '(') {
+      depth++;
+      continue;
+    }
+    if (char === ')') {
+      depth--;
+      if (depth === 0) return i;
+      if (depth < 0) break;
+    }
+  }
+  throw new Error('Malformed expression: unmatched parentheses.');
+}
+
+function parseApply(apply: string): AggregationSpec {
+  const trimmed = apply.trim();
+  if (!trimmed) {
+    throw new Error('Empty $apply expression.');
+  }
+
+  const segments = splitTopLevel(trimmed, '/');
+  if (segments.length !== 1) {
+    throw new Error('Unsupported $apply pipeline. Only a single groupby(...) segment is supported.');
+  }
+
+  const segment = segments[0].trim();
+  if (!/^groupby\s*\(/i.test(segment)) {
+    throw new Error('Unsupported $apply expression. Expected groupby(...).');
+  }
+
+  const openIndex = segment.indexOf('(');
+  const closeIndex = findClosingParen(segment, openIndex);
+  if (closeIndex !== segment.length - 1) {
+    throw new Error('Unsupported $apply expression. Unexpected content after groupby(...).');
+  }
+
+  const inner = segment.substring(openIndex + 1, closeIndex).trim();
+  if (!inner.startsWith('(')) {
+    throw new Error('groupby requires a list of properties in double parentheses.');
+  }
+
+  const groupClose = findClosingParen(inner, 0);
+  const groupFieldsExpr = inner.substring(1, groupClose).trim();
+  const remainder = inner.substring(groupClose + 1).trim();
+
+  const groupFields = groupFieldsExpr
+    ? groupFieldsExpr.split(',').map(p => p.trim()).filter(Boolean)
+    : [];
+
+  if (!groupFields.length) {
+    throw new Error('groupby requires at least one property.');
+  }
+  groupFields.forEach(field => {
+    if (!/^[_A-Za-z][_A-Za-z0-9]*$/.test(field)) {
+      throw new Error(`Unsupported group-by property: ${field}`);
+    }
+  });
+
+  if (!remainder) {
+    throw new Error('aggregate(...) clause is required within groupby.');
+  }
+
+  const aggregateMatch = remainder.match(/^,?\s*aggregate\s*\((.*)\)\s*$/i);
+  if (!aggregateMatch) {
+    throw new Error('Unsupported $apply expression. Expected aggregate(...) after groupby.');
+  }
+  const aggregateBody = aggregateMatch[1];
+  const aggregateTokens = splitTopLevel(aggregateBody, ',');
+  if (!aggregateTokens.length) {
+    throw new Error('aggregate(...) must specify at least one aggregation.');
+  }
+
+  const aggregates: AggregationExpression[] = aggregateTokens.map(token => parseAggregateExpression(token));
+
+  return {groupBy: groupFields, aggregates};
+}
+
+function parseAggregateExpression(raw: string): AggregationExpression {
+  const expr = raw.trim();
+  if (!expr) {
+    throw new Error('Empty aggregate expression.');
+  }
+
+  const match = expr.match(/^([^\s]+)\s+with\s+([A-Za-z]+)\s+as\s+([A-Za-z_][A-Za-z0-9_]*)$/i);
+  if (!match) {
+    throw new Error(`Invalid aggregate expression: ${expr}`);
+  }
+
+  const fieldToken = match[1];
+  const operatorToken = match[2].toLowerCase();
+  const alias = match[3];
+
+  if (!/^[_A-Za-z][_A-Za-z0-9]*$/.test(alias)) {
+    throw new Error(`Invalid aggregate alias: ${alias}`);
+  }
+
+  const operatorMap: Record<string, AggregationOperator> = {
+    sum: 'sum',
+    min: 'min',
+    max: 'max',
+    average: 'average',
+    avg: 'average',
+    count: 'count',
+    countdistinct: 'countdistinct',
+  };
+
+  const operator = operatorMap[operatorToken];
+  if (!operator) {
+    throw new Error(`Unsupported aggregation operator: ${operatorToken}`);
+  }
+
+  if (fieldToken === '*' && operator !== 'count') {
+    throw new Error('Only count(*) is supported for the wildcard aggregator.');
+  }
+
+  if (fieldToken !== '*' && !/^[_A-Za-z][_A-Za-z0-9]*$/.test(fieldToken)) {
+    throw new Error(`Unsupported aggregate property: ${fieldToken}`);
+  }
+
+  return {
+    field: fieldToken === '*' ? undefined : fieldToken,
+    operator,
+    alias,
+  };
 }
 
 function extractPathAndOptions(segment: string): {path: string; options?: string} {
@@ -985,6 +1379,8 @@ function parseExpand(
 export interface ParsedODataQuery extends Filter<AnyObject> {
   inlineCount?: boolean;
   search?: string;
+  apply?: AggregationSpec;
+  lambda?: LambdaExpression;
 }
 
 export function parseODataQuery(query: QueryObject, options: ParseOptions = {}): ParsedODataQuery {
@@ -992,7 +1388,7 @@ export function parseODataQuery(query: QueryObject, options: ParseOptions = {}):
   const {relations} = options;
 
   if (options.strict) {
-    const allowed = new Set(['$filter', '$orderby', '$top', '$skip', '$select', '$expand', '$count', '$search']);
+    const allowed = new Set(['$filter', '$orderby', '$top', '$skip', '$select', '$expand', '$count', '$search', '$apply']);
     for (const key of Object.keys(query ?? {})) {
       if (key.startsWith('$') && !allowed.has(key)) {
         throw new Error(`Unsupported query option: ${key}`);
@@ -1005,7 +1401,18 @@ export function parseODataQuery(query: QueryObject, options: ParseOptions = {}):
     const tokens = tokenize(filterExpr);
     if (tokens.length) {
       const [expr] = parseFilter(tokens);
-      filter.where = buildWhere(expr);
+      const {lambda, predicate} = splitLambdaExpression(expr);
+      if (lambda) {
+        filter.lambda = {
+          type: lambda.lambdaType,
+          path: lambda.path,
+          alias: lambda.alias,
+          predicate: lambda.predicate,
+        };
+      }
+      if (predicate) {
+        filter.where = buildWhere(predicate);
+      }
     }
   }
 
@@ -1044,6 +1451,11 @@ export function parseODataQuery(query: QueryObject, options: ParseOptions = {}):
   const search = typeof query['$search'] === 'string' ? query['$search'] : undefined;
   if (search) {
     filter.search = search;
+  }
+
+  const apply = typeof query['$apply'] === 'string' ? query['$apply'] : undefined;
+  if (apply) {
+    filter.apply = parseApply(apply);
   }
 
   return filter;

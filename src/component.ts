@@ -16,9 +16,14 @@ export class ODataComponent implements Component {
         Binding.bind(ODATA_BINDINGS.CONFIG).to({
             basePath: '/odata',
             strict: true,
+            namespace: 'Default',
+            entityContainerName: 'DefaultContainer',
             searchMode: 'annotated',
             maxSearchFields: 5,
             maxSearchTerms: 5,
+            capabilities: {
+                aggregation: true,
+            },
         } as ODataConfig),
         Binding.bind(ODATA_BINDINGS.CSDL_GEN).toClass(CsdlGenerator).inScope(BindingScope.SINGLETON),
         Binding.bind(ODATA_BINDINGS.ENTITY_SET_REGISTRY).toClass(EntitySetRegistry).inScope(BindingScope.SINGLETON),

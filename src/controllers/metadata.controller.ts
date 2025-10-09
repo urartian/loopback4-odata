@@ -17,6 +17,7 @@ export class ODataMetadataController {
                 description: 'OData service metadata',
                 content: {
                     'application/xml': { schema: { type: 'string' } },
+                    'application/json': { schema: { type: 'string' } },
                 },
             },
         },
@@ -38,8 +39,9 @@ export class ODataMetadataController {
                 }
             }
         }
-        const body = this.csdl.generate();
-        const mime = this.csdl.contentType(this.cfg.csdlFormat ?? 'xml');
+        const format = this.cfg.csdlFormat ?? 'xml';
+        const body = this.csdl.generate(format);
+        const mime = this.csdl.contentType(format);
         res.type(mime);
         res.send(body);
         return res;

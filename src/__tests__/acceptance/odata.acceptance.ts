@@ -37,6 +37,17 @@ describe('OData component acceptance', () => {
     }
   });
 
+  it('supports multi-segment lambda navigation paths', async () => {
+    const res = await client
+      .get('/odata/Products')
+      .query({$filter: 'orders/items/any(i: i/quantity gt 2)'})
+      .expect(200);
+
+    expect(res.body.value).to.be.Array();
+    const names = res.body.value.map((item: any) => item.name);
+    expect(names).to.containEql('Monitor');
+  });
+
   afterEach(async () => {
     if (app.state === 'started') {
       await app.stop();
@@ -142,6 +153,49 @@ describe('OData component acceptance', () => {
     expect(res.body.value).to.be.Array();
     const names = res.body.value.map((p: any) => String(p.name || ''));
     expect(names.some((n: string) => /lap/i.test(n))).to.be.true();
+  });
+
+  it('supports $apply groupby aggregate on collections', async () => {
+    const res = await client
+      .get('/odata/Orders')
+      .query({
+        $apply: 'groupby((total), aggregate(id with count as OrderCount))',
+        $orderby: 'total desc',
+        $top: '1',
+      })
+      .expect(200);
+
+    expect(res.body.value).to.be.Array();
+    expect(res.body.value).to.have.length(1);
+    const first = res.body.value[0];
+    expect(first).to.have.property('total');
+    expect(first.OrderCount).to.equal(1);
+  });
+
+  it('supports lambda any filters', async () => {
+    const res = await client
+      .get('/odata/Products')
+      .query({$filter: 'orderItems/any(i: i/unitPrice gt 800)'})
+      .expect(200);
+
+    expect(res.body.value).to.be.Array();
+    expect(res.body.value.length).to.be.greaterThan(0);
+    for (const item of res.body.value) {
+      expect(item.orderItems.some((oi: any) => oi.unitPrice > 800)).to.be.true();
+    }
+  });
+
+  it('supports lambda filters combined with additional predicates', async () => {
+    const res = await client
+      .get('/odata/Products')
+      .query({$filter: 'orderItems/any(i: i/unitPrice gt 800) and price gt 1000'})
+      .expect(200);
+
+    expect(res.body.value).to.be.Array();
+    expect(res.body.value).to.have.length(1);
+    const [first] = res.body.value;
+    expect(first.price).to.be.greaterThan(1000);
+    expect(first.orderItems.some((oi: any) => oi.unitPrice > 800)).to.be.true();
   });
 
   it('keeps expanded navigation when root $select omits relation property', async () => {

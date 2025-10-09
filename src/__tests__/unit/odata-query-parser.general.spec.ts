@@ -60,4 +60,37 @@ describe('parseODataQuery basics', () => {
       /Unsupported comparator/i,
     );
   });
+
+  it('treats null literals as null values', () => {
+    const parsed = parseODataQuery({
+      '$filter': 'name eq null',
+    });
+
+    assert.deepStrictEqual(parsed.where, {name: null});
+  });
+
+  it('unescapes doubled quotes inside string literals', () => {
+    const parsed = parseODataQuery({
+      '$filter': "name eq 'O''Brian'",
+    });
+
+    assert.deepStrictEqual(parsed.where, {name: "O'Brian"});
+  });
+
+  it('extracts lambda predicates combined with additional AND conditions', () => {
+    const parsed = parseODataQuery({
+      '$filter': 'orderItems/any(i: i/unitPrice gt 800) and price gt 1000',
+    });
+
+    assert(parsed.lambda);
+    assert.deepStrictEqual(parsed.lambda?.path, ['orderItems']);
+    assert.deepStrictEqual(parsed.where, {price: {gt: 1000}});
+  });
+
+  it('rejects lambda expressions combined with OR predicates', () => {
+    assert.throws(
+      () => parseODataQuery({'$filter': 'orderItems/any(i: i/unitPrice gt 800) or price gt 1000'}),
+      /Lambda expressions combined with OR are not supported yet/i,
+    );
+  });
 });

@@ -37,7 +37,7 @@ const MEMORY_DS_CONFIG = {
 
 export class TestApplication extends BootMixin(RepositoryMixin(RestApplication)) {
   constructor(config: RestServerConfig = {}) {
-    super({rest: config});
+    super({rest: config, shutdown: {signals: []}});
     this.projectRoot = __dirname;
   }
 }

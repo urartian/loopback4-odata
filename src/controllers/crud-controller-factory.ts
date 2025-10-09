@@ -24,7 +24,7 @@ import {
     AnyObject,
 } from '@loopback/repository';
 import { EntitySetDef } from '../registry/entityset-registry';
-import { parseODataQuery } from '../services/odata-query-parser.service';
+import { parseODataQuery, AggregationSpec, AggregationOperator, LambdaExpression, ParsedExpression } from '../services/odata-query-parser.service';
 import { ODATA_ATOMICITY_STATE, ODATA_VERSION } from '../constants';
 import { AtomicityRequestState } from '../types/batch';
 import { Response } from '@loopback/rest';
@@ -50,6 +50,16 @@ import { ODataConfig } from '../types';
 import { getODataSearchableProps } from '../decorators/search.decorators';
 type CrudEntity = Entity & { [key: string]: unknown };
 type CrudRepo = DefaultCrudRepository<CrudEntity, unknown>;
+type NormalizedInclusion = Exclude<InclusionFilter, string>;
+
+interface AggregationAccumulatorState {
+    operator: AggregationOperator;
+    sum?: number;
+    count?: number;
+    min?: number;
+    max?: number;
+    distinct?: Set<unknown>;
+}
 
 function inferIdParamType(definition: any): 'string' | 'number' | 'boolean' {
     const idName = definition?.idProperties?.()[0];
@@ -223,6 +233,396 @@ export function defineODataCrudController(def: EntitySetDef) {
                 return plainEntities.map(entity => ({ ...entity }));
             }
             return plainEntities.map(plain => this.decoratePlainEntity(plain, this.computeEtagFromPlain(plain)));
+        }
+
+        executeAggregation(rows: AnyObject[], spec: AggregationSpec): AnyObject[] {
+            const groupMap = new Map<string, {groupValues: Record<string, unknown>; aggregates: Record<string, AggregationAccumulatorState>}>();
+
+            for (const row of rows) {
+                const groupValues = spec.groupBy.map(field => (row as AnyObject)[field]);
+                const key = JSON.stringify(groupValues);
+                let entry = groupMap.get(key);
+                if (!entry) {
+                    const values: Record<string, unknown> = {};
+                    spec.groupBy.forEach((field, idx) => {
+                        values[field] = groupValues[idx];
+                    });
+                    entry = {groupValues: values, aggregates: {}};
+                    groupMap.set(key, entry);
+                }
+
+                for (const aggregate of spec.aggregates) {
+                    let state = entry.aggregates[aggregate.alias];
+                    if (!state) {
+                        state = {
+                            operator: aggregate.operator,
+                            sum: aggregate.operator === 'sum' || aggregate.operator === 'average' ? 0 : undefined,
+                            count: aggregate.operator === 'count' || aggregate.operator === 'average' ? 0 : undefined,
+                            min: undefined,
+                            max: undefined,
+                            distinct: aggregate.operator === 'countdistinct' ? new Set<unknown>() : undefined,
+                        };
+                        entry.aggregates[aggregate.alias] = state;
+                    }
+                    const value = aggregate.field ? (row as AnyObject)[aggregate.field] : undefined;
+                    updateAccumulatorState(state, value);
+                }
+            }
+
+            const results: AnyObject[] = [];
+            for (const {groupValues, aggregates} of groupMap.values()) {
+                const record: AnyObject = {...groupValues};
+                for (const [alias, state] of Object.entries(aggregates)) {
+                    record[alias] = finalizeAccumulatorState(state);
+                }
+                results.push(record);
+            }
+
+            return results;
+
+            function updateAccumulatorState(state: AggregationAccumulatorState, rawValue: unknown) {
+                switch (state.operator) {
+                    case 'sum': {
+                        const num = typeof rawValue === 'number' ? rawValue : Number(rawValue);
+                        if (Number.isFinite(num)) {
+                            state.sum = (state.sum ?? 0) + num;
+                        }
+                        break;
+                    }
+                    case 'average': {
+                        const num = typeof rawValue === 'number' ? rawValue : Number(rawValue);
+                        if (Number.isFinite(num)) {
+                            state.sum = (state.sum ?? 0) + num;
+                            state.count = (state.count ?? 0) + 1;
+                        }
+                        break;
+                    }
+                    case 'min': {
+                        const num = typeof rawValue === 'number' ? rawValue : Number(rawValue);
+                        if (Number.isFinite(num)) {
+                            state.min = state.min === undefined ? num : Math.min(state.min, num);
+                        }
+                        break;
+                    }
+                    case 'max': {
+                        const num = typeof rawValue === 'number' ? rawValue : Number(rawValue);
+                        if (Number.isFinite(num)) {
+                            state.max = state.max === undefined ? num : Math.max(state.max, num);
+                        }
+                        break;
+                    }
+                    case 'count': {
+                        state.count = (state.count ?? 0) + 1;
+                        break;
+                    }
+                    case 'countdistinct': {
+                        if (!state.distinct) state.distinct = new Set();
+                        state.distinct.add(rawValue);
+                        break;
+                    }
+                }
+            }
+
+            function finalizeAccumulatorState(state: AggregationAccumulatorState): unknown {
+                switch (state.operator) {
+                    case 'sum':
+                        return state.sum ?? 0;
+                    case 'average':
+                        if (!state.count) return null;
+                        return (state.sum ?? 0) / state.count;
+                    case 'min':
+                        return state.min ?? null;
+                    case 'max':
+                        return state.max ?? null;
+                    case 'count':
+                        return state.count ?? 0;
+                    case 'countdistinct':
+                        return state.distinct ? state.distinct.size : 0;
+                    default:
+                        return null;
+                }
+            }
+        }
+
+        orderResults(data: AnyObject[], order?: string[]): AnyObject[] {
+            if (!order?.length) return data;
+            const descriptors = order
+                .map(entry => entry.trim())
+                .filter(Boolean)
+                .map(part => {
+                    const [field, direction] = part.split(/\s+/);
+                    return {
+                        field,
+                        direction: direction?.toUpperCase() === 'DESC' ? -1 : 1,
+                    };
+                })
+                .filter(item => item.field);
+            if (!descriptors.length) return data;
+
+            const sorted = [...data];
+            sorted.sort((a, b) => {
+                for (const descriptor of descriptors) {
+                    const av = (a as AnyObject)[descriptor.field];
+                    const bv = (b as AnyObject)[descriptor.field];
+                    if (av === bv) continue;
+                    if (av == null) return 1 * descriptor.direction;
+                    if (bv == null) return -1 * descriptor.direction;
+                    if (typeof av === 'number' && typeof bv === 'number') {
+                        if (av < bv) return -1 * descriptor.direction;
+                        if (av > bv) return 1 * descriptor.direction;
+                        continue;
+                    }
+                    const aStr = String(av);
+                    const bStr = String(bv);
+                    if (aStr < bStr) return -1 * descriptor.direction;
+                    if (aStr > bStr) return 1 * descriptor.direction;
+                }
+                return 0;
+            });
+            return sorted;
+        }
+
+        sliceResults(data: AnyObject[], offset?: number, limit?: number): AnyObject[] {
+            let result = data;
+            if (typeof offset === 'number' && offset > 0) {
+                result = result.slice(offset);
+            }
+            if (typeof limit === 'number' && limit >= 0) {
+                result = result.slice(0, limit);
+            }
+            return result;
+        }
+
+        ensureLambdaInclusion(filter: Filter<CrudEntity>, lambda: LambdaExpression) {
+            if (!lambda.path.length) {
+                throw new HttpErrors.BadRequest('Lambda expressions must reference a navigation property.');
+            }
+            const includeList = this.normalizeIncludeList(filter.include);
+            this.ensureIncludePath(includeList, lambda.path);
+            filter.include = includeList;
+            this.ensureLambdaFieldProjection(filter, lambda.path[0]);
+        }
+
+        cloneIncludeEntry(entry: string | InclusionFilter): NormalizedInclusion {
+            if (typeof entry === 'string') {
+                return {relation: entry};
+            }
+            const scope = entry.scope ? {...entry.scope} : undefined;
+            if (scope && scope.include) {
+                if (Array.isArray(scope.include)) {
+                    scope.include = scope.include.map(item => this.cloneIncludeEntry(item));
+                } else {
+                    scope.include = [this.cloneIncludeEntry(scope.include)];
+                }
+            }
+            return {relation: entry.relation, scope};
+        }
+
+        normalizeIncludeList(include: Filter<CrudEntity>['include']): NormalizedInclusion[] {
+            if (!include) return [];
+            if (Array.isArray(include)) {
+                return include.map(entry => this.cloneIncludeEntry(entry));
+            }
+            return [this.cloneIncludeEntry(include)];
+        }
+
+        ensureIncludePath(include: NormalizedInclusion[], path: string[]) {
+            const [current, ...rest] = path;
+            if (!current) return;
+            let entry = include.find(item => item.relation === current);
+            if (!entry) {
+                entry = rest.length ? {relation: current, scope: {include: []}} : {relation: current};
+                include.push(entry);
+            }
+            if (!rest.length) return;
+            entry.scope = entry.scope ?? {};
+            const rawInclude = entry.scope.include;
+            const nested = Array.isArray(rawInclude)
+                ? rawInclude.map(item => this.cloneIncludeEntry(item))
+                : rawInclude
+                    ? [this.cloneIncludeEntry(rawInclude)]
+                    : [];
+            this.ensureIncludePath(nested, rest);
+            entry.scope.include = nested;
+        }
+
+        ensureLambdaFieldProjection(filter: Filter<CrudEntity>, relation: string | undefined) {
+            if (!relation) return;
+            if (!filter.fields) return;
+            if (Array.isArray(filter.fields)) {
+                if (!filter.fields.includes(relation)) filter.fields.push(relation);
+                return;
+            }
+            if (typeof filter.fields === 'string') {
+                if (filter.fields !== relation) {
+                    filter.fields = [filter.fields, relation];
+                }
+                return;
+            }
+            if (typeof filter.fields === 'object') {
+                filter.fields[relation] = true;
+            }
+        }
+
+        resolveCollectionPath(source: AnyObject, segments: string[]): AnyObject[] {
+            let current: unknown[] = [source];
+            for (const segment of segments) {
+                const next: unknown[] = [];
+                for (const item of current) {
+                    if (item == null) continue;
+                    const value = (item as AnyObject)[segment];
+                    if (Array.isArray(value)) {
+                        next.push(...value);
+                    } else if (value != null) {
+                        next.push(value);
+                    }
+                }
+                current = next;
+            }
+            return current.filter(item => item != null) as AnyObject[];
+        }
+
+        filterEntitiesByLambda(entities: AnyObject[], lambda: LambdaExpression): AnyObject[] {
+            return entities.filter(entity => this.evaluateLambda(entity, lambda));
+        }
+
+        evaluateLambda(entity: AnyObject, lambda: LambdaExpression): boolean {
+            const items = this.resolveCollectionPath(entity, lambda.path);
+            if (lambda.type === 'any') {
+                return items.some(item => this.evaluatePredicate(lambda.predicate, item, lambda.alias, entity));
+            }
+            // all
+            if (!items.length) return true;
+            return items.every(item => this.evaluatePredicate(lambda.predicate, item, lambda.alias, entity));
+        }
+
+        evaluatePredicate(expr: ParsedExpression, current: AnyObject, alias: string, root: AnyObject): boolean {
+            switch (expr.operator) {
+                case 'comparison': {
+                    const left = this.resolvePredicateValue(expr.field, current, alias, root);
+                    const right = expr.value;
+                    switch (expr.comparator) {
+                        case 'eq': return this.compareValues(left, right) === 0;
+                        case 'neq': return this.compareValues(left, right) !== 0;
+                        case 'gt': return this.compareValues(left, right) > 0;
+                        case 'gte': return this.compareValues(left, right) >= 0;
+                        case 'lt': return this.compareValues(left, right) < 0;
+                        case 'lte': return this.compareValues(left, right) <= 0;
+                        default:
+                            throw new Error(`Unsupported comparator: ${expr.comparator}`);
+                    }
+                }
+                case 'function': {
+                    const value = this.resolvePredicateValue(expr.field, current, alias, root);
+                    if (typeof value !== 'string') return false;
+                    const arg = typeof expr.args[0] === 'string' ? expr.args[0] : String(expr.args[0] ?? '');
+                    const source = expr.caseInsensitive ? value.toLowerCase() : value;
+                    const needle = expr.caseInsensitive ? arg.toLowerCase() : arg;
+                    if (expr.name === 'contains') return source.includes(needle);
+                    if (expr.name === 'startswith') return source.startsWith(needle);
+                    if (expr.name === 'endswith') return source.endsWith(needle);
+                    return false;
+                }
+                case 'fncmp': {
+                    const value = this.resolvePredicateValue(expr.field, current, alias, root);
+                    const numeric = value instanceof Date ? value : Number(value);
+                    if (expr.name === 'year') {
+                        if (!(value instanceof Date)) return false;
+                        const year = value.getUTCFullYear();
+                        return this.compareValues(year, expr.value) === 0;
+                    }
+                    if (!Number.isFinite(numeric as number)) return false;
+                    switch (expr.name) {
+                        case 'round':
+                            return this.compareValues(Math.round(numeric as number), expr.value) === 0;
+                        case 'floor':
+                            return this.compareValues(Math.floor(numeric as number), expr.value) === 0;
+                        case 'ceiling':
+                            return this.compareValues(Math.ceil(numeric as number), expr.value) === 0;
+                    }
+                    return false;
+                }
+                case 'indexofcmp': {
+                    const value = this.resolvePredicateValue(expr.field, current, alias, root);
+                    if (typeof value !== 'string') return false;
+                    const index = value.toLowerCase().indexOf(expr.needle.toLowerCase());
+                    const compare = this.compareValues(index, expr.value);
+                    switch (expr.comparator) {
+                        case 'eq': return compare === 0;
+                        case 'neq': return compare !== 0;
+                        case 'gt': return compare > 0;
+                        case 'gte': return compare >= 0;
+                        case 'lt': return compare < 0;
+                        case 'lte': return compare <= 0;
+                    }
+                    return false;
+                }
+                case 'substrcmp': {
+                    const value = this.resolvePredicateValue(expr.field, current, alias, root);
+                    if (typeof value !== 'string') return false;
+                    const start = Math.max(0, expr.start);
+                    const segment = expr.length !== undefined ? value.substr(start, expr.length) : value.slice(start);
+                    return expr.comparator === 'eq' ? segment === expr.literal : segment !== expr.literal;
+                }
+                case 'lengthcmp': {
+                    const value = this.resolvePredicateValue(expr.field, current, alias, root);
+                    const len = typeof value === 'string' ? value.length : Array.isArray(value) ? value.length : 0;
+                    switch (expr.comparator) {
+                        case 'eq': return len === expr.value;
+                        case 'gt': return len > expr.value;
+                        case 'gte': return len >= expr.value;
+                        case 'lt': return len < expr.value;
+                        case 'lte': return len <= expr.value;
+                        case 'neq': return len !== expr.value;
+                        default: return false;
+                    }
+                }
+                case 'logical': {
+                    if (expr.type === 'and') {
+                        return expr.expressions.every(child => this.evaluatePredicate(child, current, alias, root));
+                    }
+                    return expr.expressions.some(child => this.evaluatePredicate(child, current, alias, root));
+                }
+                case 'not':
+                    return !this.evaluatePredicate(expr.expr, current, alias, root);
+                case 'lambda':
+                    throw new Error('Nested lambda expressions are not supported yet.');
+                default:
+                    return false;
+            }
+        }
+
+        compareValues(a: unknown, b: unknown): number {
+            if (a === b) return 0;
+            if (a == null) return -1;
+            if (b == null) return 1;
+            if (typeof a === 'number' && typeof b === 'number') {
+                if (a < b) return -1;
+                if (a > b) return 1;
+                return 0;
+            }
+            const aStr = String(a);
+            const bStr = String(b);
+            if (aStr < bStr) return -1;
+            if (aStr > bStr) return 1;
+            return 0;
+        }
+
+        resolvePredicateValue(path: string, current: AnyObject, alias: string, root: AnyObject): unknown {
+            const segments = path.split('/');
+            if (segments[0] === alias) {
+                return this.resolvePath(current, segments.slice(1));
+            }
+            return this.resolvePath(root, segments);
+        }
+
+        resolvePath(source: AnyObject, segments: string[]): unknown {
+            let current: unknown = source;
+            for (const segment of segments) {
+                if (current == null) return undefined;
+                current = (current as AnyObject)[segment];
+            }
+            return current;
         }
 
         ensureEtagField(filter: Filter<CrudEntity>) {
@@ -620,8 +1020,11 @@ export function defineODataCrudController(def: EntitySetDef) {
             if (preferences.respondAsync) this.throwPreferenceNotSupported('respond-async');
 
             const baseFilter: Filter<CrudEntity> = filter ? { ...filter } : {};
+            const aggregationEnabled = Boolean(def.capabilities?.aggregation ?? this.cfg?.capabilities?.aggregation);
 
             let inlineCountRequested = false;
+            let aggregationSpec: AggregationSpec | undefined;
+            let lambdaExpression: LambdaExpression | undefined;
             try {
                 const parsed = parseODataQuery(
                     this.request.query as Record<string, string | string[] | undefined>,
@@ -631,8 +1034,12 @@ export function defineODataCrudController(def: EntitySetDef) {
                 if (inlineCountRequested && this.cfg && this.cfg.enableCount === false) {
                     throw new HttpErrors.BadRequest('The $count option is disabled by server configuration.');
                 }
-                const parsedFilter = { ...parsed } as Filter<CrudEntity> & { inlineCount?: boolean };
+                aggregationSpec = parsed.apply;
+                lambdaExpression = parsed.lambda;
+                const parsedFilter = { ...parsed } as Filter<CrudEntity> & { inlineCount?: boolean; apply?: AggregationSpec; lambda?: LambdaExpression };
                 delete (parsedFilter as { inlineCount?: boolean }).inlineCount;
+                delete (parsedFilter as { apply?: AggregationSpec }).apply;
+                delete (parsedFilter as { lambda?: LambdaExpression }).lambda;
                 this.mergeFilters(baseFilter, parsedFilter);
                 this.ensureEtagField(baseFilter);
                 // apply $search if present
@@ -642,6 +1049,25 @@ export function defineODataCrudController(def: EntitySetDef) {
             } catch (error) {
                 const message = (error as Error).message ?? 'Invalid OData query.';
                 throw new HttpErrors.BadRequest(message);
+            }
+
+            if (aggregationSpec) {
+                if (inlineCountRequested) {
+                    throw new HttpErrors.BadRequest('The $count option cannot be combined with $apply.');
+                }
+                if (baseFilter.include) {
+                    throw new HttpErrors.BadRequest('The $expand option is not supported together with $apply.');
+                }
+                if (!aggregationEnabled) {
+                    throw new HttpErrors.NotImplemented('Aggregations are not enabled for this entity set.');
+                }
+            }
+
+            if (lambdaExpression) {
+                if (aggregationSpec) {
+                    throw new HttpErrors.BadRequest('Combining $apply with lambda expressions is not supported.');
+                }
+                this.ensureLambdaInclusion(baseFilter, lambdaExpression);
             }
 
             // Enforce maxTop if configured
@@ -671,6 +1097,49 @@ export function defineODataCrudController(def: EntitySetDef) {
 
             const execDefault = async () => {
                 const options = this.repositoryOptions();
+
+                if (aggregationSpec) {
+                    const fetchFilter: Filter<CrudEntity> = { ...baseFilter };
+                    delete fetchFilter.order;
+                    delete fetchFilter.limit;
+                    delete fetchFilter.offset;
+
+                    const entities = await this.repository.find(fetchFilter, options);
+                    const plainEntities = entities.map(entity => this.toPlainEntity(entity) ?? {});
+                    const aggregated = this.executeAggregation(plainEntities, aggregationSpec);
+                    const ordered = this.orderResults(aggregated, baseFilter.order);
+                    const paged = this.sliceResults(ordered, baseFilter.offset, baseFilter.limit);
+
+                    this.ensureODataHeaders();
+                    const result = {
+                        '@odata.context': contextBase,
+                        value: paged,
+                    } as AnyObject;
+                    ctx.result = result;
+                    return result;
+                }
+
+                if (lambdaExpression) {
+                    const fetchFilter: Filter<CrudEntity> = { ...baseFilter };
+                    delete fetchFilter.order;
+                    delete fetchFilter.limit;
+                    delete fetchFilter.offset;
+
+                    const entities = await this.repository.find(fetchFilter, options);
+                    const plainEntities = entities.map(entity => this.toPlainEntity(entity) ?? {});
+                    const filtered = this.filterEntitiesByLambda(plainEntities, lambdaExpression);
+                    const ordered = this.orderResults(filtered, baseFilter.order);
+                    const paged = this.sliceResults(ordered, baseFilter.offset, baseFilter.limit);
+
+                    this.ensureODataHeaders();
+                    const result = {
+                        '@odata.context': contextBase,
+                        value: this.decoratePlainEntities(paged),
+                    } as AnyObject;
+                    ctx.result = result;
+                    return result;
+                }
+
                 const results = await this.repository.find(baseFilter, options);
                 const plainResults = results.map(entity => this.toPlainEntity(entity) ?? {});
                 let totalCount: number | undefined;

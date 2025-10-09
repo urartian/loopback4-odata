@@ -3,6 +3,7 @@ import { Entity } from '@loopback/repository';
 import { OperationMeta } from '../decorators/action.function.decorators';
 import type {CrudHookBundle} from '../types/crud-hooks';
 import { ControllerSecurityMetadata, MethodAliasMap } from '../util/security-metadata';
+import { ODataCapabilitiesConfig } from '../types';
 
 export interface EntitySetDef<T extends Entity = Entity> {
     name: string;                                      // e.g. "Products"
@@ -17,6 +18,8 @@ export interface EntitySetDef<T extends Entity = Entity> {
     securityMethodAliases?: MethodAliasMap;
     hooks?: CrudHookBundle;                            // controller-declared hooks
     sourceControllerBindingKey?: string;               // binding key to resolve controller instance
+    hasStream?: boolean;
+    capabilities?: ODataCapabilitiesConfig;
 }
 
 @injectable({ scope: BindingScope.SINGLETON })
