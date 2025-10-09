@@ -124,6 +124,11 @@ describe('parseODataQuery extended filter grammar', () => {
     assert.deepStrictEqual(absent.where, {name: {nlike: '%Lap%', escape: '\\', options: 'i'}});
   });
 
+  it('supports negated indexof comparisons', () => {
+    const parsed = parseODataQuery({'$filter': "not indexof(name,'Lap') eq -1"});
+    assert.deepStrictEqual(parsed.where, {name: {like: '%Lap%', escape: '\\', options: 'i'}});
+  });
+
   it('supports substring eq/ne with start and optional length', () => {
     const eqStart = parseODataQuery({'$filter': "substring(code,2) eq 'ABC'"});
     assert.deepStrictEqual(eqStart.where, {code: {like: '__ABC', escape: '\\'}});
@@ -131,10 +136,31 @@ describe('parseODataQuery extended filter grammar', () => {
     assert.deepStrictEqual(neStartLen.where, {code: {nlike: '____XYZ%', escape: '\\'}});
   });
 
+  it('supports negated substring comparisons', () => {
+    const parsed = parseODataQuery({'$filter': "not substring(code,2,3) eq 'ABC'"});
+    assert.deepStrictEqual(parsed.where, {code: {nlike: '__ABC%', escape: '\\'}});
+  });
+
   it('supports minimal length() comparisons', () => {
     const empty = parseODataQuery({'$filter': 'length(description) eq 0'});
     assert.deepStrictEqual(empty.where, {description: ''});
     const nonEmpty = parseODataQuery({'$filter': 'length(description) gt 0'});
     assert.deepStrictEqual(nonEmpty.where, {description: {neq: ''}});
+  });
+
+  it('supports additional length() comparators', () => {
+    const exact = parseODataQuery({'$filter': 'length(code) eq 3'});
+    assert.deepStrictEqual(exact.where, {code: {like: '___', escape: '\\'}});
+
+    const longer = parseODataQuery({'$filter': 'length(code) gt 2'});
+    assert.deepStrictEqual(longer.where, {code: {like: '___%', escape: '\\'}});
+
+    const shorter = parseODataQuery({'$filter': 'length(code) lt 4'});
+    assert.deepStrictEqual(shorter.where, {code: {nlike: '____%', escape: '\\'}});
+  });
+
+  it('supports negated length() comparisons', () => {
+    const parsed = parseODataQuery({'$filter': 'not length(code) lt 3'});
+    assert.deepStrictEqual(parsed.where, {code: {like: '___%', escape: '\\'}});
   });
 });

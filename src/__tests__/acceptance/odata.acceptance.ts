@@ -37,6 +37,17 @@ describe('OData component acceptance', () => {
     }
   });
 
+  it('supports multi-segment lambda navigation paths', async () => {
+    const res = await client
+      .get('/odata/Products')
+      .query({$filter: 'orders/items/any(i: i/quantity gt 2)'})
+      .expect(200);
+
+    expect(res.body.value).to.be.Array();
+    const names = res.body.value.map((item: any) => item.name);
+    expect(names).to.containEql('Monitor');
+  });
+
   afterEach(async () => {
     if (app.state === 'started') {
       await app.stop();
@@ -172,6 +183,19 @@ describe('OData component acceptance', () => {
     for (const item of res.body.value) {
       expect(item.orderItems.some((oi: any) => oi.unitPrice > 800)).to.be.true();
     }
+  });
+
+  it('supports lambda filters combined with additional predicates', async () => {
+    const res = await client
+      .get('/odata/Products')
+      .query({$filter: 'orderItems/any(i: i/unitPrice gt 800) and price gt 1000'})
+      .expect(200);
+
+    expect(res.body.value).to.be.Array();
+    expect(res.body.value).to.have.length(1);
+    const [first] = res.body.value;
+    expect(first.price).to.be.greaterThan(1000);
+    expect(first.orderItems.some((oi: any) => oi.unitPrice > 800)).to.be.true();
   });
 
   it('keeps expanded navigation when root $select omits relation property', async () => {

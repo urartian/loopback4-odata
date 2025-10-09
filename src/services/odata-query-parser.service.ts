@@ -456,11 +456,14 @@ function parseLiteral(token: string): unknown {
   if (!token) return token;
 
   if (token.startsWith("'") && token.endsWith("'")) {
-    return token.slice(1, -1);
+    const inner = token.slice(1, -1);
+    return inner.replace(/''/g, "'");
   }
 
-  if (token === 'true') return true;
-  if (token === 'false') return false;
+  const lower = token.toLowerCase();
+  if (lower === 'true') return true;
+  if (lower === 'false') return false;
+  if (lower === 'null') return null;
 
   const numeric = Number(token);
   if (!Number.isNaN(numeric)) return numeric;
@@ -523,6 +526,136 @@ function containsLambda(expr: ParsedExpression): boolean {
   return false;
 }
 
+function splitLambdaExpression(expr: ParsedExpression): {
+  lambda?: LambdaExpressionNode;
+  predicate?: ParsedExpression;
+} {
+  if (expr.operator === 'lambda') {
+    return {lambda: expr};
+  }
+
+  if (expr.operator === 'logical') {
+    if (expr.type !== 'and') {
+      if (containsLambda(expr)) {
+        throw new Error('Lambda expressions combined with OR are not supported yet.');
+      }
+      return {predicate: expr};
+    }
+    let lambda: LambdaExpressionNode | undefined;
+    const others: ParsedExpression[] = [];
+    for (const child of expr.expressions) {
+      const result = splitLambdaExpression(child);
+      if (result.lambda) {
+        if (lambda) {
+          throw new Error('Multiple lambda expressions are not supported yet.');
+        }
+        lambda = result.lambda;
+      }
+      if (result.predicate) {
+        others.push(result.predicate);
+      }
+    }
+    let predicate: ParsedExpression | undefined;
+    if (others.length === 1) {
+      predicate = others[0];
+    } else if (others.length > 1) {
+      predicate = {
+        operator: 'logical',
+        type: 'and',
+        expressions: others,
+      };
+    }
+    return {lambda, predicate};
+  }
+
+  if (expr.operator === 'not' && containsLambda(expr)) {
+    throw new Error('Negated lambda expressions are not supported yet.');
+  }
+
+  return {predicate: expr};
+}
+
+type IndexOfExpression = Extract<ParsedExpression, {operator: 'indexofcmp'}>;
+type SubstringExpression = Extract<ParsedExpression, {operator: 'substrcmp'}>;
+type LengthExpression = Extract<ParsedExpression, {operator: 'lengthcmp'}>;
+
+function negateIndexOfExpression(expr: IndexOfExpression): IndexOfExpression {
+  const {comparator, value} = expr;
+  if (comparator === 'eq' && value === -1) {
+    return {...expr, comparator: 'gte', value: 0};
+  }
+  if (comparator === 'gte' && value >= 0) {
+    return {...expr, comparator: 'eq', value: -1};
+  }
+  if (comparator === 'gt' && value > -1) {
+    return {...expr, comparator: 'eq', value: -1};
+  }
+  throw new Error('Unsupported negated indexof comparison.');
+}
+
+function negateSubstringExpression(expr: SubstringExpression): SubstringExpression {
+  const inverted = expr.comparator === 'eq' ? 'neq' : 'eq';
+  return {...expr, comparator: inverted as SubstringExpression['comparator']};
+}
+
+function negateLengthExpression(expr: LengthExpression): LengthExpression {
+  const inverse: Record<LengthExpression['comparator'], LengthExpression['comparator']> = {
+    eq: 'neq',
+    neq: 'eq',
+    gt: 'lte',
+    gte: 'lt',
+    lt: 'gte',
+    lte: 'gt',
+  };
+  const comparator = inverse[expr.comparator];
+  if (!comparator) {
+    throw new Error('Unsupported negated length comparison.');
+  }
+  return {...expr, comparator};
+}
+
+function underscorePattern(length: number): string {
+  return '_'.repeat(Math.max(0, length));
+}
+
+function translateLengthComparison(expr: LengthExpression): Where<AnyObject> {
+  const {field, comparator, value} = expr;
+  if (!Number.isFinite(value) || value < 0) {
+    throw new Error('length comparison requires a non-negative integer value.');
+  }
+  if (!Number.isInteger(value)) {
+    throw new Error('length comparison requires an integer literal.');
+  }
+  if (comparator === 'eq') {
+    if (value === 0) return {[field]: ''} as Where<AnyObject>;
+    return {[field]: {like: underscorePattern(value), escape: '\\'}} as Where<AnyObject>;
+  }
+  if (comparator === 'neq') {
+    if (value === 0) return {[field]: {neq: ''}} as Where<AnyObject>;
+    return {[field]: {nlike: underscorePattern(value), escape: '\\'}} as Where<AnyObject>;
+  }
+  if (comparator === 'gt') {
+    if (value === 0) {
+      return {[field]: {neq: ''}} as Where<AnyObject>;
+    }
+    return {[field]: {like: `${underscorePattern(value + 1)}%`, escape: '\\'}} as Where<AnyObject>;
+  }
+  if (comparator === 'gte') {
+    if (value <= 0) {
+      return {[field]: {like: '%', escape: '\\'}} as Where<AnyObject>;
+    }
+    return {[field]: {like: `${underscorePattern(value)}%`, escape: '\\'}} as Where<AnyObject>;
+  }
+  if (comparator === 'lt') {
+    return {[field]: {nlike: `${underscorePattern(value)}%`, escape: '\\'}} as Where<AnyObject>;
+  }
+  if (comparator === 'lte') {
+    if (value === 0) return {[field]: ''} as Where<AnyObject>;
+    return {[field]: {nlike: `${underscorePattern(value + 1)}%`, escape: '\\'}} as Where<AnyObject>;
+  }
+  throw new Error('Unsupported length comparison.');
+}
+
 function buildWhere(expr: ParsedExpression): Where<AnyObject> {
   if (expr.operator === 'not') {
     const inner = expr.expr;
@@ -546,6 +679,15 @@ function buildWhere(expr: ParsedExpression): Where<AnyObject> {
     if (inner.operator === 'fncmp') {
       // Fallback to {not: ...} — connector support may vary
       return {not: buildWhere(inner)} as any;
+    }
+    if (inner.operator === 'indexofcmp') {
+      return buildWhere(negateIndexOfExpression(inner));
+    }
+    if (inner.operator === 'substrcmp') {
+      return buildWhere(negateSubstringExpression(inner));
+    }
+    if (inner.operator === 'lengthcmp') {
+      return buildWhere(negateLengthExpression(inner));
     }
   }
   if (expr.operator === 'comparison') {
@@ -604,14 +746,7 @@ function buildWhere(expr: ParsedExpression): Where<AnyObject> {
   }
 
   if (expr.operator === 'lengthcmp') {
-    const {field, comparator, value} = expr;
-    if (comparator === 'eq' && value === 0) {
-      return {[field]: ''} as Where<AnyObject>;
-    }
-    if ((comparator === 'gt' || comparator === 'gte') && value >= 0) {
-      if (value <= 0) return {[field]: {neq: ''}} as Where<AnyObject>;
-    }
-    throw new Error('Unsupported length comparison. Supported: length(field) eq 0, length(field) gt 0.');
+    return translateLengthComparison(expr);
   }
 
   if (expr.operator === 'fncmp') {
@@ -1266,18 +1401,17 @@ export function parseODataQuery(query: QueryObject, options: ParseOptions = {}):
     const tokens = tokenize(filterExpr);
     if (tokens.length) {
       const [expr] = parseFilter(tokens);
-      if (expr.operator === 'lambda') {
+      const {lambda, predicate} = splitLambdaExpression(expr);
+      if (lambda) {
         filter.lambda = {
-          type: expr.lambdaType,
-          path: expr.path,
-          alias: expr.alias,
-          predicate: expr.predicate,
+          type: lambda.lambdaType,
+          path: lambda.path,
+          alias: lambda.alias,
+          predicate: lambda.predicate,
         };
-      } else {
-        if (containsLambda(expr)) {
-          throw new Error('Lambda expressions cannot currently be combined with other predicates.');
-        }
-        filter.where = buildWhere(expr);
+      }
+      if (predicate) {
+        filter.where = buildWhere(predicate);
       }
     }
   }

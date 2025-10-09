@@ -345,13 +345,13 @@ Performs a case‑insensitive substring search across all string properties of t
 GET /odata/Products?$filter=indexof(name,'Lap') ge 0
 ```
 
-Equivalent to `contains(name,'Lap')`. To test absence use `eq -1`:
+Equivalent to `contains(name,'Lap')`. To test absence use `eq -1`, or wrap a supported comparison in `not`:
 
 ```http
 GET /odata/Products?$filter=indexof(name,'Lap') eq -1
 ```
 
-Strict limitations: only presence/absence forms are supported (`ge 0`, `gt -1`, `eq -1`). Exact position comparisons like `indexof(name,'Lap') eq 2` are rejected with 400 in strict mode.
+Strict limitations: only presence/absence forms are supported (`ge 0`, `gt -1`, `eq -1`) plus their negations. Exact position comparisons like `indexof(name,'Lap') eq 2` are rejected with 400 in strict mode.
 
 - Substring at position: `substring`
 
@@ -367,15 +367,23 @@ GET /odata/Products?$filter=substring(code,4,3) ne 'XYZ'
 
 Strict limitations: supports only `eq` / `ne` with a string literal on the right‑hand side. Other comparators or non‑string RHS are rejected (400).
 
-- Minimal string length checks: `length`
+- String length predicates: `length`
 
 ```http
 GET /odata/Products?$filter=length(description) eq 0
-GET /odata/Products?$filter=length(description) gt 0
+GET /odata/Products?$filter=length(code) gt 3
+GET /odata/Products?$filter=not length(code) lt 2
 ```
 
-Strict limitations: only `eq 0` (empty) and `gt 0` (non‑empty) are supported. Other comparisons like `length(field) eq 5` are rejected (400).
+All comparison operators (`eq`, `ne`, `gt`, `ge`, `lt`, `le`) are supported with integer literals.
 
+- Lambda filters alongside additional predicates
+
+```http
+GET /odata/Products?$filter=orderItems/any(i: i/unitPrice gt 800) and price gt 1000
+```
+
+The parser keeps the lambda for post-processing while applying the remaining clauses (`price gt 1000`) to the database query. Lambdas currently support a single predicate per `$filter`, combined using `and`, and any/all across multi-segment navigation paths (for example, `orders/items/any(...)`).
 ### Searchable Fields
 
 Control which fields participate in `$search`:
@@ -738,7 +746,7 @@ this.bind(ODATA_BINDINGS.CONFIG).to({
 - `namespaceAlias`: Adds the optional `Alias` attribute to the CSDL schema so clients can refer to types using a short prefix.
 - `capabilities`: Sets default service-level annotations such as supported filter functions, countability, permissions, and stream support. Values can be overridden per entity set via `EntitySetDef.capabilities`.
 - `$apply` support currently covers a single `groupby((... ), aggregate(...))` segment with aggregate methods `sum`, `average`, `min`, `max`, `count`, and `countdistinct` on scalar entity properties. Pipelines with additional stages (`filter`, `orderby`, etc.) and aggregations on navigation properties are not yet available.
-- Lambda filters (`any` / `all`) are supported for single-level navigation collections with simple predicates. Combining lambdas with other `$filter` predicates or nesting lambdas is not yet available.
+- Lambda filters (`any` / `all`) support navigation collections (including multi-segment paths) and can be combined with additional predicates using `and`. Nesting lambdas, mixing multiple lambdas, or combining them with `or` remains unsupported.
 - `strict` (default: true): Enables stricter validations and policies:
   - Requires `If-Match` on `PATCH`/`DELETE` when ETags are enabled (428 if missing).
   - If `maxTop` is set, `$top` above the cap returns `400 Bad Request` instead of being clamped.
@@ -764,8 +772,8 @@ Entity-set specific overrides are available via `EntitySetRegistry.register`:
 
 ## Roadmap
 
-- [ ] any/all (lambdas): parse `<nav>/(any|all)(x: <expr>)` and translate via related repositories (hasMany / through) with acceptance tests
-- [ ] Filter functions: add string (`length`, `indexof`, `substring`, `trim`, `concat`) and date/time parts (`month`, `day`, `hour`, `minute`, `second`); return 400 in strict mode when unsupported by connector
+- [x] any/all (lambdas): translate `<nav>/(any|all)(x: <expr>)` through relation repositories, support multi-segment paths, and allow additional predicates via `and` (nesting/multiple lambdas still pending)
+- [ ] Filter functions: add additional string helpers (e.g. `trim`, `concat`) and date/time parts (`month`, `day`, `hour`, `minute`, `second`); return 400 in strict mode when unsupported by connector
 - [ ] $search hardening: boolean operators (AND/OR/NOT), quoted phrases with correct precedence; enforce `maxSearchFields` / `maxSearchTerms`; connector hooks for FTS
 - [ ] Limits & safety: `maxExpandDepth` (and optional `maxSkip`) to prevent heavy queries in strict mode
 - [ ] Advanced CSDL polish: extend annotations with insert/update restrictions, expose search annotations, and support complex type inheritance

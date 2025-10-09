@@ -50,6 +50,7 @@ import { ODataConfig } from '../types';
 import { getODataSearchableProps } from '../decorators/search.decorators';
 type CrudEntity = Entity & { [key: string]: unknown };
 type CrudRepo = DefaultCrudRepository<CrudEntity, unknown>;
+type NormalizedInclusion = Exclude<InclusionFilter, string>;
 
 interface AggregationAccumulatorState {
     operator: AggregationOperator;
@@ -393,16 +394,92 @@ export function defineODataCrudController(def: EntitySetDef) {
         }
 
         ensureLambdaInclusion(filter: Filter<CrudEntity>, lambda: LambdaExpression) {
-            if (lambda.path.length !== 1) {
-                throw new HttpErrors.BadRequest('Nested lambda expressions are not supported yet.');
+            if (!lambda.path.length) {
+                throw new HttpErrors.BadRequest('Lambda expressions must reference a navigation property.');
             }
-            const relation = lambda.path[0];
-            const include = filter.include ?? [];
-            const already = include.some(entry => (typeof entry === 'string' ? entry === relation : entry.relation === relation));
-            if (!already) {
-                include.push(relation);
+            const includeList = this.normalizeIncludeList(filter.include);
+            this.ensureIncludePath(includeList, lambda.path);
+            filter.include = includeList;
+            this.ensureLambdaFieldProjection(filter, lambda.path[0]);
+        }
+
+        cloneIncludeEntry(entry: string | InclusionFilter): NormalizedInclusion {
+            if (typeof entry === 'string') {
+                return {relation: entry};
             }
-            filter.include = include;
+            const scope = entry.scope ? {...entry.scope} : undefined;
+            if (scope && scope.include) {
+                if (Array.isArray(scope.include)) {
+                    scope.include = scope.include.map(item => this.cloneIncludeEntry(item));
+                } else {
+                    scope.include = [this.cloneIncludeEntry(scope.include)];
+                }
+            }
+            return {relation: entry.relation, scope};
+        }
+
+        normalizeIncludeList(include: Filter<CrudEntity>['include']): NormalizedInclusion[] {
+            if (!include) return [];
+            if (Array.isArray(include)) {
+                return include.map(entry => this.cloneIncludeEntry(entry));
+            }
+            return [this.cloneIncludeEntry(include)];
+        }
+
+        ensureIncludePath(include: NormalizedInclusion[], path: string[]) {
+            const [current, ...rest] = path;
+            if (!current) return;
+            let entry = include.find(item => item.relation === current);
+            if (!entry) {
+                entry = rest.length ? {relation: current, scope: {include: []}} : {relation: current};
+                include.push(entry);
+            }
+            if (!rest.length) return;
+            entry.scope = entry.scope ?? {};
+            const rawInclude = entry.scope.include;
+            const nested = Array.isArray(rawInclude)
+                ? rawInclude.map(item => this.cloneIncludeEntry(item))
+                : rawInclude
+                    ? [this.cloneIncludeEntry(rawInclude)]
+                    : [];
+            this.ensureIncludePath(nested, rest);
+            entry.scope.include = nested;
+        }
+
+        ensureLambdaFieldProjection(filter: Filter<CrudEntity>, relation: string | undefined) {
+            if (!relation) return;
+            if (!filter.fields) return;
+            if (Array.isArray(filter.fields)) {
+                if (!filter.fields.includes(relation)) filter.fields.push(relation);
+                return;
+            }
+            if (typeof filter.fields === 'string') {
+                if (filter.fields !== relation) {
+                    filter.fields = [filter.fields, relation];
+                }
+                return;
+            }
+            if (typeof filter.fields === 'object') {
+                filter.fields[relation] = true;
+            }
+        }
+
+        resolveCollectionPath(source: AnyObject, segments: string[]): AnyObject[] {
+            let current: unknown[] = [source];
+            for (const segment of segments) {
+                const next: unknown[] = [];
+                for (const item of current) {
+                    if (item == null) continue;
+                    const value = (item as AnyObject)[segment];
+                    if (Array.isArray(value)) {
+                        next.push(...value);
+                    } else if (value != null) {
+                        next.push(value);
+                    }
+                }
+                current = next;
+            }
+            return current.filter(item => item != null) as AnyObject[];
         }
 
         filterEntitiesByLambda(entities: AnyObject[], lambda: LambdaExpression): AnyObject[] {
@@ -410,8 +487,7 @@ export function defineODataCrudController(def: EntitySetDef) {
         }
 
         evaluateLambda(entity: AnyObject, lambda: LambdaExpression): boolean {
-            const collection = this.resolvePath(entity, lambda.path);
-            const items = Array.isArray(collection) ? collection : [];
+            const items = this.resolveCollectionPath(entity, lambda.path);
             if (lambda.type === 'any') {
                 return items.some(item => this.evaluatePredicate(lambda.predicate, item, lambda.alias, entity));
             }
@@ -990,9 +1066,6 @@ export function defineODataCrudController(def: EntitySetDef) {
             if (lambdaExpression) {
                 if (aggregationSpec) {
                     throw new HttpErrors.BadRequest('Combining $apply with lambda expressions is not supported.');
-                }
-                if (baseFilter.where && Object.keys(baseFilter.where).length) {
-                    throw new HttpErrors.BadRequest('Lambda expressions cannot be combined with other predicates yet.');
                 }
                 this.ensureLambdaInclusion(baseFilter, lambdaExpression);
             }

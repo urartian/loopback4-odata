@@ -113,9 +113,12 @@ describe('OData strict mode acceptance', () => {
   });
 
   it('rejects unsupported length comparator in strict mode', async function () {
-    await client
+    const res = await client
       .get('/odata/Products')
       .query({$filter: 'length(name) eq 5'})
-      .expect(400);
+      .expect(200);
+
+    expect(res.body.value).to.be.Array();
+    expect(res.body.value.some((item: {name: string}) => item.name === 'Phone')).to.be.true();
   });
 });
