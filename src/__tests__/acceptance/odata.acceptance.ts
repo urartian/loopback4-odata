@@ -161,6 +161,19 @@ describe('OData component acceptance', () => {
     expect(first.OrderCount).to.equal(1);
   });
 
+  it('supports lambda any filters', async () => {
+    const res = await client
+      .get('/odata/Products')
+      .query({$filter: 'orderItems/any(i: i/unitPrice gt 800)'})
+      .expect(200);
+
+    expect(res.body.value).to.be.Array();
+    expect(res.body.value.length).to.be.greaterThan(0);
+    for (const item of res.body.value) {
+      expect(item.orderItems.some((oi: any) => oi.unitPrice > 800)).to.be.true();
+    }
+  });
+
   it('keeps expanded navigation when root $select omits relation property', async () => {
     const res = await client
       .get('/odata/Products')

@@ -738,6 +738,7 @@ this.bind(ODATA_BINDINGS.CONFIG).to({
 - `namespaceAlias`: Adds the optional `Alias` attribute to the CSDL schema so clients can refer to types using a short prefix.
 - `capabilities`: Sets default service-level annotations such as supported filter functions, countability, permissions, and stream support. Values can be overridden per entity set via `EntitySetDef.capabilities`.
 - `$apply` support currently covers a single `groupby((... ), aggregate(...))` segment with aggregate methods `sum`, `average`, `min`, `max`, `count`, and `countdistinct` on scalar entity properties. Pipelines with additional stages (`filter`, `orderby`, etc.) and aggregations on navigation properties are not yet available.
+- Lambda filters (`any` / `all`) are supported for single-level navigation collections with simple predicates. Combining lambdas with other `$filter` predicates or nesting lambdas is not yet available.
 - `strict` (default: true): Enables stricter validations and policies:
   - Requires `If-Match` on `PATCH`/`DELETE` when ETags are enabled (428 if missing).
   - If `maxTop` is set, `$top` above the cap returns `400 Bad Request` instead of being clamped.

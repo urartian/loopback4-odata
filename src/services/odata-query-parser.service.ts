@@ -54,7 +54,22 @@ export interface AggregationSpec {
   aggregates: AggregationExpression[];
 }
 
-type ParsedExpression =
+interface LambdaExpressionNode {
+  operator: 'lambda';
+  lambdaType: 'any' | 'all';
+  path: string[];
+  alias: string;
+  predicate: ParsedExpression;
+}
+
+export interface LambdaExpression {
+  type: 'any' | 'all';
+  path: string[];
+  alias: string;
+  predicate: ParsedExpression;
+}
+
+export type ParsedExpression =
   | {operator: 'comparison'; field: string; comparator: string; value: unknown}
   | {operator: 'logical'; type: 'and' | 'or'; expressions: ParsedExpression[]}
   | {operator: 'not'; expr: ParsedExpression}
@@ -62,7 +77,8 @@ type ParsedExpression =
   | {operator: 'fncmp'; name: 'round' | 'floor' | 'ceiling' | 'year'; field: string; comparator: string; value: number}
   | {operator: 'indexofcmp'; field: string; comparator: string; value: number; needle: string}
   | {operator: 'substrcmp'; field: string; start: number; length?: number; comparator: 'eq' | 'neq'; literal: string}
-  | {operator: 'lengthcmp'; field: string; comparator: string; value: number};
+  | {operator: 'lengthcmp'; field: string; comparator: string; value: number}
+  | LambdaExpressionNode;
 
 type QueryObject = Record<string, string | string[] | undefined>;
 
@@ -315,6 +331,9 @@ function parseLengthComparison(tokens: string[], index: number): [{operator: 'le
 }
 
 function parseComparison(tokens: string[], index: number): [ParsedExpression, number] {
+  const lambda = tryParseLambda(tokens, index);
+  if (lambda) return lambda;
+
   const fn = parseFunction(tokens, index);
   if (fn) {
     return [fn[0], fn[1]];
@@ -357,6 +376,79 @@ function parseComparison(tokens: string[], index: number): [ParsedExpression, nu
       value,
     },
     index + 3,
+  ];
+}
+
+function tryParseLambda(tokens: string[], index: number): [LambdaExpressionNode, number] | undefined {
+  const token = tokens[index];
+  const match = token?.match(/^([A-Za-z_][A-Za-z0-9_\/]*)\/(any|all)$/i);
+  if (!match) return undefined;
+  if (tokens[index + 1] !== '(') {
+    throw new Error(`Malformed ${match[2].toLowerCase()} expression. Expected opening parenthesis.`);
+  }
+
+  let depth = 0;
+  const innerTokens: string[] = [];
+  let i = index + 1;
+  for (; i < tokens.length; i++) {
+    const current = tokens[i];
+    if (current === '(') {
+      depth++;
+      if (depth > 1) innerTokens.push(current);
+      continue;
+    }
+    if (current === ')') {
+      depth--;
+      if (depth < 0) {
+        throw new Error('Malformed lambda expression: unmatched closing parenthesis.');
+      }
+      if (depth === 0) {
+        break;
+      }
+      innerTokens.push(current);
+      continue;
+    }
+    innerTokens.push(current);
+  }
+  if (depth !== 0) {
+    throw new Error('Malformed lambda expression: unmatched parentheses.');
+  }
+  if (i >= tokens.length) {
+    throw new Error('Malformed lambda expression.');
+  }
+
+  const aliasToken = innerTokens.shift();
+  if (!aliasToken) {
+    throw new Error('Lambda expressions require an alias before the predicate.');
+  }
+  const alias = aliasToken.endsWith(':') ? aliasToken.slice(0, -1) : aliasToken;
+  if (!alias) {
+    throw new Error('Lambda alias cannot be empty.');
+  }
+
+  if (!innerTokens.length) {
+    throw new Error('Lambda predicate is required.');
+  }
+
+  const [predicate, consumed] = parseExpression(innerTokens, 0);
+  if (consumed !== innerTokens.length) {
+    throw new Error('Unable to parse lambda predicate.');
+  }
+
+  const pathSegments = match[1].split('/').filter(Boolean);
+  if (!pathSegments.length) {
+    throw new Error('Lambda expressions must reference a navigation property.');
+  }
+
+  return [
+    {
+      operator: 'lambda',
+      lambdaType: match[2].toLowerCase() as 'any' | 'all',
+      path: pathSegments,
+      alias,
+      predicate,
+    },
+    i + 1,
   ];
 }
 
@@ -418,6 +510,17 @@ function parseFilter(tokens: string[], startIndex = 0): [ParsedExpression, numbe
   }
 
   return parseExpression(tokens, startIndex);
+}
+
+function containsLambda(expr: ParsedExpression): boolean {
+  if (expr.operator === 'lambda') return true;
+  if (expr.operator === 'logical') {
+    return expr.expressions.some(containsLambda);
+  }
+  if (expr.operator === 'not') {
+    return containsLambda(expr.expr);
+  }
+  return false;
 }
 
 function buildWhere(expr: ParsedExpression): Where<AnyObject> {
@@ -1142,6 +1245,7 @@ export interface ParsedODataQuery extends Filter<AnyObject> {
   inlineCount?: boolean;
   search?: string;
   apply?: AggregationSpec;
+  lambda?: LambdaExpression;
 }
 
 export function parseODataQuery(query: QueryObject, options: ParseOptions = {}): ParsedODataQuery {
@@ -1162,7 +1266,19 @@ export function parseODataQuery(query: QueryObject, options: ParseOptions = {}):
     const tokens = tokenize(filterExpr);
     if (tokens.length) {
       const [expr] = parseFilter(tokens);
-      filter.where = buildWhere(expr);
+      if (expr.operator === 'lambda') {
+        filter.lambda = {
+          type: expr.lambdaType,
+          path: expr.path,
+          alias: expr.alias,
+          predicate: expr.predicate,
+        };
+      } else {
+        if (containsLambda(expr)) {
+          throw new Error('Lambda expressions cannot currently be combined with other predicates.');
+        }
+        filter.where = buildWhere(expr);
+      }
     }
   }
 

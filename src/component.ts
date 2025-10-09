@@ -21,6 +21,9 @@ export class ODataComponent implements Component {
             searchMode: 'annotated',
             maxSearchFields: 5,
             maxSearchTerms: 5,
+            capabilities: {
+                aggregation: true,
+            },
         } as ODataConfig),
         Binding.bind(ODATA_BINDINGS.CSDL_GEN).toClass(CsdlGenerator).inScope(BindingScope.SINGLETON),
         Binding.bind(ODATA_BINDINGS.ENTITY_SET_REGISTRY).toClass(EntitySetRegistry).inScope(BindingScope.SINGLETON),

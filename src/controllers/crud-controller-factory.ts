@@ -24,7 +24,7 @@ import {
     AnyObject,
 } from '@loopback/repository';
 import { EntitySetDef } from '../registry/entityset-registry';
-import { parseODataQuery, AggregationSpec, AggregationOperator } from '../services/odata-query-parser.service';
+import { parseODataQuery, AggregationSpec, AggregationOperator, LambdaExpression, ParsedExpression } from '../services/odata-query-parser.service';
 import { ODATA_ATOMICITY_STATE, ODATA_VERSION } from '../constants';
 import { AtomicityRequestState } from '../types/batch';
 import { Response } from '@loopback/rest';
@@ -343,7 +343,7 @@ export function defineODataCrudController(def: EntitySetDef) {
             }
         }
 
-        orderAggregationResults(data: AnyObject[], order?: string[]): AnyObject[] {
+        orderResults(data: AnyObject[], order?: string[]): AnyObject[] {
             if (!order?.length) return data;
             const descriptors = order
                 .map(entry => entry.trim())
@@ -381,7 +381,7 @@ export function defineODataCrudController(def: EntitySetDef) {
             return sorted;
         }
 
-        sliceAggregationResults(data: AnyObject[], offset?: number, limit?: number): AnyObject[] {
+        sliceResults(data: AnyObject[], offset?: number, limit?: number): AnyObject[] {
             let result = data;
             if (typeof offset === 'number' && offset > 0) {
                 result = result.slice(offset);
@@ -390,6 +390,163 @@ export function defineODataCrudController(def: EntitySetDef) {
                 result = result.slice(0, limit);
             }
             return result;
+        }
+
+        ensureLambdaInclusion(filter: Filter<CrudEntity>, lambda: LambdaExpression) {
+            if (lambda.path.length !== 1) {
+                throw new HttpErrors.BadRequest('Nested lambda expressions are not supported yet.');
+            }
+            const relation = lambda.path[0];
+            const include = filter.include ?? [];
+            const already = include.some(entry => (typeof entry === 'string' ? entry === relation : entry.relation === relation));
+            if (!already) {
+                include.push(relation);
+            }
+            filter.include = include;
+        }
+
+        filterEntitiesByLambda(entities: AnyObject[], lambda: LambdaExpression): AnyObject[] {
+            return entities.filter(entity => this.evaluateLambda(entity, lambda));
+        }
+
+        evaluateLambda(entity: AnyObject, lambda: LambdaExpression): boolean {
+            const collection = this.resolvePath(entity, lambda.path);
+            const items = Array.isArray(collection) ? collection : [];
+            if (lambda.type === 'any') {
+                return items.some(item => this.evaluatePredicate(lambda.predicate, item, lambda.alias, entity));
+            }
+            // all
+            if (!items.length) return true;
+            return items.every(item => this.evaluatePredicate(lambda.predicate, item, lambda.alias, entity));
+        }
+
+        evaluatePredicate(expr: ParsedExpression, current: AnyObject, alias: string, root: AnyObject): boolean {
+            switch (expr.operator) {
+                case 'comparison': {
+                    const left = this.resolvePredicateValue(expr.field, current, alias, root);
+                    const right = expr.value;
+                    switch (expr.comparator) {
+                        case 'eq': return this.compareValues(left, right) === 0;
+                        case 'neq': return this.compareValues(left, right) !== 0;
+                        case 'gt': return this.compareValues(left, right) > 0;
+                        case 'gte': return this.compareValues(left, right) >= 0;
+                        case 'lt': return this.compareValues(left, right) < 0;
+                        case 'lte': return this.compareValues(left, right) <= 0;
+                        default:
+                            throw new Error(`Unsupported comparator: ${expr.comparator}`);
+                    }
+                }
+                case 'function': {
+                    const value = this.resolvePredicateValue(expr.field, current, alias, root);
+                    if (typeof value !== 'string') return false;
+                    const arg = typeof expr.args[0] === 'string' ? expr.args[0] : String(expr.args[0] ?? '');
+                    const source = expr.caseInsensitive ? value.toLowerCase() : value;
+                    const needle = expr.caseInsensitive ? arg.toLowerCase() : arg;
+                    if (expr.name === 'contains') return source.includes(needle);
+                    if (expr.name === 'startswith') return source.startsWith(needle);
+                    if (expr.name === 'endswith') return source.endsWith(needle);
+                    return false;
+                }
+                case 'fncmp': {
+                    const value = this.resolvePredicateValue(expr.field, current, alias, root);
+                    const numeric = value instanceof Date ? value : Number(value);
+                    if (expr.name === 'year') {
+                        if (!(value instanceof Date)) return false;
+                        const year = value.getUTCFullYear();
+                        return this.compareValues(year, expr.value) === 0;
+                    }
+                    if (!Number.isFinite(numeric as number)) return false;
+                    switch (expr.name) {
+                        case 'round':
+                            return this.compareValues(Math.round(numeric as number), expr.value) === 0;
+                        case 'floor':
+                            return this.compareValues(Math.floor(numeric as number), expr.value) === 0;
+                        case 'ceiling':
+                            return this.compareValues(Math.ceil(numeric as number), expr.value) === 0;
+                    }
+                    return false;
+                }
+                case 'indexofcmp': {
+                    const value = this.resolvePredicateValue(expr.field, current, alias, root);
+                    if (typeof value !== 'string') return false;
+                    const index = value.toLowerCase().indexOf(expr.needle.toLowerCase());
+                    const compare = this.compareValues(index, expr.value);
+                    switch (expr.comparator) {
+                        case 'eq': return compare === 0;
+                        case 'neq': return compare !== 0;
+                        case 'gt': return compare > 0;
+                        case 'gte': return compare >= 0;
+                        case 'lt': return compare < 0;
+                        case 'lte': return compare <= 0;
+                    }
+                    return false;
+                }
+                case 'substrcmp': {
+                    const value = this.resolvePredicateValue(expr.field, current, alias, root);
+                    if (typeof value !== 'string') return false;
+                    const start = Math.max(0, expr.start);
+                    const segment = expr.length !== undefined ? value.substr(start, expr.length) : value.slice(start);
+                    return expr.comparator === 'eq' ? segment === expr.literal : segment !== expr.literal;
+                }
+                case 'lengthcmp': {
+                    const value = this.resolvePredicateValue(expr.field, current, alias, root);
+                    const len = typeof value === 'string' ? value.length : Array.isArray(value) ? value.length : 0;
+                    switch (expr.comparator) {
+                        case 'eq': return len === expr.value;
+                        case 'gt': return len > expr.value;
+                        case 'gte': return len >= expr.value;
+                        case 'lt': return len < expr.value;
+                        case 'lte': return len <= expr.value;
+                        case 'neq': return len !== expr.value;
+                        default: return false;
+                    }
+                }
+                case 'logical': {
+                    if (expr.type === 'and') {
+                        return expr.expressions.every(child => this.evaluatePredicate(child, current, alias, root));
+                    }
+                    return expr.expressions.some(child => this.evaluatePredicate(child, current, alias, root));
+                }
+                case 'not':
+                    return !this.evaluatePredicate(expr.expr, current, alias, root);
+                case 'lambda':
+                    throw new Error('Nested lambda expressions are not supported yet.');
+                default:
+                    return false;
+            }
+        }
+
+        compareValues(a: unknown, b: unknown): number {
+            if (a === b) return 0;
+            if (a == null) return -1;
+            if (b == null) return 1;
+            if (typeof a === 'number' && typeof b === 'number') {
+                if (a < b) return -1;
+                if (a > b) return 1;
+                return 0;
+            }
+            const aStr = String(a);
+            const bStr = String(b);
+            if (aStr < bStr) return -1;
+            if (aStr > bStr) return 1;
+            return 0;
+        }
+
+        resolvePredicateValue(path: string, current: AnyObject, alias: string, root: AnyObject): unknown {
+            const segments = path.split('/');
+            if (segments[0] === alias) {
+                return this.resolvePath(current, segments.slice(1));
+            }
+            return this.resolvePath(root, segments);
+        }
+
+        resolvePath(source: AnyObject, segments: string[]): unknown {
+            let current: unknown = source;
+            for (const segment of segments) {
+                if (current == null) return undefined;
+                current = (current as AnyObject)[segment];
+            }
+            return current;
         }
 
         ensureEtagField(filter: Filter<CrudEntity>) {
@@ -787,9 +944,11 @@ export function defineODataCrudController(def: EntitySetDef) {
             if (preferences.respondAsync) this.throwPreferenceNotSupported('respond-async');
 
             const baseFilter: Filter<CrudEntity> = filter ? { ...filter } : {};
+            const aggregationEnabled = Boolean(def.capabilities?.aggregation ?? this.cfg?.capabilities?.aggregation);
 
             let inlineCountRequested = false;
             let aggregationSpec: AggregationSpec | undefined;
+            let lambdaExpression: LambdaExpression | undefined;
             try {
                 const parsed = parseODataQuery(
                     this.request.query as Record<string, string | string[] | undefined>,
@@ -800,9 +959,11 @@ export function defineODataCrudController(def: EntitySetDef) {
                     throw new HttpErrors.BadRequest('The $count option is disabled by server configuration.');
                 }
                 aggregationSpec = parsed.apply;
-                const parsedFilter = { ...parsed } as Filter<CrudEntity> & { inlineCount?: boolean; apply?: AggregationSpec };
+                lambdaExpression = parsed.lambda;
+                const parsedFilter = { ...parsed } as Filter<CrudEntity> & { inlineCount?: boolean; apply?: AggregationSpec; lambda?: LambdaExpression };
                 delete (parsedFilter as { inlineCount?: boolean }).inlineCount;
                 delete (parsedFilter as { apply?: AggregationSpec }).apply;
+                delete (parsedFilter as { lambda?: LambdaExpression }).lambda;
                 this.mergeFilters(baseFilter, parsedFilter);
                 this.ensureEtagField(baseFilter);
                 // apply $search if present
@@ -821,6 +982,19 @@ export function defineODataCrudController(def: EntitySetDef) {
                 if (baseFilter.include) {
                     throw new HttpErrors.BadRequest('The $expand option is not supported together with $apply.');
                 }
+                if (!aggregationEnabled) {
+                    throw new HttpErrors.NotImplemented('Aggregations are not enabled for this entity set.');
+                }
+            }
+
+            if (lambdaExpression) {
+                if (aggregationSpec) {
+                    throw new HttpErrors.BadRequest('Combining $apply with lambda expressions is not supported.');
+                }
+                if (baseFilter.where && Object.keys(baseFilter.where).length) {
+                    throw new HttpErrors.BadRequest('Lambda expressions cannot be combined with other predicates yet.');
+                }
+                this.ensureLambdaInclusion(baseFilter, lambdaExpression);
             }
 
             // Enforce maxTop if configured
@@ -860,13 +1034,34 @@ export function defineODataCrudController(def: EntitySetDef) {
                     const entities = await this.repository.find(fetchFilter, options);
                     const plainEntities = entities.map(entity => this.toPlainEntity(entity) ?? {});
                     const aggregated = this.executeAggregation(plainEntities, aggregationSpec);
-                    const ordered = this.orderAggregationResults(aggregated, baseFilter.order);
-                    const paged = this.sliceAggregationResults(ordered, baseFilter.offset, baseFilter.limit);
+                    const ordered = this.orderResults(aggregated, baseFilter.order);
+                    const paged = this.sliceResults(ordered, baseFilter.offset, baseFilter.limit);
 
                     this.ensureODataHeaders();
                     const result = {
                         '@odata.context': contextBase,
                         value: paged,
+                    } as AnyObject;
+                    ctx.result = result;
+                    return result;
+                }
+
+                if (lambdaExpression) {
+                    const fetchFilter: Filter<CrudEntity> = { ...baseFilter };
+                    delete fetchFilter.order;
+                    delete fetchFilter.limit;
+                    delete fetchFilter.offset;
+
+                    const entities = await this.repository.find(fetchFilter, options);
+                    const plainEntities = entities.map(entity => this.toPlainEntity(entity) ?? {});
+                    const filtered = this.filterEntitiesByLambda(plainEntities, lambdaExpression);
+                    const ordered = this.orderResults(filtered, baseFilter.order);
+                    const paged = this.sliceResults(ordered, baseFilter.offset, baseFilter.limit);
+
+                    this.ensureODataHeaders();
+                    const result = {
+                        '@odata.context': contextBase,
+                        value: this.decoratePlainEntities(paged),
                     } as AnyObject;
                     ctx.result = result;
                     return result;
