@@ -757,7 +757,8 @@ Run `npm test` to compile the TypeScript specs and execute the unit suite. Accep
 - [x] Service document exposing registered entity sets
 - [x] $metadata endpoint with generated CSDL (including navigation properties for relations)
 - [x] Basic query options → LoopBack filters (`$filter`, `$orderby`, `$top`, `$skip`, `$select`)
-- [x] Extended filter support: `not`, numeric functions (`round`, `floor`, `ceiling`), date extraction (`year`), and basic `$search` across string fields
+- [x] Extended filter support: `not`, numeric functions (`round`, `floor`, `ceiling`), date extraction (`year`), and `$search` across string fields
+- [x] any/all (lambdas): translate `<nav>/(any|all)(x: <expr>)` through relation repositories, support multi-segment paths, and allow additional predicates via `and` (nesting/multiple lambdas still pending)
 - [x] Relational expansion via `$expand`
 - [x] Inline and standalone `$count`
 - [x] `$batch` endpoint (JSON and multipart/mixed)
@@ -770,10 +771,18 @@ Run `npm test` to compile the TypeScript specs and execute the unit suite. Accep
 - [x] Optimistic concurrency with OData ETags (`If-Match` / `If-None-Match` support on generated CRUD routes)
 - [x] `$batch` execution runs through the LoopBack pipeline so interceptors/auth apply; changesets use per-datasource transactions and commit/rollback as a unit
 - [x] Configurable base path (`basePath`), `$top` limit (`maxTop`), `$count` toggle (`enableCount`), and strict mode validations
-- [x] Opt-in `$search` with field-level decorators and configuration
+- [x] Opt-in `$search` with boolean operators (AND/OR/NOT), quoted phrases, per-field configuration, and guardrails
 - [x] Configurable CSDL namespace/container names and JSON CSDL output with enriched primitive facets
 - [x] Complex types, enum types, and referential constraints reflected in generated CSDL (XML & JSON)
 - [x] Capabilities annotations (filter functions, count/navigation restrictions, permissions, streams) to describe service behaviors to OData clients
+
+Queries can now combine boolean operators and phrases:
+
+```http
+GET /odata/Products?$search="coffee beans" AND grinder NOT decaf
+```
+
+The example above matches products that include the phrase "coffee beans", also mention "grinder", and omit anything containing "decaf".
 
 ## Configuration
 
@@ -827,7 +836,7 @@ this.bind(ODATA_BINDINGS.CONFIG).to({
   - Search:
     - `searchMode`: `'annotated' | 'config-only' | 'all' | 'disabled'` (default: `annotated`)
     - `searchFields`: `{[entitySet: string]: string[]}` overrides decorator scope
-    - `maxSearchFields` / `maxSearchTerms`: caps to prevent overly broad queries
+    - `maxSearchFields` / `maxSearchTerms`: caps to prevent overly broad queries (exceeding `maxSearchTerms` now returns `400 Bad Request`)
 
 Example: With `{basePath: '/api/odata', maxTop: 100, enableCount: false}`
 - Routes mount at `/api/odata/...`.
@@ -842,9 +851,7 @@ Entity-set specific overrides are available via `EntitySetRegistry.register`:
 
 ## Roadmap
 
-- [x] any/all (lambdas): translate `<nav>/(any|all)(x: <expr>)` through relation repositories, support multi-segment paths, and allow additional predicates via `and` (nesting/multiple lambdas still pending)
 - [ ] Filter functions: add additional string helpers (e.g. `trim`, `concat`) and date/time parts (`month`, `day`, `hour`, `minute`, `second`); return 400 in strict mode when unsupported by connector
-- [ ] $search hardening: boolean operators (AND/OR/NOT), quoted phrases with correct precedence; enforce `maxSearchFields` / `maxSearchTerms`; connector hooks for FTS
 - [ ] Limits & safety: `maxExpandDepth` (and optional `maxSkip`) to prevent heavy queries in strict mode
 - [ ] Advanced CSDL polish: extend annotations with insert/update restrictions, expose search annotations, and support complex type inheritance
 - [ ] Path rewriting polish: alternate/compound keys and robust quoting beyond `\w+` heuristics
