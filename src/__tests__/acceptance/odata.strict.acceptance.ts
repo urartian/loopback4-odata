@@ -97,6 +97,20 @@ describe('OData strict mode acceptance', () => {
       .expect(400);
   });
 
+  it('rejects trim() filters in strict mode', async () => {
+    await client
+      .get('/odata/Products')
+      .query({$filter: "trim(name) eq 'Laptop'"})
+      .expect(400);
+  });
+
+  it('rejects month() filters in strict mode', async () => {
+    await client
+      .get('/odata/Products')
+      .query({$filter: 'month(updatedAt) eq 1'})
+      .expect(400);
+  });
+
   it('rejects unsupported indexof comparator in strict mode', async function () {
     // default strict app from beforeEach
     await client
