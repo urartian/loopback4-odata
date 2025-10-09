@@ -757,7 +757,7 @@ Run `npm test` to compile the TypeScript specs and execute the unit suite. Accep
 - [x] Service document exposing registered entity sets
 - [x] $metadata endpoint with generated CSDL (including navigation properties for relations)
 - [x] Basic query options → LoopBack filters (`$filter`, `$orderby`, `$top`, `$skip`, `$select`)
-- [x] Extended filter support: `not`, numeric functions (`round`, `floor`, `ceiling`), date extraction (`year`), and `$search` across string fields
+- [x] Extended filter support: `not`, numeric functions (`round`, `floor`, `ceiling`), date extraction (`year`), string helpers (`trim`, `concat`), date parts (`month`, `day`, `hour`, `minute`, `second`), and `$search` across string fields
 - [x] any/all (lambdas): translate `<nav>/(any|all)(x: <expr>)` through relation repositories, support multi-segment paths, and allow additional predicates via `and` (nesting/multiple lambdas still pending)
 - [x] Relational expansion via `$expand`
 - [x] Inline and standalone `$count`
@@ -783,6 +783,8 @@ GET /odata/Products?$search="coffee beans" AND grinder NOT decaf
 ```
 
 The example above matches products that include the phrase "coffee beans", also mention "grinder", and omit anything containing "decaf".
+
+String helpers such as `trim`/`concat` and date part functions (`month`, `day`, `hour`, `minute`, `second`) are processed automatically when `strict=false`. In strict mode these functions return `400 Bad Request` unless the backing connector provides native support.
 
 ## Configuration
 

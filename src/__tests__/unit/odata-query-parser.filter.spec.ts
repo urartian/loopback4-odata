@@ -163,4 +163,25 @@ describe('parseODataQuery extended filter grammar', () => {
     const parsed = parseODataQuery({'$filter': 'not length(code) lt 3'});
     assert.deepStrictEqual(parsed.where, {code: {like: '___%', escape: '\\'}});
   });
+
+  it('marks trim() comparisons for post-processing', () => {
+    const parsed = parseODataQuery({'$filter': "trim(name) eq 'Laptop'"});
+    assert.equal(parsed.where, undefined);
+    assert(parsed.postFilter, 'Expected postFilter expression');
+    assert.deepStrictEqual(parsed.unsupportedFunctions, ['trim']);
+  });
+
+  it('marks concat() comparisons for post-processing', () => {
+    const parsed = parseODataQuery({'$filter': "concat(name,'-',code) eq 'Laptop-001'"});
+    assert.equal(parsed.where, undefined);
+    assert(parsed.postFilter, 'Expected postFilter expression');
+    assert.deepStrictEqual(parsed.unsupportedFunctions, ['concat']);
+  });
+
+  it('marks month() comparisons for post-processing', () => {
+    const parsed = parseODataQuery({'$filter': 'month(updatedAt) eq 12'});
+    assert.equal(parsed.where, undefined);
+    assert(parsed.postFilter, 'Expected postFilter expression');
+    assert.deepStrictEqual(parsed.unsupportedFunctions, ['month']);
+  });
 });

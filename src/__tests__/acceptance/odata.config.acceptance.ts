@@ -102,6 +102,42 @@ describe('OData config plumbing acceptance', () => {
     expect(res.body.value[0].name).to.equal('Monitor');
   });
 
+  it('supports trim() filters when strict=false', async () => {
+    const res = await client
+      .get('/api/odata/Products')
+      .query({$filter: "trim(name) eq 'Laptop'"})
+      .expect(200);
+
+    expect(res.body.value).to.be.Array();
+    expect(res.body.value.map((item: any) => item.name)).to.containEql('Laptop');
+  });
+
+  it('supports concat() filters when strict=false', async () => {
+    const res = await client
+      .get('/api/odata/Products')
+      .query({$filter: "concat(name,'/',price) eq 'Laptop/1299'"})
+      .expect(200);
+
+    expect(res.body.value).to.be.Array();
+    expect(res.body.value).to.have.length(1);
+    expect(res.body.value[0].name).to.equal('Laptop');
+  });
+
+  it('supports month() filters when strict=false', async () => {
+    const first = await client.get('/api/odata/Products?$top=1').expect(200);
+    const sample = first.body.value[0];
+    const updatedAt = new Date(sample.updatedAt);
+    const month = updatedAt.getUTCMonth() + 1;
+
+    const res = await client
+      .get('/api/odata/Products')
+      .query({$filter: `month(updatedAt) eq ${month}`})
+      .expect(200);
+
+    expect(res.body.value).to.be.Array();
+    expect(res.body.value.length).to.be.greaterThan(0);
+  });
+
   it('rejects inline $count when disabled', async () => {
     const res = await client
       .get('/api/odata/Products')

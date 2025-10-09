@@ -25,7 +25,7 @@ import {
     AnyObject,
 } from '@loopback/repository';
 import { EntitySetDef } from '../registry/entityset-registry';
-import { parseODataQuery, AggregationSpec, AggregationOperator, LambdaExpression, ParsedExpression } from '../services/odata-query-parser.service';
+import { parseODataQuery, AggregationSpec, AggregationOperator, LambdaExpression, ParsedExpression, FunctionArg } from '../services/odata-query-parser.service';
 import { ODATA_ATOMICITY_STATE, ODATA_VERSION } from '../constants';
 import { AtomicityRequestState } from '../types/batch';
 import { Response } from '@loopback/rest';
@@ -414,6 +414,70 @@ export function defineODataCrudController(def: EntitySetDef) {
             return result;
         }
 
+        applyPostFilter(data: AnyObject[], expr?: ParsedExpression): AnyObject[] {
+            if (!expr) return data;
+            return data.filter(entity => this.evaluatePredicate(expr, entity, '', entity));
+        }
+
+        resolveFunctionArgValue(arg: FunctionArg, current: AnyObject, alias: string, root: AnyObject): unknown {
+            if (arg.kind === 'literal') return arg.value;
+            const raw = this.resolvePredicateValue(arg.name, current, alias, root);
+            if (raw == null) return raw;
+            if (typeof raw === 'string') {
+                if (arg.transform === 'tolower') return raw.toLowerCase();
+                if (arg.transform === 'toupper') return raw.toUpperCase();
+                return raw;
+            }
+            if (arg.transform) {
+                const str = String(raw);
+                return arg.transform === 'tolower' ? str.toLowerCase() : str.toUpperCase();
+            }
+            return raw;
+        }
+
+        evaluateStringFunction(expr: Extract<ParsedExpression, {operator: 'stringfncmp'}>, current: AnyObject, alias: string, root: AnyObject): string | undefined {
+            switch (expr.name) {
+                case 'trim': {
+                    const value = this.resolveFunctionArgValue(expr.args[0], current, alias, root);
+                    if (value == null) return undefined;
+                    return String(value).trim();
+                }
+                case 'concat': {
+                    const parts = expr.args.map(arg => {
+                        const value = this.resolveFunctionArgValue(arg, current, alias, root);
+                        return value == null ? '' : String(value);
+                    });
+                    return parts.join('');
+                }
+                default:
+                    return undefined;
+            }
+        }
+
+        extractDatePart(value: unknown, part: 'month' | 'day' | 'hour' | 'minute' | 'second'): number | undefined {
+            const date =
+                value instanceof Date
+                    ? value
+                    : typeof value === 'string' || typeof value === 'number'
+                        ? new Date(value)
+                        : undefined;
+            if (!date || Number.isNaN(date.getTime())) return undefined;
+            switch (part) {
+                case 'month':
+                    return date.getUTCMonth() + 1;
+                case 'day':
+                    return date.getUTCDate();
+                case 'hour':
+                    return date.getUTCHours();
+                case 'minute':
+                    return date.getUTCMinutes();
+                case 'second':
+                    return date.getUTCSeconds();
+                default:
+                    return undefined;
+            }
+        }
+
         ensureLambdaInclusion(filter: Filter<CrudEntity>, lambda: LambdaExpression) {
             if (!lambda.path.length) {
                 throw new HttpErrors.BadRequest('Lambda expressions must reference a navigation property.');
@@ -543,6 +607,28 @@ export function defineODataCrudController(def: EntitySetDef) {
                     if (expr.name === 'startswith') return source.startsWith(needle);
                     if (expr.name === 'endswith') return source.endsWith(needle);
                     return false;
+                }
+                case 'stringfncmp': {
+                    const result = this.evaluateStringFunction(expr, current, alias, root);
+                    if (result == null) return false;
+                    const compare = this.compareValues(result, expr.value);
+                    return expr.comparator === 'eq' ? compare === 0 : compare !== 0;
+                }
+                case 'datepart': {
+                    const value = this.resolvePredicateValue(expr.field, current, alias, root);
+                    const partValue = this.extractDatePart(value, expr.part);
+                    if (partValue == null) return false;
+                    const compare = this.compareValues(partValue, expr.value);
+                    switch (expr.comparator) {
+                        case 'eq': return compare === 0;
+                        case 'neq': return compare !== 0;
+                        case 'gt': return compare > 0;
+                        case 'gte': return compare >= 0;
+                        case 'lt': return compare < 0;
+                        case 'lte': return compare <= 0;
+                        default:
+                            return false;
+                    }
                 }
                 case 'fncmp': {
                     const value = this.resolvePredicateValue(expr.field, current, alias, root);
@@ -1321,6 +1407,8 @@ export function defineODataCrudController(def: EntitySetDef) {
             let inlineCountRequested = false;
             let aggregationSpec: AggregationSpec | undefined;
             let lambdaExpression: LambdaExpression | undefined;
+            let postFilterExpr: ParsedExpression | undefined;
+            let unsupportedFunctions: string[] = [];
             try {
                 const parsed = parseODataQuery(
                     this.request.query as Record<string, string | string[] | undefined>,
@@ -1332,10 +1420,17 @@ export function defineODataCrudController(def: EntitySetDef) {
                 }
                 aggregationSpec = parsed.apply;
                 lambdaExpression = parsed.lambda;
+                postFilterExpr = parsed.postFilter;
+                unsupportedFunctions = parsed.unsupportedFunctions ?? [];
+                if (postFilterExpr && unsupportedFunctions.length && this.cfg?.strict) {
+                    throw new HttpErrors.BadRequest(`Unsupported filter functions in strict mode: ${unsupportedFunctions.join(', ')}`);
+                }
                 const parsedFilter = { ...parsed } as Filter<CrudEntity> & { inlineCount?: boolean; apply?: AggregationSpec; lambda?: LambdaExpression };
                 delete (parsedFilter as { inlineCount?: boolean }).inlineCount;
                 delete (parsedFilter as { apply?: AggregationSpec }).apply;
                 delete (parsedFilter as { lambda?: LambdaExpression }).lambda;
+                delete (parsedFilter as { postFilter?: ParsedExpression }).postFilter;
+                delete (parsedFilter as { unsupportedFunctions?: string[] }).unsupportedFunctions;
                 this.mergeFilters(baseFilter, parsedFilter);
                 this.ensureEtagField(baseFilter);
                 // apply $search if present
@@ -1386,6 +1481,15 @@ export function defineODataCrudController(def: EntitySetDef) {
             this.validateFieldsStrict(baseFilter);
             this.enforceSkipLimit(baseFilter);
 
+            const requestedOffset = typeof baseFilter.offset === 'number' ? baseFilter.offset : 0;
+            const requestedLimit = typeof baseFilter.limit === 'number' ? baseFilter.limit : undefined;
+            const requiresPostFilter = Boolean(postFilterExpr);
+
+            if (requiresPostFilter) {
+                delete baseFilter.offset;
+                delete baseFilter.limit;
+            }
+
             const op: CrudOperation = 'READ';
             const scope: CrudScope = 'collection';
             const ctx = this.buildHookContext({operation: op, scope, filter: baseFilter as any, options: this.repositoryOptions()});
@@ -1402,9 +1506,10 @@ export function defineODataCrudController(def: EntitySetDef) {
 
                     const entities = await this.repository.find(fetchFilter, options);
                     const plainEntities = entities.map(entity => this.toPlainEntity(entity) ?? {});
-                    const aggregated = this.executeAggregation(plainEntities, aggregationSpec);
+                    const filteredEntities = requiresPostFilter ? this.applyPostFilter(plainEntities, postFilterExpr) : plainEntities;
+                    const aggregated = this.executeAggregation(filteredEntities, aggregationSpec);
                     const ordered = this.orderResults(aggregated, baseFilter.order);
-                    const paged = this.sliceResults(ordered, baseFilter.offset, baseFilter.limit);
+                    const paged = this.sliceResults(ordered, requestedOffset, requestedLimit);
 
                     this.ensureODataHeaders();
                     const result = {
@@ -1423,9 +1528,12 @@ export function defineODataCrudController(def: EntitySetDef) {
 
                     const entities = await this.repository.find(fetchFilter, options);
                     const plainEntities = entities.map(entity => this.toPlainEntity(entity) ?? {});
-                    const filtered = this.filterEntitiesByLambda(plainEntities, lambdaExpression);
+                    let filtered = this.filterEntitiesByLambda(plainEntities, lambdaExpression);
+                    if (requiresPostFilter) {
+                        filtered = this.applyPostFilter(filtered, postFilterExpr);
+                    }
                     const ordered = this.orderResults(filtered, baseFilter.order);
-                    const paged = this.sliceResults(ordered, baseFilter.offset, baseFilter.limit);
+                    const paged = this.sliceResults(ordered, requestedOffset, requestedLimit);
 
                     this.ensureODataHeaders();
                     const result = {
@@ -1438,19 +1546,29 @@ export function defineODataCrudController(def: EntitySetDef) {
 
                 const results = await this.repository.find(baseFilter, options);
                 const plainResults = results.map(entity => this.toPlainEntity(entity) ?? {});
+                const filteredResults = requiresPostFilter ? this.applyPostFilter(plainResults, postFilterExpr) : plainResults;
                 let totalCount: number | undefined;
 
                 if (inlineCountRequested) {
-                    const where = baseFilter.where as Filter<CrudEntity>['where'];
-                    const { count } = await this.repository.count(where as any, options);
-                    totalCount = count;
+                    if (requiresPostFilter) {
+                        totalCount = filteredResults.length;
+                    } else {
+                        const where = baseFilter.where as Filter<CrudEntity>['where'];
+                        const { count } = await this.repository.count(where as any, options);
+                        totalCount = count;
+                    }
                 }
+
+                const ordered = this.orderResults(filteredResults, baseFilter.order);
+                const paged = requiresPostFilter
+                    ? this.sliceResults(ordered, requestedOffset, requestedLimit)
+                    : ordered;
 
                 this.ensureODataHeaders();
                 const result = {
                     '@odata.context': contextBase,
-                    ...(inlineCountRequested ? { '@odata.count': totalCount ?? results.length } : {}),
-                    value: this.decoratePlainEntities(plainResults),
+                    ...(inlineCountRequested ? { '@odata.count': totalCount ?? filteredResults.length } : {}),
+                    value: this.decoratePlainEntities(paged),
                 } as AnyObject;
                 ctx.result = result;
                 return result;
@@ -1487,6 +1605,8 @@ export function defineODataCrudController(def: EntitySetDef) {
             }
 
             const baseFilter: Filter<CrudEntity> = {};
+            let postFilterExpr: ParsedExpression | undefined;
+            let unsupportedFunctions: string[] = [];
 
             try {
                 const parsed = parseODataQuery(
@@ -1495,6 +1615,13 @@ export function defineODataCrudController(def: EntitySetDef) {
                 );
                 const parsedFilter = { ...parsed } as Filter<CrudEntity> & { inlineCount?: boolean };
                 delete (parsedFilter as { inlineCount?: boolean }).inlineCount;
+                postFilterExpr = parsed.postFilter;
+                unsupportedFunctions = parsed.unsupportedFunctions ?? [];
+                if (postFilterExpr && unsupportedFunctions.length && this.cfg?.strict) {
+                    throw new HttpErrors.BadRequest(`Unsupported filter functions in strict mode: ${unsupportedFunctions.join(', ')}`);
+                }
+                delete (parsedFilter as { postFilter?: ParsedExpression }).postFilter;
+                delete (parsedFilter as { unsupportedFunctions?: string[] }).unsupportedFunctions;
                 this.mergeFilters(baseFilter, parsedFilter);
                 this.applySearch(baseFilter, (parsed as any).search);
                 this.enforceExpandDepth((parsed as any).include as InclusionFilter[] | undefined);
@@ -1513,6 +1640,16 @@ export function defineODataCrudController(def: EntitySetDef) {
 
             const execDefault = async () => {
                 const options = this.repositoryOptions();
+                if (postFilterExpr) {
+                    const entities = await this.repository.find(baseFilter, options);
+                    const plain = entities.map(entity => this.toPlainEntity(entity) ?? {});
+                    const filtered = this.applyPostFilter(plain, postFilterExpr);
+                    this.ensureODataHeaders();
+                    const result = `${filtered.length}`;
+                    ctx.result = result;
+                    return result;
+                }
+
                 const where = baseFilter.where as Filter<CrudEntity>['where'];
                 const { count } = await this.repository.count(where as any, options);
                 this.ensureODataHeaders();
@@ -1548,12 +1685,19 @@ export function defineODataCrudController(def: EntitySetDef) {
             const options = this.repositoryOptions();
             this.ensureEtagField(baseFilter as Filter<CrudEntity>);
             const ifNoneMatch = this.parseIfNoneMatchHeader();
+            let postFilterExpr: ParsedExpression | undefined;
+            let unsupportedFunctions: string[] = [];
 
             try {
                 const parsed = parseODataQuery(
                     this.request.query as Record<string, string | string[] | undefined>,
                     { relations: modelRelations, strict: Boolean(this.cfg?.strict) },
                 );
+                postFilterExpr = parsed.postFilter;
+                unsupportedFunctions = parsed.unsupportedFunctions ?? [];
+                if (postFilterExpr && unsupportedFunctions.length && this.cfg?.strict) {
+                    throw new HttpErrors.BadRequest(`Unsupported filter functions in strict mode: ${unsupportedFunctions.join(', ')}`);
+                }
                 const sanitized: Filter<CrudEntity> = {};
                 if (parsed.fields) sanitized.fields = parsed.fields;
                 if (parsed.include) sanitized.include = parsed.include;
@@ -1579,6 +1723,12 @@ export function defineODataCrudController(def: EntitySetDef) {
                 const options = this.repositoryOptions();
                 const entity = await this.repository.findById(id as any, baseFilter, options);
                 const plain = this.toPlainEntity(entity) ?? {};
+                if (postFilterExpr) {
+                    const matches = this.evaluatePredicate(postFilterExpr, plain, '', plain);
+                    if (!matches) {
+                        throw new HttpErrors.NotFound('Entity not found.');
+                    }
+                }
                 const etag = this.computeEtagFromPlain(plain);
 
                 if (ifNoneMatch && !ifNoneMatch.any && etag && matchesEtag(etag, ifNoneMatch.values)) {
