@@ -613,6 +613,76 @@ async resetInventory(body: {confirm?: boolean}) {
 
 This action is exposed as `POST /odata/resetInventory`, surfaces in `$metadata` as an unbound action, and because `rawResponse` is set, the controller controls the full payload.
 
+#### Example: virtual/computed properties
+
+LoopBack models can advertise computed fields by marking them as non-persistent. The extension will list the field in `$metadata`, but you are responsible for calculating it at runtime and ignoring any client-supplied values.
+
+```ts
+// order.model.ts
+import {Entity, model, property} from '@loopback/repository';
+import {odataModel} from '@loopback/odata';
+
+@odataModel({entitySetName: 'Orders'})
+@model()
+export class Order extends Entity {
+  @property({id: true})
+  id: string;
+
+  @property({type: 'number', required: true})
+  amount: number;
+
+  @property({type: 'string', required: true})
+  currency: string;
+
+  @property({type: 'number', persist: false, jsonSchema: {readOnly: true}})
+  totalWithTax?: number;
+}
+```
+
+```ts
+// order.odata-controller.ts
+import {AnyObject, repository} from '@loopback/repository';
+import {odata, CrudHookContext} from '@loopback/odata';
+import {Order} from './order.model';
+import {OrderRepository} from './order.repository';
+
+const addTotal = (entity: AnyObject) => {
+  const rate = entity.currency === 'EUR' ? 0.19 : 0.07;
+  const amount = Number(entity.amount ?? 0);
+  entity.totalWithTax = Number.isFinite(amount) ? +(amount * (1 + rate)).toFixed(2) : undefined;
+  return entity;
+};
+
+@odataController(Order)
+export class OrderODataController {
+  constructor(@repository(OrderRepository) private readonly orders: OrderRepository) {}
+
+  @odata.before('CREATE')
+  @odata.before('UPDATE')
+  stripVirtual(ctx: CrudHookContext) {
+    if (ctx.payload) delete (ctx.payload as AnyObject).totalWithTax;
+  }
+
+  @odata.after('READ', 'entity')
+  addVirtualToEntity(ctx: CrudHookContext) {
+    const entity = ctx.result as AnyObject | undefined;
+    if (entity) addTotal(entity);
+  }
+
+  @odata.after('READ', 'collection')
+  addVirtualToCollection(ctx: CrudHookContext) {
+    const payload = ctx.result as {value?: AnyObject[]};
+    if (!payload?.value) return;
+    payload.value = payload.value.map(item => addTotal(item));
+  }
+}
+```
+
+Key points:
+- Declare the field on the model with `persist: false` so it is not stored in the datasource but still appears in `$metadata`.
+- Use `@odata.before` hooks to strip the field from incoming payloads.
+- Populate the computed value in an `@odata.after` hook (or `@odata.on` override) before the response is sent.
+
 ### Using `$batch`
 
 Send a JSON payload containing `requests`. When multiple entries share the same `atomicityGroup`, LoopBack executes them as a changeset and either commits or rolls everything back.
