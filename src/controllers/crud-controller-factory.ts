@@ -1106,6 +1106,143 @@ export function defineODataCrudController(def: EntitySetDef) {
             }
         }
 
+        buildPropertyNameMap(): Map<string, string> {
+            const {props} = this.allowedProperties();
+            const map = new Map<string, string>();
+            for (const prop of props) {
+                map.set(prop, prop);
+                map.set(prop.toLowerCase(), prop);
+            }
+            return map;
+        }
+
+        normalizePropertyName(name: string, map: Map<string, string>): string {
+            if (!name) return name;
+            const direct = map.get(name);
+            if (direct) return direct;
+            const lower = name.toLowerCase();
+            const resolved = map.get(lower);
+            return resolved ?? name;
+        }
+
+        normalizeWhereClause(where: CrudWhere | undefined, map: Map<string, string>): CrudWhere | undefined {
+            if (!where || typeof where !== 'object') return where;
+            if (Array.isArray(where)) {
+                let mutated = false;
+                const normalized = where.map(entry => {
+                    const next = this.normalizeWhereClause(entry as CrudWhere, map);
+                    if (next !== entry) mutated = true;
+                    return next as CrudWhere;
+                });
+                return mutated ? (normalized as unknown as CrudWhere) : where;
+            }
+
+            let mutated = false;
+            const result: AnyObject = {};
+
+            for (const [key, value] of Object.entries(where)) {
+                if (key === 'and' || key === 'or') {
+                    const list = Array.isArray(value) ? value : [];
+                    const normalizedList = list.map(entry => this.normalizeWhereClause(entry as CrudWhere, map));
+                    if (normalizedList.some((entry, idx) => entry !== list[idx])) mutated = true;
+                    result[key] = normalizedList;
+                    continue;
+                }
+                if (key === 'not') {
+                    const normalizedChild = this.normalizeWhereClause(value as CrudWhere, map);
+                    if (normalizedChild !== value) mutated = true;
+                    result[key] = normalizedChild;
+                    continue;
+                }
+                const normalizedKey = this.normalizePropertyName(key, map);
+                if (normalizedKey !== key) mutated = true;
+                result[normalizedKey] = value;
+            }
+
+            return mutated ? (result as CrudWhere) : where;
+        }
+
+        normalizeOrderList(order: string | string[] | undefined, map: Map<string, string>): string | string[] | undefined {
+            if (!order) return order;
+            const list = Array.isArray(order) ? order : [order];
+            let mutated = false;
+            const mapped = list.map(item => {
+                const original = String(item ?? '');
+                const raw = original.trim();
+                if (raw !== original) mutated = true;
+                if (!raw) {
+                    if (original) mutated = true;
+                    return '';
+                }
+                const [field, direction, ...rest] = raw.split(/\s+/);
+                if (!field) return raw;
+                const normalizedField = this.normalizePropertyName(field, map);
+                if (normalizedField !== field) mutated = true;
+                const suffix = [direction, ...rest].filter(Boolean).join(' ');
+                return suffix ? `${normalizedField} ${suffix}` : normalizedField;
+            });
+            const normalized = mapped.filter(entry => {
+                if (!entry) {
+                    mutated = true;
+                    return false;
+                }
+                return true;
+            });
+
+            if (!Array.isArray(order)) {
+                return normalized.length ? normalized[0] : undefined;
+            }
+            return mutated ? normalized : order;
+        }
+
+        normalizeFields(fields: Filter<CrudEntity>['fields'], map: Map<string, string>): Filter<CrudEntity>['fields'] {
+            if (!fields) return fields;
+            if (Array.isArray(fields)) {
+                let mutated = false;
+                const normalized = fields.map(name => {
+                    const normalizedName = this.normalizePropertyName(String(name), map);
+                    if (normalizedName !== name) mutated = true;
+                    return normalizedName;
+                });
+                return mutated ? (normalized as Filter<CrudEntity>['fields']) : fields;
+            }
+            if (typeof fields === 'object') {
+                let mutated = false;
+                const result: AnyObject = {};
+                for (const [key, value] of Object.entries(fields as AnyObject)) {
+                    const normalizedKey = this.normalizePropertyName(key, map);
+                    if (normalizedKey !== key) mutated = true;
+                    result[normalizedKey] = value;
+                }
+                return mutated ? (result as Filter<CrudEntity>['fields']) : fields;
+            }
+            return fields;
+        }
+
+        normalizeFilterProperties(filter: Filter<CrudEntity>) {
+            if (!filter) return;
+            const map = this.buildPropertyNameMap();
+            if (!map.size) return;
+            if (filter.fields) {
+                const normalizedFields = this.normalizeFields(filter.fields, map);
+                if (normalizedFields !== filter.fields) {
+                    filter.fields = normalizedFields;
+                }
+            }
+            if (filter.order) {
+                const normalizedOrder = this.normalizeOrderList(filter.order, map);
+                if (normalizedOrder !== filter.order) {
+                    filter.order = normalizedOrder as typeof filter.order;
+                }
+            }
+            if (filter.where) {
+                const normalizedWhere = this.normalizeWhereClause(filter.where as CrudWhere, map);
+                if (normalizedWhere !== filter.where) {
+                    filter.where = normalizedWhere as Filter<CrudEntity>['where'];
+                }
+            }
+        }
+
         validateFieldsStrict(filter: Filter<CrudEntity>) {
             if (!this.cfg?.strict) return;
             const {props, relations} = this.allowedProperties();
@@ -2055,6 +2192,7 @@ export function defineODataCrudController(def: EntitySetDef) {
                 target.include = mergeIncludes(existing, source.include);
             }
 
+            this.normalizeFilterProperties(target);
             this.ensureEtagField(target);
         }
     }

@@ -235,6 +235,36 @@ describe('OData component acceptance', () => {
     expect(first.orderItems.some((oi: any) => oi.unitPrice > 800)).to.be.true();
   });
 
+  it('excludes entities when using ne comparator in $filter', async () => {
+    const res = await client
+      .get('/odata/Products')
+      .query({$filter: "name ne 'Laptop'", $orderby: 'name asc'})
+      .expect(200);
+
+    expect(res.body.value).to.be.Array();
+    const names = res.body.value.map((item: any) => String(item.name ?? ''));
+    expect(names).to.not.containEql('Laptop');
+  });
+
+  it('supports case-insensitive property names in filters and selects', async () => {
+    const laptop = await client
+      .get('/odata/Products')
+      .query({$filter: "name eq 'Laptop'", $select: 'id', $top: '1'})
+      .expect(200);
+
+    const laptopId = laptop.body.value[0]?.id;
+    expect(laptopId).to.be.a.Number();
+
+    const res = await client
+      .get('/odata/Products')
+      .query({$filter: `ID ne ${laptopId}`, $select: 'ID,name', $orderby: 'ID asc'})
+      .expect(200);
+
+    expect(res.body.value).to.be.Array();
+    const ids = res.body.value.map((item: any) => item.id ?? item.ID ?? item.Id);
+    expect(ids).to.not.containEql(laptopId);
+  });
+
   it('keeps expanded navigation when root $select omits relation property', async () => {
     const res = await client
       .get('/odata/Products')
