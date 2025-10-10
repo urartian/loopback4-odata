@@ -740,14 +740,30 @@ export function defineODataCrudController(def: EntitySetDef) {
             }
         }
 
+        getModelDefinition(): any {
+            const repo = this.repository as AnyObject | undefined;
+            const repoDef = repo?.entityClass?.definition ?? repo?.modelClass?.definition;
+            if (repoDef && typeof repoDef === 'object') {
+                return repoDef;
+            }
+            const ctorDef = (modelCtor as AnyObject | undefined)?.definition;
+            if (ctorDef && typeof ctorDef === 'object') {
+                return ctorDef;
+            }
+            return modelDefinition;
+        }
+
         allowedProperties(): {props: Set<string>; relations: Set<string>} {
-            const props = new Set<string>(Object.keys(modelDefinition?.properties ?? {}));
-            const relations = new Set<string>(Object.keys(modelRelations ?? {}));
+            const definition = this.getModelDefinition();
+            const props = new Set<string>(Object.keys(definition?.properties ?? {}));
+            const relationDefs = (definition?.relations ?? modelRelations ?? {}) as RelationDefinitionMap | undefined;
+            const relations = new Set<string>(Object.keys(relationDefs ?? {}));
             return {props, relations};
         }
 
         stringPropertyNames(): string[] {
-            const props = modelDefinition?.properties ?? {};
+            const definition = this.getModelDefinition();
+            const props = definition?.properties ?? {};
             const out: string[] = [];
             for (const [name, def] of Object.entries(props)) {
                 const type = (def as any)?.type;
@@ -1107,11 +1123,47 @@ export function defineODataCrudController(def: EntitySetDef) {
         }
 
         buildPropertyNameMap(): Map<string, string> {
+            const definition = this.getModelDefinition();
             const {props} = this.allowedProperties();
             const map = new Map<string, string>();
+            const register = (candidate: unknown, target: string) => {
+                if (typeof candidate !== 'string') return;
+                const trimmed = candidate.trim();
+                if (!trimmed) return;
+                if (!map.has(trimmed)) {
+                    map.set(trimmed, target);
+                }
+                const lower = trimmed.toLowerCase();
+                if (!map.has(lower)) {
+                    map.set(lower, target);
+                }
+            };
+
             for (const prop of props) {
-                map.set(prop, prop);
-                map.set(prop.toLowerCase(), prop);
+                register(prop, prop);
+                const def = (definition?.properties ?? {})[prop] as AnyObject | undefined;
+                if (def && typeof def === 'object') {
+                    register(def.name, prop);
+                    const jsonSchema = def.jsonSchema as AnyObject | undefined;
+                    if (jsonSchema && typeof jsonSchema === 'object') {
+                        register(jsonSchema.name, prop);
+                        register(jsonSchema['x-odata-original-name'], prop);
+                        register(jsonSchema['x-odata-property-name'], prop);
+                    }
+                }
+            }
+
+            const definitionIdProps = typeof definition?.idProperties === 'function'
+                ? definition.idProperties()
+                : undefined;
+            const idList = Array.isArray(definitionIdProps) && definitionIdProps.length
+                ? definitionIdProps
+                : idProperties;
+            for (const idName of idList ?? []) {
+                const canonical = typeof idName === 'string'
+                    ? (map.get(idName) ?? map.get(idName.toLowerCase()) ?? idName)
+                    : idName;
+                register(idName, String(canonical));
             }
             return map;
         }
