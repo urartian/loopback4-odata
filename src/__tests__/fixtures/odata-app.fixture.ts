@@ -102,6 +102,22 @@ export class OrderItem extends Entity {
 
   @property({required: true})
   unitPrice!: number;
+
+  @hasMany(() => OrderItemNote)
+  notes?: OrderItemNote[];
+}
+
+@odataModel()
+@model()
+export class OrderItemNote extends Entity {
+  @property({id: true, generated: true})
+  id?: number;
+
+  @belongsTo(() => OrderItem)
+  orderItemId!: number;
+
+  @property({required: true})
+  text!: string;
 }
 
 export class ProductRepository extends DefaultCrudRepository<
@@ -206,6 +222,7 @@ export class OrderItemRepository extends DefaultCrudRepository<
 > {
   public readonly order: BelongsToAccessor<Order, typeof OrderItem.prototype.id>;
   public readonly product: BelongsToAccessor<Product, typeof OrderItem.prototype.id>;
+  public readonly notes: HasManyRepositoryFactory<OrderItemNote, typeof OrderItem.prototype.id>;
 
   constructor(
     @inject('datasources.db') dataSource: juggler.DataSource,
@@ -213,12 +230,25 @@ export class OrderItemRepository extends DefaultCrudRepository<
     protected orderRepositoryGetter: Getter<OrderRepository>,
     @repository.getter('ProductRepository')
     protected productRepositoryGetter: Getter<ProductRepository>,
+    @repository.getter('OrderItemNoteRepository')
+    protected noteRepositoryGetter: Getter<OrderItemNoteRepository>,
   ) {
     super(OrderItem, dataSource);
     this.order = this.createBelongsToAccessorFor('order', orderRepositoryGetter);
     this.registerInclusionResolver('order', this.order.inclusionResolver);
     this.product = this.createBelongsToAccessorFor('product', productRepositoryGetter);
     this.registerInclusionResolver('product', this.product.inclusionResolver);
+    this.notes = this.createHasManyRepositoryFactoryFor('notes', noteRepositoryGetter);
+    this.registerInclusionResolver('notes', this.notes.inclusionResolver);
+  }
+}
+
+export class OrderItemNoteRepository extends DefaultCrudRepository<
+  OrderItemNote,
+  typeof OrderItemNote.prototype.id
+> {
+  constructor(@inject('datasources.db') dataSource: juggler.DataSource) {
+    super(OrderItemNote, dataSource);
   }
 }
 
@@ -279,6 +309,9 @@ class OrderODataController {}
 @odataController(OrderItem)
 class OrderItemODataController {}
 
+@odataController(OrderItemNote)
+class OrderItemNoteODataController {}
+
 export async function givenODataApplication(config: RestServerConfig = {}): Promise<TestApplication> {
   const app = new TestApplication(config);
   const dataSource = new juggler.DataSource(MEMORY_DS_CONFIG);
@@ -286,10 +319,12 @@ export async function givenODataApplication(config: RestServerConfig = {}): Prom
   app.repository(OrderItemRepository);
   app.repository(ProductRepository);
   app.repository(OrderRepository);
+  app.repository(OrderItemNoteRepository);
   app.component(ODataComponent);
   app.controller(ProductODataController);
   app.controller(OrderODataController);
   app.controller(OrderItemODataController);
+  app.controller(OrderItemNoteODataController);
   return app;
 }
 

@@ -264,86 +264,113 @@ export function defineODataCrudController(def: EntitySetDef) {
             return Boolean(this.cfg?.enableDeepInsert);
         }
 
-        extractDeepInsertPayload(source: AnyObject | undefined): {rootPayload: AnyObject; relationPayloads?: Record<string, unknown>} {
-            const copy: AnyObject = source ? {...source} : {};
-            const relations: Record<string, unknown> = {};
-            for (const relationName of Object.keys(modelRelations ?? {})) {
-                if (Object.prototype.hasOwnProperty.call(copy, relationName)) {
-                    relations[relationName] = copy[relationName];
-                    delete copy[relationName];
-                }
+        async persistDeepInsertGraph(
+            relationName: string,
+            relationMeta: AnyObject,
+            relationRepository: AnyObject,
+            value: unknown,
+            options: Options | undefined,
+            visited: Set<AnyObject>,
+            depth: number,
+        ) {
+            const maxDepth = this.cfg?.maxDeepInsertDepth ?? 10;
+            if (depth > maxDepth) {
+                throw new HttpErrors.BadRequest(`Deep insert exceeds maximum supported depth of ${maxDepth}.`);
             }
-            return {
-                rootPayload: copy,
-                relationPayloads: Object.keys(relations).length ? relations : undefined,
-            };
-        }
 
-        async persistDeepInsertRelations(
-            createdEntity: CrudEntity | AnyObject,
-            relationPayloads: Record<string, unknown> | undefined,
-            options?: Options,
-        ): Promise<void> {
-            if (!relationPayloads || !Object.keys(relationPayloads).length) return;
-            const parentId = this.extractEntityId(createdEntity);
-            if (parentId == null) return;
+            const relationType = relationMeta?.type ?? relationMeta?.relationType;
+            if (relationType !== 'hasMany' && relationType !== 'hasOne') {
+                throw new HttpErrors.BadRequest(`Deep insert is only supported for hasOne/hasMany relations. Relation ${relationName} uses type ${relationType ?? 'unknown'}.`);
+            }
 
-            const repoWithRelations = this.repository as AnyObject;
+            const targetCtor = typeof relationMeta.target === 'function' ? relationMeta.target() as typeof Entity : undefined;
 
-            for (const [relationName, value] of Object.entries(relationPayloads)) {
-                if (value == null) continue;
-                const relationMeta = modelRelations?.[relationName] as AnyObject | undefined;
-                if (!relationMeta) continue;
-                const relationType = relationMeta?.type ?? relationMeta?.relationType;
-                if (relationType !== 'hasMany' && relationType !== 'hasOne') {
-                    throw new HttpErrors.BadRequest(`Deep insert is only supported for hasOne/hasMany relations. Relation ${relationName} uses type ${relationType ?? 'unknown'}.`);
+            const createAndRecurse = async (payload: AnyObject) => {
+                if (visited.has(payload)) {
+                    throw new HttpErrors.BadRequest('Circular references detected in deep insert payload.');
                 }
-                const factory = repoWithRelations[relationName];
-                if (typeof factory !== 'function') {
-                    throw new HttpErrors.BadRequest(`Repository for ${setName} does not expose a relation factory for ${relationName}. Ensure the repository defines '${relationName}' via the appropriate relation helper.`);
-                }
-                const relationRepository = factory(parentId, options);
-                if (!relationRepository || typeof relationRepository.create !== 'function') {
-                    throw new HttpErrors.BadRequest(`Relation ${relationName} does not support create operations required for deep insert.`);
-                }
-                const targetCtor = typeof relationMeta.target === 'function' ? relationMeta.target() as typeof Entity : undefined;
+                visited.add(payload);
 
-                if (relationMeta.targetsMany) {
-                    const items = Array.isArray(value) ? value : [value];
-                    for (const item of items) {
-                        if (item == null) continue;
-                        const prepared = this.prepareNestedEntity(item, targetCtor);
-                        await relationRepository.create(prepared, options);
+                const {root, children} = this.normalizeDeepInsertPayload(payload, targetCtor);
+                const createdChild = await relationRepository.create(root, options);
+
+                if (children && Object.keys(children).length) {
+                    const childId = this.extractEntityId(createdChild);
+                    if (childId == null) {
+                        throw new HttpErrors.BadRequest(`Unable to determine identifier for nested entity on relation ${relationName}.`);
                     }
-                } else {
-                    const prepared = this.prepareNestedEntity(value, targetCtor);
-                    if (typeof relationRepository.create === 'function') {
-                        await relationRepository.create(prepared, options);
-                    } else if (typeof relationRepository.patch === 'function') {
-                        await relationRepository.patch(prepared, options);
-                    } else {
-                        throw new HttpErrors.BadRequest(`Relation ${relationName} does not support deep insert operations.`);
-                    }
-                }
-            }
-        }
-
-        prepareNestedEntity(value: unknown, targetCtor?: typeof Entity): AnyObject {
-            if (typeof value !== 'object' || value == null) {
-                throw new HttpErrors.BadRequest('Deep insert payloads for related entities must be objects.');
-            }
-            const prepared: AnyObject = {...(value as AnyObject)};
-            if (targetCtor) {
-                const definition = (targetCtor as {definition?: ModelDefinition}).definition as ModelDefinition | undefined;
-                if (definition?.relations) {
-                    for (const relationName of Object.keys(definition.relations)) {
-                        if (Object.prototype.hasOwnProperty.call(prepared, relationName)) {
-                            delete prepared[relationName];
+                    const targetRepository = typeof relationRepository.getTargetRepository === 'function'
+                        ? await relationRepository.getTargetRepository()
+                        : undefined;
+                    const repoWithRelations = targetRepository ?? relationRepository;
+                    for (const [childRelationName, childValue] of Object.entries(children)) {
+                        if (childValue == null) continue;
+                        const childMeta = (targetCtor?.definition as ModelDefinition | undefined)?.relations?.[childRelationName] as AnyObject | undefined;
+                        if (!childMeta) {
+                            if (this.cfg?.strict) {
+                                throw new HttpErrors.BadRequest(`Unknown relation ${childRelationName} on ${targetCtor?.name ?? 'target'} for deep insert.`);
+                            }
+                            continue;
+                        }
+                        const childFactory = repoWithRelations?.[childRelationName];
+                        if (typeof childFactory !== 'function') {
+                            throw new HttpErrors.BadRequest(`Repository for relation ${relationName} does not expose a factory for ${childRelationName}.`);
+                        }
+                        const childRelationRepo = childFactory(childId);
+                        if (!childRelationRepo || typeof childRelationRepo.create !== 'function') {
+                            throw new HttpErrors.BadRequest(`Relation ${childRelationName} does not support create operations required for deep insert.`);
+                        }
+                        if (childMeta.targetsMany) {
+                            const arrayValues = Array.isArray(childValue) ? childValue : [childValue];
+                            for (const arrEntry of arrayValues) {
+                                if (arrEntry == null) continue;
+                                await this.persistDeepInsertGraph(childRelationName, childMeta, childRelationRepo, arrEntry, options, visited, depth + 1);
+                            }
+                        } else {
+                            await this.persistDeepInsertGraph(childRelationName, childMeta, childRelationRepo, childValue, options, visited, depth + 1);
                         }
                     }
                 }
+                visited.delete(payload);
+            };
+
+            if (relationMeta.targetsMany) {
+                const items = Array.isArray(value) ? value : [value];
+                for (const item of items) {
+                    if (item == null) continue;
+                    const prepared = this.coercePayloadToObject(item);
+                    await createAndRecurse(prepared);
+                }
+            } else {
+                const prepared = this.coercePayloadToObject(value);
+                await createAndRecurse(prepared);
             }
-            return prepared;
+        }
+
+        normalizeDeepInsertPayload(value: AnyObject, targetCtor?: typeof Entity): {root: AnyObject; children?: Record<string, unknown>} {
+            const prepared: AnyObject = {...value};
+            const children: Record<string, unknown> = {};
+            if (targetCtor) {
+                const definition = (targetCtor as {definition?: ModelDefinition}).definition as ModelDefinition | undefined;
+                const childRelations = definition?.relations ?? {};
+                for (const relationName of Object.keys(childRelations)) {
+                    if (Object.prototype.hasOwnProperty.call(prepared, relationName)) {
+                        children[relationName] = prepared[relationName];
+                        delete prepared[relationName];
+                    }
+                }
+            }
+            return {
+                root: prepared,
+                children: Object.keys(children).length ? children : undefined,
+            };
+        }
+
+        coercePayloadToObject(value: unknown): AnyObject {
+            if (typeof value !== 'object' || value == null) {
+                throw new HttpErrors.BadRequest('Deep insert payloads for related entities must be objects.');
+            }
+            return {...(value as AnyObject)};
         }
 
         extractEntityId(entity: CrudEntity | AnyObject | undefined): unknown {
@@ -1916,20 +1943,60 @@ export function defineODataCrudController(def: EntitySetDef) {
                 const options = this.repositoryOptions();
                 const preference = preferences.returnPreference;
                 const deepInsertEnabled = this.isDeepInsertEnabled(deepInsertEnabledForSet);
-                const payloadForCreate = (ctx.payload ?? payload) as AnyObject;
-                const { rootPayload, relationPayloads } = deepInsertEnabled
-                    ? this.extractDeepInsertPayload(payloadForCreate)
-                    : { rootPayload: payloadForCreate, relationPayloads: undefined };
-                if (deepInsertEnabled) {
-                    ctx.payload = rootPayload;
-                    ctx.state.deepInsertRelations = relationPayloads;
-                }
+                const payloadForCreate = this.coercePayloadToObject((ctx.payload ?? payload) as AnyObject);
+                const visited = new Set<AnyObject>();
+                const normalized = deepInsertEnabled
+                    ? this.normalizeDeepInsertPayload(payloadForCreate, modelCtor as typeof Entity)
+                    : { root: payloadForCreate, children: undefined };
+                ctx.payload = normalized.root;
 
-                const created = await this.repository.create(rootPayload as any, options);
+                const created = await this.repository.create(normalized.root as any, options);
                 let entityForResponse: AnyObject | undefined = this.toPlainEntity(created);
 
-                if (deepInsertEnabled && relationPayloads && Object.keys(relationPayloads).length) {
-                    await this.persistDeepInsertRelations(created, relationPayloads, options);
+                if (deepInsertEnabled && normalized.children && Object.keys(normalized.children).length) {
+                    const parentId = this.extractEntityId(created);
+                    if (parentId == null) {
+                        throw new HttpErrors.InternalServerError('Unable to determine entity id for deep insert.');
+                    }
+                    const repoWithRelations = this.repository as AnyObject;
+                    for (const [relationName, relationValue] of Object.entries(normalized.children)) {
+                        if (relationValue == null) continue;
+                        const relationMeta = modelRelations?.[relationName] as AnyObject | undefined;
+                        if (!relationMeta) continue;
+                        const factory = repoWithRelations[relationName];
+                        if (typeof factory !== 'function') {
+                            throw new HttpErrors.BadRequest(`Repository for ${setName} does not expose a relation factory for ${relationName}.`);
+                        }
+                        const relationRepo = factory(parentId, options);
+                        if (!relationRepo || typeof relationRepo.create !== 'function') {
+                            throw new HttpErrors.BadRequest(`Relation ${relationName} does not support create operations required for deep insert.`);
+                        }
+                        if (relationMeta.targetsMany) {
+                            const arrayValues = Array.isArray(relationValue) ? relationValue : [relationValue];
+                            for (const arrEntry of arrayValues) {
+                                if (arrEntry == null) continue;
+                                await this.persistDeepInsertGraph(
+                                    relationName,
+                                    relationMeta,
+                                    relationRepo,
+                                    arrEntry,
+                                    options,
+                                    visited,
+                                    1,
+                                );
+                            }
+                        } else {
+                            await this.persistDeepInsertGraph(
+                                relationName,
+                                relationMeta,
+                                relationRepo,
+                                relationValue,
+                                options,
+                                visited,
+                                1,
+                            );
+                        }
+                    }
                     const reloaded = await this.reloadEntityForResponse(created, options);
                     entityForResponse = this.toPlainEntity(reloaded ?? created);
                 }

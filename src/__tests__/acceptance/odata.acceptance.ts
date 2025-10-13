@@ -128,8 +128,18 @@ describe('OData component acceptance', () => {
         id: orderId,
         total: 1234,
         items: [
-          {productId: 1, quantity: 2, unitPrice: 499},
-          {productId: 2, quantity: 1, unitPrice: 299},
+          {
+            productId: 1,
+            quantity: 2,
+            unitPrice: 499,
+            notes: [{text: 'bulk discount requested'}],
+          },
+          {
+            productId: 2,
+            quantity: 1,
+            unitPrice: 299,
+            notes: [{text: 'gift wrap'}, {text: 'urgent delivery'}],
+          },
         ],
       })
       .expect(200);
@@ -138,7 +148,7 @@ describe('OData component acceptance', () => {
 
     const fetched = await client
       .get(`/odata/Orders(${orderId})`)
-      .query({$expand: 'items'})
+      .query({$expand: 'items($expand=notes)'})
       .expect(200);
 
     expect(Array.isArray(fetched.body.items)).to.be.true();
@@ -146,6 +156,11 @@ describe('OData component acceptance', () => {
     const itemIds = fetched.body.items.map((item: AnyObject) => item.productId);
     expect(itemIds).to.containEql(1);
     expect(itemIds).to.containEql(2);
+    const firstNotes = fetched.body.items[0].notes ?? [];
+    const secondNotes = fetched.body.items[1].notes ?? [];
+    expect(firstNotes.map((n: AnyObject) => n.text)).to.containEql('bulk discount requested');
+    expect(secondNotes.map((n: AnyObject) => n.text)).to.containEql('gift wrap');
+    expect(secondNotes.map((n: AnyObject) => n.text)).to.containEql('urgent delivery');
   });
 
   it('supports $expand of navigation properties', async () => {
