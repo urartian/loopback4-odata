@@ -757,7 +757,7 @@ Run `npm test` to compile the TypeScript specs and execute the unit suite. Accep
 - [x] Service document exposing registered entity sets
 - [x] $metadata endpoint with generated CSDL (including navigation properties for relations)
 - [x] Basic query options → LoopBack filters (`$filter`, `$orderby`, `$top`, `$skip`, `$select`)
-- [x] Extended filter support: `not`, numeric functions (`round`, `floor`, `ceiling`), date extraction (`year`), string helpers (`trim`, `concat`), date parts (`month`, `day`, `hour`, `minute`, `second`), and `$search` across string fields
+- [x] Extended filter support: `not`, numeric functions (`round`, `floor`, `ceiling`), date extraction (`year`), string helpers (`trim`, `concat`), date parts (`month`, `day`, `hour`, `minute`, `second`) with strict-mode guards when unsupported, and `$search` across string fields
 - [x] any/all (lambdas): translate `<nav>/(any|all)(x: <expr>)` through relation repositories, support multi-segment paths, and allow additional predicates via `and` (nesting/multiple lambdas still pending)
 - [x] Relational expansion via `$expand`
 - [x] Inline and standalone `$count`
@@ -774,7 +774,8 @@ Run `npm test` to compile the TypeScript specs and execute the unit suite. Accep
 - [x] Opt-in `$search` with boolean operators (AND/OR/NOT), quoted phrases, per-field configuration, and guardrails
 - [x] Configurable CSDL namespace/container names and JSON CSDL output with enriched primitive facets
 - [x] Complex types, enum types, and referential constraints reflected in generated CSDL (XML & JSON)
-- [x] Capabilities annotations (filter functions, count/navigation restrictions, permissions, streams) to describe service behaviors to OData clients
+- [x] Capabilities annotations (filter functions, count/navigation restrictions, permissions, streams, insert/update/delete/search restrictions) to describe service behaviors to OData clients
+- [x] Derived LoopBack models surface `$BaseType` so inheritance is reflected in the generated CSDL
 
 Queries can now combine boolean operators and phrases:
 
@@ -825,7 +826,7 @@ this.bind(ODATA_BINDINGS.CONFIG).to({
 - `namespace`: Overrides the CSDL schema namespace (`Default` by default). All generated types live under this namespace.
 - `entityContainerName`: Controls the `<EntityContainer>` / JSON entity container name (`DefaultContainer` by default).
 - `namespaceAlias`: Adds the optional `Alias` attribute to the CSDL schema so clients can refer to types using a short prefix.
-- `capabilities`: Sets default service-level annotations such as supported filter functions, countability, permissions, and stream support. Values can be overridden per entity set via `EntitySetDef.capabilities`.
+- `capabilities`: Sets default service-level annotations such as supported filter functions, countability, permissions, stream support, and now OData capability records for inserts/updates/deletes/search via the `insertRestrictions`, `updateRestrictions`, `deleteRestrictions`, and `searchRestrictions` options. Values can be overridden per entity set via `EntitySetDef.capabilities`.
 - `$apply` support currently covers a single `groupby((... ), aggregate(...))` segment with aggregate methods `sum`, `average`, `min`, `max`, `count`, and `countdistinct` on scalar entity properties. Pipelines with additional stages (`filter`, `orderby`, etc.) and aggregations on navigation properties are not yet available.
 - Lambda filters (`any` / `all`) support navigation collections (including multi-segment paths) and can be combined with additional predicates using `and`. Nesting lambdas, mixing multiple lambdas, or combining them with `or` remains unsupported.
 - `strict` (default: true): Enables stricter validations and policies:
@@ -851,10 +852,10 @@ Entity-set specific overrides are available via `EntitySetRegistry.register`:
 - `capabilities`: refine or override filter functions, countability, navigation restrictions, permissions, or stream support for a single entity set.
 - `hasStream`: mark the backing entity type as streaming (`Org.OData.Core.V1.HasStream`).
 
+Both the global `capabilities` defaults and per-set overrides support the new `insertRestrictions`, `updateRestrictions`, `deleteRestrictions`, and `searchRestrictions` keys. Example: `insertRestrictions: {insertable: false, nonInsertableNavigationProperties: ['orders']}` emits `Org.OData.Capabilities.V1.InsertRestrictions`, while `searchRestrictions: {unsupportedExpressions: ['not']}` maps shorthand values (`and`, `or`, `not`, etc.) to the corresponding `Org.OData.Capabilities.V1.SearchExpressions/*` enum members.
+
 ## Roadmap
 
-- [ ] Filter functions: add additional string helpers (e.g. `trim`, `concat`) and date/time parts (`month`, `day`, `hour`, `minute`, `second`); return 400 in strict mode when unsupported by connector
-- [ ] Advanced CSDL polish: extend annotations with insert/update restrictions, expose search annotations, and support complex type inheritance
 - [ ] Path rewriting polish: alternate/compound keys and robust quoting beyond `\w+` heuristics
 - [ ] Draft/deep insert workflows, localized fields, and SAP Fiori-friendly annotations
 
