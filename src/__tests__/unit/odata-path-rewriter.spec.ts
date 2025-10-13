@@ -39,5 +39,40 @@ describe('odataPathRewriter middleware', () => {
     await odataPathRewriter(ctx, () => Promise.resolve());
     assert.equal(ctx.request.url, '/odata/Orders/O%27Brien');
   });
-});
 
+  it('supports named key predicates', async () => {
+    const ctx = createContext('/odata/Products(ID=%27123%27)');
+    await odataPathRewriter(ctx, () => Promise.resolve());
+    assert.equal(ctx.request.url, '/odata/Products/ID%3D123');
+  });
+
+  it('rewrites composite keys with string values', async () => {
+    const ctx = createContext("/odata/Orders(OrderID=10248,CustomerID='ALFKI')/items");
+    await odataPathRewriter(ctx, () => Promise.resolve());
+    assert.equal(
+      ctx.request.url,
+      '/odata/Orders/OrderID%3D10248%2CCustomerID%3DALFKI/items',
+    );
+  });
+
+  it('supports positional composite keys', async () => {
+    const ctx = createContext("/odata/Composite(10248,'ALFKI')");
+    await odataPathRewriter(ctx, () => Promise.resolve());
+    assert.equal(
+      ctx.request.url,
+      '/odata/Composite/10248%2CALFKI',
+    );
+  });
+
+  it('handles positional values that contain closing parentheses', async () => {
+    const ctx = createContext("/odata/Legacy(10248,'Line)1')");
+    await odataPathRewriter(ctx, () => Promise.resolve());
+    assert.equal(ctx.request.url, '/odata/Legacy/10248%2CLine)1');
+  });
+
+  it('preserves segments without key predicates', async () => {
+    const ctx = createContext('/odata/$metadata');
+    await odataPathRewriter(ctx, () => Promise.resolve());
+    assert.equal(ctx.request.url, '/odata/$metadata');
+  });
+});
