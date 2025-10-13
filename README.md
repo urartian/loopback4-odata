@@ -323,6 +323,14 @@ GET /odata/Products?$filter=round(price) eq 10
 {"where": {"and": [{"price": {"gte": 9.5}}, {"price": {"lt": 10.5}}]}}
 ```
 
+- Compound keys and alternate key predicates are rewritten transparently:
+
+```http
+GET /odata/Orders(OrderID=10248,CustomerID='ALFKI')
+```
+
+Normalizes to the REST-friendly route `/odata/Orders/OrderID%3D10248%2CCustomerID%3DALFKI` before reaching the controller, while preserving string literals (including embedded parentheses, commas, and escaped quotes).
+
 - Date extraction: `year(<DateTimeOffset>) eq <year>`
 
 ```http
@@ -750,7 +758,7 @@ Run `npm test` to compile the TypeScript specs and execute the unit suite. Accep
 
 ## Features
 
-- [x] OData-style entity paths (Products(1)) supported via middleware
+- [x] OData-style entity paths (Products(1), Orders(OrderID=10248,CustomerID='ALFKI')) supported via middleware with compound and quoted key support
 - [x] Auto-discovery of OData controllers (Booter)
 - [x] Registry of entity sets
 - [x] CRUD controller factory backed by LoopBack repositories
@@ -856,8 +864,7 @@ Both the global `capabilities` defaults and per-set overrides support the new `i
 
 ## Roadmap
 
-- [ ] Path rewriting polish: alternate/compound keys and robust quoting beyond `\w+` heuristics
-- [ ] Draft/deep insert workflows, localized fields, and SAP Fiori-friendly annotations
+- [ ] Draft/deep insert workflow
 
 ## Contributing
 
