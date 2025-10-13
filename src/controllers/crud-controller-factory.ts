@@ -1041,8 +1041,14 @@ export function defineODataCrudController(def: EntitySetDef) {
         buildNegatedTermClause(term: string, fields: string[]): CrudWhere | undefined {
             const pattern = `%${this.escapeSearchTerm(term)}%`;
             const clauses = fields.map(field => {
+                // To properly handle NOT LIKE with NULL values,
+                // we need: (field NOT LIKE 'pattern' OR field IS NULL)
+                // This ensures that NULL fields don't cause the condition to fail
                 return {
-                    [field]: { nilike: pattern, escape: '\\' },
+                    or: [
+                        { [field]: { nilike: pattern, escape: '\\' } },
+                        { [field]: null },
+                    ],
                 } as unknown as CrudWhere;
             });
             if (!clauses.length) return undefined;
