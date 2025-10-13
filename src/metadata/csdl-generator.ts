@@ -3,7 +3,19 @@ import { Entity, ModelDefinition, PropertyDefinition, RelationDefinitionMap } fr
 import { EntitySetDef, EntitySetRegistry } from '../registry/entityset-registry';
 import { ODATA_BINDINGS } from '../keys';
 import { getODataActions, getODataFunctions, OperationMeta } from '../decorators/action.function.decorators';
-import { ODataConfig, ODataCapabilitiesConfig, ODataCapabilityDefaults, ODataNavigationRestriction, ODataEntityPermission } from '../types';
+import {
+    ODataConfig,
+    ODataCapabilitiesConfig,
+    ODataCapabilityDefaults,
+    ODataNavigationRestriction,
+    ODataEntityPermission,
+    ODataInsertRestrictionsConfig,
+    ODataUpdateRestrictionsConfig,
+    ODataDeleteRestrictionsConfig,
+    ODataSearchRestrictionsConfig,
+    ODataSearchExpression,
+} from '../types';
+import { getODataSearchableProps } from '../decorators/search.decorators';
 
 const EDM_NAMESPACE = 'http://docs.oasis-open.org/odata/ns/edm';
 const EDMX_NAMESPACE = 'http://docs.oasis-open.org/odata/ns/edmx';
@@ -67,6 +79,82 @@ const DEFAULT_FILTER_FUNCTIONS = [
     'year',
 ];
 
+const SEARCH_EXPRESSION_ENUM_MAP: Record<string, string> = {
+    none: 'Org.OData.Capabilities.V1.SearchExpressions/none',
+    and: 'Org.OData.Capabilities.V1.SearchExpressions/And',
+    or: 'Org.OData.Capabilities.V1.SearchExpressions/Or',
+    not: 'Org.OData.Capabilities.V1.SearchExpressions/Not',
+    phrase: 'Org.OData.Capabilities.V1.SearchExpressions/Phrase',
+    grouping: 'Org.OData.Capabilities.V1.SearchExpressions/Grouping',
+    propertyexpressions: 'Org.OData.Capabilities.V1.SearchExpressions/PropertyExpressions',
+    searchterms: 'Org.OData.Capabilities.V1.SearchExpressions/SearchTerms',
+};
+
+function mergeInsertRestrictions(
+    defaults?: ODataInsertRestrictionsConfig,
+    overrides?: ODataInsertRestrictionsConfig,
+): ODataInsertRestrictionsConfig | undefined {
+    if (!defaults && !overrides) return undefined;
+    return {
+        insertable: overrides?.insertable ?? defaults?.insertable,
+        description: overrides?.description ?? defaults?.description,
+        longDescription: overrides?.longDescription ?? defaults?.longDescription,
+        requiredProperties: overrides?.requiredProperties ?? defaults?.requiredProperties,
+        requiredNavigationProperties: overrides?.requiredNavigationProperties ?? defaults?.requiredNavigationProperties,
+        nonInsertableProperties: overrides?.nonInsertableProperties ?? defaults?.nonInsertableProperties,
+        nonInsertableNavigationProperties: overrides?.nonInsertableNavigationProperties ?? defaults?.nonInsertableNavigationProperties,
+    };
+}
+
+function mergeUpdateRestrictions(
+    defaults?: ODataUpdateRestrictionsConfig,
+    overrides?: ODataUpdateRestrictionsConfig,
+): ODataUpdateRestrictionsConfig | undefined {
+    if (!defaults && !overrides) return undefined;
+    return {
+        updatable: overrides?.updatable ?? defaults?.updatable,
+        description: overrides?.description ?? defaults?.description,
+        longDescription: overrides?.longDescription ?? defaults?.longDescription,
+        requiredProperties: overrides?.requiredProperties ?? defaults?.requiredProperties,
+        nonUpdatableProperties: overrides?.nonUpdatableProperties ?? defaults?.nonUpdatableProperties,
+        nonUpdatableNavigationProperties: overrides?.nonUpdatableNavigationProperties ?? defaults?.nonUpdatableNavigationProperties,
+    };
+}
+
+function mergeDeleteRestrictions(
+    defaults?: ODataDeleteRestrictionsConfig,
+    overrides?: ODataDeleteRestrictionsConfig,
+): ODataDeleteRestrictionsConfig | undefined {
+    if (!defaults && !overrides) return undefined;
+    return {
+        deletable: overrides?.deletable ?? defaults?.deletable,
+        description: overrides?.description ?? defaults?.description,
+        longDescription: overrides?.longDescription ?? defaults?.longDescription,
+        requiresFilter: overrides?.requiresFilter ?? defaults?.requiresFilter,
+        nonDeletableNavigationProperties: overrides?.nonDeletableNavigationProperties ?? defaults?.nonDeletableNavigationProperties,
+    };
+}
+
+function mergeSearchRestrictions(
+    defaults?: ODataSearchRestrictionsConfig,
+    overrides?: ODataSearchRestrictionsConfig,
+): ODataSearchRestrictionsConfig | undefined {
+    if (!defaults && !overrides) return undefined;
+    const unsupported = overrides?.unsupportedExpressions ?? defaults?.unsupportedExpressions;
+    return {
+        searchable: overrides?.searchable ?? defaults?.searchable,
+        unsupportedExpressions: unsupported,
+    };
+}
+
+function normalizeSearchExpression(expression: ODataSearchExpression): string | undefined {
+    if (expression.startsWith('Org.OData.Capabilities.V1.SearchExpressions/')) {
+        return expression;
+    }
+    const key = expression.toLowerCase();
+    return SEARCH_EXPRESSION_ENUM_MAP[key];
+}
+
 function mergeCapabilities(
     defaults: ODataCapabilityDefaults | undefined,
     overrides: ODataCapabilitiesConfig | undefined,
@@ -85,6 +173,10 @@ function mergeCapabilities(
         hasStream: overrides?.hasStream ?? defaults?.hasStream,
         aggregation: overrides?.aggregation ?? defaults?.aggregation,
         aggregationMethods: overrides?.aggregationMethods ?? defaults?.aggregationMethods,
+        insertRestrictions: mergeInsertRestrictions(defaults?.insertRestrictions, overrides?.insertRestrictions),
+        updateRestrictions: mergeUpdateRestrictions(defaults?.updateRestrictions, overrides?.updateRestrictions),
+        deleteRestrictions: mergeDeleteRestrictions(defaults?.deleteRestrictions, overrides?.deleteRestrictions),
+        searchRestrictions: mergeSearchRestrictions(defaults?.searchRestrictions, overrides?.searchRestrictions),
     };
 }
 
@@ -445,6 +537,16 @@ function buildEntityType(
     if (keyProps.length) {
         json.$Key = keyProps;
     }
+    const baseCtor = resolveBaseEntityCtor(def.modelCtor as typeof Entity);
+    let baseTypeQualified: string | undefined;
+    if (baseCtor && setLookup.has(baseCtor)) {
+        const baseDefinition = (baseCtor as typeof Entity).definition as ModelDefinition | undefined;
+        const baseName = baseDefinition?.name ?? baseCtor.name;
+        if (baseName) {
+            baseTypeQualified = `${namespace}.${xmlEscape(baseName)}`;
+            json.$BaseType = `${namespace}.${baseName}`;
+        }
+    }
     const annotationLines: string[] = [];
     const navigationLines: string[] = [];
     const navigationBindings: NavigationBinding[] = [];
@@ -560,8 +662,13 @@ function buildEntityType(
         ].join('\n')
         : '';
 
+    const entityTypeAttrs = [`Name="${xmlEscape(entityName)}"`];
+    if (baseTypeQualified) {
+        entityTypeAttrs.push(`BaseType="${baseTypeQualified}"`);
+    }
+
     const xml = [
-        `    <EntityType Name="${xmlEscape(entityName)}">`,
+        `    <EntityType ${entityTypeAttrs.join(' ')}>`,
         keySection,
         ...propertyLines,
         ...annotationLines,
@@ -572,6 +679,15 @@ function buildEntityType(
         .join('\n');
 
     return { name: entityName, xml, navigationBindings, json, relations: relationNames };
+}
+
+function resolveBaseEntityCtor(ctor: typeof Entity): (typeof Entity) | undefined {
+    let current = Object.getPrototypeOf(ctor);
+    while (current && current !== Entity && typeof current === 'function') {
+        if (current.prototype instanceof Entity) return current;
+        current = Object.getPrototypeOf(current);
+    }
+    return undefined;
 }
 
 @injectable({ scope: BindingScope.SINGLETON })
@@ -660,6 +776,281 @@ export class CsdlGenerator {
 
             const capabilityAnnotationsXml: string[] = [];
             const capabilityAnnotationsJson: Record<string, unknown> = {};
+            const searchRestrictions = mergeSearchRestrictions(
+                this.deriveSearchRestrictions(set),
+                capabilities.searchRestrictions,
+            );
+            const insertRestrictions = capabilities.insertRestrictions;
+            const updateRestrictions = capabilities.updateRestrictions;
+            const deleteRestrictions = capabilities.deleteRestrictions;
+
+            if (insertRestrictions) {
+                const {
+                    insertable,
+                    description,
+                    longDescription,
+                    requiredProperties,
+                    requiredNavigationProperties,
+                    nonInsertableProperties,
+                    nonInsertableNavigationProperties,
+                } = insertRestrictions;
+                const recordXml: string[] = [
+                    '        <Annotation Term="Org.OData.Capabilities.V1.InsertRestrictions">',
+                    '          <Record>',
+                ];
+                const recordJson: Record<string, unknown> = {};
+                let hasContent = false;
+
+                if (insertable !== undefined) {
+                    recordXml.push(`            <PropertyValue Property="Insertable" Bool="${insertable ? 'true' : 'false'}"/>`);
+                    recordJson.Insertable = Boolean(insertable);
+                    hasContent = true;
+                }
+                if (description) {
+                    recordXml.push(`            <PropertyValue Property="Description" String="${xmlEscape(description)}"/>`);
+                    recordJson.Description = description;
+                    hasContent = true;
+                }
+                if (longDescription) {
+                    recordXml.push(`            <PropertyValue Property="LongDescription" String="${xmlEscape(longDescription)}"/>`);
+                    recordJson.LongDescription = longDescription;
+                    hasContent = true;
+                }
+                if (Array.isArray(requiredProperties) && requiredProperties.length) {
+                    recordXml.push('            <PropertyValue Property="RequiredProperties">');
+                    recordXml.push('              <Collection>');
+                    const propertyJson: Array<Record<string, unknown>> = [];
+                    for (const prop of requiredProperties) {
+                        recordXml.push(`                <PropertyPath>${xmlEscape(prop)}</PropertyPath>`);
+                        propertyJson.push({ $PropertyPath: prop });
+                    }
+                    recordXml.push('              </Collection>');
+                    recordXml.push('            </PropertyValue>');
+                    recordJson.RequiredProperties = propertyJson;
+                    hasContent = true;
+                }
+                if (Array.isArray(requiredNavigationProperties) && requiredNavigationProperties.length) {
+                    recordXml.push('            <PropertyValue Property="RequiredNavigationProperties">');
+                    recordXml.push('              <Collection>');
+                    const navJson: Array<Record<string, unknown>> = [];
+                    for (const prop of requiredNavigationProperties) {
+                        recordXml.push(`                <NavigationPropertyPath>${xmlEscape(prop)}</NavigationPropertyPath>`);
+                        navJson.push({ $NavigationPropertyPath: prop });
+                    }
+                    recordXml.push('              </Collection>');
+                    recordXml.push('            </PropertyValue>');
+                    recordJson.RequiredNavigationProperties = navJson;
+                    hasContent = true;
+                }
+                if (Array.isArray(nonInsertableProperties) && nonInsertableProperties.length) {
+                    recordXml.push('            <PropertyValue Property="NonInsertableProperties">');
+                    recordXml.push('              <Collection>');
+                    const nonInsertJson: Array<Record<string, unknown>> = [];
+                    for (const prop of nonInsertableProperties) {
+                        recordXml.push(`                <PropertyPath>${xmlEscape(prop)}</PropertyPath>`);
+                        nonInsertJson.push({ $PropertyPath: prop });
+                    }
+                    recordXml.push('              </Collection>');
+                    recordXml.push('            </PropertyValue>');
+                    recordJson.NonInsertableProperties = nonInsertJson;
+                    hasContent = true;
+                }
+                if (Array.isArray(nonInsertableNavigationProperties) && nonInsertableNavigationProperties.length) {
+                    recordXml.push('            <PropertyValue Property="NonInsertableNavigationProperties">');
+                    recordXml.push('              <Collection>');
+                    const navJson: Array<Record<string, unknown>> = [];
+                    for (const prop of nonInsertableNavigationProperties) {
+                        recordXml.push(`                <NavigationPropertyPath>${xmlEscape(prop)}</NavigationPropertyPath>`);
+                        navJson.push({ $NavigationPropertyPath: prop });
+                    }
+                    recordXml.push('              </Collection>');
+                    recordXml.push('            </PropertyValue>');
+                    recordJson.NonInsertableNavigationProperties = navJson;
+                    hasContent = true;
+                }
+
+                if (hasContent) {
+                    recordXml.push('          </Record>');
+                    recordXml.push('        </Annotation>');
+                    capabilityAnnotationsXml.push(...recordXml);
+                    capabilityAnnotationsJson['@Org.OData.Capabilities.V1.InsertRestrictions'] = recordJson;
+                }
+            }
+
+            if (updateRestrictions) {
+                const {
+                    updatable,
+                    description,
+                    longDescription,
+                    requiredProperties,
+                    nonUpdatableProperties,
+                    nonUpdatableNavigationProperties,
+                } = updateRestrictions;
+                const recordXml: string[] = [
+                    '        <Annotation Term="Org.OData.Capabilities.V1.UpdateRestrictions">',
+                    '          <Record>',
+                ];
+                const recordJson: Record<string, unknown> = {};
+                let hasContent = false;
+
+                if (updatable !== undefined) {
+                    recordXml.push(`            <PropertyValue Property="Updatable" Bool="${updatable ? 'true' : 'false'}"/>`);
+                    recordJson.Updatable = Boolean(updatable);
+                    hasContent = true;
+                }
+                if (description) {
+                    recordXml.push(`            <PropertyValue Property="Description" String="${xmlEscape(description)}"/>`);
+                    recordJson.Description = description;
+                    hasContent = true;
+                }
+                if (longDescription) {
+                    recordXml.push(`            <PropertyValue Property="LongDescription" String="${xmlEscape(longDescription)}"/>`);
+                    recordJson.LongDescription = longDescription;
+                    hasContent = true;
+                }
+                if (Array.isArray(requiredProperties) && requiredProperties.length) {
+                    recordXml.push('            <PropertyValue Property="RequiredProperties">');
+                    recordXml.push('              <Collection>');
+                    const propertyJson: Array<Record<string, unknown>> = [];
+                    for (const prop of requiredProperties) {
+                        recordXml.push(`                <PropertyPath>${xmlEscape(prop)}</PropertyPath>`);
+                        propertyJson.push({ $PropertyPath: prop });
+                    }
+                    recordXml.push('              </Collection>');
+                    recordXml.push('            </PropertyValue>');
+                    recordJson.RequiredProperties = propertyJson;
+                    hasContent = true;
+                }
+                if (Array.isArray(nonUpdatableProperties) && nonUpdatableProperties.length) {
+                    recordXml.push('            <PropertyValue Property="NonUpdatableProperties">');
+                    recordXml.push('              <Collection>');
+                    const nonUpdateJson: Array<Record<string, unknown>> = [];
+                    for (const prop of nonUpdatableProperties) {
+                        recordXml.push(`                <PropertyPath>${xmlEscape(prop)}</PropertyPath>`);
+                        nonUpdateJson.push({ $PropertyPath: prop });
+                    }
+                    recordXml.push('              </Collection>');
+                    recordXml.push('            </PropertyValue>');
+                    recordJson.NonUpdatableProperties = nonUpdateJson;
+                    hasContent = true;
+                }
+                if (Array.isArray(nonUpdatableNavigationProperties) && nonUpdatableNavigationProperties.length) {
+                    recordXml.push('            <PropertyValue Property="NonUpdatableNavigationProperties">');
+                    recordXml.push('              <Collection>');
+                    const navJson: Array<Record<string, unknown>> = [];
+                    for (const prop of nonUpdatableNavigationProperties) {
+                        recordXml.push(`                <NavigationPropertyPath>${xmlEscape(prop)}</NavigationPropertyPath>`);
+                        navJson.push({ $NavigationPropertyPath: prop });
+                    }
+                    recordXml.push('              </Collection>');
+                    recordXml.push('            </PropertyValue>');
+                    recordJson.NonUpdatableNavigationProperties = navJson;
+                    hasContent = true;
+                }
+
+                if (hasContent) {
+                    recordXml.push('          </Record>');
+                    recordXml.push('        </Annotation>');
+                    capabilityAnnotationsXml.push(...recordXml);
+                    capabilityAnnotationsJson['@Org.OData.Capabilities.V1.UpdateRestrictions'] = recordJson;
+                }
+            }
+
+            if (deleteRestrictions) {
+                const {
+                    deletable,
+                    description,
+                    longDescription,
+                    requiresFilter,
+                    nonDeletableNavigationProperties,
+                } = deleteRestrictions;
+                const recordXml: string[] = [
+                    '        <Annotation Term="Org.OData.Capabilities.V1.DeleteRestrictions">',
+                    '          <Record>',
+                ];
+                const recordJson: Record<string, unknown> = {};
+                let hasContent = false;
+
+                if (deletable !== undefined) {
+                    recordXml.push(`            <PropertyValue Property="Deletable" Bool="${deletable ? 'true' : 'false'}"/>`);
+                    recordJson.Deletable = Boolean(deletable);
+                    hasContent = true;
+                }
+                if (requiresFilter !== undefined) {
+                    recordXml.push(`            <PropertyValue Property="RequiresFilter" Bool="${requiresFilter ? 'true' : 'false'}"/>`);
+                    recordJson.RequiresFilter = Boolean(requiresFilter);
+                    hasContent = true;
+                }
+                if (description) {
+                    recordXml.push(`            <PropertyValue Property="Description" String="${xmlEscape(description)}"/>`);
+                    recordJson.Description = description;
+                    hasContent = true;
+                }
+                if (longDescription) {
+                    recordXml.push(`            <PropertyValue Property="LongDescription" String="${xmlEscape(longDescription)}"/>`);
+                    recordJson.LongDescription = longDescription;
+                    hasContent = true;
+                }
+                if (Array.isArray(nonDeletableNavigationProperties) && nonDeletableNavigationProperties.length) {
+                    recordXml.push('            <PropertyValue Property="NonDeletableNavigationProperties">');
+                    recordXml.push('              <Collection>');
+                    const navJson: Array<Record<string, unknown>> = [];
+                    for (const prop of nonDeletableNavigationProperties) {
+                        recordXml.push(`                <NavigationPropertyPath>${xmlEscape(prop)}</NavigationPropertyPath>`);
+                        navJson.push({ $NavigationPropertyPath: prop });
+                    }
+                    recordXml.push('              </Collection>');
+                    recordXml.push('            </PropertyValue>');
+                    recordJson.NonDeletableNavigationProperties = navJson;
+                    hasContent = true;
+                }
+
+                if (hasContent) {
+                    recordXml.push('          </Record>');
+                    recordXml.push('        </Annotation>');
+                    capabilityAnnotationsXml.push(...recordXml);
+                    capabilityAnnotationsJson['@Org.OData.Capabilities.V1.DeleteRestrictions'] = recordJson;
+                }
+            }
+
+            if (searchRestrictions) {
+                const { searchable, unsupportedExpressions } = searchRestrictions;
+                const recordXml: string[] = [
+                    '        <Annotation Term="Org.OData.Capabilities.V1.SearchRestrictions">',
+                    '          <Record>',
+                ];
+                const recordJson: Record<string, unknown> = {};
+                let hasContent = false;
+
+                if (searchable !== undefined) {
+                    recordXml.push(`            <PropertyValue Property="Searchable" Bool="${searchable ? 'true' : 'false'}"/>`);
+                    recordJson.Searchable = Boolean(searchable);
+                    hasContent = true;
+                }
+                const normalizedUnsupported = Array.isArray(unsupportedExpressions)
+                    ? unsupportedExpressions
+                        .map(expr => normalizeSearchExpression(expr))
+                        .filter((value): value is string => Boolean(value))
+                    : undefined;
+                if (normalizedUnsupported && normalizedUnsupported.length) {
+                    recordXml.push('            <PropertyValue Property="UnsupportedExpressions">');
+                    recordXml.push('              <Collection>');
+                    for (const expr of normalizedUnsupported) {
+                        recordXml.push(`                <EnumMember>${xmlEscape(expr)}</EnumMember>`);
+                    }
+                    recordXml.push('              </Collection>');
+                    recordXml.push('            </PropertyValue>');
+                    recordJson.UnsupportedExpressions = normalizedUnsupported;
+                    hasContent = true;
+                }
+
+                if (hasContent) {
+                    recordXml.push('          </Record>');
+                    recordXml.push('        </Annotation>');
+                    capabilityAnnotationsXml.push(...recordXml);
+                    capabilityAnnotationsJson['@Org.OData.Capabilities.V1.SearchRestrictions'] = recordJson;
+                }
+            }
 
             if (capabilities.countable === false) {
                 capabilityAnnotationsXml.push(
@@ -928,6 +1319,66 @@ export class CsdlGenerator {
         const trimmed = ns?.trim();
         if (!trimmed) return 'Default';
         return trimmed;
+    }
+
+    private deriveSearchRestrictions(set: EntitySetDef): ODataSearchRestrictionsConfig | undefined {
+        const mode = this.cfg?.searchMode ?? 'annotated';
+        if (mode === 'disabled') {
+            return { searchable: false };
+        }
+        const fields = this.resolveSearchableFields(set);
+        if (fields.length) {
+            return { searchable: true };
+        }
+        if (mode === 'all') {
+            const stringProps = this.modelStringProperties(set.modelCtor as typeof Entity);
+            return { searchable: stringProps.length > 0 };
+        }
+        return { searchable: false };
+    }
+
+    private resolveSearchableFields(set: EntitySetDef): string[] {
+        const mode = this.cfg?.searchMode ?? 'annotated';
+        if (mode === 'disabled') return [];
+        const configured = this.cfg?.searchFields?.[set.name];
+        if (configured && configured.length) {
+            return configured.map(field => field?.trim()).filter((field): field is string => Boolean(field));
+        }
+        if (mode === 'config-only') return [];
+        const annotated = getODataSearchableProps(set.modelCtor) ?? [];
+        if (annotated.length) {
+            return annotated.filter((field): field is string => Boolean(field));
+        }
+        if (mode === 'all') {
+            return this.modelStringProperties(set.modelCtor as typeof Entity);
+        }
+        return [];
+    }
+
+    private modelStringProperties(modelCtor: typeof Entity): string[] {
+        const definition = (modelCtor as typeof Entity).definition as ModelDefinition | undefined;
+        if (!definition?.properties) return [];
+        const result: string[] = [];
+        for (const [name, property] of Object.entries(definition.properties)) {
+            if (this.isStringProperty(property as PropertyDefinition)) {
+                result.push(name);
+            }
+        }
+        return result;
+    }
+
+    private isStringProperty(definition: PropertyDefinition): boolean {
+        const type = definition.type;
+        if (type === String || type === 'string') return true;
+        if (Array.isArray(type)) return false;
+        if (typeof type === 'function') {
+            const typeName = type.name?.toLowerCase();
+            if (typeName === 'string') return true;
+        }
+        const schema = definition.jsonSchema as Record<string, unknown> | undefined;
+        const schemaType = typeof schema?.type === 'string' ? String(schema.type).toLowerCase() : undefined;
+        if (schemaType === 'string') return true;
+        return false;
     }
 
     private normalizeContainerName(name?: string): string {

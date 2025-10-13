@@ -10,6 +10,7 @@ import {
 } from '@loopback/repository';
 import {CsdlGenerator} from '../../metadata/csdl-generator';
 import {EntitySetRegistry, EntitySetDef} from '../../registry/entityset-registry';
+import {odataSearchable} from '../../decorators/search.decorators';
 
 @model()
 class Dimensions extends Model {
@@ -34,6 +35,7 @@ class Widget extends Entity {
   @property({id: true, type: 'number'})
   id!: number;
 
+  @odataSearchable()
   @property({
     type: 'string',
     required: true,
@@ -70,6 +72,12 @@ class Widget extends Entity {
   gadgets?: Gadget[];
 }
 
+@model()
+class AdvancedWidget extends Widget {
+  @property({type: 'string'})
+  feature?: string;
+}
+
 describe('CsdlGenerator', () => {
   let registry: EntitySetRegistry;
   let generator: CsdlGenerator;
@@ -100,6 +108,22 @@ describe('CsdlGenerator', () => {
         hasStream: true,
         aggregation: true,
         aggregationMethods: ['Sum', 'Count'],
+        insertRestrictions: {
+          insertable: false,
+          description: 'Widgets are managed externally',
+          nonInsertableNavigationProperties: ['gadgets'],
+        },
+        updateRestrictions: {
+          updatable: true,
+          nonUpdatableProperties: ['status'],
+        },
+        deleteRestrictions: {
+          deletable: true,
+          requiresFilter: true,
+        },
+        searchRestrictions: {
+          unsupportedExpressions: ['not'],
+        },
       },
       actions: [
         {
@@ -133,6 +157,10 @@ describe('CsdlGenerator', () => {
       modelCtor: Gadget,
     });
 
+    registry.register({
+      name: 'AdvancedWidgets',
+      modelCtor: AdvancedWidget,
+    });
 
     generator = new CsdlGenerator(registry, {
       namespace: 'Catalog',
@@ -189,6 +217,11 @@ describe('CsdlGenerator', () => {
     expect(xml.includes('<Function Name="ping"')).to.be.true();
     expect(xml.includes('Annotation Term="Org.OData.Core.V1.Permissions"')).to.be.true();
     expect(xml.includes('<EntityContainer Name="CatalogService">')).to.be.true();
+    expect(xml.includes('Annotation Term="Org.OData.Capabilities.V1.InsertRestrictions"')).to.be.true();
+    expect(xml.includes('Annotation Term="Org.OData.Capabilities.V1.UpdateRestrictions"')).to.be.true();
+    expect(xml.includes('Annotation Term="Org.OData.Capabilities.V1.DeleteRestrictions"')).to.be.true();
+    expect(xml.includes('Annotation Term="Org.OData.Capabilities.V1.SearchRestrictions"')).to.be.true();
+    expect(xml.includes('<EntityType Name="AdvancedWidget" BaseType="Catalog.Widget">')).to.be.true();
   });
 
   it('produces aligned JSON CSDL', () => {
@@ -220,6 +253,7 @@ describe('CsdlGenerator', () => {
     expect(schema.Widget.gadgets.$Kind).to.equal('NavigationProperty');
     expect(schema.Widget.gadgets.$Type).to.equal('Collection(Catalog.Gadget)');
     expect(schema.Widget['@Org.OData.Core.V1.HasStream']).to.equal(true);
+    expect(schema.AdvancedWidget.$BaseType).to.equal('Catalog.Widget');
     expect(schema.Widget.gadgets.$Partner).to.equal('widget');
     expect(schema.Widget.gadgets.$ReferentialConstraint[0]).to.containDeep({
       Property: 'widgetId',
@@ -254,7 +288,14 @@ describe('CsdlGenerator', () => {
     expect(container.Widgets['@Org.OData.Core.V1.Permissions'][0].SchemeName).to.equal('OAuth2');
     expect(container.Widgets['@Org.OData.Core.V1.Permissions'][0].Scopes).to.have.length(2);
     expect(container.Widgets['@Org.OData.Capabilities.V1.Aggregate'].SupportedAggregationMethods).to.deepEqual(['Sum', 'Count']);
+    expect(container.Widgets['@Org.OData.Capabilities.V1.InsertRestrictions'].Insertable).to.equal(false);
+    expect(container.Widgets['@Org.OData.Capabilities.V1.DeleteRestrictions'].RequiresFilter).to.equal(true);
+    expect(container.Widgets['@Org.OData.Capabilities.V1.SearchRestrictions'].Searchable).to.equal(true);
+    expect(container.Widgets['@Org.OData.Capabilities.V1.SearchRestrictions'].UnsupportedExpressions).to.containEql(
+      'Org.OData.Capabilities.V1.SearchExpressions/Not',
+    );
     expect(container.Gadgets.$Type).to.equal('Catalog.Gadget');
+    expect(container.AdvancedWidgets.$Type).to.equal('Catalog.AdvancedWidget');
     expect(container.ping.$Function).to.equal('Catalog.ping');
   });
 
