@@ -784,6 +784,8 @@ export class CsdlGenerator {
             const updateRestrictions = capabilities.updateRestrictions;
             const deleteRestrictions = capabilities.deleteRestrictions;
 
+            const deepInsertEnabled = set.deepInsert ?? this.cfg?.enableDeepInsert ?? insertRestrictions?.insertable;
+
             if (insertRestrictions) {
                 const {
                     insertable,
@@ -875,6 +877,19 @@ export class CsdlGenerator {
                     capabilityAnnotationsXml.push(...recordXml);
                     capabilityAnnotationsJson['@Org.OData.Capabilities.V1.InsertRestrictions'] = recordJson;
                 }
+            }
+
+            if (deepInsertEnabled) {
+                capabilityAnnotationsXml.push(
+                    '        <Annotation Term="Org.OData.Capabilities.V1.DeepInsertSupport">',
+                    '          <Record>',
+                    '            <PropertyValue Property="Supported" Bool="true"/>',
+                    '          </Record>',
+                    '        </Annotation>',
+                );
+                capabilityAnnotationsJson['@Org.OData.Capabilities.V1.DeepInsertSupport'] = {
+                    Supported: true,
+                };
             }
 
             if (updateRestrictions) {

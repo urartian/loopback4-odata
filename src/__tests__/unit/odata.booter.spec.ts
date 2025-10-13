@@ -13,7 +13,7 @@ describe('ODataBooter entity set naming', () => {
 
     const app = new Application();
     const registry = new EntitySetRegistry();
-    const booter = new ODataBooter(app, registry);
+    const booter = new ODataBooter(app, registry, {} as any);
 
     const setName = (booter as any).getEntitySetName(Person);
     expect(setName).to.equal('People');
@@ -26,7 +26,7 @@ describe('ODataBooter entity set naming', () => {
 
     const app = new Application();
     const registry = new EntitySetRegistry();
-    const booter = new ODataBooter(app, registry);
+    const booter = new ODataBooter(app, registry, {} as any);
 
     const setName = (booter as any).getEntitySetName(Citizen);
     expect(setName).to.equal('CustomPeople');

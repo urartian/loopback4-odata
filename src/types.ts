@@ -8,6 +8,7 @@ export interface ODataConfig {
     maxTop?: number;
     enableCount?: boolean;
     strict?: boolean;
+    enableDeepInsert?: boolean;
     // Search configuration
     searchMode?: 'annotated' | 'config-only' | 'all' | 'disabled';
     searchFields?: Record<string, string[]>; // per entity set

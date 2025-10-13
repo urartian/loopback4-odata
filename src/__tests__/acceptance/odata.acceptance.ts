@@ -1,6 +1,7 @@
 /// <reference path="../../types/testing.globals.d.ts" />
 
 import {Client, createRestAppClient, expect} from '@loopback/testlab';
+import {AnyObject} from '@loopback/repository';
 import {
   TestApplication,
   givenODataApplication,
@@ -117,6 +118,34 @@ describe('OData component acceptance', () => {
   it('supports standalone $count endpoint', async () => {
     const res = await client.get('/odata/Products/$count').expect(200);
     expect(Number(res.text)).to.be.a.Number();
+  });
+
+  it('supports deep insert for related entities when enabled', async () => {
+    const orderId = 9801;
+    const createRes = await client
+      .post('/odata/Orders')
+      .send({
+        id: orderId,
+        total: 1234,
+        items: [
+          {productId: 1, quantity: 2, unitPrice: 499},
+          {productId: 2, quantity: 1, unitPrice: 299},
+        ],
+      })
+      .expect(200);
+
+    expect(createRes.body.id).to.equal(orderId);
+
+    const fetched = await client
+      .get(`/odata/Orders(${orderId})`)
+      .query({$expand: 'items'})
+      .expect(200);
+
+    expect(Array.isArray(fetched.body.items)).to.be.true();
+    expect(fetched.body.items.length).to.equal(2);
+    const itemIds = fetched.body.items.map((item: AnyObject) => item.productId);
+    expect(itemIds).to.containEql(1);
+    expect(itemIds).to.containEql(2);
   });
 
   it('supports $expand of navigation properties', async () => {

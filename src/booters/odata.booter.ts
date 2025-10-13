@@ -13,12 +13,14 @@ import { normalizeEtagProperties } from '../util/etag';
 import { collectControllerSecurityMetadata } from '../util/security-metadata';
 import {getODataHooks} from '../decorators/hook.decorators';
 import type {CrudHookBundle} from '../types/crud-hooks';
+import { ODataConfig } from '../types';
 
 @injectable({ tags: { booters: 'odata' } })
 export class ODataBooter implements Booter {
     constructor(
         @inject(CoreBindings.APPLICATION_INSTANCE) private app: Application,
         @inject(ODATA_BINDINGS.ENTITY_SET_REGISTRY) private registry: EntitySetRegistry,
+        @inject(ODATA_BINDINGS.CONFIG) private readonly config: ODataConfig,
     ) { }
 
     async load(): Promise<void> {
@@ -61,6 +63,7 @@ export class ODataBooter implements Booter {
                 }
             }
 
+            const deepInsert = modelMeta?.deepInsert ?? Boolean(this.config?.enableDeepInsert);
             const def = this.registry.register({
                 name: setName,
                 modelCtor,
@@ -70,6 +73,7 @@ export class ODataBooter implements Booter {
                 securityMetadata,
                 hooks: hooks as CrudHookBundle,
                 sourceControllerBindingKey: binding.key,
+                deepInsert,
             });
 
             const CrudController = defineODataCrudController(def);
