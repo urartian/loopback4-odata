@@ -2,7 +2,13 @@ import {Request, Response} from '@loopback/rest';
 import {AnyObject, Entity, Filter, FilterExcludingWhere, Options} from '@loopback/repository';
 import type {EntitySetDef} from '../registry/entityset-registry';
 
-export type CrudOperation = 'READ' | 'CREATE' | 'UPDATE' | 'DELETE';
+export type CrudOperation =
+  | 'READ'
+  | 'CREATE'
+  | 'UPDATE'
+  | 'DELETE'
+  | 'LINK_NAVIGATION'
+  | 'UNLINK_NAVIGATION';
 export type CrudScope = 'collection' | 'entity' | 'count';
 
 export interface CrudHookContext {
@@ -24,6 +30,13 @@ export interface CrudHookContext {
   id?: unknown;
   payload?: AnyObject;
   filter?: Filter<Entity> | FilterExcludingWhere<Entity>;
+  relationName?: string;
+  navigationTargetId?: unknown;
+  navigationTargetKey?: string;
+  navigationTargetUri?: string;
+  navigationRelationRepository?: unknown;
+  navigationTargetRepository?: unknown;
+  navigationTargetEntity?: AnyObject | Entity | undefined;
 
   // Result of the operation (available in after phase)
   result?: unknown;
@@ -52,4 +65,3 @@ export interface CrudHookBundle {
   after: HookMeta[];
   on: HookMeta[];
 }
-

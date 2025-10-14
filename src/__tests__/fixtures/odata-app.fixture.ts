@@ -304,7 +304,16 @@ class ProductODataController {
 }
 
 @odataController(Order)
-class OrderODataController {}
+class OrderODataController {
+  @odata.before('LINK_NAVIGATION')
+  guardNavigationLinks(ctx: CrudHookContext) {
+    if (ctx.relationName !== 'items') return;
+    const flag = ctx.request.get('x-block-link');
+    if (flag && flag.toLowerCase() === 'true') {
+      throw new HttpErrors.Conflict('Navigation link blocked by hook.');
+    }
+  }
+}
 
 @odataController(OrderItem)
 class OrderItemODataController {}

@@ -50,6 +50,7 @@ import {CrudHookBundle, CrudHookContext, CrudOnContext, CrudOperation, CrudScope
 import { ODATA_BINDINGS } from '../keys';
 import { ODataConfig } from '../types';
 import { getODataSearchableProps } from '../decorators/search.decorators';
+import {ensureNavigationTargetKey} from '../util/relation-metadata';
 type CrudEntity = Entity & { [key: string]: unknown };
 type CrudRepo = DefaultCrudRepository<CrudEntity, unknown>;
 type NormalizedInclusion = Exclude<InclusionFilter, string>;
@@ -371,6 +372,251 @@ export function defineODataCrudController(def: EntitySetDef) {
                 throw new HttpErrors.BadRequest('Deep insert payloads for related entities must be objects.');
             }
             return {...(value as AnyObject)};
+        }
+
+        resolveNavigationRelationMetadata(relationName: string): AnyObject {
+            const relationMeta = modelRelations?.[relationName] as AnyObject | undefined;
+            if (!relationMeta) {
+                throw new HttpErrors.BadRequest(`Unknown relation ${relationName}.`);
+            }
+            if (relationMeta.through) {
+                throw new HttpErrors.NotImplemented(`$ref operations are not supported for relation ${relationName} (through/ many-to-many).`);
+            }
+            if (!ensureNavigationTargetKey(relationMeta)) {
+                throw new HttpErrors.NotImplemented(`Relation ${relationName} does not expose a foreign key (keyTo).`);
+            }
+            return relationMeta;
+        }
+
+        async linkNavigationRef(
+            relationName: string,
+            parentIdRaw: unknown,
+            targetUri: string | undefined,
+        ) {
+            const parentId = this.coerceParentId(parentIdRaw);
+            if (!targetUri) {
+                throw new HttpErrors.BadRequest('Missing @odata.id in request body.');
+            }
+            const relationMeta = this.resolveNavigationRelationMetadata(relationName);
+            const keyTo = relationMeta.keyTo as string;
+
+            const {keyExpression} = this.parseODataIdReference(targetUri);
+            const targetKeyLiteral = this.parseKeyLiteral(keyExpression);
+
+            const repoWithRelations = this.repository as AnyObject;
+            const factory = repoWithRelations[relationName];
+            if (typeof factory !== 'function') {
+                throw new HttpErrors.BadRequest(`Repository for ${setName} does not expose a relation factory for ${relationName}.`);
+            }
+
+            const relationRepo = factory(parentId, this.repositoryOptions());
+            const targetRepo = await this.resolveTargetRepository(relationRepo, relationMeta);
+            const targetId = this.coerceTargetId(targetRepo, targetKeyLiteral);
+
+            const op: CrudOperation = 'LINK_NAVIGATION';
+            const ctx = this.buildHookContext({
+                operation: op,
+                id: parentId,
+                options: this.repositoryOptions(),
+            });
+            ctx.relationName = relationName;
+            ctx.navigationTargetUri = targetUri;
+            ctx.navigationTargetKey = targetKeyLiteral;
+            ctx.navigationTargetId = targetId;
+            ctx.navigationRelationRepository = relationRepo;
+            ctx.navigationTargetRepository = targetRepo;
+
+            await this.runBefore(op, undefined, ctx);
+
+            const execDefault = async () => {
+                const navRepo = (ctx.navigationTargetRepository ?? targetRepo) as AnyObject;
+                const navId = ctx.navigationTargetId ?? targetId;
+                if (navId == null) {
+                    throw new HttpErrors.BadRequest('Navigation target identifier is required.');
+                }
+                const existing = await navRepo.findById(navId as any, undefined, this.repositoryOptions());
+                ctx.navigationTargetId = navId;
+                ctx.navigationTargetEntity = existing;
+                const plain = this.toPlainEntity(existing) ?? {};
+                plain[keyTo] = ctx.id ?? parentId;
+                await navRepo.replaceById(navId as any, plain as AnyObject, this.repositoryOptions());
+                return undefined;
+            };
+
+            const helpers = this.helpersForEntity(entityContext);
+            const onCtx = this.buildOnContext(ctx, helpers);
+            const res = await this.runOn(op, undefined, onCtx, execDefault);
+            ctx.result = res;
+            if (!this.response.headersSent) {
+                await this.runAfter(op, undefined, ctx);
+            }
+            return ctx.result as AnyObject | undefined;
+        }
+
+        async unlinkNavigationRef(
+            relationName: string,
+            parentIdRaw: unknown,
+            targetKeyRaw: string | undefined,
+        ) {
+            const parentId = this.coerceParentId(parentIdRaw);
+            const relationMeta = this.resolveNavigationRelationMetadata(relationName);
+            const keyTo = relationMeta.keyTo as string;
+
+            const repoWithRelations = this.repository as AnyObject;
+            const factory = repoWithRelations[relationName];
+            if (typeof factory !== 'function') {
+                throw new HttpErrors.BadRequest(`Repository for ${setName} does not expose a relation factory for ${relationName}.`);
+            }
+
+            const relationRepo = factory(parentId, this.repositoryOptions());
+            const targetRepo = await this.resolveTargetRepository(relationRepo, relationMeta);
+
+            const op: CrudOperation = 'UNLINK_NAVIGATION';
+            const ctx = this.buildHookContext({
+                operation: op,
+                id: parentId,
+                options: this.repositoryOptions(),
+            });
+            ctx.relationName = relationName;
+            ctx.navigationTargetKey = targetKeyRaw;
+            ctx.navigationRelationRepository = relationRepo;
+            ctx.navigationTargetRepository = targetRepo;
+
+            if (relationMeta.targetsMany) {
+                if (!targetKeyRaw) {
+                    throw new HttpErrors.BadRequest('Target key is required to remove a reference from a collection.');
+                }
+                const keyLiteral = this.parseKeyLiteral(targetKeyRaw);
+                const targetId = this.coerceTargetId(targetRepo, keyLiteral);
+                ctx.navigationTargetKey = keyLiteral;
+                ctx.navigationTargetId = targetId;
+            }
+
+            await this.runBefore(op, undefined, ctx);
+
+            const execDefault = async () => {
+                const navRepo = (ctx.navigationTargetRepository ?? targetRepo) as AnyObject;
+                if (relationMeta.targetsMany) {
+                    const navId = ctx.navigationTargetId;
+                    if (navId == null) {
+                        throw new HttpErrors.BadRequest('Navigation target identifier is required.');
+                    }
+                    const existing = await navRepo.findById(navId as any, undefined, this.repositoryOptions());
+                    ctx.navigationTargetId = navId;
+                    ctx.navigationTargetEntity = existing;
+                    const plain = this.toPlainEntity(existing) ?? {};
+                    plain[keyTo] = null;
+                    await navRepo.replaceById(navId as any, plain as AnyObject, this.repositoryOptions());
+                    return;
+                }
+
+                const relationRepository = (ctx.navigationRelationRepository ?? relationRepo) as AnyObject;
+                const existing = await relationRepository
+                    .get?.(undefined, this.repositoryOptions())
+                    .catch(() => undefined);
+                if (!existing) return;
+                ctx.navigationTargetEntity = existing;
+                const navId = ctx.navigationTargetId ?? this.extractEntityId(existing);
+                if (navId == null) return;
+                ctx.navigationTargetId = navId;
+                const plain = this.toPlainEntity(existing) ?? {};
+                plain[keyTo] = null;
+                await navRepo.replaceById(navId as any, plain as AnyObject, this.repositoryOptions());
+            };
+
+            const helpers = this.helpersForEntity(entityContext);
+            const onCtx = this.buildOnContext(ctx, helpers);
+            const res = await this.runOn(op, undefined, onCtx, execDefault);
+            ctx.result = res;
+            if (!this.response.headersSent) {
+                await this.runAfter(op, undefined, ctx);
+            }
+            return ctx.result as AnyObject | undefined;
+        }
+
+        parseODataIdReference(reference: string): {entitySet: string; keyExpression: string} {
+            let path = reference;
+            try {
+                const base = `${this.request.protocol}://${this.request.headers.host ?? ''}`;
+                const url = new URL(reference, base);
+                path = url.pathname;
+            } catch {
+                // ignore, treat as relative path
+            }
+            const match = /\/([^/]+)\((.+)\)/.exec(path);
+            if (!match) {
+                throw new HttpErrors.BadRequest(`Invalid @odata.id value: ${reference}`);
+            }
+            return {entitySet: match[1], keyExpression: match[2]};
+        }
+
+        parseKeyLiteral(raw: string): string {
+            const decoded = decodeURIComponent(String(raw));
+            let literal = decoded.trim();
+            const guidPrefix = /^guid'/i;
+            if (guidPrefix.test(literal)) {
+                literal = literal.replace(guidPrefix, '');
+                if (literal.endsWith("'")) literal = literal.slice(0, -1);
+            }
+            if (literal.startsWith("'") && literal.endsWith("'")) {
+                literal = literal.slice(1, -1).replace(/''/g, "'");
+            }
+            return literal;
+        }
+
+        async resolveTargetRepository(relationRepo: AnyObject, relationMeta: AnyObject) {
+            if (typeof relationRepo.getTargetRepository === 'function') {
+                return relationRepo.getTargetRepository();
+            }
+            if (relationRepo.getTargetRepositoryDict) {
+                const dict = relationRepo.getTargetRepositoryDict as Record<string, any>;
+                const keys = Object.keys(dict);
+                if (!keys.length) {
+                    throw new HttpErrors.InternalServerError('Unable to resolve target repository for hasOne relation.');
+                }
+                const getter = dict[keys[0]];
+                return getter();
+            }
+            throw new HttpErrors.NotImplemented(`Unable to resolve target repository for relation ${relationMeta?.name ?? '[unknown]'}.`);
+        }
+
+        coerceTargetId(targetRepo: CrudRepo | AnyObject, literal: string): unknown {
+            const entityClass = (targetRepo as AnyObject).entityClass as typeof Entity | undefined;
+            const idProps = entityClass?.getIdProperties?.() ?? [];
+            const idName = idProps[0] ?? 'id';
+            const idDef = (entityClass as AnyObject)?.definition?.properties?.[idName];
+            const type = idDef?.type;
+            if (type === Number || type === 'number') {
+                const num = Number(literal);
+                if (Number.isNaN(num)) {
+                    throw new HttpErrors.BadRequest(`Invalid numeric identifier: ${literal}`);
+                }
+                return num;
+            }
+            if (type === Boolean || type === 'boolean') {
+                if (literal === 'true') return true;
+                if (literal === 'false') return false;
+            }
+            return literal;
+        }
+
+        coerceParentId(raw: unknown): unknown {
+            if (typeof raw !== 'string') return raw;
+            const idName = idProperties[0];
+            const idDef = modelDefinition?.properties?.[idName];
+            const type = idDef?.type;
+            if (type === Number || type === 'number') {
+                const num = Number(raw);
+                if (Number.isNaN(num)) {
+                    throw new HttpErrors.BadRequest(`Invalid identifier: ${raw}`);
+                }
+                return num;
+            }
+            if (type === Boolean || type === 'boolean') {
+                if (raw === 'true') return true;
+                if (raw === 'false') return false;
+            }
+            return raw;
         }
 
         extractEntityId(entity: CrudEntity | AnyObject | undefined): unknown {
@@ -2299,37 +2545,71 @@ function deriveDefaultMethodAliases(
     const methodMetadata = metadata?.methodMetadata;
     if (!methodMetadata) return undefined;
 
-    const derived = new Map<string, string[]>();
+    const derived = new Map<string, Map<string, number>>();
+    const addAlias = (source: string, target: string, priority = 10) => {
+        if (!controllerMethods.has(target)) return;
+        let map = derived.get(source);
+        if (!map) {
+            map = new Map();
+            derived.set(source, map);
+        }
+        const existing = map.get(target);
+        if (existing === undefined || priority < existing) {
+            map.set(target, priority);
+        }
+    };
+
+    const writeAliasSources = new Set([
+        'update',
+        'updateById',
+        'replace',
+        'replaceById',
+        'patch',
+        'patchById',
+        'bulkUpdate',
+    ]);
+    const deleteAliasSources = new Set([
+        'delete',
+        'deleteById',
+        'destroyById',
+    ]);
+    const hasExplicitDeleteMetadata = Object.keys(methodMetadata).some(name => deleteAliasSources.has(name));
 
     for (const methodName of Object.keys(methodMetadata)) {
-        if (controllerMethods.has(methodName)) continue;
-
-        const candidates: string[] = [];
-
         if (methodName === 'find' && controllerMethods.has('list')) {
-            candidates.push('list');
+            addAlias(methodName, 'list');
         }
 
         if (methodName.endsWith('ById')) {
             const base = methodName.substring(0, methodName.length - 'ById'.length);
             if (base && controllerMethods.has(base)) {
-                candidates.push(base);
+                addAlias(methodName, base);
             } else if (base === 'replace' && controllerMethods.has('update')) {
-                candidates.push('update');
+                addAlias(methodName, 'update');
             }
         }
 
-        if (!candidates.length) continue;
+        if (writeAliasSources.has(methodName)) {
+            addAlias(methodName, 'linkNavigationRef');
+            if (!hasExplicitDeleteMetadata) {
+                addAlias(methodName, 'unlinkNavigationRef', 20);
+            }
+        }
 
-        const uniqueCandidates = Array.from(new Set(candidates));
-        derived.set(methodName, uniqueCandidates);
+        if (deleteAliasSources.has(methodName)) {
+            addAlias(methodName, 'unlinkNavigationRef', 5);
+        }
     }
 
     if (!derived.size) return undefined;
 
     const result: MethodAliasMap = {};
     for (const [source, aliases] of derived.entries()) {
-        result[source] = aliases.length === 1 ? aliases[0] : aliases;
+        const sorted = Array.from(aliases.entries())
+            .sort((a, b) => a[1] - b[1])
+            .map(([name]) => name)
+            .filter((value, index, array) => array.indexOf(value) === index);
+        result[source] = sorted.length === 1 ? sorted[0] : sorted;
     }
     return result;
 }

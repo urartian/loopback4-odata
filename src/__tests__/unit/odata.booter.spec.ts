@@ -1,5 +1,6 @@
 import 'reflect-metadata';
 import {Application, inject} from '@loopback/core';
+import {RestApplication} from '@loopback/rest';
 import {
   DefaultCrudRepository,
   Entity,
@@ -7,6 +8,7 @@ import {
   juggler,
   model,
   property,
+  RelationType,
 } from '@loopback/repository';
 import {expect} from '@loopback/testlab';
 import {ODataBooter} from '../../booters/odata.booter';
@@ -80,5 +82,57 @@ describe('ODataBooter repository binding resolution', () => {
     expect(instantiationAttempts).to.equal(0);
     const def = registry.get(Widget);
     expect(def?.repositoryBindingKey).to.equal('repositories.WidgetRepository');
+  });
+});
+
+describe('ODataBooter navigation reference routes', () => {
+  it('registers $ref routes when the foreign key can be inferred', async () => {
+    const app = new RestApplication();
+    const registry = new EntitySetRegistry();
+    const booter = new ODataBooter(app, registry, {} as any);
+
+    @model()
+    class Order extends Entity {
+      @property({id: true})
+      id!: number;
+    }
+
+    @model()
+    class OrderItem extends Entity {
+      @property({id: true})
+      id!: number;
+
+      @property()
+      orderId!: number;
+    }
+
+    const orderDef = (Order as typeof Entity).definition;
+    orderDef.addRelation({
+      name: 'items',
+      type: RelationType.hasMany,
+      targetsMany: true,
+      source: Order,
+      target: () => OrderItem,
+    });
+
+    @odataController(Order)
+    class OrderODataController {
+      async linkNavigationRef() {}
+      async unlinkNavigationRef() {}
+    }
+
+    app.controller(OrderODataController);
+
+    const def = registry.register({
+      name: 'Orders',
+      modelCtor: Order,
+      controllerCtor: OrderODataController,
+    });
+
+    (booter as any).registerNavigationRefRoutes(def, orderDef, OrderODataController);
+
+    const spec = await app.restServer.getApiSpec();
+    expect(spec.paths?.['/odata/Orders/{id}/items/$ref']).to.be.Object();
+    expect(spec.paths?.['/odata/Orders/{id}/items/{targetKey}/$ref']).to.be.Object();
   });
 });

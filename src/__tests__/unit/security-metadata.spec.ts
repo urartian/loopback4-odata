@@ -110,4 +110,52 @@ describe('Security metadata propagation', () => {
     const Generated = defineODataCrudController(def);
     expect(Reflect.getMetadata(AUTHZ_KEY, Generated.prototype, 'delete')).to.be.undefined();
   });
+
+  it('maps update/delete metadata to navigation link/unlink handlers', () => {
+    @model()
+    class Order extends Entity {}
+
+    class OrderController {
+      updateById() {}
+      deleteById() {}
+    }
+
+    Reflect.defineMetadata(AUTHZ_KEY, {scopes: ['order.update']}, OrderController.prototype, 'updateById');
+    Reflect.defineMetadata(AUTHZ_KEY, {scopes: ['order.delete']}, OrderController.prototype, 'deleteById');
+
+    const securityMetadata = collectControllerSecurityMetadata(OrderController);
+    const def: EntitySetDef = {
+      name: 'Orders',
+      modelCtor: Order,
+      repositoryBindingKey: 'repositories.OrderRepository',
+      securityMetadata,
+    };
+
+    const Generated = defineODataCrudController(def);
+    expect(Reflect.getMetadata(AUTHZ_KEY, Generated.prototype, 'linkNavigationRef')).to.deepEqual({scopes: ['order.update']});
+    expect(Reflect.getMetadata(AUTHZ_KEY, Generated.prototype, 'unlinkNavigationRef')).to.deepEqual({scopes: ['order.delete']});
+  });
+
+  it('falls back to update metadata for unlink when delete metadata is absent', () => {
+    @model()
+    class Invoice extends Entity {}
+
+    class InvoiceController {
+      updateById() {}
+    }
+
+    Reflect.defineMetadata(AUTHZ_KEY, {scopes: ['invoice.write']}, InvoiceController.prototype, 'updateById');
+
+    const securityMetadata = collectControllerSecurityMetadata(InvoiceController);
+    const def: EntitySetDef = {
+      name: 'Invoices',
+      modelCtor: Invoice,
+      repositoryBindingKey: 'repositories.InvoiceRepository',
+      securityMetadata,
+    };
+
+    const Generated = defineODataCrudController(def);
+    expect(Reflect.getMetadata(AUTHZ_KEY, Generated.prototype, 'linkNavigationRef')).to.deepEqual({scopes: ['invoice.write']});
+    expect(Reflect.getMetadata(AUTHZ_KEY, Generated.prototype, 'unlinkNavigationRef')).to.deepEqual({scopes: ['invoice.write']});
+  });
 });
