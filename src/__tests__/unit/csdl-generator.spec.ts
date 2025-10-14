@@ -90,6 +90,7 @@ describe('CsdlGenerator', () => {
       modelCtor: Widget,
       etagProperties: ['updatedAt'],
       hasStream: true,
+      deepInsert: true,
       capabilities: {
         countable: false,
         filterFunctions: ['contains', 'startswith'],
@@ -202,6 +203,7 @@ describe('CsdlGenerator', () => {
     expect(xml.includes('Annotation Term="Org.OData.Capabilities.V1.FilterFunctions"')).to.be.true();
     expect(xml.includes('Annotation Term="Org.OData.Capabilities.V1.Aggregate"')).to.be.true();
     expect(xml.includes('Annotation Term="Org.OData.Capabilities.V1.NavigationRestrictions"')).to.be.true();
+    expect(xml.includes('Annotation Term="Org.OData.Capabilities.V1.DeepInsertSupport"')).to.be.true();
     expect(
       xml.includes('<NavigationProperty Name="gadgets" Type="Collection(Catalog.Gadget)"'),
     ).to.be.true();
@@ -288,6 +290,7 @@ describe('CsdlGenerator', () => {
     expect(container.Widgets['@Org.OData.Core.V1.Permissions'][0].SchemeName).to.equal('OAuth2');
     expect(container.Widgets['@Org.OData.Core.V1.Permissions'][0].Scopes).to.have.length(2);
     expect(container.Widgets['@Org.OData.Capabilities.V1.Aggregate'].SupportedAggregationMethods).to.deepEqual(['Sum', 'Count']);
+    expect(container.Widgets['@Org.OData.Capabilities.V1.DeepInsertSupport'].Supported).to.equal(true);
     expect(container.Widgets['@Org.OData.Capabilities.V1.InsertRestrictions'].Insertable).to.equal(false);
     expect(container.Widgets['@Org.OData.Capabilities.V1.DeleteRestrictions'].RequiresFilter).to.equal(true);
     expect(container.Widgets['@Org.OData.Capabilities.V1.SearchRestrictions'].Searchable).to.equal(true);

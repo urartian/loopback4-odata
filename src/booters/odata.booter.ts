@@ -13,19 +13,28 @@ import { normalizeEtagProperties } from '../util/etag';
 import { collectControllerSecurityMetadata } from '../util/security-metadata';
 import {getODataHooks} from '../decorators/hook.decorators';
 import type {CrudHookBundle} from '../types/crud-hooks';
+import { ODataConfig } from '../types';
 
 @injectable({ tags: { booters: 'odata' } })
 export class ODataBooter implements Booter {
     constructor(
         @inject(CoreBindings.APPLICATION_INSTANCE) private app: Application,
         @inject(ODATA_BINDINGS.ENTITY_SET_REGISTRY) private registry: EntitySetRegistry,
+        @inject(ODATA_BINDINGS.CONFIG) private readonly config: ODataConfig,
     ) { }
 
     async load(): Promise<void> {
-        const repositoryMap = await this.buildRepositoryMap();
-        const bindings = this.app.find('controllers.*');
+        const repositoryBindings = this.app.find('repositories.*');
+        const repositoryByKey = new Map<string, Readonly<Binding<unknown>>>();
+        const repositoryByEntity = new Map<typeof Entity, Readonly<Binding<unknown>>>();
+        const inspectedRepositoryBindings = new Set<string>();
+        const controllerBindings = this.app.find('controllers.*');
 
-        for (const binding of bindings) {
+        for (const binding of repositoryBindings) {
+            repositoryByKey.set(binding.key, binding);
+        }
+
+        for (const binding of controllerBindings) {
             const ctor = binding.valueConstructor as ControllerClass<{ [key: string]: any }>;
             if (!ctor) continue;
 
@@ -33,7 +42,13 @@ export class ODataBooter implements Booter {
             if (!modelCtor) continue;
 
             const setName = this.getEntitySetName(modelCtor);
-            const repoBinding = repositoryMap.get(modelCtor);
+            const repoBinding = await this.resolveRepositoryBindingForModel(
+                modelCtor,
+                repositoryBindings,
+                repositoryByKey,
+                repositoryByEntity,
+                inspectedRepositoryBindings,
+            );
             const modelMeta = getODataModelMeta(modelCtor);
 
             if (!repoBinding) {
@@ -61,6 +76,7 @@ export class ODataBooter implements Booter {
                 }
             }
 
+            const deepInsert = modelMeta?.deepInsert ?? Boolean(this.config?.enableDeepInsert);
             const def = this.registry.register({
                 name: setName,
                 modelCtor,
@@ -70,6 +86,7 @@ export class ODataBooter implements Booter {
                 securityMetadata,
                 hooks: hooks as CrudHookBundle,
                 sourceControllerBindingKey: binding.key,
+                deepInsert,
             });
 
             const CrudController = defineODataCrudController(def);
@@ -79,23 +96,66 @@ export class ODataBooter implements Booter {
         }
     }
 
-    private async buildRepositoryMap(): Promise<Map<typeof Entity, Readonly<Binding<unknown>>>> {
-        const repoBindings = this.app.find('repositories.*');
-        const map = new Map<typeof Entity, Readonly<Binding<unknown>>>();
+    private async resolveRepositoryBindingForModel(
+        modelCtor: typeof Entity,
+        repositoryBindings: ReadonlyArray<Readonly<Binding<unknown>>>,
+        repositoryByKey: Map<string, Readonly<Binding<unknown>>>,
+        repositoryByEntity: Map<typeof Entity, Readonly<Binding<unknown>>>,
+        inspectedBindings: Set<string>,
+    ): Promise<Readonly<Binding<unknown>> | undefined> {
+        const cached = repositoryByEntity.get(modelCtor);
+        if (cached) return cached;
 
-        for (const binding of repoBindings) {
+        for (const key of this.buildRepositoryKeyCandidates(modelCtor)) {
+            const binding = repositoryByKey.get(key);
+            if (binding) {
+                repositoryByEntity.set(modelCtor, binding);
+                return binding;
+            }
+        }
+
+        for (const binding of repositoryBindings) {
+            if (repositoryByEntity.has(modelCtor)) break;
+            if (inspectedBindings.has(binding.key)) continue;
+            inspectedBindings.add(binding.key);
+
             try {
                 const repoInstance = await binding.getValue(this.app);
                 const entityCtor = (repoInstance as { entityClass?: typeof Entity }).entityClass;
-                if (entityCtor) {
-                    map.set(entityCtor, binding);
+                if (entityCtor && !repositoryByEntity.has(entityCtor)) {
+                    repositoryByEntity.set(entityCtor, binding);
                 }
-            } catch (err) {
+            } catch {
                 // Ignore bindings that cannot be resolved at boot time.
             }
         }
 
-        return map;
+        return repositoryByEntity.get(modelCtor);
+    }
+
+    private buildRepositoryKeyCandidates(modelCtor: typeof Entity): string[] {
+        const candidates = new Set<string>();
+        const rawName = modelCtor?.name ?? '';
+        const trimmed = rawName.trim();
+        if (!trimmed) return [];
+
+        candidates.add(this.composeRepositoryBindingKey(trimmed));
+
+        if (trimmed.endsWith('Entity')) {
+            const withoutEntity = trimmed.slice(0, -'Entity'.length).trim();
+            if (withoutEntity) candidates.add(this.composeRepositoryBindingKey(withoutEntity));
+        }
+
+        if (trimmed.endsWith('Model')) {
+            const withoutModel = trimmed.slice(0, -'Model'.length).trim();
+            if (withoutModel) candidates.add(this.composeRepositoryBindingKey(withoutModel));
+        }
+
+        return Array.from(candidates);
+    }
+
+    private composeRepositoryBindingKey(name: string): string {
+        return `repositories.${name}Repository`;
     }
 
     private getEntitySetName(modelCtor: typeof Entity): string {

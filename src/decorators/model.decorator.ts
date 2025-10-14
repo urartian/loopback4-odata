@@ -4,6 +4,7 @@ const ODATA_MODEL_KEY = 'odata:model';
 export interface ODataModelOptions {
     entitySetName?: string;
     etag?: string | string[];
+    deepInsert?: boolean;
 }
 
 export function odataModel(opts: ODataModelOptions = {}) {

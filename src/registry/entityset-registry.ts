@@ -20,6 +20,7 @@ export interface EntitySetDef<T extends Entity = Entity> {
     sourceControllerBindingKey?: string;               // binding key to resolve controller instance
     hasStream?: boolean;
     capabilities?: ODataCapabilitiesConfig;
+    deepInsert?: boolean;
 }
 
 @injectable({ scope: BindingScope.SINGLETON })
@@ -31,6 +32,9 @@ export class EntitySetRegistry {
         const next: EntitySetDef = { ...(existing ?? {}), ...def };
         if (!def.securityMetadata && existing?.securityMetadata) {
             next.securityMetadata = existing.securityMetadata;
+        }
+        if (def.deepInsert === undefined && existing?.deepInsert !== undefined) {
+            next.deepInsert = existing.deepInsert;
         }
         this.sets.set(def.modelCtor, next);
         return next as EntitySetDef<T>;
