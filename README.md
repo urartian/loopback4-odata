@@ -135,6 +135,21 @@ registry.register({
 });
 ```
 
+Write metadata from the controller (`update*`, `replace*`, `patch*`, `delete*`) automatically propagates to the navigation `$ref` handlers so users with read-only scopes cannot relink entities. If you need different policies on `$ref`, you can still override them via `securityMethodAliases` or by decorating the stub methods directly:
+
+```ts
+@odataController(Order)
+@authenticate('jwt')
+export class OrderODataController {
+  // Override default write policy by attaching custom metadata
+  @authorize({allowedRoles: ['order-manager']})
+  async linkNavigationRef() {}
+
+  @authorize({allowedRoles: ['order-manager']})
+  async unlinkNavigationRef() {}
+}
+```
+
 ## Endpoints (Phase 3)
 
 Start your app and test:

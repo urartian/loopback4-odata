@@ -2545,37 +2545,71 @@ function deriveDefaultMethodAliases(
     const methodMetadata = metadata?.methodMetadata;
     if (!methodMetadata) return undefined;
 
-    const derived = new Map<string, string[]>();
+    const derived = new Map<string, Map<string, number>>();
+    const addAlias = (source: string, target: string, priority = 10) => {
+        if (!controllerMethods.has(target)) return;
+        let map = derived.get(source);
+        if (!map) {
+            map = new Map();
+            derived.set(source, map);
+        }
+        const existing = map.get(target);
+        if (existing === undefined || priority < existing) {
+            map.set(target, priority);
+        }
+    };
+
+    const writeAliasSources = new Set([
+        'update',
+        'updateById',
+        'replace',
+        'replaceById',
+        'patch',
+        'patchById',
+        'bulkUpdate',
+    ]);
+    const deleteAliasSources = new Set([
+        'delete',
+        'deleteById',
+        'destroyById',
+    ]);
+    const hasExplicitDeleteMetadata = Object.keys(methodMetadata).some(name => deleteAliasSources.has(name));
 
     for (const methodName of Object.keys(methodMetadata)) {
-        if (controllerMethods.has(methodName)) continue;
-
-        const candidates: string[] = [];
-
         if (methodName === 'find' && controllerMethods.has('list')) {
-            candidates.push('list');
+            addAlias(methodName, 'list');
         }
 
         if (methodName.endsWith('ById')) {
             const base = methodName.substring(0, methodName.length - 'ById'.length);
             if (base && controllerMethods.has(base)) {
-                candidates.push(base);
+                addAlias(methodName, base);
             } else if (base === 'replace' && controllerMethods.has('update')) {
-                candidates.push('update');
+                addAlias(methodName, 'update');
             }
         }
 
-        if (!candidates.length) continue;
+        if (writeAliasSources.has(methodName)) {
+            addAlias(methodName, 'linkNavigationRef');
+            if (!hasExplicitDeleteMetadata) {
+                addAlias(methodName, 'unlinkNavigationRef', 20);
+            }
+        }
 
-        const uniqueCandidates = Array.from(new Set(candidates));
-        derived.set(methodName, uniqueCandidates);
+        if (deleteAliasSources.has(methodName)) {
+            addAlias(methodName, 'unlinkNavigationRef', 5);
+        }
     }
 
     if (!derived.size) return undefined;
 
     const result: MethodAliasMap = {};
     for (const [source, aliases] of derived.entries()) {
-        result[source] = aliases.length === 1 ? aliases[0] : aliases;
+        const sorted = Array.from(aliases.entries())
+            .sort((a, b) => a[1] - b[1])
+            .map(([name]) => name)
+            .filter((value, index, array) => array.indexOf(value) === index);
+        result[source] = sorted.length === 1 ? sorted[0] : sorted;
     }
     return result;
 }
