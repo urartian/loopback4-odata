@@ -785,6 +785,7 @@ Run `npm test` to compile the TypeScript specs and execute the unit suite. Accep
 - [x] Capabilities annotations (filter functions, count/navigation restrictions, permissions, streams, insert/update/delete/search restrictions) to describe service behaviors to OData clients
 - [x] Derived LoopBack models surface `$BaseType` so inheritance is reflected in the generated CSDL
 - [x] Deep insert support for `hasOne`/`hasMany` relations (opt-in per entity set, multi-level traversal)
+- [x] Navigation `$ref` endpoints for `hasOne`/`hasMany` relations (link/unlink existing entities)
 
 Queries can now combine boolean operators and phrases:
 
@@ -838,6 +839,7 @@ this.bind(ODATA_BINDINGS.CONFIG).to({
 - `capabilities`: Sets default service-level annotations such as supported filter functions, countability, permissions, stream support, and now OData capability records for inserts/updates/deletes/search via the `insertRestrictions`, `updateRestrictions`, `deleteRestrictions`, and `searchRestrictions` options. Values can be overridden per entity set via `EntitySetDef.capabilities`.
 - `enableDeepInsert`: Opt-in global switch for accepting nested payloads (deep insert). When `true`, every entity set defaults to deep insert unless overridden per model. When `false` (default), only entity sets with `@odataModel({deepInsert: true})` participate.
 - `maxDeepInsertDepth`: Maximum recursion depth for deep insert traversal (default: `10`). Requests exceeding the limit are rejected with `400 Bad Request` to prevent runaway graphs.
+- `enableNavigationRefEndpoints`: Set to `false` to skip registration of navigation `$ref` routes if you prefer to manage linking manually (default: `true`).
 - `$apply` support currently covers a single `groupby((... ), aggregate(...))` segment with aggregate methods `sum`, `average`, `min`, `max`, `count`, and `countdistinct` on scalar entity properties. Pipelines with additional stages (`filter`, `orderby`, etc.) and aggregations on navigation properties are not yet available.
 - Lambda filters (`any` / `all`) support navigation collections (including multi-segment paths) and can be combined with additional predicates using `and`. Nesting lambdas, mixing multiple lambdas, or combining them with `or` remains unsupported.
 - `strict` (default: true): Enables stricter validations and policies:
@@ -904,6 +906,25 @@ Content-Type: application/json
 ```
 
 The controller persists the order, its line items, and each item note inside a single transaction and annotates `$metadata` with `Org.OData.Capabilities.V1.DeepInsertSupport` for the entity set. Nested relations beyond the first level are followed recursively (subject to `maxDeepInsertDepth`).
+
+### Navigation `$ref`
+
+Link existing entities without PATCHing full payloads. For a `hasMany` relation:
+
+```http
+POST /odata/Orders(1)/items/$ref
+Content-Type: application/json
+
+{"@odata.id": "/odata/OrderItems(42)"}
+```
+
+The handler reassigns `OrderItems(42)` to order `1` and returns `204 No Content`. To remove the association:
+
+```http
+DELETE /odata/Orders(1)/items/42/$ref
+```
+
+For `hasOne`, use `PUT /EntitySet(key)/Relation/$ref` with the same payload shape and `DELETE /EntitySet(key)/Relation/$ref` to clear the link. Relations defined with `hasManyThrough` are skipped.
 
 ## Roadmap
 

@@ -10,6 +10,7 @@ export interface ODataConfig {
     strict?: boolean;
     enableDeepInsert?: boolean;
     maxDeepInsertDepth?: number;
+    enableNavigationRefEndpoints?: boolean;
     // Search configuration
     searchMode?: 'annotated' | 'config-only' | 'all' | 'disabled';
     searchFields?: Record<string, string[]>; // per entity set

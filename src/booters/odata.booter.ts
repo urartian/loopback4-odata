@@ -6,7 +6,7 @@ import { getODataControllerModel } from '../decorators/controller.decorator';
 import { defineODataCrudController } from '../controllers/crud-controller-factory';
 import { getODataModelMeta } from '../decorators/model.decorator';
 import { ODATA_BINDINGS } from '../keys';
-import { Entity } from '@loopback/repository';
+import { AnyObject, Entity, ModelDefinition } from '@loopback/repository';
 import { getODataActions, getODataFunctions, OperationMeta } from '../decorators/action.function.decorators';
 import { pluralize } from 'inflection';
 import { normalizeEtagProperties } from '../util/etag';
@@ -60,6 +60,7 @@ export class ODataBooter implements Booter {
             }
 
             const securityMetadata = collectControllerSecurityMetadata(ctor);
+            const modelDefinition = (modelCtor as typeof Entity).definition as ModelDefinition | undefined;
             const hooks = getODataHooks(ctor);
 
             // Validate @odata.on uniqueness per (op, scope)
@@ -93,6 +94,7 @@ export class ODataBooter implements Booter {
             def.controllerCtor = CrudController;
             this.app.controller(CrudController);
             this.registerOperations(def, ctor);
+            this.registerNavigationRefRoutes(def, modelDefinition, CrudController);
         }
     }
 
@@ -185,6 +187,108 @@ export class ODataBooter implements Booter {
         }
     }
 
+    private registerNavigationRefRoutes(
+        def: EntitySetDef,
+        modelDefinition: ModelDefinition | undefined,
+        controllerCtor: Function,
+    ) {
+        if (this.config?.enableNavigationRefEndpoints === false) return;
+        const relations = (modelDefinition?.relations ?? {}) as Record<string, any>;
+        if (!relations || !Object.keys(relations).length) return;
+
+        const basePath = `/odata/${def.name}`;
+        const bindingKey = `controllers.${controllerCtor.name}`;
+        const app = this.app as RestApplication;
+
+        for (const [relationName, relationMeta] of Object.entries(relations)) {
+            const relationType = relationMeta?.type ?? relationMeta?.relationType;
+            if (relationType !== 'hasMany' && relationType !== 'hasOne') continue;
+            if (relationMeta?.through) continue;
+            if (!relationMeta?.keyTo) continue;
+
+            const linkVerb = relationMeta.targetsMany ? 'post' : 'put';
+            const linkPath = `${basePath}/{id}/${relationName}/$ref`;
+            const linkSpec: OperationObject = {
+                responses: {
+                    '204': {description: 'Reference successfully set.'},
+                },
+                requestBody: {
+                    required: true,
+                    content: {
+                        'application/json': {
+                            schema: {
+                                type: 'object',
+                                required: ['@odata.id'],
+                                properties: {
+                                    '@odata.id': {type: 'string'},
+                                },
+                            },
+                        },
+                    },
+                },
+                parameters: [
+                    {
+                        name: 'id',
+                        in: 'path',
+                        required: true,
+                        schema: {type: 'string'},
+                    },
+                ],
+            };
+
+            const linkHandler: OperationHandler = async (
+                ctx: RequestContext,
+                ...args: unknown[]
+            ) => {
+                const body = args[0] as Record<string, unknown> | undefined;
+                const id = args[1];
+                const controller = await ctx.get(bindingKey as any) as AnyObject;
+                await controller.linkNavigationRef(
+                    relationName,
+                    id,
+                    body?.['@odata.id'] as string | undefined,
+                );
+                if (!ctx.response.headersSent) ctx.response.status(204).end();
+            };
+
+            app.route(new ODataRefRoute(linkVerb, linkPath, linkSpec, linkHandler));
+
+            const deletePath = relationMeta.targetsMany
+                ? `${basePath}/{id}/${relationName}/{targetKey}/$ref`
+                : `${basePath}/{id}/${relationName}/$ref`;
+            const deleteSpec: OperationObject = {
+                responses: {
+                    '204': {description: 'Reference removed.'},
+                },
+                parameters: relationMeta.targetsMany
+                    ? [
+                        {name: 'id', in: 'path', required: true, schema: {type: 'string'}},
+                        {name: 'targetKey', in: 'path', required: true, schema: {type: 'string'}},
+                    ]
+                    : [
+                        {name: 'id', in: 'path', required: true, schema: {type: 'string'}},
+                    ],
+            };
+
+            const deleteHandler: OperationHandler = async (
+                ctx: RequestContext,
+                ...args: unknown[]
+            ) => {
+                const id = args[0];
+                const targetKey = args[1];
+                const controller = await ctx.get(bindingKey as any) as AnyObject;
+                await controller.unlinkNavigationRef(
+                    relationName,
+                    id,
+                    relationMeta.targetsMany ? (targetKey as string | undefined) : undefined,
+                );
+                if (!ctx.response.headersSent) ctx.response.status(204).end();
+            };
+
+            app.route(new ODataRefRoute('delete', deletePath, deleteSpec, deleteHandler));
+        }
+    }
+
     private buildOperationRoute(
         op: OperationMeta,
         controllerCtor: Function,
@@ -266,6 +370,22 @@ export class ODataBooter implements Booter {
 type OperationHandler = (ctx: RequestContext, ...params: unknown[]) => ValueOrPromise<unknown>;
 
 class ODataOperationRoute extends Route {
+    constructor(verb: string, path: string, spec: OperationObject, handler: OperationHandler) {
+        super(verb, path, spec, handler);
+    }
+
+    async invokeHandler(requestContext: RequestContext, args: unknown[]): Promise<unknown> {
+        return invokeMethodWithInterceptors(
+            requestContext,
+            this,
+            '_handler',
+            [requestContext, ...args],
+            { source: new RouteSource(this) },
+        );
+    }
+}
+
+class ODataRefRoute extends Route {
     constructor(verb: string, path: string, spec: OperationObject, handler: OperationHandler) {
         super(verb, path, spec, handler);
     }

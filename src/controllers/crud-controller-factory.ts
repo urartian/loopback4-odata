@@ -373,6 +373,182 @@ export function defineODataCrudController(def: EntitySetDef) {
             return {...(value as AnyObject)};
         }
 
+        async linkNavigationRef(
+            relationName: string,
+            parentIdRaw: unknown,
+            targetUri: string | undefined,
+        ) {
+            const parentId = this.coerceParentId(parentIdRaw);
+            if (!targetUri) {
+                throw new HttpErrors.BadRequest('Missing @odata.id in request body.');
+            }
+            const relationMeta = modelRelations?.[relationName] as AnyObject | undefined;
+            if (!relationMeta) {
+                throw new HttpErrors.BadRequest(`Unknown relation ${relationName}.`);
+            }
+            if (relationMeta.through) {
+                throw new HttpErrors.NotImplemented(`$ref operations are not supported for relation ${relationName} (through/ many-to-many).`);
+            }
+            const keyTo = relationMeta?.keyTo;
+            if (!keyTo) {
+                throw new HttpErrors.NotImplemented(`Relation ${relationName} does not expose a foreign key (keyTo).`);
+            }
+
+            const {keyExpression} = this.parseODataIdReference(targetUri);
+            const targetKeyLiteral = this.parseKeyLiteral(keyExpression);
+
+            const repoWithRelations = this.repository as AnyObject;
+            const factory = repoWithRelations[relationName];
+            if (typeof factory !== 'function') {
+                throw new HttpErrors.BadRequest(`Repository for ${setName} does not expose a relation factory for ${relationName}.`);
+            }
+
+            const relationRepo = factory(parentId, this.repositoryOptions());
+            const targetRepo = await this.resolveTargetRepository(relationRepo, relationMeta);
+            const targetId = this.coerceTargetId(targetRepo, targetKeyLiteral);
+            const existing = await targetRepo.findById(targetId as any, undefined, this.repositoryOptions());
+            const plain = this.toPlainEntity(existing) ?? {};
+            plain[keyTo] = parentId;
+            await targetRepo.replaceById(targetId as any, plain as AnyObject, this.repositoryOptions());
+        }
+
+        async unlinkNavigationRef(
+            relationName: string,
+            parentIdRaw: unknown,
+            targetKeyRaw: string | undefined,
+        ) {
+            const parentId = this.coerceParentId(parentIdRaw);
+            const relationMeta = modelRelations?.[relationName] as AnyObject | undefined;
+            if (!relationMeta) {
+                throw new HttpErrors.BadRequest(`Unknown relation ${relationName}.`);
+            }
+            if (relationMeta.through) {
+                throw new HttpErrors.NotImplemented(`$ref operations are not supported for relation ${relationName} (through/ many-to-many).`);
+            }
+            const keyTo = relationMeta?.keyTo;
+            if (!keyTo) {
+                throw new HttpErrors.NotImplemented(`Relation ${relationName} does not expose a foreign key (keyTo).`);
+            }
+
+            const repoWithRelations = this.repository as AnyObject;
+            const factory = repoWithRelations[relationName];
+            if (typeof factory !== 'function') {
+                throw new HttpErrors.BadRequest(`Repository for ${setName} does not expose a relation factory for ${relationName}.`);
+            }
+
+            const relationRepo = factory(parentId, this.repositoryOptions());
+            const targetRepo = await this.resolveTargetRepository(relationRepo, relationMeta);
+
+            if (relationMeta.targetsMany) {
+                if (!targetKeyRaw) {
+                    throw new HttpErrors.BadRequest('Target key is required to remove a reference from a collection.');
+                }
+                const keyLiteral = this.parseKeyLiteral(targetKeyRaw);
+                const targetId = this.coerceTargetId(targetRepo, keyLiteral);
+                const existing = await targetRepo.findById(targetId as any, undefined, this.repositoryOptions());
+                const plain = this.toPlainEntity(existing) ?? {};
+                plain[keyTo] = null;
+                await targetRepo.replaceById(targetId as any, plain as AnyObject, this.repositoryOptions());
+                return;
+            }
+
+            // hasOne: remove link by nulling FK for the related entity currently pointing to parent
+            const existing = await relationRepo
+                .get?.(undefined, this.repositoryOptions())
+                .catch(() => undefined);
+            if (!existing) return;
+            const targetId = this.extractEntityId(existing);
+            if (targetId == null) return;
+            const plain = this.toPlainEntity(existing) ?? {};
+            plain[keyTo] = null;
+            await targetRepo.replaceById(targetId as any, plain as AnyObject, this.repositoryOptions());
+        }
+
+        parseODataIdReference(reference: string): {entitySet: string; keyExpression: string} {
+            let path = reference;
+            try {
+                const base = `${this.request.protocol}://${this.request.headers.host ?? ''}`;
+                const url = new URL(reference, base);
+                path = url.pathname;
+            } catch {
+                // ignore, treat as relative path
+            }
+            const match = /\/([^/]+)\((.+)\)/.exec(path);
+            if (!match) {
+                throw new HttpErrors.BadRequest(`Invalid @odata.id value: ${reference}`);
+            }
+            return {entitySet: match[1], keyExpression: match[2]};
+        }
+
+        parseKeyLiteral(raw: string): string {
+            const decoded = decodeURIComponent(String(raw));
+            let literal = decoded.trim();
+            const guidPrefix = /^guid'/i;
+            if (guidPrefix.test(literal)) {
+                literal = literal.replace(guidPrefix, '');
+                if (literal.endsWith("'")) literal = literal.slice(0, -1);
+            }
+            if (literal.startsWith("'") && literal.endsWith("'")) {
+                literal = literal.slice(1, -1).replace(/''/g, "'");
+            }
+            return literal;
+        }
+
+        async resolveTargetRepository(relationRepo: AnyObject, relationMeta: AnyObject) {
+            if (typeof relationRepo.getTargetRepository === 'function') {
+                return relationRepo.getTargetRepository();
+            }
+            if (relationRepo.getTargetRepositoryDict) {
+                const dict = relationRepo.getTargetRepositoryDict as Record<string, any>;
+                const keys = Object.keys(dict);
+                if (!keys.length) {
+                    throw new HttpErrors.InternalServerError('Unable to resolve target repository for hasOne relation.');
+                }
+                const getter = dict[keys[0]];
+                return getter();
+            }
+            throw new HttpErrors.NotImplemented(`Unable to resolve target repository for relation ${relationMeta?.name ?? '[unknown]'}.`);
+        }
+
+        coerceTargetId(targetRepo: CrudRepo | AnyObject, literal: string): unknown {
+            const entityClass = (targetRepo as AnyObject).entityClass as typeof Entity | undefined;
+            const idProps = entityClass?.getIdProperties?.() ?? [];
+            const idName = idProps[0] ?? 'id';
+            const idDef = (entityClass as AnyObject)?.definition?.properties?.[idName];
+            const type = idDef?.type;
+            if (type === Number || type === 'number') {
+                const num = Number(literal);
+                if (Number.isNaN(num)) {
+                    throw new HttpErrors.BadRequest(`Invalid numeric identifier: ${literal}`);
+                }
+                return num;
+            }
+            if (type === Boolean || type === 'boolean') {
+                if (literal === 'true') return true;
+                if (literal === 'false') return false;
+            }
+            return literal;
+        }
+
+        coerceParentId(raw: unknown): unknown {
+            if (typeof raw !== 'string') return raw;
+            const idName = idProperties[0];
+            const idDef = modelDefinition?.properties?.[idName];
+            const type = idDef?.type;
+            if (type === Number || type === 'number') {
+                const num = Number(raw);
+                if (Number.isNaN(num)) {
+                    throw new HttpErrors.BadRequest(`Invalid identifier: ${raw}`);
+                }
+                return num;
+            }
+            if (type === Boolean || type === 'boolean') {
+                if (raw === 'true') return true;
+                if (raw === 'false') return false;
+            }
+            return raw;
+        }
+
         extractEntityId(entity: CrudEntity | AnyObject | undefined): unknown {
             if (!entity) return undefined;
             const repoAny = this.repository as CrudRepo & {entityClass?: typeof Entity};

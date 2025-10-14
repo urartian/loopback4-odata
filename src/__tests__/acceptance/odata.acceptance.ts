@@ -163,6 +163,38 @@ describe('OData component acceptance', () => {
     expect(secondNotes.map((n: AnyObject) => n.text)).to.containEql('urgent delivery');
   });
 
+  it('supports navigation $ref linking of existing entities', async () => {
+    const newOrder = await client
+      .post('/odata/Orders')
+      .send({total: 0})
+      .expect(200);
+    const newOrderId = newOrder.body.id;
+    expect(newOrderId).to.be.a.Number();
+
+    const orderItemsRes = await client.get('/odata/OrderItems').expect(200);
+    const existingItem = orderItemsRes.body.value[0];
+    expect(existingItem).to.be.Object();
+    const originalOrderId = existingItem.orderId;
+
+    await client
+      .post(`/odata/Orders(${newOrderId})/items/$ref`)
+      .send({'@odata.id': `/odata/OrderItems(${existingItem.id})`})
+      .expect(204);
+
+    const verifyList = await client.get('/odata/OrderItems').expect(200);
+    expect(
+      verifyList.body.value.some(
+        (item: AnyObject) => item.id === existingItem.id && item.orderId === newOrderId,
+      )
+    ).to.be.true();
+
+    // restore link for data consistency
+    await client
+      .post(`/odata/Orders(${originalOrderId})/items/$ref`)
+      .send({'@odata.id': `/odata/OrderItems(${existingItem.id})`})
+      .expect(204);
+  });
+
   it('supports $expand of navigation properties', async () => {
     const res = await client
       .get('/odata/Products')
