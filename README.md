@@ -547,7 +547,7 @@ import {odata, CrudHookContext, CrudOnContext} from '@loopback/odata';
 ```
 
 Supported operations and scopes:
-- Operations: `READ`, `CREATE`, `UPDATE`, `DELETE`
+- Operations: `READ`, `CREATE`, `UPDATE`, `DELETE`, `LINK_NAVIGATION`, `UNLINK_NAVIGATION`
 - Scopes for `READ`: `collection`, `entity`, `count`
 
 Example usage:
@@ -605,6 +605,24 @@ Notes:
 - `@odata.on` can replace the generated logic by not calling `next()`. Use `ctx.helpers.entity`, `ctx.helpers.collection`, `ctx.helpers.count`, or `ctx.helpers.noContent` to produce OData-correct responses when you override.
 - Hooks receive `CrudHookContext` with `request`, `response`, `repository`, `options` (including active transactions for `$batch`), `payload/filter/id`, and a mutable `state` bag for passing data between phases.
 - Only one `@odata.on` is allowed per operation/scope per controller; duplicates fail at boot.
+- Navigation reference routes trigger the dedicated operations `LINK_NAVIGATION` (for `POST/PUT .../$ref`) and `UNLINK_NAVIGATION` (for `DELETE .../$ref`). The hook context includes `relationName`, `navigationTargetId`, `navigationTargetKey`, plus `navigationRelationRepository` / `navigationTargetRepository` so you can enforce custom linking rules.
+
+```ts
+@odata.before('LINK_NAVIGATION')
+blockDuplicateLinks(ctx: CrudHookContext) {
+  if (ctx.relationName !== 'items') return;
+  const header = ctx.request.get('x-block-link');
+  if (header?.toLowerCase() === 'true') {
+    throw new HttpErrors.Conflict('Link prevented by business rules.');
+  }
+}
+
+@odata.on('UNLINK_NAVIGATION')
+async auditUnlink(ctx: CrudOnContext, next: () => Promise<unknown>) {
+  await next();
+  console.log('Unlinked', ctx.navigationTargetId, 'from order', ctx.id);
+}
+```
 
 #### Example: unbound action with a raw response
 

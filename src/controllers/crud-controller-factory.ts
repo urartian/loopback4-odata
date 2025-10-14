@@ -50,6 +50,7 @@ import {CrudHookBundle, CrudHookContext, CrudOnContext, CrudOperation, CrudScope
 import { ODATA_BINDINGS } from '../keys';
 import { ODataConfig } from '../types';
 import { getODataSearchableProps } from '../decorators/search.decorators';
+import {ensureNavigationTargetKey} from '../util/relation-metadata';
 type CrudEntity = Entity & { [key: string]: unknown };
 type CrudRepo = DefaultCrudRepository<CrudEntity, unknown>;
 type NormalizedInclusion = Exclude<InclusionFilter, string>;
@@ -373,6 +374,20 @@ export function defineODataCrudController(def: EntitySetDef) {
             return {...(value as AnyObject)};
         }
 
+        resolveNavigationRelationMetadata(relationName: string): AnyObject {
+            const relationMeta = modelRelations?.[relationName] as AnyObject | undefined;
+            if (!relationMeta) {
+                throw new HttpErrors.BadRequest(`Unknown relation ${relationName}.`);
+            }
+            if (relationMeta.through) {
+                throw new HttpErrors.NotImplemented(`$ref operations are not supported for relation ${relationName} (through/ many-to-many).`);
+            }
+            if (!ensureNavigationTargetKey(relationMeta)) {
+                throw new HttpErrors.NotImplemented(`Relation ${relationName} does not expose a foreign key (keyTo).`);
+            }
+            return relationMeta;
+        }
+
         async linkNavigationRef(
             relationName: string,
             parentIdRaw: unknown,
@@ -382,17 +397,8 @@ export function defineODataCrudController(def: EntitySetDef) {
             if (!targetUri) {
                 throw new HttpErrors.BadRequest('Missing @odata.id in request body.');
             }
-            const relationMeta = modelRelations?.[relationName] as AnyObject | undefined;
-            if (!relationMeta) {
-                throw new HttpErrors.BadRequest(`Unknown relation ${relationName}.`);
-            }
-            if (relationMeta.through) {
-                throw new HttpErrors.NotImplemented(`$ref operations are not supported for relation ${relationName} (through/ many-to-many).`);
-            }
-            const keyTo = relationMeta?.keyTo;
-            if (!keyTo) {
-                throw new HttpErrors.NotImplemented(`Relation ${relationName} does not expose a foreign key (keyTo).`);
-            }
+            const relationMeta = this.resolveNavigationRelationMetadata(relationName);
+            const keyTo = relationMeta.keyTo as string;
 
             const {keyExpression} = this.parseODataIdReference(targetUri);
             const targetKeyLiteral = this.parseKeyLiteral(keyExpression);
@@ -406,10 +412,45 @@ export function defineODataCrudController(def: EntitySetDef) {
             const relationRepo = factory(parentId, this.repositoryOptions());
             const targetRepo = await this.resolveTargetRepository(relationRepo, relationMeta);
             const targetId = this.coerceTargetId(targetRepo, targetKeyLiteral);
-            const existing = await targetRepo.findById(targetId as any, undefined, this.repositoryOptions());
-            const plain = this.toPlainEntity(existing) ?? {};
-            plain[keyTo] = parentId;
-            await targetRepo.replaceById(targetId as any, plain as AnyObject, this.repositoryOptions());
+
+            const op: CrudOperation = 'LINK_NAVIGATION';
+            const ctx = this.buildHookContext({
+                operation: op,
+                id: parentId,
+                options: this.repositoryOptions(),
+            });
+            ctx.relationName = relationName;
+            ctx.navigationTargetUri = targetUri;
+            ctx.navigationTargetKey = targetKeyLiteral;
+            ctx.navigationTargetId = targetId;
+            ctx.navigationRelationRepository = relationRepo;
+            ctx.navigationTargetRepository = targetRepo;
+
+            await this.runBefore(op, undefined, ctx);
+
+            const execDefault = async () => {
+                const navRepo = (ctx.navigationTargetRepository ?? targetRepo) as AnyObject;
+                const navId = ctx.navigationTargetId ?? targetId;
+                if (navId == null) {
+                    throw new HttpErrors.BadRequest('Navigation target identifier is required.');
+                }
+                const existing = await navRepo.findById(navId as any, undefined, this.repositoryOptions());
+                ctx.navigationTargetId = navId;
+                ctx.navigationTargetEntity = existing;
+                const plain = this.toPlainEntity(existing) ?? {};
+                plain[keyTo] = ctx.id ?? parentId;
+                await navRepo.replaceById(navId as any, plain as AnyObject, this.repositoryOptions());
+                return undefined;
+            };
+
+            const helpers = this.helpersForEntity(entityContext);
+            const onCtx = this.buildOnContext(ctx, helpers);
+            const res = await this.runOn(op, undefined, onCtx, execDefault);
+            ctx.result = res;
+            if (!this.response.headersSent) {
+                await this.runAfter(op, undefined, ctx);
+            }
+            return ctx.result as AnyObject | undefined;
         }
 
         async unlinkNavigationRef(
@@ -418,17 +459,8 @@ export function defineODataCrudController(def: EntitySetDef) {
             targetKeyRaw: string | undefined,
         ) {
             const parentId = this.coerceParentId(parentIdRaw);
-            const relationMeta = modelRelations?.[relationName] as AnyObject | undefined;
-            if (!relationMeta) {
-                throw new HttpErrors.BadRequest(`Unknown relation ${relationName}.`);
-            }
-            if (relationMeta.through) {
-                throw new HttpErrors.NotImplemented(`$ref operations are not supported for relation ${relationName} (through/ many-to-many).`);
-            }
-            const keyTo = relationMeta?.keyTo;
-            if (!keyTo) {
-                throw new HttpErrors.NotImplemented(`Relation ${relationName} does not expose a foreign key (keyTo).`);
-            }
+            const relationMeta = this.resolveNavigationRelationMetadata(relationName);
+            const keyTo = relationMeta.keyTo as string;
 
             const repoWithRelations = this.repository as AnyObject;
             const factory = repoWithRelations[relationName];
@@ -439,29 +471,67 @@ export function defineODataCrudController(def: EntitySetDef) {
             const relationRepo = factory(parentId, this.repositoryOptions());
             const targetRepo = await this.resolveTargetRepository(relationRepo, relationMeta);
 
+            const op: CrudOperation = 'UNLINK_NAVIGATION';
+            const ctx = this.buildHookContext({
+                operation: op,
+                id: parentId,
+                options: this.repositoryOptions(),
+            });
+            ctx.relationName = relationName;
+            ctx.navigationTargetKey = targetKeyRaw;
+            ctx.navigationRelationRepository = relationRepo;
+            ctx.navigationTargetRepository = targetRepo;
+
             if (relationMeta.targetsMany) {
                 if (!targetKeyRaw) {
                     throw new HttpErrors.BadRequest('Target key is required to remove a reference from a collection.');
                 }
                 const keyLiteral = this.parseKeyLiteral(targetKeyRaw);
                 const targetId = this.coerceTargetId(targetRepo, keyLiteral);
-                const existing = await targetRepo.findById(targetId as any, undefined, this.repositoryOptions());
-                const plain = this.toPlainEntity(existing) ?? {};
-                plain[keyTo] = null;
-                await targetRepo.replaceById(targetId as any, plain as AnyObject, this.repositoryOptions());
-                return;
+                ctx.navigationTargetKey = keyLiteral;
+                ctx.navigationTargetId = targetId;
             }
 
-            // hasOne: remove link by nulling FK for the related entity currently pointing to parent
-            const existing = await relationRepo
-                .get?.(undefined, this.repositoryOptions())
-                .catch(() => undefined);
-            if (!existing) return;
-            const targetId = this.extractEntityId(existing);
-            if (targetId == null) return;
-            const plain = this.toPlainEntity(existing) ?? {};
-            plain[keyTo] = null;
-            await targetRepo.replaceById(targetId as any, plain as AnyObject, this.repositoryOptions());
+            await this.runBefore(op, undefined, ctx);
+
+            const execDefault = async () => {
+                const navRepo = (ctx.navigationTargetRepository ?? targetRepo) as AnyObject;
+                if (relationMeta.targetsMany) {
+                    const navId = ctx.navigationTargetId;
+                    if (navId == null) {
+                        throw new HttpErrors.BadRequest('Navigation target identifier is required.');
+                    }
+                    const existing = await navRepo.findById(navId as any, undefined, this.repositoryOptions());
+                    ctx.navigationTargetId = navId;
+                    ctx.navigationTargetEntity = existing;
+                    const plain = this.toPlainEntity(existing) ?? {};
+                    plain[keyTo] = null;
+                    await navRepo.replaceById(navId as any, plain as AnyObject, this.repositoryOptions());
+                    return;
+                }
+
+                const relationRepository = (ctx.navigationRelationRepository ?? relationRepo) as AnyObject;
+                const existing = await relationRepository
+                    .get?.(undefined, this.repositoryOptions())
+                    .catch(() => undefined);
+                if (!existing) return;
+                ctx.navigationTargetEntity = existing;
+                const navId = ctx.navigationTargetId ?? this.extractEntityId(existing);
+                if (navId == null) return;
+                ctx.navigationTargetId = navId;
+                const plain = this.toPlainEntity(existing) ?? {};
+                plain[keyTo] = null;
+                await navRepo.replaceById(navId as any, plain as AnyObject, this.repositoryOptions());
+            };
+
+            const helpers = this.helpersForEntity(entityContext);
+            const onCtx = this.buildOnContext(ctx, helpers);
+            const res = await this.runOn(op, undefined, onCtx, execDefault);
+            ctx.result = res;
+            if (!this.response.headersSent) {
+                await this.runAfter(op, undefined, ctx);
+            }
+            return ctx.result as AnyObject | undefined;
         }
 
         parseODataIdReference(reference: string): {entitySet: string; keyExpression: string} {

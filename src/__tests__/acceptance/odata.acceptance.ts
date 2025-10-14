@@ -195,6 +195,23 @@ describe('OData component acceptance', () => {
       .expect(204);
   });
 
+  it('allows navigation $ref hooks to veto link operations', async () => {
+    const orderItemsRes = await client.get('/odata/OrderItems').expect(200);
+    const existingItem = orderItemsRes.body.value[0];
+
+    await client
+      .post('/odata/Orders(1)/items/$ref')
+      .set('x-block-link', 'true')
+      .send({'@odata.id': `/odata/OrderItems(${existingItem.id})`})
+      .expect(409);
+  });
+
+  it('includes navigation $ref routes in the generated OpenAPI spec', async () => {
+    const spec = await app.restServer.getApiSpec();
+    expect(spec.paths?.['/odata/Orders/{id}/items/$ref']).to.be.Object();
+    expect(spec.paths?.['/odata/Orders/{id}/items/{targetKey}/$ref']).to.be.Object();
+  });
+
   it('supports $expand of navigation properties', async () => {
     const res = await client
       .get('/odata/Products')

@@ -14,6 +14,7 @@ import { collectControllerSecurityMetadata } from '../util/security-metadata';
 import {getODataHooks} from '../decorators/hook.decorators';
 import type {CrudHookBundle} from '../types/crud-hooks';
 import { ODataConfig } from '../types';
+import {ensureNavigationTargetKey} from '../util/relation-metadata';
 
 @injectable({ tags: { booters: 'odata' } })
 export class ODataBooter implements Booter {
@@ -204,7 +205,7 @@ export class ODataBooter implements Booter {
             const relationType = relationMeta?.type ?? relationMeta?.relationType;
             if (relationType !== 'hasMany' && relationType !== 'hasOne') continue;
             if (relationMeta?.through) continue;
-            if (!relationMeta?.keyTo) continue;
+            if (!ensureNavigationTargetKey(relationMeta as AnyObject)) continue;
 
             const linkVerb = relationMeta.targetsMany ? 'post' : 'put';
             const linkPath = `${basePath}/{id}/${relationName}/$ref`;
@@ -236,12 +237,9 @@ export class ODataBooter implements Booter {
                 ],
             };
 
-            const linkHandler: OperationHandler = async (
-                ctx: RequestContext,
-                ...args: unknown[]
-            ) => {
-                const body = args[0] as Record<string, unknown> | undefined;
-                const id = args[1];
+            const linkHandler: OperationHandler = async (ctx: RequestContext, ...params: unknown[]) => {
+                const body = params[0] as Record<string, unknown> | undefined;
+                const id = params[1];
                 const controller = await ctx.get(bindingKey as any) as AnyObject;
                 await controller.linkNavigationRef(
                     relationName,
@@ -270,17 +268,14 @@ export class ODataBooter implements Booter {
                     ],
             };
 
-            const deleteHandler: OperationHandler = async (
-                ctx: RequestContext,
-                ...args: unknown[]
-            ) => {
-                const id = args[0];
-                const targetKey = args[1];
+            const deleteHandler: OperationHandler = async (ctx: RequestContext, ...params: unknown[]) => {
+                const id = params[0];
+                const targetKeyParam = relationMeta.targetsMany ? (params[1] as string | undefined) : undefined;
                 const controller = await ctx.get(bindingKey as any) as AnyObject;
                 await controller.unlinkNavigationRef(
                     relationName,
                     id,
-                    relationMeta.targetsMany ? (targetKey as string | undefined) : undefined,
+                    relationMeta.targetsMany ? targetKeyParam : undefined,
                 );
                 if (!ctx.response.headersSent) ctx.response.status(204).end();
             };
