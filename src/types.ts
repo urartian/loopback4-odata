@@ -11,6 +11,9 @@ export interface ODataConfig {
     enableDeepInsert?: boolean;
     maxDeepInsertDepth?: number;
     enableNavigationRefEndpoints?: boolean;
+    logApplyFallbacks?: boolean;
+    maxApplyResultSize?: number;
+    onApplyFallback?: (event: ODataApplyFallbackEvent) => void;
     // Search configuration
     searchMode?: 'annotated' | 'config-only' | 'all' | 'disabled';
     searchFields?: Record<string, string[]>; // per entity set
@@ -86,6 +89,7 @@ export interface ODataCapabilitiesConfig {
     hasStream?: boolean;
     aggregation?: boolean;
     aggregationMethods?: string[];
+    applySupported?: boolean;
     insertRestrictions?: ODataInsertRestrictionsConfig;
     updateRestrictions?: ODataUpdateRestrictionsConfig;
     deleteRestrictions?: ODataDeleteRestrictionsConfig;
@@ -94,4 +98,12 @@ export interface ODataCapabilitiesConfig {
 
 export interface ODataCapabilityDefaults extends ODataCapabilitiesConfig {
     navigationRestrictionDefaults?: ODataNavigationRestriction;
+}
+
+export interface ODataApplyFallbackEvent {
+    event: string;
+    entitySet: string;
+    transformations?: number;
+    rows?: number;
+    limit?: number;
 }

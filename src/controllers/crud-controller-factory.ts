@@ -26,7 +26,15 @@ import {
     ModelDefinition,
 } from '@loopback/repository';
 import { EntitySetDef } from '../registry/entityset-registry';
-import { parseODataQuery, AggregationSpec, AggregationOperator, LambdaExpression, ParsedExpression, FunctionArg } from '../services/odata-query-parser.service';
+import {
+    parseODataQuery,
+    AggregationSpec,
+    AggregationOperator,
+    LambdaExpression,
+    ParsedExpression,
+    FunctionArg,
+    ApplyPipeline,
+} from '../services/odata-query-parser.service';
 import { ODATA_ATOMICITY_STATE, ODATA_VERSION } from '../constants';
 import { AtomicityRequestState } from '../types/batch';
 import { Response } from '@loopback/rest';
@@ -51,6 +59,7 @@ import { ODATA_BINDINGS } from '../keys';
 import { ODataConfig } from '../types';
 import { getODataSearchableProps } from '../decorators/search.decorators';
 import {ensureNavigationTargetKey} from '../util/relation-metadata';
+import { ApplyExecutionPlan, buildApplyExecutionPlan } from '../services/odata-apply-planner.service';
 type CrudEntity = Entity & { [key: string]: unknown };
 type CrudRepo = DefaultCrudRepository<CrudEntity, unknown>;
 type NormalizedInclusion = Exclude<InclusionFilter, string>;
@@ -646,14 +655,15 @@ export function defineODataCrudController(def: EntitySetDef) {
 
         executeAggregation(rows: AnyObject[], spec: AggregationSpec): AnyObject[] {
             const groupMap = new Map<string, {groupValues: Record<string, unknown>; aggregates: Record<string, AggregationAccumulatorState>}>();
+            const groupKeys = spec.groupBy ?? [];
 
             for (const row of rows) {
-                const groupValues = spec.groupBy.map(field => (row as AnyObject)[field]);
+                const groupValues = groupKeys.map(field => this.getValueAtPath(row, field));
                 const key = JSON.stringify(groupValues);
                 let entry = groupMap.get(key);
                 if (!entry) {
                     const values: Record<string, unknown> = {};
-                    spec.groupBy.forEach((field, idx) => {
+                    groupKeys.forEach((field, idx) => {
                         values[field] = groupValues[idx];
                     });
                     entry = {groupValues: values, aggregates: {}};
@@ -673,7 +683,7 @@ export function defineODataCrudController(def: EntitySetDef) {
                         };
                         entry.aggregates[aggregate.alias] = state;
                     }
-                    const value = aggregate.field ? (row as AnyObject)[aggregate.field] : undefined;
+                    const value = aggregate.field ? this.getValueAtPath(row, aggregate.field) : undefined;
                     updateAccumulatorState(state, value);
                 }
             }
@@ -805,6 +815,55 @@ export function defineODataCrudController(def: EntitySetDef) {
         applyPostFilter(data: AnyObject[], expr?: ParsedExpression): AnyObject[] {
             if (!expr) return data;
             return data.filter(entity => this.evaluatePredicate(expr, entity, '', entity));
+        }
+
+        applyPostFilters(data: AnyObject[], expressions: ParsedExpression[]): AnyObject[] {
+            if (!expressions.length) return data;
+            let result = data;
+            for (const expr of expressions) {
+                result = this.applyPostFilter(result, expr);
+            }
+            return result;
+        }
+
+        collectAggregationRelations(plan: ApplyExecutionPlan | undefined): string[] {
+            if (!plan?.groupBy) return [];
+            const relations = new Set<string>();
+            const addPath = (path?: string) => {
+                if (!path || !path.includes('/')) return;
+                const [head] = path.split('/');
+                if (!head) return;
+                if (!(modelRelations as Record<string, unknown>)[head]) return;
+                relations.add(head);
+            };
+            plan.groupBy.keys.forEach(addPath);
+            for (const aggregate of plan.groupBy.aggregates) {
+                addPath(aggregate.field);
+            }
+            return Array.from(relations);
+        }
+
+        getValueAtPath(source: AnyObject, path: string): unknown {
+            if (!path) return undefined;
+            if (!path.includes('/')) return (source as AnyObject)?.[path];
+            const segments = path.split('/');
+            let current: unknown = source;
+            for (const segment of segments) {
+                if (current == null) return undefined;
+                if (Array.isArray(current)) {
+                    return undefined;
+                }
+                current = (current as AnyObject)[segment];
+            }
+            return current;
+        }
+
+        logApplyFallback(event: string, detail: { entitySet: string; transformations?: number; rows?: number; limit?: number }) {
+            const payload = { event, ...detail };
+            this.cfg?.onApplyFallback?.(payload);
+            if (this.cfg?.logApplyFallbacks) {
+                console.warn(`[OData] $apply fallback (${event}) ${JSON.stringify(detail)}`);
+            }
         }
 
         resolveFunctionArgValue(arg: FunctionArg, current: AnyObject, alias: string, root: AnyObject): unknown {
@@ -1797,9 +1856,12 @@ export function defineODataCrudController(def: EntitySetDef) {
 
             const baseFilter: Filter<CrudEntity> = filter ? { ...filter } : {};
             const aggregationEnabled = Boolean(def.capabilities?.aggregation ?? this.cfg?.capabilities?.aggregation);
+            let hadClientExpand = false;
 
             let inlineCountRequested = false;
             let aggregationSpec: AggregationSpec | undefined;
+            let applyPipeline: ApplyPipeline | undefined;
+            let applyPlan: ApplyExecutionPlan | undefined;
             let lambdaExpression: LambdaExpression | undefined;
             let postFilterExpr: ParsedExpression | undefined;
             let unsupportedFunctions: string[] = [];
@@ -1812,20 +1874,52 @@ export function defineODataCrudController(def: EntitySetDef) {
                 if (inlineCountRequested && this.cfg && this.cfg.enableCount === false) {
                     throw new HttpErrors.BadRequest('The $count option is disabled by server configuration.');
                 }
-                aggregationSpec = parsed.apply;
+                const externalOrder = Array.isArray(parsed.order) ? [...parsed.order] : parsed.order;
+                applyPipeline = parsed.applyPipeline;
+                if (applyPipeline) {
+                    applyPlan = buildApplyExecutionPlan(applyPipeline, { strict: Boolean(this.cfg?.strict) });
+                    if (applyPlan?.orderBy?.length && externalOrder && (Array.isArray(externalOrder) ? externalOrder.length : true)) {
+                        throw new HttpErrors.BadRequest('Combining $orderby outside $apply with orderby() inside the pipeline is not supported.');
+                    }
+                }
+                aggregationSpec = applyPlan?.groupBy
+                    ? { groupBy: applyPlan.groupBy.keys, aggregates: applyPlan.groupBy.aggregates }
+                    : parsed.apply;
                 lambdaExpression = parsed.lambda;
                 postFilterExpr = parsed.postFilter;
                 unsupportedFunctions = parsed.unsupportedFunctions ?? [];
                 if (postFilterExpr && unsupportedFunctions.length && this.cfg?.strict) {
                     throw new HttpErrors.BadRequest(`Unsupported filter functions in strict mode: ${unsupportedFunctions.join(', ')}`);
                 }
-                const parsedFilter = { ...parsed } as Filter<CrudEntity> & { inlineCount?: boolean; apply?: AggregationSpec; lambda?: LambdaExpression };
+                const parsedFilter = { ...parsed } as Filter<CrudEntity> & {
+                    inlineCount?: boolean;
+                    apply?: AggregationSpec;
+                    applyPipeline?: ApplyPipeline;
+                    lambda?: LambdaExpression;
+                };
                 delete (parsedFilter as { inlineCount?: boolean }).inlineCount;
                 delete (parsedFilter as { apply?: AggregationSpec }).apply;
+                delete (parsedFilter as { applyPipeline?: ApplyPipeline }).applyPipeline;
                 delete (parsedFilter as { lambda?: LambdaExpression }).lambda;
                 delete (parsedFilter as { postFilter?: ParsedExpression }).postFilter;
                 delete (parsedFilter as { unsupportedFunctions?: string[] }).unsupportedFunctions;
                 this.mergeFilters(baseFilter, parsedFilter);
+                hadClientExpand = Array.isArray(baseFilter.include)
+                    ? baseFilter.include.length > 0
+                    : Boolean(baseFilter.include);
+                if (applyPlan?.pushdownWhere) {
+                    const existingWhere = baseFilter.where as CrudWhere | undefined;
+                    const planWhere = applyPlan.pushdownWhere as CrudWhere;
+                    const combinedWhere = this.combineWithAnd([existingWhere, planWhere]);
+                    baseFilter.where = combinedWhere ?? planWhere;
+                }
+                if (applyPlan) {
+                    const relationsToInclude = this.collectAggregationRelations(applyPlan);
+                    if (relationsToInclude.length) {
+                        const additions = relationsToInclude.map(relation => ({ relation }));
+                        baseFilter.include = mergeIncludes(baseFilter.include as InclusionFilter[] | undefined, additions);
+                    }
+                }
                 this.ensureEtagField(baseFilter);
                 // apply $search if present
                 this.applySearch(baseFilter, (parsed as any).search);
@@ -1840,7 +1934,7 @@ export function defineODataCrudController(def: EntitySetDef) {
                 if (inlineCountRequested) {
                     throw new HttpErrors.BadRequest('The $count option cannot be combined with $apply.');
                 }
-                if (baseFilter.include) {
+                if (hadClientExpand) {
                     throw new HttpErrors.BadRequest('The $expand option is not supported together with $apply.');
                 }
                 if (!aggregationEnabled) {
@@ -1877,7 +1971,8 @@ export function defineODataCrudController(def: EntitySetDef) {
 
             const requestedOffset = typeof baseFilter.offset === 'number' ? baseFilter.offset : 0;
             const requestedLimit = typeof baseFilter.limit === 'number' ? baseFilter.limit : undefined;
-            const requiresPostFilter = Boolean(postFilterExpr);
+            const planTriggersPostFilter = Boolean(applyPlan && (applyPlan.postFilters.length > 0 || applyPlan.skip !== undefined || applyPlan.top !== undefined));
+            const requiresPostFilter = Boolean(postFilterExpr) || planTriggersPostFilter;
 
             if (requiresPostFilter) {
                 delete baseFilter.offset;
@@ -1900,10 +1995,35 @@ export function defineODataCrudController(def: EntitySetDef) {
 
                     const entities = await this.repository.find(fetchFilter, options);
                     const plainEntities = entities.map(entity => this.toPlainEntity(entity) ?? {});
-                    const filteredEntities = requiresPostFilter ? this.applyPostFilter(plainEntities, postFilterExpr) : plainEntities;
-                    const aggregated = this.executeAggregation(filteredEntities, aggregationSpec);
-                    const ordered = this.orderResults(aggregated, baseFilter.order);
-                    const paged = this.sliceResults(ordered, requestedOffset, requestedLimit);
+                    let working = plainEntities;
+                    if (applyPlan?.postFilters.length) {
+                        working = this.applyPostFilters(working, applyPlan.postFilters);
+                    }
+                    if (postFilterExpr) {
+                        working = this.applyPostFilter(working, postFilterExpr);
+                    }
+                    this.logApplyFallback('in-memory-apply', {
+                        entitySet: setName,
+                        transformations: applyPipeline?.transformations.length ?? 0,
+                        rows: working.length,
+                    });
+                    const maxApplySize = this.cfg?.maxApplyResultSize;
+                    if (typeof maxApplySize === 'number' && maxApplySize > 0 && working.length > maxApplySize) {
+                        this.logApplyFallback('limit-exceeded', {
+                            entitySet: setName,
+                            transformations: applyPipeline?.transformations.length ?? 0,
+                            rows: working.length,
+                            limit: maxApplySize,
+                        });
+                        throw new HttpErrors.BadRequest(`$apply result exceeds the server limit of ${maxApplySize} records. Refine the query or increase maxApplyResultSize.`);
+                    }
+                    const aggregated = this.executeAggregation(working, aggregationSpec);
+                    const planOrderClauses = applyPlan?.orderBy?.map(item => `${item.field} ${item.direction.toUpperCase()}`);
+                    const ordered = this.orderResults(aggregated, planOrderClauses ?? baseFilter.order);
+                    const afterPlanPaging = (applyPlan?.skip !== undefined || applyPlan?.top !== undefined)
+                        ? this.sliceResults(ordered, applyPlan?.skip, applyPlan?.top)
+                        : ordered;
+                    const paged = this.sliceResults(afterPlanPaging, requestedOffset, requestedLimit);
 
                     this.ensureODataHeaders();
                     const result = {

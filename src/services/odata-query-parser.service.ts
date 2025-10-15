@@ -58,6 +58,63 @@ export interface AggregationSpec {
   aggregates: AggregationExpression[];
 }
 
+export interface ApplyPipeline {
+  transformations: ApplyTransformation[];
+}
+
+export type ApplyTransformation =
+  | ApplyFilterTransformation
+  | ApplyGroupByTransformation
+  | ApplyAggregateTransformation
+  | ApplyOrderByTransformation
+  | ApplySkipTransformation
+  | ApplyTopTransformation
+  | ApplyBottomTransformation;
+
+export interface ApplyFilterTransformation {
+  type: 'filter';
+  expression: ParsedExpression;
+}
+
+export interface ApplyGroupByTransformation {
+  type: 'groupby';
+  keys: string[];
+  aggregates: AggregationExpression[];
+}
+
+export interface ApplyAggregateTransformation {
+  type: 'aggregate';
+  expressions: AggregationExpression[];
+}
+
+export interface ApplyOrderByTransformation {
+  type: 'orderby';
+  items: Array<{field: string; direction: 'asc' | 'desc'}>;
+}
+
+export interface ApplySkipTransformation {
+  type: 'skip';
+  count: number;
+}
+
+export interface ApplyTopTransformation {
+  type: 'top';
+  count: number;
+}
+
+export interface ApplyBottomTransformation {
+  type: 'bottom';
+  count: number;
+}
+
+function isValidIdentifierSegment(segment: string): boolean {
+  return /^[_A-Za-z][_A-Za-z0-9]*$/.test(segment);
+}
+
+function isValidPath(path: string): boolean {
+  return path.split('/').every(segment => segment.length > 0 && isValidIdentifierSegment(segment));
+}
+
 interface LambdaExpressionNode {
   operator: 'lambda';
   lambdaType: 'any' | 'all';
@@ -93,7 +150,7 @@ interface ParseOptions {
   strict?: boolean;
 }
 
-class UnsupportedFilterError extends Error {
+export class UnsupportedFilterError extends Error {
   functions: string[];
 
   constructor(functions: string[]) {
@@ -799,6 +856,10 @@ function translateLengthComparison(expr: LengthExpression): Where<AnyObject> {
   throw new Error('Unsupported length comparison.');
 }
 
+export function buildWhereFromParsedExpression(expr: ParsedExpression): Where<AnyObject> {
+  return buildWhere(expr);
+}
+
 function buildWhere(expr: ParsedExpression): Where<AnyObject> {
   if (expr.operator === 'stringfncmp') {
     throw new UnsupportedFilterError([expr.name]);
@@ -1079,36 +1140,89 @@ function findClosingParen(value: string, openIndex: number): number {
   throw new Error('Malformed expression: unmatched parentheses.');
 }
 
-function parseApply(apply: string): AggregationSpec {
-  const trimmed = apply.trim();
+export function parseApplyPipeline(apply: string): ApplyPipeline {
+  const trimmed = (apply ?? '').trim();
   if (!trimmed) {
     throw new Error('Empty $apply expression.');
   }
-
   const segments = splitTopLevel(trimmed, '/');
-  if (segments.length !== 1) {
-    throw new Error('Unsupported $apply pipeline. Only a single groupby(...) segment is supported.');
+  if (!segments.length) {
+    throw new Error('Empty $apply expression.');
+  }
+  const transformations = segments.map(segment => parseApplyTransformation(segment.trim()));
+  return {transformations};
+}
+
+function parseApplyTransformation(segment: string): ApplyTransformation {
+  const trimmed = segment.trim();
+  if (!trimmed) {
+    throw new Error('Empty $apply transformation.');
   }
 
-  const segment = segments[0].trim();
-  if (!/^groupby\s*\(/i.test(segment)) {
-    throw new Error('Unsupported $apply expression. Expected groupby(...).');
+  const openIndex = trimmed.indexOf('(');
+  if (openIndex === -1) {
+    throw new Error(`Invalid $apply transformation: ${segment}`);
   }
 
-  const openIndex = segment.indexOf('(');
-  const closeIndex = findClosingParen(segment, openIndex);
-  if (closeIndex !== segment.length - 1) {
-    throw new Error('Unsupported $apply expression. Unexpected content after groupby(...).');
+  const name = trimmed.substring(0, openIndex).trim().toLowerCase();
+  const closeIndex = findClosingParen(trimmed, openIndex);
+  if (closeIndex === -1) {
+    throw new Error(`Unbalanced parentheses inside $apply transformation: ${segment}`);
   }
 
-  const inner = segment.substring(openIndex + 1, closeIndex).trim();
-  if (!inner.startsWith('(')) {
+  const remainder = trimmed.substring(closeIndex + 1).trim();
+  if (remainder) {
+    throw new Error(`Invalid $apply transformation: unexpected content "${remainder}".`);
+  }
+
+  const inner = trimmed.substring(openIndex + 1, closeIndex).trim();
+  switch (name) {
+    case 'filter':
+      return parseApplyFilter(inner);
+    case 'groupby':
+      return parseApplyGroupBy(inner);
+    case 'aggregate':
+      return parseApplyAggregate(inner);
+    case 'orderby':
+      return parseApplyOrderBy(inner);
+    case 'skip':
+      return parseApplySkip(inner);
+    case 'top':
+      return parseApplyTop(inner);
+    case 'bottom':
+      return parseApplyBottom(inner);
+    default:
+      throw new Error(`Unsupported $apply transformation: ${name}`);
+  }
+}
+
+function parseApplyFilter(body: string): ApplyFilterTransformation {
+  const trimmed = body.trim();
+  if (!trimmed) {
+    throw new Error('filter() requires an expression.');
+  }
+  const tokens = tokenize(trimmed);
+  if (!tokens.length) {
+    throw new Error('filter() requires an expression.');
+  }
+  const [expression, next] = parseFilter(tokens);
+  if (next !== tokens.length) {
+    throw new Error('Invalid filter() transformation.');
+  }
+  return {type: 'filter', expression};
+}
+
+function parseApplyGroupBy(body: string): ApplyGroupByTransformation {
+  const trimmed = body.trim();
+  if (!trimmed.startsWith('(')) {
     throw new Error('groupby requires a list of properties in double parentheses.');
   }
-
-  const groupClose = findClosingParen(inner, 0);
-  const groupFieldsExpr = inner.substring(1, groupClose).trim();
-  const remainder = inner.substring(groupClose + 1).trim();
+  const groupClose = findClosingParen(trimmed, 0);
+  if (groupClose === -1) {
+    throw new Error('Unbalanced parentheses inside groupby().');
+  }
+  const groupFieldsExpr = trimmed.substring(1, groupClose).trim();
+  const remainder = trimmed.substring(groupClose + 1).trim();
 
   const groupFields = groupFieldsExpr
     ? groupFieldsExpr.split(',').map(p => p.trim()).filter(Boolean)
@@ -1118,7 +1232,7 @@ function parseApply(apply: string): AggregationSpec {
     throw new Error('groupby requires at least one property.');
   }
   groupFields.forEach(field => {
-    if (!/^[_A-Za-z][_A-Za-z0-9]*$/.test(field)) {
+    if (!isValidPath(field)) {
       throw new Error(`Unsupported group-by property: ${field}`);
     }
   });
@@ -1139,7 +1253,98 @@ function parseApply(apply: string): AggregationSpec {
 
   const aggregates: AggregationExpression[] = aggregateTokens.map(token => parseAggregateExpression(token));
 
-  return {groupBy: groupFields, aggregates};
+  return {
+    type: 'groupby',
+    keys: groupFields,
+    aggregates,
+  };
+}
+
+function parseApplyAggregate(body: string): ApplyAggregateTransformation {
+  const trimmed = body.trim();
+  if (!trimmed) {
+    throw new Error('aggregate() requires at least one expression.');
+  }
+  const aggregateTokens = splitTopLevel(trimmed, ',');
+  if (!aggregateTokens.length) {
+    throw new Error('aggregate() requires at least one expression.');
+  }
+  const expressions = aggregateTokens.map(token => parseAggregateExpression(token));
+  return {type: 'aggregate', expressions};
+}
+
+function parseApplyOrderBy(body: string): ApplyOrderByTransformation {
+  const orderStrings = parseOrder(body);
+  if (!orderStrings || !orderStrings.length) {
+    throw new Error('orderby() requires at least one property.');
+  }
+  const items = orderStrings.map(item => {
+    const [field, directionToken] = item.split(/\s+/);
+    const direction = directionToken?.toLowerCase() === 'desc' ? 'desc' : 'asc';
+    return {field, direction: direction as 'asc' | 'desc'};
+  });
+  return {type: 'orderby', items};
+}
+
+function parseApplySkip(body: string): ApplySkipTransformation {
+  const count = parseNonNegativeInteger(body, 'skip');
+  return {type: 'skip', count};
+}
+
+function parseApplyTop(body: string): ApplyTopTransformation {
+  const count = parseNonNegativeInteger(body, 'top');
+  return {type: 'top', count};
+}
+
+function parseApplyBottom(body: string): ApplyBottomTransformation {
+  const count = parseNonNegativeInteger(body, 'bottom');
+  return {type: 'bottom', count};
+}
+
+function parseNonNegativeInteger(value: string, transformation: string): number {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    throw new Error(`${transformation}() requires a numeric argument.`);
+  }
+  if (!/^[+-]?\d+$/.test(trimmed)) {
+    throw new Error(`${transformation}() requires an integer argument.`);
+  }
+  const num = Number(trimmed);
+  if (!Number.isInteger(num) || num < 0) {
+    throw new Error(`${transformation}() requires a non-negative integer argument.`);
+  }
+  return num;
+}
+
+function parseApply(apply: string): AggregationSpec | undefined {
+  const pipeline = parseApplyPipeline(apply);
+  return deriveAggregationSpecFromPipeline(pipeline);
+}
+
+function deriveAggregationSpecFromPipeline(pipeline: ApplyPipeline): AggregationSpec | undefined {
+  let groupByKeys: string[] | undefined;
+  const aggregates: AggregationExpression[] = [];
+  let hasGroupingStage = false;
+
+  for (const transformation of pipeline.transformations) {
+    if (transformation.type === 'groupby') {
+      if (groupByKeys !== undefined) {
+        throw new Error('Multiple groupby() transformations are not supported.');
+      }
+      groupByKeys = [...transformation.keys];
+      aggregates.push(...transformation.aggregates);
+      hasGroupingStage = true;
+    } else if (transformation.type === 'aggregate') {
+      aggregates.push(...transformation.expressions);
+      hasGroupingStage = true;
+    }
+  }
+
+  if (!hasGroupingStage || !aggregates.length) return undefined;
+  return {
+    groupBy: groupByKeys ?? [],
+    aggregates,
+  };
 }
 
 function parseAggregateExpression(raw: string): AggregationExpression {
@@ -1180,7 +1385,7 @@ function parseAggregateExpression(raw: string): AggregationExpression {
     throw new Error('Only count(*) is supported for the wildcard aggregator.');
   }
 
-  if (fieldToken !== '*' && !/^[_A-Za-z][_A-Za-z0-9]*$/.test(fieldToken)) {
+  if (fieldToken !== '*' && !isValidPath(fieldToken)) {
     throw new Error(`Unsupported aggregate property: ${fieldToken}`);
   }
 
@@ -1547,6 +1752,7 @@ function parseExpand(
 export interface ParsedODataQuery extends Filter<AnyObject> {
   inlineCount?: boolean;
   search?: string;
+  applyPipeline?: ApplyPipeline;
   apply?: AggregationSpec;
   lambda?: LambdaExpression;
   postFilter?: ParsedExpression;
@@ -1635,7 +1841,9 @@ export function parseODataQuery(query: QueryObject, options: ParseOptions = {}):
 
   const apply = typeof query['$apply'] === 'string' ? query['$apply'] : undefined;
   if (apply) {
-    filter.apply = parseApply(apply);
+    const pipeline = parseApplyPipeline(apply);
+    filter.applyPipeline = pipeline;
+    filter.apply = deriveAggregationSpecFromPipeline(pipeline);
   }
 
   return filter;

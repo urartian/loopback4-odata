@@ -173,6 +173,7 @@ function mergeCapabilities(
         hasStream: overrides?.hasStream ?? defaults?.hasStream,
         aggregation: overrides?.aggregation ?? defaults?.aggregation,
         aggregationMethods: overrides?.aggregationMethods ?? defaults?.aggregationMethods,
+        applySupported: overrides?.applySupported ?? defaults?.applySupported,
         insertRestrictions: mergeInsertRestrictions(defaults?.insertRestrictions, overrides?.insertRestrictions),
         updateRestrictions: mergeUpdateRestrictions(defaults?.updateRestrictions, overrides?.updateRestrictions),
         deleteRestrictions: mergeDeleteRestrictions(defaults?.deleteRestrictions, overrides?.deleteRestrictions),
@@ -1110,6 +1111,19 @@ export class CsdlGenerator {
                 );
                 capabilityAnnotationsJson['@Org.OData.Capabilities.V1.Aggregate'] = {
                     SupportedAggregationMethods: methodsForJson,
+                };
+            }
+
+            if (capabilities.applySupported) {
+                capabilityAnnotationsXml.push(
+                    '        <Annotation Term="Org.OData.Capabilities.V1.ApplySupported">',
+                    '          <Record>',
+                    '            <PropertyValue Property="ApplySupported" Bool="true"/>',
+                    '          </Record>',
+                    '        </Annotation>',
+                );
+                capabilityAnnotationsJson['@Org.OData.Capabilities.V1.ApplySupported'] = {
+                    ApplySupported: true,
                 };
             }
 

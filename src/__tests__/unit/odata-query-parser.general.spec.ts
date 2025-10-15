@@ -1,7 +1,7 @@
 /// <reference path="../../types/testing.globals.d.ts" />
 
 import {strict as assert} from 'assert';
-import {parseODataQuery} from '../../services/odata-query-parser.service';
+import {parseODataQuery, parseApplyPipeline} from '../../services/odata-query-parser.service';
 
 describe('parseODataQuery basics', () => {
   it('maps comparison operators and logical AND/OR', () => {
@@ -92,5 +92,51 @@ describe('parseODataQuery basics', () => {
       () => parseODataQuery({'$filter': 'orderItems/any(i: i/unitPrice gt 800) or price gt 1000'}),
       /Lambda expressions combined with OR are not supported yet/i,
     );
+  });
+
+  it('attaches simple $apply pipelines to the parsed query', () => {
+    const parsed = parseODataQuery({
+      '$apply': 'groupby((total), aggregate(id with count as OrderCount))',
+    });
+
+    assert(parsed.apply);
+    assert(parsed.applyPipeline);
+    assert.equal(parsed.apply?.groupBy[0], 'total');
+    assert.equal(parsed.applyPipeline?.transformations[0].type, 'groupby');
+  });
+
+  it('parses multi-stage $apply pipelines into an AST', () => {
+    const pipeline = parseApplyPipeline(
+      "filter(price gt 100)/groupby((category), aggregate(price with sum as TotalPrice))",
+    );
+
+    assert.equal(pipeline.transformations.length, 2);
+    const [first, second] = pipeline.transformations;
+    assert.equal(first.type, 'filter');
+    assert.equal(second.type, 'groupby');
+    if (second.type === 'groupby') {
+      assert.deepStrictEqual(second.keys, ['category']);
+      assert.equal(second.aggregates[0].alias, 'TotalPrice');
+    }
+
+    const parsed = parseODataQuery({
+      '$apply': "filter(price gt 100)/groupby((category), aggregate(price with sum as TotalPrice))",
+    });
+
+    assert(parsed.applyPipeline);
+    assert(parsed.apply);
+    assert.deepStrictEqual(parsed.apply?.groupBy, ['category']);
+    assert.equal(parsed.apply?.aggregates[0].alias, 'TotalPrice');
+  });
+
+  it('supports navigation paths in groupby and aggregate expressions', () => {
+    const parsed = parseODataQuery({
+      '$apply': 'groupby((customer/country), aggregate(order/total with sum as TotalRevenue))',
+    });
+
+    assert(parsed.applyPipeline);
+    assert(parsed.apply);
+    assert.deepStrictEqual(parsed.apply?.groupBy, ['customer/country']);
+    assert.equal(parsed.apply?.aggregates[0].field, 'order/total');
   });
 });
