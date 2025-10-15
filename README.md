@@ -962,6 +962,12 @@ For `hasOne`, use `PUT /EntitySet(key)/Relation/$ref` with the same payload shap
 ## Roadmap
 
 - [ ] Draft/deep insert workflow
+- [ ] Full `$apply` pipeline support (multi-stage transformations, navigation aggregates) to align with SAP CAP analytics scenarios
+- [ ] Broader query option coverage including `$compute`, `$skiptoken`, `$levels`, `$value`, `$format`, and delta links
+- [ ] Deep update / draft handling for composition hierarchies
+- [ ] Rich lambda grammar with nested `any` / `all` and mixed logical operators
+- [ ] Virtual/calculated field exposure with CSDL annotations
+- [ ] Media stream and attachment handling via `$value` routes and `HasStream` entity sets
 
 ## Contributing
 
