@@ -877,7 +877,7 @@ this.bind(ODATA_BINDINGS.CONFIG).to({
 - `enableDeepInsert`: Opt-in global switch for accepting nested payloads (deep insert). When `true`, every entity set defaults to deep insert unless overridden per model. When `false` (default), only entity sets with `@odataModel({deepInsert: true})` participate.
 - `maxDeepInsertDepth`: Maximum recursion depth for deep insert traversal (default: `10`). Requests exceeding the limit are rejected with `400 Bad Request` to prevent runaway graphs.
 - `enableNavigationRefEndpoints`: Set to `false` to skip registration of navigation `$ref` routes if you prefer to manage linking manually (default: `true`).
-- `$apply` support currently covers a single `groupby((... ), aggregate(...))` segment with aggregate methods `sum`, `average`, `min`, `max`, `count`, and `countdistinct` on scalar entity properties. Pipelines with additional stages (`filter`, `orderby`, etc.) and aggregations on navigation properties are not yet available.
+- `$apply` pipelines support chained `filter`, `groupby`, `aggregate`, `orderby`, `skip`, and `top` stages, including navigation-path aggregates. When a connector cannot push the pipeline down, the runtime executes it in memory with safety limits (`maxApplyResultSize`, logging callbacks, etc.).
 - Lambda filters (`any` / `all`) support navigation collections (including multi-segment paths) and can be combined with additional predicates using `and`. Nesting lambdas, mixing multiple lambdas, or combining them with `or` remains unsupported.
 - `strict` (default: true): Enables stricter validations and policies:
   - Requires `If-Match` on `PATCH`/`DELETE` when ETags are enabled (428 if missing).
@@ -903,6 +903,35 @@ Entity-set specific overrides are available via `EntitySetRegistry.register`:
 - `hasStream`: mark the backing entity type as streaming (`Org.OData.Core.V1.HasStream`).
 
 Both the global `capabilities` defaults and per-set overrides support the new `insertRestrictions`, `updateRestrictions`, `deleteRestrictions`, and `searchRestrictions` keys. Example: `insertRestrictions: {insertable: false, nonInsertableNavigationProperties: ['orders']}` emits `Org.OData.Capabilities.V1.InsertRestrictions`, while `searchRestrictions: {unsupportedExpressions: ['not']}` maps shorthand values (`and`, `or`, `not`, etc.) to the corresponding `Org.OData.Capabilities.V1.SearchExpressions/*` enum members.
+
+### Advanced `$apply` Examples
+
+Start the example app (it seeds sample data on boot):
+
+```bash
+npm run dev
+```
+
+Run a multi-stage pipeline with filtering, grouping, and ordering:
+
+```bash
+curl "http://127.0.0.1:3001/odata/Orders?\$apply=filter(total%20gt%202500)/groupby((total),aggregate(id%20with%20count%20as%20OrderCount))/orderby(OrderCount%20desc)/top(1)"
+```
+
+Aggregate over navigation paths:
+
+```bash
+curl "http://127.0.0.1:3001/odata/OrderItems?\$apply=groupby((order/id),aggregate(order/total%20with%20sum%20as%20TotalRevenue))/orderby(TotalRevenue%20desc)/top(1)"
+```
+
+Guard in-memory fallbacks by capping the allowed result size:
+
+```bash
+MAX_APPLY_RESULT_SIZE=1 npm run dev
+curl "http://127.0.0.1:3001/odata/OrderItems?\$apply=groupby((order/id),aggregate(order/total%20with%20sum%20as%20TotalRevenue))"
+```
+
+The second command now returns `400 Bad Request`, demonstrating the throttle.
 
 ### Deep Insert
 

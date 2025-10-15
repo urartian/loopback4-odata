@@ -20,7 +20,9 @@ import {
   repository,
 } from '@loopback/repository';
 import {
+  ODATA_BINDINGS,
   ODataComponent,
+  ODataConfig,
   odataAction,
   odataController,
   odataFunction,
@@ -43,10 +45,20 @@ class ExampleApp extends BootMixin(RepositoryMixin(RestApplication)) {
     this.repository(OrderRepository);
 
     this.component(ODataComponent);
+
+    const maxApply = Number(process.env.MAX_APPLY_RESULT_SIZE ?? '');
+    if (Number.isFinite(maxApply) && maxApply > 0) {
+      const current = this.getSync(ODATA_BINDINGS.CONFIG) as ODataConfig;
+      this.bind(ODATA_BINDINGS.CONFIG).to({
+        ...current,
+        maxApplyResultSize: maxApply,
+        logApplyFallbacks: true, // optional so you see the warning
+      });
+    }
   }
 }
 
-@odataModel({etag: 'updatedAt'})
+@odataModel({ etag: 'updatedAt' })
 @model()
 export class Product extends Entity {
   @property({ id: true })
@@ -161,7 +173,7 @@ export class ProductRepository extends DefaultCrudRepository<
     return super.updateById(id, data, options);
   }
 
-  async updateAll(data: DataObject<Product>, where?: AnyObject, options?: Options): Promise<{count: number}> {
+  async updateAll(data: DataObject<Product>, where?: AnyObject, options?: Options): Promise<{ count: number }> {
     this.touch(data);
     return super.updateAll(data, where, options);
   }
@@ -229,7 +241,7 @@ export class OrderItemRepository extends DefaultCrudRepository<
 class ProductODataController {
   constructor(
     @repository(ProductRepository) private readonly products: ProductRepository,
-  ) {}
+  ) { }
 
   @odataAction({
     binding: 'entity',
@@ -257,10 +269,10 @@ class ProductODataController {
 }
 
 @odataController(Order)
-class OrderODataController {}
+class OrderODataController { }
 
 @odataController(OrderItem)
-class OrderItemODataController {}
+class OrderItemODataController { }
 
 export async function main() {
   const app = new ExampleApp();
