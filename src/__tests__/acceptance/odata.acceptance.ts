@@ -7,6 +7,8 @@ import {
   givenODataApplication,
   seedExampleData,
 } from '../fixtures/odata-app.fixture';
+import {ODATA_BINDINGS} from '../../keys';
+import {ODataConfig} from '../../types';
 
 if (typeof process.setMaxListeners === 'function') {
   process.setMaxListeners(20);
@@ -300,6 +302,67 @@ describe('OData component acceptance', () => {
     const first = res.body.value[0];
     expect(first).to.have.property('total');
     expect(first.OrderCount).to.equal(1);
+  });
+
+  it('supports multi-stage $apply pipelines with filter and orderby', async () => {
+    const res = await client
+      .get('/odata/Orders')
+      .query({
+        $apply:
+          "filter(total gt 2500)/groupby((total), aggregate(id with count as OrderCount))/orderby(OrderCount desc)/top(1)",
+      })
+      .expect(200);
+
+    expect(res.body.value).to.be.Array();
+    expect(res.body.value).to.have.length(1);
+    const only = res.body.value[0];
+    expect(only.total).to.be.a.Number();
+    expect(only.total).to.be.greaterThan(2500);
+    expect(only.OrderCount).to.equal(1);
+  });
+
+  it('supports navigation-path groupby aggregates', async () => {
+    const res = await client
+      .get('/odata/OrderItems')
+      .query({
+        $apply:
+          'groupby((order/id), aggregate(order/total with sum as TotalOrderValue))/orderby(TotalOrderValue desc)/top(1)',
+      })
+      .expect(200);
+
+    expect(res.body.value).to.be.Array();
+    expect(res.body.value).to.have.length(1);
+    const first = res.body.value[0];
+    expect(first).to.have.property('order/id');
+    expect(first['order/id']).to.be.a.Number();
+    expect(first.TotalOrderValue).to.be.a.Number();
+    expect(first.TotalOrderValue).to.be.greaterThan(0);
+  });
+
+  it('enforces maxApplyResultSize limits during fallback execution', async function () {
+    if (app.state === 'started') await app.stop();
+    app = await givenODataApplication({port: 0, host: '127.0.0.1'});
+    app.bind(ODATA_BINDINGS.CONFIG).to({
+      maxApplyResultSize: 1,
+      logApplyFallbacks: false,
+      capabilities: {
+        aggregation: true,
+        applySupported: true,
+      },
+    } as ODataConfig);
+    await app.boot();
+    await seedExampleData(app);
+    await app.start();
+    client = createRestAppClient(app);
+
+    const res = await client
+      .get('/odata/OrderItems')
+      .query({
+        $apply: 'groupby((order/id), aggregate(order/total with sum as TotalRevenue))',
+      })
+      .expect(400);
+
+    expect(String(res.body?.error?.message ?? '')).to.match(/exceeds the server limit/i);
   });
 
   it('supports lambda any filters', async () => {
