@@ -4,9 +4,9 @@ import { ControllerClass, RestApplication, RequestContext, OperationObject, Rout
 import { EntitySetDef, EntitySetRegistry } from '../registry/entityset-registry';
 import { getODataControllerModel } from '../decorators/controller.decorator';
 import { defineODataCrudController } from '../controllers/crud-controller-factory';
-import { getODataModelMeta } from '../decorators/model.decorator';
+import { getODataModelMeta, ODataModelOptions } from '../decorators/model.decorator';
 import { ODATA_BINDINGS } from '../keys';
-import { AnyObject, Entity, ModelDefinition } from '@loopback/repository';
+import { AnyObject, Entity, ModelDefinition, juggler } from '@loopback/repository';
 import { getODataActions, getODataFunctions, OperationMeta } from '../decorators/action.function.decorators';
 import { pluralize } from 'inflection';
 import { normalizeEtagProperties } from '../util/etag';
@@ -15,6 +15,7 @@ import {getODataHooks} from '../decorators/hook.decorators';
 import type {CrudHookBundle} from '../types/crud-hooks';
 import { ODataConfig } from '../types';
 import {ensureNavigationTargetKey} from '../util/relation-metadata';
+import { ODataApplyExecutorRegistry } from '../services/odata-apply-executor.registry';
 
 @injectable({ tags: { booters: 'odata' } })
 export class ODataBooter implements Booter {
@@ -22,6 +23,7 @@ export class ODataBooter implements Booter {
         @inject(CoreBindings.APPLICATION_INSTANCE) private app: Application,
         @inject(ODATA_BINDINGS.ENTITY_SET_REGISTRY) private registry: EntitySetRegistry,
         @inject(ODATA_BINDINGS.CONFIG) private readonly config: ODataConfig,
+        @inject(ODATA_BINDINGS.APPLY_EXECUTOR_REGISTRY) private readonly executorRegistry: ODataApplyExecutorRegistry,
     ) { }
 
     async load(): Promise<void> {
@@ -91,11 +93,76 @@ export class ODataBooter implements Booter {
                 deepInsert,
             });
 
+            await this.configureApplyPushdown(def, repoBinding, modelMeta);
+
             const CrudController = defineODataCrudController(def);
             def.controllerCtor = CrudController;
             this.app.controller(CrudController);
             this.registerOperations(def, ctor);
             this.registerNavigationRefRoutes(def, modelDefinition, CrudController);
+        }
+    }
+
+    private async configureApplyPushdown(
+        def: EntitySetDef,
+        repoBinding: Readonly<Binding<unknown>>,
+        modelMeta: ODataModelOptions | undefined,
+    ): Promise<void> {
+        let preference = def.applyPushdown;
+        if (preference === undefined && modelMeta?.applyPushdown !== undefined) {
+            preference = modelMeta.applyPushdown;
+        }
+        if (preference === undefined && this.config?.enableApplyPushdown !== undefined) {
+            preference = this.config.enableApplyPushdown;
+        }
+
+        if (!preference) {
+            def.applyPushdown = false;
+            def.applyExecutorId = undefined;
+            return;
+        }
+
+        let repositoryInstance: unknown;
+        try {
+            repositoryInstance = await this.app.get(repoBinding.key);
+        } catch {
+            def.applyPushdown = false;
+            def.applyExecutorId = undefined;
+            return;
+        }
+
+        const dataSource = (repositoryInstance as {dataSource?: juggler.DataSource}).dataSource;
+        if (!dataSource) {
+            def.applyPushdown = false;
+            def.applyExecutorId = undefined;
+            return;
+        }
+
+        if (def.applyExecutorId) {
+            const existingExecutor = this.executorRegistry.get(def.applyExecutorId);
+            if (existingExecutor) {
+                const supported = existingExecutor.supports ? await existingExecutor.supports(dataSource) : true;
+                if (supported) {
+                    def.applyPushdown = true;
+                    return;
+                }
+            }
+        }
+
+        const autoExecutor = await this.executorRegistry.findForDataSource(dataSource);
+        if (autoExecutor) {
+            def.applyPushdown = true;
+            def.applyExecutorId = autoExecutor.id;
+            return;
+        }
+
+        def.applyPushdown = false;
+        def.applyExecutorId = undefined;
+        if (preference) {
+            const datasourceName = (dataSource as AnyObject)?.name ?? '[unknown]';
+            console.warn(
+                `[OData] apply pushdown requested for entity set ${def.name} but no compatible executor was found for datasource ${datasourceName}. Falling back to in-memory execution.`,
+            );
         }
     }
 

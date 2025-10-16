@@ -865,6 +865,7 @@ this.bind(ODATA_BINDINGS.CONFIG).to({
 - `maxApplyResultSize`: Maximum number of rows the server will process in-memory when executing `$apply` fallbacks (default: `2000`). Requests that exceed the limit are rejected with `400 Bad Request`.
 - `logApplyFallbacks`: When `true`, logs a warning whenever `$apply` falls back to in-memory execution (default: `false`).
 - `onApplyFallback(event)`: Optional callback invoked whenever `$apply` falls back; receives `{event, entitySet, transformations, rows, limit}` so you can integrate with metrics/telemetry.
+- `enableApplyPushdown`: Opt-in switch that negotiates `$apply` pushdown with each datasource. When enabled, supported connectors (currently PostgreSQL) execute `groupby()/aggregate()` pipelines in the database. Combine with `@odataModel({applyPushdown: true})` or `EntitySetRegistry.register({applyPushdown: true})` for per-entity control.
 - `maxExpandDepth`: Maximum allowed `$expand` nesting depth; requests that exceed it return `400 Bad Request`.
 - `enableCount`:
   - When `false`, inline counts (`?$count=true`) return `400 Bad Request` with an OData error.
@@ -932,6 +933,14 @@ curl "http://127.0.0.1:3001/odata/OrderItems?\$apply=groupby((order/id),aggregat
 ```
 
 The second command now returns `400 Bad Request`, demonstrating the throttle.
+
+### `$apply` Pushdown (PostgreSQL)
+
+- Pushdown is **opt-in**. Out of the box, `$apply` still executes in memory with the existing safety guards. Set `enableApplyPushdown: true` on `ODataConfig` to negotiate pushdown across datasources, or opt in per model with `@odataModel({applyPushdown: true})` / per entity set via `EntitySetRegistry.register({applyPushdown: true})`.
+- PostgreSQL is supported natively. The extension inspects each repository datasource and, when it detects a Postgres connector, routes aggregation pipelines through a SQL executor built on `dataSource.execute(...)`. No upstream connector changes are required.
+- Unsupported scenarios automatically fall back to the in-memory executor. When `logApplyFallbacks` is enabled (or `onApplyFallback` is provided), additional events (`executor-declined`, `executor-error`) surface whenever the pushdown path declines a request.
+- Capability metadata reflects reality: entity sets only emit `Org.OData.Capabilities.V1.ApplySupported` when pushdown is active, so BI clients can rely on the annotation.
+- Custom connectors can participate by registering their own executor with `ODataApplyExecutorRegistry`. Executors decide at runtime whether they can satisfy a pipeline and can signal unsupported combinations by returning `undefined`, preserving the existing fallback behavior.
 
 ### Deep Insert
 

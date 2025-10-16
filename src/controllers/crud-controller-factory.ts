@@ -60,6 +60,7 @@ import { ODataConfig } from '../types';
 import { getODataSearchableProps } from '../decorators/search.decorators';
 import {ensureNavigationTargetKey} from '../util/relation-metadata';
 import { ApplyExecutionPlan, buildApplyExecutionPlan } from '../services/odata-apply-planner.service';
+import { ODataApplyExecutorRegistry, ODataApplyExecutorContext } from '../services/odata-apply-executor.registry';
 type CrudEntity = Entity & { [key: string]: unknown };
 type CrudRepo = DefaultCrudRepository<CrudEntity, unknown>;
 type NormalizedInclusion = Exclude<InclusionFilter, string>;
@@ -224,6 +225,8 @@ export function defineODataCrudController(def: EntitySetDef) {
             public readonly httpCtx: RequestContext,
             @inject(ODATA_BINDINGS.CONFIG)
             public readonly cfg: ODataConfig,
+            @inject(ODATA_BINDINGS.APPLY_EXECUTOR_REGISTRY)
+            public readonly applyExecutors: ODataApplyExecutorRegistry,
         ) { }
 
         etagEnabled(): boolean {
@@ -863,6 +866,110 @@ export function defineODataCrudController(def: EntitySetDef) {
             this.cfg?.onApplyFallback?.(payload);
             if (this.cfg?.logApplyFallbacks) {
                 console.warn(`[OData] $apply fallback (${event}) ${JSON.stringify(detail)}`);
+            }
+        }
+
+        async tryExecuteApplyPushdown(
+            aggregation: AggregationSpec,
+            plan: ApplyExecutionPlan | undefined,
+            pipeline: ApplyPipeline | undefined,
+            fetchFilter: Filter<CrudEntity>,
+            baseFilter: Filter<CrudEntity>,
+            requestedOffset: number,
+            requestedLimit: number | undefined,
+            postFilterExpr: ParsedExpression | undefined,
+            contextBase: string,
+            options: Options | undefined,
+        ): Promise<AnyObject | undefined> {
+            if (!def.applyPushdown || !def.applyExecutorId) return undefined;
+            const registry = this.applyExecutors;
+            if (!registry) return undefined;
+            const executor = registry.get(def.applyExecutorId);
+            if (!executor) return undefined;
+
+            const defaultGroupBy = plan?.groupBy ?? {
+                keys: aggregation.groupBy ?? [],
+                aggregates: aggregation.aggregates,
+            };
+
+            const effectivePlan: ApplyExecutionPlan = plan
+                ? {
+                    ...plan,
+                    groupBy: defaultGroupBy,
+                }
+                : {
+                    pushdownWhere: undefined,
+                    postFilters: [],
+                    groupBy: defaultGroupBy,
+                    orderBy: undefined,
+                    top: undefined,
+                    skip: undefined,
+                };
+
+            const effectivePipeline: ApplyPipeline = pipeline ?? { transformations: [] };
+            const fetchFilterCopy: Filter<CrudEntity> = { ...fetchFilter };
+            if (fetchFilter.where) {
+                fetchFilterCopy.where = { ...(fetchFilter.where as CrudWhere) } as CrudWhere;
+            }
+            if (Array.isArray(fetchFilter.include)) {
+                fetchFilterCopy.include = [...fetchFilter.include];
+            }
+
+            const context: ODataApplyExecutorContext = {
+                entitySet: def,
+                repository: this.repository,
+                plan: effectivePlan,
+                pipeline: effectivePipeline,
+                aggregation,
+                baseFilter: { ...baseFilter },
+                fetchFilter: fetchFilterCopy,
+                options,
+                requestedLimit,
+                requestedOffset,
+            };
+
+            try {
+                const execResult = await executor.execute(context);
+                if (!execResult) {
+                    this.logApplyFallback('executor-declined', {
+                        entitySet: setName,
+                        transformations: effectivePipeline.transformations.length,
+                        rows: 0,
+                    });
+                    return undefined;
+                }
+
+                let working = execResult.rows ?? [];
+                if (effectivePlan.postFilters.length) {
+                    working = this.applyPostFilters(working, effectivePlan.postFilters);
+                }
+                if (postFilterExpr) {
+                    working = this.applyPostFilter(working, postFilterExpr);
+                }
+                const planOrderClauses = effectivePlan.orderBy?.map(item => `${item.field} ${item.direction.toUpperCase()}`);
+                const fallbackOrder = Array.isArray(baseFilter.order)
+                    ? baseFilter.order
+                    : typeof baseFilter.order === 'string'
+                        ? [baseFilter.order]
+                        : undefined;
+                const ordered = this.orderResults(working, planOrderClauses ?? fallbackOrder);
+                const afterPlanPaging = (effectivePlan.skip !== undefined || effectivePlan.top !== undefined)
+                    ? this.sliceResults(ordered, effectivePlan.skip, effectivePlan.top)
+                    : ordered;
+                const paged = this.sliceResults(afterPlanPaging, requestedOffset, requestedLimit);
+
+                this.ensureODataHeaders();
+                return {
+                    '@odata.context': contextBase,
+                    value: paged,
+                } as AnyObject;
+            } catch (error) {
+                this.logApplyFallback('executor-error', {
+                    entitySet: setName,
+                    transformations: effectivePipeline.transformations.length,
+                    rows: 0,
+                });
+                return undefined;
             }
         }
 
@@ -1992,6 +2099,23 @@ export function defineODataCrudController(def: EntitySetDef) {
                     delete fetchFilter.order;
                     delete fetchFilter.limit;
                     delete fetchFilter.offset;
+
+                    const pushdownResult = await this.tryExecuteApplyPushdown(
+                        aggregationSpec,
+                        applyPlan,
+                        applyPipeline,
+                        fetchFilter,
+                        baseFilter,
+                        requestedOffset,
+                        requestedLimit,
+                        postFilterExpr,
+                        contextBase,
+                        options,
+                    );
+                    if (pushdownResult) {
+                        ctx.result = pushdownResult;
+                        return pushdownResult;
+                    }
 
                     const entities = await this.repository.find(fetchFilter, options);
                     const plainEntities = entities.map(entity => this.toPlainEntity(entity) ?? {});

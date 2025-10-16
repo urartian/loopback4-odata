@@ -21,6 +21,8 @@ export interface EntitySetDef<T extends Entity = Entity> {
     hasStream?: boolean;
     capabilities?: ODataCapabilitiesConfig;
     deepInsert?: boolean;
+    applyPushdown?: boolean;
+    applyExecutorId?: string;
 }
 
 @injectable({ scope: BindingScope.SINGLETON })
@@ -35,6 +37,12 @@ export class EntitySetRegistry {
         }
         if (def.deepInsert === undefined && existing?.deepInsert !== undefined) {
             next.deepInsert = existing.deepInsert;
+        }
+        if (def.applyPushdown === undefined && existing?.applyPushdown !== undefined) {
+            next.applyPushdown = existing.applyPushdown;
+        }
+        if (!def.applyExecutorId && existing?.applyExecutorId) {
+            next.applyExecutorId = existing.applyExecutorId;
         }
         this.sets.set(def.modelCtor, next);
         return next as EntitySetDef<T>;

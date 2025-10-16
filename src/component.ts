@@ -10,6 +10,8 @@ import { EntitySetRegistry } from './registry/entityset-registry';
 import { ODataBooter } from './booters/odata.booter';
 import { OdataPathRewriterProvider } from './middleware/odata-path-rewriter.provider';
 import { ODataErrorProvider } from './providers/odata-error.provider';
+import { ODataApplyExecutorRegistry } from './services/odata-apply-executor.registry';
+import { PostgresApplyExecutor } from './services/postgres-apply-executor';
 
 export class ODataComponent implements Component {
     bindings = [
@@ -29,6 +31,13 @@ export class ODataComponent implements Component {
         } as ODataConfig),
         Binding.bind(ODATA_BINDINGS.CSDL_GEN).toClass(CsdlGenerator).inScope(BindingScope.SINGLETON),
         Binding.bind(ODATA_BINDINGS.ENTITY_SET_REGISTRY).toClass(EntitySetRegistry).inScope(BindingScope.SINGLETON),
+        Binding.bind(ODATA_BINDINGS.APPLY_EXECUTOR_REGISTRY)
+            .toDynamicValue(() => {
+                const registry = new ODataApplyExecutorRegistry();
+                registry.register(new PostgresApplyExecutor());
+                return registry;
+            })
+            .inScope(BindingScope.SINGLETON),
         createMiddlewareBinding(OdataPathRewriterProvider, {
             key: 'middleware.odataPathRewriter',
         }),

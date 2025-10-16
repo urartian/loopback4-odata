@@ -15,6 +15,7 @@ import {ODataBooter} from '../../booters/odata.booter';
 import {EntitySetRegistry} from '../../registry/entityset-registry';
 import {odataModel} from '../../decorators/model.decorator';
 import {odataController} from '../../decorators/controller.decorator';
+import {ODataApplyExecutorRegistry} from '../../services/odata-apply-executor.registry';
 
 describe('ODataBooter entity set naming', () => {
   it('uses inflection to pluralize model names by default', () => {
@@ -23,7 +24,7 @@ describe('ODataBooter entity set naming', () => {
 
     const app = new Application();
     const registry = new EntitySetRegistry();
-    const booter = new ODataBooter(app, registry, {} as any);
+    const booter = new ODataBooter(app, registry, {} as any, new ODataApplyExecutorRegistry());
 
     const setName = (booter as any).getEntitySetName(Person);
     expect(setName).to.equal('People');
@@ -36,7 +37,7 @@ describe('ODataBooter entity set naming', () => {
 
     const app = new Application();
     const registry = new EntitySetRegistry();
-    const booter = new ODataBooter(app, registry, {} as any);
+    const booter = new ODataBooter(app, registry, {} as any, new ODataApplyExecutorRegistry());
 
     const setName = (booter as any).getEntitySetName(Citizen);
     expect(setName).to.equal('CustomPeople');
@@ -75,7 +76,7 @@ describe('ODataBooter repository binding resolution', () => {
     app.controller(WidgetODataController);
 
     const registry = new EntitySetRegistry();
-    const booter = new ODataBooter(app, registry, {} as any);
+    const booter = new ODataBooter(app, registry, {} as any, new ODataApplyExecutorRegistry());
 
     await booter.load();
 
@@ -89,7 +90,7 @@ describe('ODataBooter navigation reference routes', () => {
   it('registers $ref routes when the foreign key can be inferred', async () => {
     const app = new RestApplication();
     const registry = new EntitySetRegistry();
-    const booter = new ODataBooter(app, registry, {} as any);
+    const booter = new ODataBooter(app, registry, {} as any, new ODataApplyExecutorRegistry());
 
     @model()
     class Order extends Entity {
