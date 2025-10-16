@@ -859,6 +859,24 @@ this.bind(ODATA_BINDINGS.CONFIG).to({
 } as ODataConfig);
 ```
 
+> **Important:** `capabilities` is a nested object. Flags such as `aggregation`, `applySupported`, or `filterFunctions` belong under `config.capabilities`. If you bind a brand-new config object without copying the defaults registered by `ODataComponent`, those flags disappear and features like `$apply` aggregations are reported as not implemented. Prefer `this.getSync(ODATA_BINDINGS.CONFIG)` and spread the existing value before applying overrides.
+
+```ts
+const currentConfig = this.getSync(ODATA_BINDINGS.CONFIG) as ODataConfig;
+
+this.bind(ODATA_BINDINGS.CONFIG).to({
+  ...currentConfig,
+  maxTop: 100,
+  enableDeepInsert: true,
+  capabilities: {
+    ...currentConfig.capabilities,
+    aggregation: true,
+    applySupported: true,
+    filterFunctions: ['contains', 'startswith', 'endswith'],
+  },
+} satisfies ODataConfig);
+```
+
 - `basePath`: Externally visible service root. All OData routes are served under this path (via middleware rewrite) while internal routes remain at `/odata`. Response metadata (`@odata.context`) uses this value.
 - `maxTop`: Caps `$top` for collection reads. The server may return fewer results than requested per OData v4. In strict mode, requests with `$top` above the cap return 400; otherwise the value is clamped to the maximum.
 - `maxSkip`: Maximum allowed `$skip`. When strict mode is disabled, requests above the cap are clamped; with strict mode enabled they return `400 Bad Request`.
