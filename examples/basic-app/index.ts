@@ -52,7 +52,9 @@ export class ExampleApp extends BootMixin(RepositoryMixin(RestApplication)) {
     super({ rest: { port: 3001, host: '127.0.0.1' } });
     this.projectRoot = __dirname;
 
-    this.dataSource(new juggler.DataSource(MEMORY_DS_CONFIG), MEMORY_DS_CONFIG.name);
+    const usePostgres = process.env.USE_POSTGRES === 'true';
+    const dsConfig = usePostgres ? POSTGRES_DS_CONFIG : MEMORY_DS_CONFIG;
+    this.dataSource(new juggler.DataSource(dsConfig), dsConfig.name);
     this.repository(OrderItemRepository);
     this.repository(ProductRepository);
     this.repository(OrderRepository);
@@ -70,10 +72,13 @@ export class ExampleApp extends BootMixin(RepositoryMixin(RestApplication)) {
     }
 
     const current = this.getSync(ODATA_BINDINGS.CONFIG) as ODataConfig;
+    const enablePushdown = process.env.ENABLE_APPLY_PUSHDOWN === 'true';
+    const logTelemetry = process.env.LOG_APPLY_TELEMETRY === 'true';
     this.bind(ODATA_BINDINGS.CONFIG).to({
       ...current,
-      enableApplyPushdown: false,
+      enableApplyPushdown: enablePushdown,
       logApplyFallbacks: true, // optional so you see the warning
+      ...(logTelemetry ? {logApplyTelemetry: true} : {}),
     });
   }
 }

@@ -10,6 +10,13 @@ import {EntitySetDef} from '../registry/entityset-registry';
 import {ApplyExecutionPlan} from './odata-apply-planner.service';
 import {AggregationSpec, ApplyPipeline} from './odata-query-parser.service';
 
+export interface ApplyExecutorTelemetryPayload {
+  durationMs?: number;
+  rows?: number;
+  joinCount?: number;
+  executorId?: string;
+}
+
 export interface ODataApplyExecutorContext {
   entitySet: EntitySetDef;
   repository: DefaultCrudRepository<any, unknown>;
@@ -21,6 +28,9 @@ export interface ODataApplyExecutorContext {
   options?: Options;
   requestedLimit?: number;
   requestedOffset?: number;
+  stageIndex: number;
+  stageCount: number;
+  telemetry?: (payload: ApplyExecutorTelemetryPayload) => void;
 }
 
 export interface ODataApplyExecutorResult {
@@ -28,10 +38,14 @@ export interface ODataApplyExecutorResult {
   appliedOrder?: boolean;
   appliedPipelinePagination?: boolean;
   appliedExternalPagination?: boolean;
+  appliedStageFilters?: boolean;
 }
 
 export interface ODataApplyExecutor {
   readonly id: string;
+  readonly capabilities?: {
+    navigation?: boolean;
+  };
   /**
    * Quick guard invoked during boot to determine whether the executor can handle
    * the given datasource (for example, a PostgreSQL connector). Return `true`

@@ -327,6 +327,38 @@ describe('OData component acceptance', () => {
     expect(only.OrderCount).to.equal(1);
   });
 
+  it('supports multi-stage $apply pipelines with successive aggregate stages', async () => {
+    const res = await client
+      .get('/odata/Orders')
+      .query({
+        $apply:
+          'groupby((total), aggregate(id with count as OrderCount))/aggregate(OrderCount with sum as OverallCount)',
+      })
+      .expect(200);
+
+    expect(res.body.value).to.be.Array();
+    expect(res.body.value).to.have.length(1);
+    const first = res.body.value[0];
+    expect(first.OverallCount).to.be.a.Number();
+    expect(first.OverallCount).to.be.greaterThan(0);
+  });
+
+  it('supports $apply pipelines with post-aggregate filter stages', async () => {
+    const res = await client
+      .get('/odata/Orders')
+      .query({
+        $apply:
+          "groupby((total), aggregate(id with count as OrderCount))/filter(OrderCount ge 1)/orderby(OrderCount desc)/top(1)",
+      })
+      .expect(200);
+
+    expect(res.body.value).to.be.Array();
+    expect(res.body.value).to.have.length(1);
+    const first = res.body.value[0];
+    expect(first.OrderCount).to.be.a.Number();
+    expect(first.OrderCount).to.be.greaterThan(0);
+  });
+
   it('supports navigation-path groupby aggregates', async () => {
     const res = await client
       .get('/odata/OrderItems')
@@ -343,6 +375,45 @@ describe('OData component acceptance', () => {
     expect(first['order/id']).to.be.a.Number();
     expect(first.TotalOrderValue).to.be.a.Number();
     expect(first.TotalOrderValue).to.be.greaterThan(0);
+  });
+
+  it('aggregates navigation paths in fallback execution', async () => {
+    const res = await client
+      .get('/odata/Products')
+      .query({
+        $apply: 'groupby((id), aggregate(orderItems/quantity with sum as TotalQuantity))',
+      })
+      .expect(200);
+
+    expect(res.body.value).to.be.Array();
+    const laptop = res.body.value.find((item: any) => item.id === 1);
+    expect(laptop).to.be.Object();
+    expect(laptop.TotalQuantity).to.equal(2);
+  });
+
+  it('enforces navigation fanout guardrail during fallback execution', async function () {
+    if (app.state === 'started') await app.stop();
+    app = await givenODataApplication({port: 0, host: '127.0.0.1'});
+    const current = app.getSync(ODATA_BINDINGS.CONFIG) as ODataConfig;
+    app.bind(ODATA_BINDINGS.CONFIG).to({
+      ...current,
+      maxApplyNavigationFanout: 1,
+      logApplyFallbacks: false,
+    } as ODataConfig);
+    await app.boot();
+    await seedExampleData(app);
+    await app.start();
+    client = createRestAppClient(app);
+
+    await client
+      .get('/odata/Products')
+      .query({
+        $apply: 'groupby((id), aggregate(orderItems/quantity with sum as TotalQuantity))',
+      })
+      .expect(400)
+      .expect(res => {
+        expect(res.body.error.message).to.match(/navigation expansion exceeds/i);
+      });
   });
 
   it('enforces maxApplyResultSize limits during fallback execution', async function () {

@@ -1116,15 +1116,22 @@ export class CsdlGenerator {
             }
 
             if (capabilities.applySupported) {
+                const transformations = ['filter', 'groupby', 'aggregate', 'orderby', 'top', 'skip'];
                 capabilityAnnotationsXml.push(
                     '        <Annotation Term="Org.OData.Capabilities.V1.ApplySupported">',
                     '          <Record>',
                     '            <PropertyValue Property="ApplySupported" Bool="true"/>',
+                    '            <PropertyValue Property="SupportedTransformations">',
+                    '              <Collection>',
+                    ...transformations.map(item => `                <String>${xmlEscape(item)}</String>`),
+                    '              </Collection>',
+                    '            </PropertyValue>',
                     '          </Record>',
                     '        </Annotation>',
                 );
                 capabilityAnnotationsJson['@Org.OData.Capabilities.V1.ApplySupported'] = {
                     ApplySupported: true,
+                    SupportedTransformations: transformations,
                 };
             }
 
