@@ -34,7 +34,20 @@ const MEMORY_DS_CONFIG = {
   connector: 'memory',
 };
 
-class ExampleApp extends BootMixin(RepositoryMixin(RestApplication)) {
+// use the following config if you want to test out with PostgreSQL
+const POSTGRES_DS_CONFIG = {
+  name: 'db',
+  connector: 'postgresql',
+  host: process.env.PG_HOST ?? '127.0.0.1',
+  port: Number(process.env.PG_PORT ?? 5432),
+  user: process.env.PG_USER ?? 'postgres',
+  password: process.env.PG_PASSWORD ?? 'pass',
+  database: process.env.PG_DATABASE ?? 'odata_dev',
+  ssl: process.env.PG_SSL === 'true',
+};
+
+
+export class ExampleApp extends BootMixin(RepositoryMixin(RestApplication)) {
   constructor() {
     super({ rest: { port: 3001, host: '127.0.0.1' } });
     this.projectRoot = __dirname;
@@ -55,13 +68,24 @@ class ExampleApp extends BootMixin(RepositoryMixin(RestApplication)) {
         logApplyFallbacks: true, // optional so you see the warning
       });
     }
+
+    const current = this.getSync(ODATA_BINDINGS.CONFIG) as ODataConfig;
+    this.bind(ODATA_BINDINGS.CONFIG).to({
+      ...current,
+      enableApplyPushdown: false,
+      logApplyFallbacks: true, // optional so you see the warning
+    });
   }
 }
 
 @odataModel({ etag: 'updatedAt' })
 @model()
 export class Product extends Entity {
-  @property({ id: true })
+  @property({
+    type: 'number',
+    id: true,
+    generated: true,
+  })
   id!: number;
 
   @property()
@@ -85,7 +109,11 @@ export class Product extends Entity {
 @odataModel()
 @model()
 export class Order extends Entity {
-  @property({ id: true })
+  @property({
+    type: 'number',
+    id: true,
+    generated: true,
+  })
   id!: number;
 
   @property({ required: true })
@@ -103,7 +131,11 @@ export class Order extends Entity {
 @odataModel()
 @model()
 export class OrderItem extends Entity {
-  @property({ id: true, generated: true })
+  @property({
+    type: 'number',
+    id: true,
+    generated: true,
+  })
   id?: number;
 
   @belongsTo(() => Order)
