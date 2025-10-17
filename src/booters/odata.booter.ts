@@ -147,6 +147,9 @@ export class ODataBooter implements Booter {
                 const supported = existingExecutor.supports ? await existingExecutor.supports(dataSource) : true;
                 if (supported) {
                     def.applyPushdown = true;
+                    if (existingExecutor.capabilities?.navigation) {
+                        def.applySupportsNavigation = true;
+                    }
                     const inferred = inferSqlMetadata(modelCtor, dataSource);
                     if (inferred) {
                         def.sqlMetadata = inferred;
@@ -163,6 +166,9 @@ export class ODataBooter implements Booter {
             const inferred = inferSqlMetadata(modelCtor, dataSource);
             if (inferred) {
                 def.sqlMetadata = inferred;
+            }
+            if (autoExecutor.capabilities?.navigation) {
+                def.applySupportsNavigation = true;
             }
             return;
         }

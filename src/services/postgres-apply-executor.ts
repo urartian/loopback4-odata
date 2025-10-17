@@ -1,17 +1,51 @@
-import {AnyObject, DataObject, ModelDefinition, PropertyDefinition, Where, juggler} from '@loopback/repository';
+import {AnyObject, DataObject, ModelDefinition, PropertyDefinition, Where, juggler, Entity} from '@loopback/repository';
 import {ODataApplyExecutor, ODataApplyExecutorContext, ODataApplyExecutorResult} from './odata-apply-executor.registry';
+import {ParsedExpression, AggregationSpec} from './odata-query-parser.service';
+import {ApplyAggregationStage, ApplyExecutionPlan, collectNavigationPathsForStage} from './odata-apply-planner.service';
 import {EntitySqlMetadata} from '../registry/entityset-registry';
 import {inferSqlMetadata} from '../util/sql-metadata';
+import {resolveNavigationPath, NavigationPathError, ResolvedNavigationPath} from '../util/navigation-path';
 
 interface ColumnResolution {
   column: string;
   rawColumn: string;
 }
 
+interface StageSource {
+  alias: string;
+  fromClause: string;
+  resolveField(field: string): ColumnResolution | undefined;
+  getJoinClauses?(): string[];
+  getJoinCount?(): number;
+  availableColumns?: Set<string>;
+}
+
+interface StageSqlBuildResult {
+  name: string;
+  sql: string;
+  outputColumns: Set<string>;
+  finalOrderClause?: string;
+  finalLimitClause?: string;
+  finalOffsetClause?: string;
+  filtersApplied: boolean;
+  paginationApplied: boolean;
+  joinCountContribution: number;
+}
+
+interface StageBuildOptions {
+  stageIndex: number;
+  stageName: string;
+  source: StageSource;
+  params: unknown[];
+  isFinalStage: boolean;
+  where?: Where<DataObject<AnyObject>>;
+}
+
 const SUPPORTED_AGGREGATES = new Set(['sum', 'average', 'min', 'max', 'count', 'countdistinct']);
 
 export class PostgresApplyExecutor implements ODataApplyExecutor {
   readonly id = 'postgresql';
+  readonly capabilities = {navigation: true};
 
   supports(datasource: juggler.DataSource): boolean {
     const connectorName = datasource?.connector?.name ?? datasource?.connector?.settings?.name ?? '';
@@ -21,8 +55,7 @@ export class PostgresApplyExecutor implements ODataApplyExecutor {
   }
 
   async execute(ctx: ODataApplyExecutorContext): Promise<ODataApplyExecutorResult | undefined> {
-    const {repository, aggregation, plan, fetchFilter, entitySet} = ctx;
-    if (!aggregation || !aggregation.aggregates?.length) return undefined;
+    const {repository, plan, fetchFilter, entitySet} = ctx;
 
     const dataSource = (repository as {dataSource?: juggler.DataSource}).dataSource;
     if (!dataSource || typeof dataSource.execute !== 'function') {
@@ -30,68 +63,307 @@ export class PostgresApplyExecutor implements ODataApplyExecutor {
     }
 
     if (fetchFilter.include && Array.isArray(fetchFilter.include) && fetchFilter.include.length) {
-      return undefined; // navigation joins not supported in pushdown (yet)
+      return undefined;
     }
     if (fetchFilter.include && !Array.isArray(fetchFilter.include)) {
       return undefined;
     }
 
+    const effectivePlan = plan ?? this.buildPlanFromAggregation(ctx);
+    const stages = effectivePlan?.stages ?? [];
+    if (!stages.length) return undefined;
+    if (effectivePlan?.preAggregationFilters?.length) {
+      return undefined;
+    }
+    const finalStageSpec = stages[stages.length - 1]?.spec;
+    if (!finalStageSpec || !finalStageSpec.aggregates?.length) return undefined;
+
     const modelDefinition = (entitySet.modelCtor as {definition?: ModelDefinition}).definition;
     if (!modelDefinition) return undefined;
 
-    const sqlMetadata = this.getOrInferSqlMetadata(ctx, dataSource);
-    const tableInfo = this.buildTableInfo(sqlMetadata);
+    const metadataCache = new Map<typeof Entity, EntitySqlMetadata>();
+    const baseMetadata = this.getBaseSqlMetadata(ctx, dataSource, metadataCache);
+    if (!baseMetadata) return undefined;
+
+    const tableInfo = this.buildTableInfo(baseMetadata);
     if (!tableInfo) return undefined;
 
-    const columnResolver = this.createColumnResolver(sqlMetadata, modelDefinition, tableInfo.alias);
+    const maxJoinDepth = 5;
+    const navigationMap = new Map<string, ResolvedNavigationPath>();
+    const firstStage = stages[0];
+    firstStage?.navigationPaths?.forEach(path => navigationMap.set(path.originalPath, path));
 
-    const selectParts: string[] = [];
-    const groupByParts: string[] = [];
-
-    for (const field of aggregation.groupBy ?? []) {
-      const resolved = columnResolver(field);
-      if (!resolved) return undefined;
-      selectParts.push(`${resolved.column} AS ${quoteIdentifier(field)}`);
-      groupByParts.push(resolved.column);
-    }
-
-    for (const expr of aggregation.aggregates) {
-      if (!SUPPORTED_AGGREGATES.has(expr.operator)) return undefined;
-      if (expr.field && expr.field.includes('/')) return undefined;
-      const resolved = expr.field ? columnResolver(expr.field) : undefined;
-      const fragment = this.buildAggregateFragment(expr.operator, resolved?.column);
-      if (!fragment) return undefined;
-      const alias = expr.alias || `${expr.operator}`;
-      selectParts.push(`${fragment} AS ${quoteIdentifier(alias)}`);
-    }
-
-    if (!selectParts.length) return undefined;
-
-    const whereResult = this.buildWhereClause(
-      fetchFilter.where as Where<DataObject<AnyObject>> | undefined,
-      columnResolver,
+    const joinManager = new NavigationJoinManager(
+      entitySet.modelCtor,
+      tableInfo.alias,
+      tableInfo.tableRef,
+      model => this.getModelSqlMetadata(model, dataSource, metadataCache),
+      maxJoinDepth,
+      navigationMap,
     );
-    const whereClause = whereResult?.clause;
-    const params = whereResult?.params ?? [];
 
-    const orderClause = this.buildOrderClause(plan.orderBy);
-    const groupByClause = groupByParts.length ? `GROUP BY ${groupByParts.join(', ')}` : '';
+    const params: unknown[] = [];
 
-    const sqlParts = [
-      `SELECT ${selectParts.join(', ')}`,
-      `FROM ${tableInfo.tableRef} AS ${tableInfo.alias}`,
-    ];
-    if (whereClause) sqlParts.push(`WHERE ${whereClause}`);
-    if (groupByClause) sqlParts.push(groupByClause);
-    if (orderClause) sqlParts.push(orderClause);
+    const baseSource: StageSource = {
+      alias: tableInfo.alias,
+      fromClause: `${tableInfo.tableRef} AS ${tableInfo.alias}`,
+      resolveField: field => joinManager.resolveField(field),
+      getJoinClauses: () => joinManager.getJoinClauses(),
+      getJoinCount: () => joinManager.joinCount,
+    };
 
-    const sql = sqlParts.join(' ');
+    const stageResults: StageSqlBuildResult[] = [];
+    let currentSource: StageSource = baseSource;
+    let totalJoinCount = 0;
+    let stageFiltersApplied = true;
+    let stagePaginationApplied = true;
+
+    const fetchWhere = fetchFilter.where as Where<DataObject<AnyObject>> | undefined;
+
+    for (let stageIndex = 0; stageIndex < stages.length; stageIndex++) {
+      const stageItem = stages[stageIndex];
+      const stageName = `stage${stageIndex}`;
+      const isFinalStage = stageIndex === stages.length - 1;
+
+      const stageResult = this.buildStageSql(stageItem, {
+        stageIndex,
+        stageName,
+        source: currentSource,
+        params,
+        isFinalStage,
+        where: stageIndex === 0 ? fetchWhere : undefined,
+      });
+      if (!stageResult) {
+        return undefined;
+      }
+
+      stageResults.push(stageResult);
+
+      if (stageIndex === 0) {
+        totalJoinCount += stageResult.joinCountContribution;
+      }
+
+      const requiresFilters = stageItem.postAggregationFilters.length > 0;
+      if (requiresFilters && !stageResult.filtersApplied) {
+        stageFiltersApplied = false;
+      }
+      const requiresPagination = stageItem.top !== undefined || stageItem.skip !== undefined;
+      if (requiresPagination && !stageResult.paginationApplied) {
+        stagePaginationApplied = false;
+      }
+
+      if (!isFinalStage) {
+        const nextAlias = `s${stageIndex + 1}`;
+        currentSource = this.createDerivedStageSource(stageResult, nextAlias);
+      }
+    }
+
+    if (!stageResults.length) return undefined;
+
+    const finalStage = stageResults[stageResults.length - 1];
+    const sql = this.composeFinalQuery(stageResults, finalStage);
+    if (!sql) return undefined;
+
+    const start = Date.now();
     const result = await dataSource.execute(sql, params, ctx.options);
     const rows = Array.isArray(result)
       ? result.map(row => (row && typeof row === 'object' ? {...row} : {value: row}))
       : [];
 
-    return {rows};
+    const durationMs = Date.now() - start;
+    ctx.telemetry?.({
+      durationMs,
+      rows: rows.length,
+      joinCount: totalJoinCount,
+      executorId: this.id,
+    });
+
+    const hasStageFilters = stages.some(stageItem => stageItem.postAggregationFilters.length > 0);
+    const hasStagePagination = stages.some(stageItem => stageItem.top !== undefined || stageItem.skip !== undefined);
+    const finalStageHasOrder = Boolean(stages[stages.length - 1]?.orderBy?.length);
+
+    return {
+      rows,
+      appliedOrder: finalStageHasOrder ? true : undefined,
+      appliedPipelinePagination: hasStagePagination ? stagePaginationApplied : undefined,
+      appliedStageFilters: hasStageFilters ? stageFiltersApplied : undefined,
+    };
+  }
+
+  private buildPlanFromAggregation(ctx: ODataApplyExecutorContext): ApplyExecutionPlan | undefined {
+    const aggregation = ctx.aggregation;
+    if (!aggregation) return undefined;
+
+    const spec: AggregationSpec = {
+      groupBy: [...aggregation.groupBy],
+      aggregates: aggregation.aggregates.map(expr => ({...expr})),
+    };
+
+    let navigationPaths: ResolvedNavigationPath[] = [];
+    try {
+      navigationPaths = collectNavigationPathsForStage(ctx.entitySet.modelCtor, spec);
+    } catch {
+      navigationPaths = [];
+    }
+
+    const stage: ApplyAggregationStage = {
+      spec,
+      postAggregationFilters: [],
+      navigationPaths,
+    };
+
+    return {
+      pushdownWhere: undefined,
+      preAggregationFilters: [],
+      stages: [stage],
+    };
+  }
+
+  private buildStageSql(
+    stage: ApplyAggregationStage,
+    options: StageBuildOptions,
+  ): StageSqlBuildResult | undefined {
+    const {stageName, source, params, isFinalStage, where} = options;
+
+    const selectParts: string[] = [];
+    const groupByParts: string[] = [];
+    const outputColumns = new Set<string>();
+
+    for (const field of stage.spec.groupBy ?? []) {
+      const resolved = source.resolveField(field);
+      if (!resolved) return undefined;
+      selectParts.push(`${resolved.column} AS ${quoteIdentifier(field)}`);
+      groupByParts.push(resolved.column);
+      outputColumns.add(field);
+    }
+
+    for (const expr of stage.spec.aggregates) {
+      if (!SUPPORTED_AGGREGATES.has(expr.operator)) return undefined;
+      const resolved = expr.field ? source.resolveField(expr.field) : undefined;
+      if (expr.field && !resolved) return undefined;
+      const fragment = this.buildAggregateFragment(expr.operator, resolved?.column);
+      if (!fragment) return undefined;
+      const alias = expr.alias || `${expr.operator}`;
+      selectParts.push(`${fragment} AS ${quoteIdentifier(alias)}`);
+      outputColumns.add(alias);
+    }
+
+    if (!selectParts.length) return undefined;
+
+    const sqlParts: string[] = [];
+    sqlParts.push(`SELECT ${selectParts.join(', ')}`);
+    sqlParts.push(`FROM ${source.fromClause}`);
+
+    const joinClauses = source.getJoinClauses ? source.getJoinClauses() : [];
+    sqlParts.push(...joinClauses);
+
+    if (where) {
+      const whereClause = this.buildWhereClause(where, field => source.resolveField(field), params);
+      if (whereClause === null) return undefined;
+      if (whereClause) {
+        sqlParts.push(`WHERE ${whereClause}`);
+      } else if (Object.keys(where).length) {
+        return undefined;
+      }
+    }
+
+    if (groupByParts.length) {
+      sqlParts.push(`GROUP BY ${groupByParts.join(', ')}`);
+    }
+
+    const havingClause = this.buildHavingClause(
+      stage.postAggregationFilters,
+      field => source.resolveField(field),
+      stage.spec,
+      params,
+    );
+    if (havingClause === null) {
+      return undefined;
+    }
+    if (stage.postAggregationFilters.length) {
+      if (!havingClause) return undefined;
+      sqlParts.push(`HAVING ${havingClause}`);
+    }
+
+    const orderClause = this.buildOrderClause(stage.orderBy);
+    const limitClause = stage.top !== undefined ? `LIMIT ${Math.max(0, stage.top)}` : undefined;
+    const offsetClause = stage.skip !== undefined ? `OFFSET ${Math.max(0, stage.skip)}` : undefined;
+
+    if (!isFinalStage) {
+      if (orderClause) sqlParts.push(orderClause);
+      if (limitClause) sqlParts.push(limitClause);
+      if (offsetClause) sqlParts.push(offsetClause);
+    }
+
+    const sql = sqlParts.filter(part => part && part.length).join(' ');
+
+    const requiresFilters = stage.postAggregationFilters.length > 0;
+
+    const joinCountContribution = source.getJoinCount ? source.getJoinCount() ?? 0 : 0;
+
+    return {
+      name: stageName,
+      sql,
+      outputColumns,
+      finalOrderClause: isFinalStage && orderClause ? orderClause : undefined,
+      finalLimitClause: isFinalStage && limitClause ? limitClause : undefined,
+      finalOffsetClause: isFinalStage && offsetClause ? offsetClause : undefined,
+      filtersApplied: requiresFilters ? Boolean(havingClause) : true,
+      paginationApplied: true,
+      joinCountContribution,
+    };
+  }
+
+  private createDerivedStageSource(stageResult: StageSqlBuildResult, alias: string): StageSource {
+    const resolver = this.createDerivedFieldResolver(alias, stageResult.outputColumns);
+    return {
+      alias,
+      fromClause: `${stageResult.name} AS ${alias}`,
+      resolveField: resolver,
+      availableColumns: stageResult.outputColumns,
+    };
+  }
+
+  private createDerivedFieldResolver(
+    alias: string,
+    fields: Set<string>,
+  ): (field: string) => ColumnResolution | undefined {
+    const exact = new Map<string, string>();
+    const lower = new Map<string, string>();
+    for (const field of fields) {
+      exact.set(field, field);
+      lower.set(field.toLowerCase(), field);
+    }
+    return (field: string): ColumnResolution | undefined => {
+      const match = exact.get(field) ?? lower.get(field.toLowerCase());
+      if (!match) return undefined;
+      const quoted = quoteIdentifier(match);
+      return {
+        column: `${alias}.${quoted}`,
+        rawColumn: quoted,
+      };
+    };
+  }
+
+  private composeFinalQuery(
+    stages: StageSqlBuildResult[],
+    finalStage: StageSqlBuildResult,
+  ): string | undefined {
+    if (!stages.length) return undefined;
+    if (stages.length === 1) {
+      let query = stages[0].sql;
+      if (finalStage.finalOrderClause) query += ` ${finalStage.finalOrderClause}`;
+      if (finalStage.finalLimitClause) query += ` ${finalStage.finalLimitClause}`;
+      if (finalStage.finalOffsetClause) query += ` ${finalStage.finalOffsetClause}`;
+      return query;
+    }
+
+    const cteClause = stages.map(stage => `${stage.name} AS (${stage.sql})`).join(', ');
+    let finalQuery = `SELECT * FROM ${finalStage.name}`;
+    if (finalStage.finalOrderClause) finalQuery += ` ${finalStage.finalOrderClause}`;
+    if (finalStage.finalLimitClause) finalQuery += ` ${finalStage.finalLimitClause}`;
+    if (finalStage.finalOffsetClause) finalQuery += ` ${finalStage.finalOffsetClause}`;
+    return `WITH ${cteClause} ${finalQuery}`;
   }
 
   private getOrInferSqlMetadata(
@@ -142,6 +414,153 @@ export class PostgresApplyExecutor implements ODataApplyExecutor {
     };
   }
 
+  private buildHavingClause(
+    filters: ParsedExpression[] | undefined,
+    resolver: (field: string) => ColumnResolution | undefined,
+    stageSpec: AggregationSpec,
+    params: unknown[],
+  ): string | null | undefined {
+    if (!filters?.length) return undefined;
+    const start = params.length;
+    const clauses: string[] = [];
+
+    for (const expr of filters) {
+      const translated = this.translateHavingExpression(
+        expr,
+        resolver,
+        stageSpec,
+        params,
+      );
+      if (!translated) {
+        params.length = start;
+        return null;
+      }
+      clauses.push(translated);
+    }
+
+    if (!clauses.length) {
+      params.length = start;
+      return null;
+    }
+
+    return clauses.length === 1 ? clauses[0] : clauses.map(c => `(${c})`).join(' AND ');
+  }
+
+  private translateHavingExpression(
+    expr: ParsedExpression,
+    resolver: (field: string) => ColumnResolution | undefined,
+    stageSpec: AggregationSpec,
+    params: unknown[],
+  ): string | undefined {
+    const start = params.length;
+    switch (expr.operator) {
+      case 'comparison':
+        return this.translateHavingComparison(
+          expr.field,
+          expr.comparator,
+          expr.value,
+          resolver,
+          stageSpec,
+          params,
+        );
+      case 'logical': {
+        const parts: string[] = [];
+        for (const child of expr.expressions) {
+          const translated = this.translateHavingExpression(child, resolver, stageSpec, params);
+          if (!translated) {
+            params.length = start;
+            return undefined;
+          }
+          parts.push(translated);
+        }
+        if (!parts.length) {
+          params.length = start;
+          return undefined;
+        }
+        return parts.length === 1
+          ? parts[0]
+          : parts.map(p => `(${p})`).join(` ${expr.type.toUpperCase()} `);
+      }
+      case 'not': {
+        const inner = this.translateHavingExpression(
+          expr.expr,
+          resolver,
+          stageSpec,
+          params,
+        );
+        if (!inner) {
+          params.length = start;
+          return undefined;
+        }
+        return `NOT (${inner})`;
+      }
+      default:
+        params.length = start;
+        return undefined;
+    }
+  }
+
+  private translateHavingComparison(
+    field: string,
+    comparator: string,
+    value: unknown,
+    resolver: (field: string) => ColumnResolution | undefined,
+    stageSpec: AggregationSpec,
+    params: unknown[],
+  ): string | undefined {
+    const columnSql = this.resolveHavingField(field, resolver, stageSpec);
+    if (!columnSql) return undefined;
+    const start = params.length;
+
+    switch (comparator) {
+      case 'eq':
+        if (value === null) return `${columnSql} IS NULL`;
+        params.push(value);
+        return `${columnSql} = $${params.length}`;
+      case 'neq':
+        if (value === null) return `${columnSql} IS NOT NULL`;
+        params.push(value);
+        return `${columnSql} <> $${params.length}`;
+      case 'gt':
+      case 'ge':
+      case 'lt':
+      case 'le': {
+        params.push(value);
+        const map: Record<string, string> = {gt: '>', ge: '>=', lt: '<', le: '<='};
+        return `${columnSql} ${map[comparator]} $${params.length}`;
+      }
+      default:
+        params.length = start;
+        return undefined;
+    }
+  }
+
+  private resolveHavingField(
+    field: string,
+    resolver: (field: string) => ColumnResolution | undefined,
+    stageSpec: AggregationSpec,
+  ): string | undefined {
+    if (!field) return undefined;
+    const aggregateMatch = stageSpec.aggregates.find(a => a.alias === field);
+    if (aggregateMatch) {
+      return quoteIdentifier(field);
+    }
+    if (stageSpec.groupBy.includes(field)) {
+      const resolved = resolver(field);
+      return resolved?.column;
+    }
+    const resolved = resolver(field);
+    if (resolved) return resolved.column;
+    // Allow matching by alias even when alias is lower/upper variations
+    const aggregateInsensitive = stageSpec.aggregates.find(
+      a => (a.alias ?? '').toLowerCase() === field.toLowerCase(),
+    );
+    if (aggregateInsensitive) {
+      return quoteIdentifier(aggregateInsensitive.alias);
+    }
+    return undefined;
+  }
+
   private buildAggregateFragment(operator: string, column?: string): string | undefined {
     switch (operator) {
       case 'sum':
@@ -176,12 +595,16 @@ export class PostgresApplyExecutor implements ODataApplyExecutor {
   private buildWhereClause(
     where: Where<DataObject<AnyObject>> | undefined,
     resolver: (field: string) => ColumnResolution | undefined,
-  ): {clause: string; params: unknown[]} | undefined {
+    params: unknown[],
+  ): string | null | undefined {
     if (!where || !Object.keys(where).length) return undefined;
-    const params: unknown[] = [];
+    const start = params.length;
     const clause = this.visitWhereNode(where as AnyObject, resolver, params);
-    if (!clause) return undefined;
-    return {clause, params};
+    if (!clause) {
+      params.length = start;
+      return null;
+    }
+    return clause;
   }
 
   private visitWhereNode(
@@ -189,32 +612,59 @@ export class PostgresApplyExecutor implements ODataApplyExecutor {
     resolver: (field: string) => ColumnResolution | undefined,
     params: unknown[],
   ): string | undefined {
+    const startLength = params.length;
     if (Array.isArray(node)) {
-      const parts = node
-        .map(entry => this.visitWhereNode(entry, resolver, params))
-        .filter(Boolean) as string[];
-      if (!parts.length) return undefined;
+      const parts: string[] = [];
+      for (const entry of node) {
+        const part = this.visitWhereNode(entry, resolver, params);
+        if (!part) {
+          params.length = startLength;
+          return undefined;
+        }
+        parts.push(part);
+      }
+      if (!parts.length) {
+        params.length = startLength;
+        return undefined;
+      }
       return parts.length === 1 ? parts[0] : `(${parts.join(' AND ')})`;
     }
     const clauses: string[] = [];
     for (const [key, value] of Object.entries(node)) {
       if (key === 'and' || key === 'or') {
         const arrayVal = Array.isArray(value) ? value : [value];
-        const subParts = arrayVal
-          .map(entry => this.visitWhereNode(entry as AnyObject, resolver, params))
-          .filter(Boolean) as string[];
+        if (!arrayVal.length) continue;
+        const subParts: string[] = [];
+        for (const entry of arrayVal) {
+          const sub = this.visitWhereNode(entry as AnyObject, resolver, params);
+          if (!sub) {
+            params.length = startLength;
+            return undefined;
+          }
+          subParts.push(sub);
+        }
         if (!subParts.length) continue;
-        const joined = subParts.length === 1 ? subParts[0] : `(${subParts.join(` ${key.toUpperCase()} `)})`;
+        const joined =
+          subParts.length === 1 ? subParts[0] : `(${subParts.join(` ${key.toUpperCase()} `)})`;
         clauses.push(joined);
         continue;
       }
       const resolved = resolver(key);
-      if (!resolved) return undefined;
+      if (!resolved) {
+        params.length = startLength;
+        return undefined;
+      }
       const condition = this.buildPropertyCondition(resolved.column, value, params);
-      if (!condition) return undefined;
+      if (!condition) {
+        params.length = startLength;
+        return undefined;
+      }
       clauses.push(condition);
     }
-    if (!clauses.length) return undefined;
+    if (!clauses.length) {
+      params.length = startLength;
+      return undefined;
+    }
     return clauses.length === 1 ? clauses[0] : clauses.map(part => `(${part})`).join(' AND ');
   }
 
@@ -223,6 +673,7 @@ export class PostgresApplyExecutor implements ODataApplyExecutor {
     value: unknown,
     params: unknown[],
   ): string | undefined {
+    const startLength = params.length;
     if (value == null || typeof value !== 'object' || value instanceof Date) {
       if (value === null) {
         return `${column} IS NULL`;
@@ -291,11 +742,185 @@ export class PostgresApplyExecutor implements ODataApplyExecutor {
           break;
         }
         default:
+          params.length = startLength;
           return undefined;
       }
     }
-    if (!fragments.length) return undefined;
+    if (!fragments.length) {
+      params.length = startLength;
+      return undefined;
+    }
     return fragments.length === 1 ? fragments[0] : `(${fragments.join(' AND ')})`;
+  }
+
+  private getBaseSqlMetadata(
+    ctx: ODataApplyExecutorContext,
+    dataSource: juggler.DataSource,
+    cache: Map<typeof Entity, EntitySqlMetadata>,
+  ): EntitySqlMetadata | undefined {
+    const existing = ctx.entitySet.sqlMetadata;
+    if (existing) {
+      cache.set(ctx.entitySet.modelCtor, existing);
+      return existing;
+    }
+    const inferred = inferSqlMetadata(ctx.entitySet.modelCtor, dataSource);
+    if (inferred) {
+      cache.set(ctx.entitySet.modelCtor, inferred);
+      ctx.entitySet.sqlMetadata = inferred;
+    }
+    return inferred;
+  }
+
+  private getModelSqlMetadata(
+    modelCtor: typeof Entity,
+    dataSource: juggler.DataSource,
+    cache: Map<typeof Entity, EntitySqlMetadata>,
+  ): EntitySqlMetadata | undefined {
+    const cached = cache.get(modelCtor);
+    if (cached) return cached;
+    const inferred = inferSqlMetadata(modelCtor, dataSource);
+    if (inferred) {
+      cache.set(modelCtor, inferred);
+    }
+    return inferred;
+  }
+}
+
+type MetadataProvider = (model: typeof Entity) => EntitySqlMetadata | undefined;
+
+interface JoinNode {
+  alias: string;
+  tableRef: string;
+  condition: string;
+  targetModel: typeof Entity;
+}
+
+class NavigationJoinManager {
+  private readonly joinNodes = new Map<string, JoinNode>();
+  private readonly joinOrder: string[] = [];
+  private aliasCounter = 0;
+  private readonly navigationMap: Map<string, ResolvedNavigationPath>;
+
+  constructor(
+    private readonly baseModel: typeof Entity,
+    readonly baseAlias: string,
+    readonly baseTableRef: string,
+    private readonly metadataProvider: MetadataProvider,
+    private readonly maxDepth: number,
+    navigationPaths?: Map<string, ResolvedNavigationPath>,
+  ) {
+    this.navigationMap = navigationPaths ?? new Map();
+  }
+
+  resolveField(field: string): ColumnResolution | undefined {
+    if (!field) return undefined;
+    if (!field.includes('/')) {
+      const metadata = this.metadataProvider(this.baseModel);
+      if (!metadata) return undefined;
+      const columnName = this.resolveColumnName(metadata, field);
+      if (!columnName) return undefined;
+      const quoted = quoteIdentifier(columnName);
+      return {
+        column: `${this.baseAlias}.${quoted}`,
+        rawColumn: quoted,
+      };
+    }
+
+    const resolved = this.navigationMap.get(field) ?? this.tryResolvePath(field);
+    if (!resolved || !resolved.joins.length) {
+      return undefined;
+    }
+
+    const chain = this.ensureJoinChain(resolved);
+    if (!chain) return undefined;
+
+    const propertyPath = resolved.propertyPath;
+    if (!propertyPath || propertyPath.includes('/')) {
+      return undefined;
+    }
+
+    const metadata = this.metadataProvider(chain.targetModel);
+    if (!metadata) return undefined;
+    const columnName = this.resolveColumnName(metadata, propertyPath);
+    if (!columnName) return undefined;
+    const quoted = quoteIdentifier(columnName);
+    return {
+      column: `${chain.alias}.${quoted}`,
+      rawColumn: quoted,
+    };
+  }
+
+  getJoinClauses(): string[] {
+    return this.joinOrder.map(path => {
+      const node = this.joinNodes.get(path)!;
+      return `LEFT JOIN ${node.tableRef} AS ${node.alias} ON ${node.condition}`;
+    });
+  }
+
+  get joinCount(): number {
+    return this.joinOrder.length;
+  }
+
+  private nextAlias(): string {
+    this.aliasCounter += 1;
+    return `j${this.aliasCounter}`;
+  }
+
+  private buildTableRef(metadata: EntitySqlMetadata): string {
+    const schemaPart = metadata.schema ? `${quoteIdentifier(metadata.schema)}.` : '';
+    return `${schemaPart}${quoteIdentifier(metadata.tableName ?? '')}`;
+  }
+
+  private resolveColumnName(metadata: EntitySqlMetadata, property: string): string | undefined {
+    if (!property) return undefined;
+    const map = metadata.columnMap ?? {};
+    const candidate = map[property] ?? property;
+    return candidate;
+  }
+
+  private tryResolvePath(field: string): ResolvedNavigationPath | undefined {
+    try {
+      const resolved = resolveNavigationPath(this.baseModel, field, {maxDepth: this.maxDepth});
+      this.navigationMap.set(field, resolved);
+      return resolved;
+    } catch (err) {
+      if (err instanceof NavigationPathError) return undefined;
+      throw err;
+    }
+  }
+
+  private ensureJoinChain(path: ResolvedNavigationPath): {alias: string; targetModel: typeof Entity} | undefined {
+    let currentAlias = this.baseAlias;
+    let currentModel = this.baseModel;
+    let pathKey = '';
+
+    for (const segment of path.joins) {
+      pathKey = pathKey ? `${pathKey}/${segment.relationName}` : segment.relationName;
+      let node = this.joinNodes.get(pathKey);
+      if (!node) {
+        const sourceMetadata = this.metadataProvider(currentModel);
+        const targetMetadata = this.metadataProvider(segment.targetModel);
+        if (!sourceMetadata || !targetMetadata) return undefined;
+        const alias = this.nextAlias();
+        const tableRef = this.buildTableRef(targetMetadata);
+        const sourceColumn = this.resolveColumnName(sourceMetadata, segment.sourceKey);
+        const targetColumn = this.resolveColumnName(targetMetadata, segment.targetKey);
+        if (!sourceColumn || !targetColumn) return undefined;
+        const condition = `${currentAlias}.${quoteIdentifier(sourceColumn)} = ${alias}.${quoteIdentifier(targetColumn)}`;
+        node = {
+          alias,
+          tableRef,
+          condition,
+          targetModel: segment.targetModel,
+        };
+        this.joinNodes.set(pathKey, node);
+        this.joinOrder.push(pathKey);
+      }
+      currentAlias = node.alias;
+      currentModel = node.targetModel;
+    }
+
+    return {alias: currentAlias, targetModel: currentModel};
   }
 }
 

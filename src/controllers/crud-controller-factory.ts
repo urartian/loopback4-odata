@@ -56,10 +56,11 @@ import {
 } from '../util/security-metadata';
 import {CrudHookBundle, CrudHookContext, CrudOnContext, CrudOperation, CrudScope} from '../types/crud-hooks';
 import { ODATA_BINDINGS } from '../keys';
-import { ODataConfig } from '../types';
+import { ODataConfig, ODataApplyTelemetryEvent } from '../types';
 import { getODataSearchableProps } from '../decorators/search.decorators';
 import {ensureNavigationTargetKey} from '../util/relation-metadata';
-import { ApplyExecutionPlan, buildApplyExecutionPlan } from '../services/odata-apply-planner.service';
+import {ResolvedNavigationPath} from '../util/navigation-path';
+import { ApplyExecutionPlan, ApplyAggregationStage, buildApplyExecutionPlan, collectNavigationPathsForStage } from '../services/odata-apply-planner.service';
 import { ODataApplyExecutorRegistry, ODataApplyExecutorContext } from '../services/odata-apply-executor.registry';
 type CrudEntity = Entity & { [key: string]: unknown };
 type CrudRepo = DefaultCrudRepository<CrudEntity, unknown>;
@@ -656,115 +657,254 @@ export function defineODataCrudController(def: EntitySetDef) {
             }
         }
 
-        executeAggregation(rows: AnyObject[], spec: AggregationSpec): AnyObject[] {
+        executeAggregation(rows: AnyObject[], stage: ApplyAggregationStage): AnyObject[] {
+            const spec = stage.spec;
+            const navigationGroups = this.groupNavigationPaths(stage.navigationPaths ?? []);
             const groupMap = new Map<string, {groupValues: Record<string, unknown>; aggregates: Record<string, AggregationAccumulatorState>}>();
-            const groupKeys = spec.groupBy ?? [];
 
             for (const row of rows) {
-                const groupValues = groupKeys.map(field => this.getValueAtPath(row, field));
-                const key = JSON.stringify(groupValues);
-                let entry = groupMap.get(key);
-                if (!entry) {
-                    const values: Record<string, unknown> = {};
-                    groupKeys.forEach((field, idx) => {
-                        values[field] = groupValues[idx];
-                    });
-                    entry = {groupValues: values, aggregates: {}};
-                    groupMap.set(key, entry);
-                }
+                const variants = this.expandNavigationVariants(row, navigationGroups);
+                const variantList = variants.length ? variants : [{values: {}}];
 
-                for (const aggregate of spec.aggregates) {
-                    let state = entry.aggregates[aggregate.alias];
-                    if (!state) {
-                        state = {
-                            operator: aggregate.operator,
-                            sum: aggregate.operator === 'sum' || aggregate.operator === 'average' ? 0 : undefined,
-                            count: aggregate.operator === 'count' || aggregate.operator === 'average' ? 0 : undefined,
-                            min: undefined,
-                            max: undefined,
-                            distinct: aggregate.operator === 'countdistinct' ? new Set<unknown>() : undefined,
-                        };
-                        entry.aggregates[aggregate.alias] = state;
+                for (const variant of variantList) {
+                    const groupValues: Record<string, unknown> = {};
+                    const keyParts: unknown[] = [];
+
+                    for (const field of spec.groupBy) {
+                        const value = this.resolveVariantValue(row, variant, field);
+                        groupValues[field] = value;
+                        keyParts.push(value);
                     }
-                    const value = aggregate.field ? this.getValueAtPath(row, aggregate.field) : undefined;
-                    updateAccumulatorState(state, value);
+
+                    const key = JSON.stringify(keyParts);
+                    let entry = groupMap.get(key);
+                    if (!entry) {
+                        const aggregates: Record<string, AggregationAccumulatorState> = {};
+                        for (const aggregate of spec.aggregates) {
+                            aggregates[aggregate.alias] = this.createAccumulatorState(aggregate.operator);
+                        }
+                        entry = {groupValues, aggregates};
+                        groupMap.set(key, entry);
+                    }
+
+                    for (const aggregate of spec.aggregates) {
+                        const value = aggregate.field ? this.resolveVariantValue(row, variant, aggregate.field) : undefined;
+                        this.updateAccumulatorState(entry.aggregates[aggregate.alias], value);
+                    }
                 }
             }
 
             const results: AnyObject[] = [];
             for (const {groupValues, aggregates} of groupMap.values()) {
-                const record: AnyObject = {...groupValues};
+                const record: AnyObject = {};
+                for (const [field, value] of Object.entries(groupValues)) {
+                    record[field] = value;
+                }
                 for (const [alias, state] of Object.entries(aggregates)) {
-                    record[alias] = finalizeAccumulatorState(state);
+                    record[alias] = this.finalizeAccumulatorState(state);
                 }
                 results.push(record);
             }
 
             return results;
+        }
 
-            function updateAccumulatorState(state: AggregationAccumulatorState, rawValue: unknown) {
-                switch (state.operator) {
-                    case 'sum': {
-                        const num = typeof rawValue === 'number' ? rawValue : Number(rawValue);
-                        if (Number.isFinite(num)) {
-                            state.sum = (state.sum ?? 0) + num;
-                        }
-                        break;
-                    }
-                    case 'average': {
-                        const num = typeof rawValue === 'number' ? rawValue : Number(rawValue);
-                        if (Number.isFinite(num)) {
-                            state.sum = (state.sum ?? 0) + num;
-                            state.count = (state.count ?? 0) + 1;
-                        }
-                        break;
-                    }
-                    case 'min': {
-                        const num = typeof rawValue === 'number' ? rawValue : Number(rawValue);
-                        if (Number.isFinite(num)) {
-                            state.min = state.min === undefined ? num : Math.min(state.min, num);
-                        }
-                        break;
-                    }
-                    case 'max': {
-                        const num = typeof rawValue === 'number' ? rawValue : Number(rawValue);
-                        if (Number.isFinite(num)) {
-                            state.max = state.max === undefined ? num : Math.max(state.max, num);
-                        }
-                        break;
-                    }
-                    case 'count': {
-                        state.count = (state.count ?? 0) + 1;
-                        break;
-                    }
-                    case 'countdistinct': {
-                        if (!state.distinct) state.distinct = new Set();
-                        state.distinct.add(rawValue);
-                        break;
-                    }
+        groupNavigationPaths(paths: ResolvedNavigationPath[]): Map<string, ResolvedNavigationPath[]> {
+            const groups = new Map<string, ResolvedNavigationPath[]>();
+            for (const path of paths) {
+                if (!path.joins.length) continue;
+                const key = path.joins.map(j => j.relationName).join('/');
+                const existing = groups.get(key);
+                if (existing) {
+                    existing.push(path);
+                } else {
+                    groups.set(key, [path]);
                 }
             }
+            return groups;
+        }
 
-            function finalizeAccumulatorState(state: AggregationAccumulatorState): unknown {
-                switch (state.operator) {
-                    case 'sum':
-                        return state.sum ?? 0;
-                    case 'average':
-                        if (!state.count) return null;
-                        return (state.sum ?? 0) / state.count;
-                    case 'min':
-                        return state.min ?? null;
-                    case 'max':
-                        return state.max ?? null;
-                    case 'count':
-                        return state.count ?? 0;
-                    case 'countdistinct':
-                        return state.distinct ? state.distinct.size : 0;
-                    default:
-                        return null;
+        expandNavigationVariants(row: AnyObject, groups: Map<string, ResolvedNavigationPath[]>): Array<{values: Record<string, unknown>}> {
+            const maxFanout = this.cfg?.maxApplyNavigationFanout ?? 1000;
+            let variants: Array<{values: Record<string, unknown>}> = [{values: {}}];
+
+            for (const paths of groups.values()) {
+                const primaryPath = paths[0];
+                const targets = this.collectNavigationTargets(row, primaryPath);
+                const safeTargets = targets.length ? targets : [undefined];
+                const next: Array<{values: Record<string, unknown>}> = [];
+
+                for (const variant of variants) {
+                    for (const target of safeTargets) {
+                        const values = {...variant.values};
+                        for (const path of paths) {
+                            values[path.originalPath] = this.resolvePropertyFromTarget(target as AnyObject | undefined, path.propertyPath);
+                        }
+                        next.push({values});
+                        if (next.length > maxFanout) {
+                            throw new HttpErrors.BadRequest(`$apply navigation expansion exceeds the configured limit of ${maxFanout} combinations.`);
+                        }
+                    }
                 }
+
+                variants = next;
+            }
+
+            if (variants.length > maxFanout) {
+                throw new HttpErrors.BadRequest(`$apply navigation expansion exceeds the configured limit of ${maxFanout} combinations.`);
+            }
+
+            return variants;
+        }
+
+        collectNavigationTargets(row: AnyObject, path: ResolvedNavigationPath): AnyObject[] {
+            let current: Array<AnyObject | undefined> = [row];
+
+            for (const segment of path.joins) {
+                const next: Array<AnyObject | undefined> = [];
+                for (const item of current) {
+                    const source = item as AnyObject | undefined;
+                    if (source == null) {
+                        next.push(undefined);
+                        continue;
+                    }
+                    const related = source[segment.relationName];
+                    if (Array.isArray(related)) {
+                        if (!related.length) {
+                            next.push(undefined);
+                        } else {
+                            for (const entry of related) next.push(entry as AnyObject);
+                        }
+                    } else if (related != null) {
+                        next.push(related as AnyObject);
+                    } else {
+                        next.push(undefined);
+                    }
+                }
+                current = next.length ? next : [undefined];
+            }
+
+            return current as AnyObject[];
+        }
+
+        resolvePropertyFromTarget(target: AnyObject | undefined, propertyPath?: string): unknown {
+            if (!propertyPath) return target;
+            const segments = propertyPath.split('/').filter(Boolean);
+            let current: any = target;
+            for (const segment of segments) {
+                if (current == null) return undefined;
+                current = current[segment];
+            }
+            return current;
+        }
+
+        resolveVariantValue(row: AnyObject, variant: {values: Record<string, unknown>}, path: string): unknown {
+            if (variant.values && Object.prototype.hasOwnProperty.call(variant.values, path)) {
+                return variant.values[path];
+            }
+            if (!path.includes('/')) {
+                return this.getValueAtPath(row, path);
+            }
+            const segments = path.split('/');
+            const values = this.extractPathValues(row, segments);
+            return values.length ? values[0] : undefined;
+        }
+
+        extractPathValues(source: AnyObject | undefined, segments: string[], index = 0): unknown[] {
+            if (index >= segments.length) {
+                return [source];
+            }
+            if (source == null) return [undefined];
+            const segment = segments[index];
+            const next = (source as AnyObject)[segment];
+            if (Array.isArray(next)) {
+                if (!next.length) return [undefined];
+                const results: unknown[] = [];
+                for (const entry of next) {
+                    results.push(...this.extractPathValues(entry as AnyObject, segments, index + 1));
+                }
+                return results;
+            }
+            return this.extractPathValues(next as AnyObject, segments, index + 1);
+        }
+
+        createAccumulatorState(operator: AggregationOperator): AggregationAccumulatorState {
+            return {
+                operator,
+                sum: operator === 'sum' || operator === 'average' ? 0 : undefined,
+                count: operator === 'count' || operator === 'average' ? 0 : undefined,
+                min: undefined,
+                max: undefined,
+                distinct: operator === 'countdistinct' ? new Set<unknown>() : undefined,
+            };
+        }
+
+        updateAccumulatorState(state: AggregationAccumulatorState, rawValue: unknown): void {
+            switch (state.operator) {
+                case 'sum': {
+                    const num = typeof rawValue === 'number' ? rawValue : Number(rawValue);
+                    if (Number.isFinite(num)) {
+                        state.sum = (state.sum ?? 0) + num;
+                    }
+                    break;
+                }
+                case 'average': {
+                    const num = typeof rawValue === 'number' ? rawValue : Number(rawValue);
+                    if (Number.isFinite(num)) {
+                        state.sum = (state.sum ?? 0) + num;
+                        state.count = (state.count ?? 0) + 1;
+                    }
+                    break;
+                }
+                case 'min': {
+                    const num = typeof rawValue === 'number' ? rawValue : Number(rawValue);
+                    if (Number.isFinite(num)) {
+                        state.min = state.min === undefined ? num : Math.min(state.min, num);
+                    }
+                    break;
+                }
+                case 'max': {
+                    const num = typeof rawValue === 'number' ? rawValue : Number(rawValue);
+                    if (Number.isFinite(num)) {
+                        state.max = state.max === undefined ? num : Math.max(state.max, num);
+                    }
+                    break;
+                }
+                case 'count': {
+                    state.count = (state.count ?? 0) + 1;
+                    break;
+                }
+                case 'countdistinct': {
+                    if (!state.distinct) state.distinct = new Set();
+                    state.distinct.add(rawValue);
+                    break;
+                }
+                default:
+                    break;
             }
         }
+
+        finalizeAccumulatorState(state: AggregationAccumulatorState): unknown {
+            switch (state.operator) {
+                case 'sum':
+                    return state.sum ?? 0;
+                case 'average':
+                    if (!state.count || state.count === 0) return null;
+                    return (state.sum ?? 0) / state.count;
+                case 'min':
+                    return state.min ?? null;
+                case 'max':
+                    return state.max ?? null;
+                case 'count':
+                    return state.count ?? 0;
+                case 'countdistinct':
+                    return state.distinct ? state.distinct.size : 0;
+                default:
+                    return null;
+            }
+        }
+
+
 
         orderResults(data: AnyObject[], order?: string[]): AnyObject[] {
             if (!order?.length) return data;
@@ -830,18 +970,31 @@ export function defineODataCrudController(def: EntitySetDef) {
         }
 
         collectAggregationRelations(plan: ApplyExecutionPlan | undefined): string[] {
-            if (!plan?.groupBy) return [];
+            if (!plan?.stages?.length) return [];
             const relations = new Set<string>();
-            const addPath = (path?: string) => {
-                if (!path || !path.includes('/')) return;
-                const [head] = path.split('/');
-                if (!head) return;
-                if (!(modelRelations as Record<string, unknown>)[head]) return;
-                relations.add(head);
+            const addRelation = (name?: string) => {
+                if (!name) return;
+                if (!(modelRelations as Record<string, unknown>)[name]) return;
+                relations.add(name);
             };
-            plan.groupBy.keys.forEach(addPath);
-            for (const aggregate of plan.groupBy.aggregates) {
-                addPath(aggregate.field);
+            for (const stage of plan.stages) {
+                stage.navigationPaths.forEach(path => {
+                    const firstJoin = path.joins[0];
+                    if (firstJoin) addRelation(firstJoin.relationName);
+                });
+                stage.spec.groupBy.forEach(field => {
+                    if (field?.includes('/')) {
+                        const [head] = field.split('/');
+                        addRelation(head);
+                    }
+                });
+                for (const aggregate of stage.spec.aggregates) {
+                    const field = aggregate.field;
+                    if (field?.includes('/')) {
+                        const [head] = field.split('/');
+                        addRelation(head);
+                    }
+                }
             }
             return Array.from(relations);
         }
@@ -869,6 +1022,40 @@ export function defineODataCrudController(def: EntitySetDef) {
             }
         }
 
+        emitApplyTelemetry(
+            mode: 'pushdown' | 'fallback',
+            stageIndex: number,
+            stageCount: number,
+            data: { rows?: number; durationMs?: number; joinCount?: number; reason?: string } = {},
+        ) {
+            if (!this.cfg?.onApplyTelemetry && !this.cfg?.logApplyTelemetry) return;
+            const event: ODataApplyTelemetryEvent = {
+                entitySet: setName,
+                stageIndex,
+                stageCount,
+                mode,
+                rows: data.rows,
+                durationMs: data.durationMs,
+                joinCount: data.joinCount,
+                reason: data.reason,
+            };
+            if (this.cfg?.onApplyTelemetry) {
+                try {
+                    this.cfg.onApplyTelemetry(event);
+                } catch (err) {
+                    console.error('[OData] Failed to emit apply telemetry handler:', err);
+                }
+            }
+            if (this.cfg?.logApplyTelemetry) {
+                const parts = [`mode=${mode}`, `stage=${stageIndex + 1}/${stageCount}`];
+                if (data.rows !== undefined) parts.push(`rows=${data.rows}`);
+                if (data.durationMs !== undefined) parts.push(`durationMs=${data.durationMs}`);
+                if (data.joinCount !== undefined) parts.push(`joins=${data.joinCount}`);
+                if (data.reason) parts.push(`reason=${data.reason}`);
+                console.debug(`[OData] $apply telemetry (${setName}) ${parts.join(' ')}`);
+            }
+        }
+
         async tryExecuteApplyPushdown(
             aggregation: AggregationSpec,
             plan: ApplyExecutionPlan | undefined,
@@ -880,6 +1067,9 @@ export function defineODataCrudController(def: EntitySetDef) {
             postFilterExpr: ParsedExpression | undefined,
             contextBase: string,
             options: Options | undefined,
+            _stage: ApplyAggregationStage | undefined,
+            stageIndex: number,
+            stageCount: number,
         ): Promise<AnyObject | undefined> {
             if (!def.applyPushdown || !def.applyExecutorId) return undefined;
             const registry = this.applyExecutors;
@@ -887,29 +1077,87 @@ export function defineODataCrudController(def: EntitySetDef) {
             const executor = registry.get(def.applyExecutorId);
             if (!executor) return undefined;
 
-            const defaultGroupBy = plan?.groupBy ?? {
-                keys: aggregation.groupBy ?? [],
-                aggregates: aggregation.aggregates,
+            const emitReason = (reason: string) => {
+                this.emitApplyTelemetry('pushdown', stageIndex, stageCount || 1, {reason});
             };
 
-            const effectivePlan: ApplyExecutionPlan = plan
-                ? {
-                    ...plan,
-                    groupBy: defaultGroupBy,
-                }
-                : {
-                    pushdownWhere: undefined,
-                    postFilters: [],
-                    groupBy: defaultGroupBy,
-                    orderBy: undefined,
-                    top: undefined,
-                    skip: undefined,
-                };
+            const cloneExpression = (expression: ParsedExpression): ParsedExpression =>
+                JSON.parse(JSON.stringify(expression));
 
-            const effectivePipeline: ApplyPipeline = pipeline ?? { transformations: [] };
-            const fetchFilterCopy: Filter<CrudEntity> = { ...fetchFilter };
+            const cloneStage = (stageToClone: ApplyAggregationStage): ApplyAggregationStage => ({
+                spec: {
+                    groupBy: [...stageToClone.spec.groupBy],
+                    aggregates: stageToClone.spec.aggregates.map(expr => ({...expr})),
+                },
+                postAggregationFilters: stageToClone.postAggregationFilters.map(cloneExpression),
+                orderBy: stageToClone.orderBy ? stageToClone.orderBy.map(item => ({...item})) : undefined,
+                top: stageToClone.top,
+                skip: stageToClone.skip,
+                navigationPaths: stageToClone.navigationPaths
+                    ? stageToClone.navigationPaths.map(path => ({
+                        ...path,
+                        joins: path.joins.map(join => ({...join})),
+                    }))
+                    : [],
+            });
+
+            const clonePlan = (sourcePlan?: ApplyExecutionPlan): ApplyExecutionPlan | undefined => {
+                if (!sourcePlan) return undefined;
+                return {
+                    pushdownWhere: sourcePlan.pushdownWhere,
+                    preAggregationFilters: [...sourcePlan.preAggregationFilters],
+                    stages: sourcePlan.stages.map(cloneStage),
+                };
+            };
+
+            const buildFallbackPlan = (): ApplyExecutionPlan | undefined => {
+                if (!aggregation?.aggregates?.length) return undefined;
+                const spec: AggregationSpec = {
+                    groupBy: [...aggregation.groupBy],
+                    aggregates: aggregation.aggregates.map(expr => ({...expr})),
+                };
+                let navigationPaths: ReturnType<typeof collectNavigationPathsForStage> = [];
+                try {
+                    navigationPaths = collectNavigationPathsForStage(
+                        def.modelCtor,
+                        spec,
+                        this.cfg?.maxExpandDepth ?? 5,
+                    );
+                } catch {
+                    navigationPaths = [];
+                }
+                return {
+                    pushdownWhere: undefined,
+                    preAggregationFilters: [],
+                    stages: [
+                        {
+                            spec,
+                            postAggregationFilters: [],
+                            navigationPaths,
+                        },
+                    ],
+                };
+            };
+
+            const executionPlan = clonePlan(plan) ?? buildFallbackPlan();
+            if (!executionPlan) {
+                emitReason('no-plan');
+                return undefined;
+            }
+            const planStages = executionPlan.stages ?? [];
+            if (!planStages.length) {
+                emitReason('no-stage');
+                return undefined;
+            }
+            if (executionPlan.preAggregationFilters.length) {
+                emitReason('pre-filters');
+                return undefined;
+            }
+
+            const effectivePipeline: ApplyPipeline = pipeline ?? {transformations: []};
+            const fetchFilterCopy: Filter<CrudEntity> = {...fetchFilter};
             if (fetchFilter.where) {
-                fetchFilterCopy.where = { ...(fetchFilter.where as CrudWhere) } as CrudWhere;
+                fetchFilterCopy.where = {...(fetchFilter.where as CrudWhere)} as CrudWhere;
             }
             if (Array.isArray(fetchFilter.include)) {
                 fetchFilterCopy.include = [...fetchFilter.include];
@@ -918,19 +1166,31 @@ export function defineODataCrudController(def: EntitySetDef) {
             const context: ODataApplyExecutorContext = {
                 entitySet: def,
                 repository: this.repository,
-                plan: effectivePlan,
+                plan: executionPlan,
                 pipeline: effectivePipeline,
                 aggregation,
-                baseFilter: { ...baseFilter },
+                baseFilter: {...baseFilter},
                 fetchFilter: fetchFilterCopy,
                 options,
                 requestedLimit,
                 requestedOffset,
+                stageIndex,
+                stageCount: planStages.length,
+                telemetry: payload => {
+                    this.emitApplyTelemetry('pushdown', stageIndex, planStages.length, {
+                        rows: payload.rows,
+                        durationMs: payload.durationMs,
+                        joinCount: payload.joinCount,
+                    });
+                },
             };
 
             try {
                 const execResult = await executor.execute(context);
                 if (!execResult) {
+                    this.emitApplyTelemetry('pushdown', stageIndex, planStages.length, {
+                        reason: 'executor-declined',
+                    });
                     this.logApplyFallback('executor-declined', {
                         entitySet: setName,
                         transformations: effectivePipeline.transformations.length,
@@ -940,23 +1200,52 @@ export function defineODataCrudController(def: EntitySetDef) {
                 }
 
                 let working = execResult.rows ?? [];
-                if (effectivePlan.postFilters.length) {
-                    working = this.applyPostFilters(working, effectivePlan.postFilters);
+
+                const requiresStageFilters = planStages.some(item => item.postAggregationFilters.length > 0);
+                if (requiresStageFilters && execResult.appliedStageFilters !== true) {
+                    emitReason('missing-stage-filters');
+                    this.logApplyFallback('stage-filters-not-applied', {
+                        entitySet: setName,
+                        transformations: effectivePipeline.transformations.length,
+                        rows: execResult.rows?.length ?? 0,
+                    });
+                    return undefined;
+                }
+
+                const requiresStagePagination = planStages.some(
+                    item => item.top !== undefined || item.skip !== undefined,
+                );
+                if (requiresStagePagination && execResult.appliedPipelinePagination !== true) {
+                    emitReason('missing-stage-pagination');
+                    this.logApplyFallback('stage-pagination-not-applied', {
+                        entitySet: setName,
+                        transformations: effectivePipeline.transformations.length,
+                        rows: execResult.rows?.length ?? 0,
+                    });
+                    return undefined;
                 }
                 if (postFilterExpr) {
                     working = this.applyPostFilter(working, postFilterExpr);
                 }
-                const planOrderClauses = effectivePlan.orderBy?.map(item => `${item.field} ${item.direction.toUpperCase()}`);
+
+                const finalStage = planStages[planStages.length - 1];
+                const stageOrderClauses = finalStage?.orderBy?.map(item => `${item.field} ${item.direction.toUpperCase()}`);
                 const fallbackOrder = Array.isArray(baseFilter.order)
                     ? baseFilter.order
                     : typeof baseFilter.order === 'string'
                         ? [baseFilter.order]
                         : undefined;
-                const ordered = this.orderResults(working, planOrderClauses ?? fallbackOrder);
-                const afterPlanPaging = (effectivePlan.skip !== undefined || effectivePlan.top !== undefined)
-                    ? this.sliceResults(ordered, effectivePlan.skip, effectivePlan.top)
-                    : ordered;
-                const paged = this.sliceResults(afterPlanPaging, requestedOffset, requestedLimit);
+                let ordered = working;
+                if (stageOrderClauses?.length) {
+                    if (execResult.appliedOrder !== true) {
+                        ordered = this.orderResults(working, stageOrderClauses);
+                    }
+                } else if (fallbackOrder) {
+                    ordered = this.orderResults(working, fallbackOrder);
+                }
+                const paged = execResult.appliedExternalPagination
+                    ? ordered
+                    : this.sliceResults(ordered, requestedOffset, requestedLimit);
 
                 this.ensureODataHeaders();
                 return {
@@ -964,9 +1253,12 @@ export function defineODataCrudController(def: EntitySetDef) {
                     value: paged,
                 } as AnyObject;
             } catch (error) {
+                this.emitApplyTelemetry('pushdown', stageIndex, planStages.length, {
+                    reason: 'executor-error',
+                });
                 this.logApplyFallback('executor-error', {
                     entitySet: setName,
-                    transformations: effectivePipeline.transformations.length,
+                    transformations: effectivePipeline.transformations.length ?? 0,
                     rows: 0,
                 });
                 return undefined;
@@ -1984,14 +2276,17 @@ export function defineODataCrudController(def: EntitySetDef) {
                 const externalOrder = Array.isArray(parsed.order) ? [...parsed.order] : parsed.order;
                 applyPipeline = parsed.applyPipeline;
                 if (applyPipeline) {
-                    applyPlan = buildApplyExecutionPlan(applyPipeline, { strict: Boolean(this.cfg?.strict) });
-                    if (applyPlan?.orderBy?.length && externalOrder && (Array.isArray(externalOrder) ? externalOrder.length : true)) {
+                    applyPlan = buildApplyExecutionPlan(applyPipeline, {
+                        strict: Boolean(this.cfg?.strict),
+                        modelCtor,
+                        maxNavigationDepth: this.cfg?.maxExpandDepth ?? 5,
+                    });
+                    const pipelineHasOrder = applyPlan.stages.some(stage => stage.orderBy && stage.orderBy.length);
+                    if (pipelineHasOrder && externalOrder && (Array.isArray(externalOrder) ? externalOrder.length : true)) {
                         throw new HttpErrors.BadRequest('Combining $orderby outside $apply with orderby() inside the pipeline is not supported.');
                     }
                 }
-                aggregationSpec = applyPlan?.groupBy
-                    ? { groupBy: applyPlan.groupBy.keys, aggregates: applyPlan.groupBy.aggregates }
-                    : parsed.apply;
+                aggregationSpec = applyPlan?.stages?.[0]?.spec ?? parsed.apply;
                 lambdaExpression = parsed.lambda;
                 postFilterExpr = parsed.postFilter;
                 unsupportedFunctions = parsed.unsupportedFunctions ?? [];
@@ -2022,6 +2317,30 @@ export function defineODataCrudController(def: EntitySetDef) {
                 }
                 if (applyPlan) {
                     const relationsToInclude = this.collectAggregationRelations(applyPlan);
+                    if (relationsToInclude.length) {
+                        const additions = relationsToInclude.map(relation => ({ relation }));
+                        baseFilter.include = mergeIncludes(baseFilter.include as InclusionFilter[] | undefined, additions);
+                    }
+                } else if (aggregationSpec) {
+                    const fallbackSpec: AggregationSpec = {
+                        groupBy: [...aggregationSpec.groupBy],
+                        aggregates: aggregationSpec.aggregates.map(expr => ({...expr})),
+                    };
+                    const fallbackStage: ApplyAggregationStage = {
+                        spec: fallbackSpec,
+                        postAggregationFilters: [],
+                        navigationPaths: collectNavigationPathsForStage(
+                            modelCtor,
+                            fallbackSpec,
+                            this.cfg?.maxExpandDepth ?? 5,
+                        ),
+                    };
+                    const tempPlan: ApplyExecutionPlan = {
+                        pushdownWhere: undefined,
+                        preAggregationFilters: [],
+                        stages: [fallbackStage],
+                    };
+                    const relationsToInclude = this.collectAggregationRelations(tempPlan);
                     if (relationsToInclude.length) {
                         const additions = relationsToInclude.map(relation => ({ relation }));
                         baseFilter.include = mergeIncludes(baseFilter.include as InclusionFilter[] | undefined, additions);
@@ -2078,8 +2397,20 @@ export function defineODataCrudController(def: EntitySetDef) {
 
             const requestedOffset = typeof baseFilter.offset === 'number' ? baseFilter.offset : 0;
             const requestedLimit = typeof baseFilter.limit === 'number' ? baseFilter.limit : undefined;
-            const planTriggersPostFilter = Boolean(applyPlan && (applyPlan.postFilters.length > 0 || applyPlan.skip !== undefined || applyPlan.top !== undefined));
-            const requiresPostFilter = Boolean(postFilterExpr) || planTriggersPostFilter;
+            const planRequiresPostProcessing = Boolean(
+                applyPlan &&
+                (
+                    applyPlan.preAggregationFilters.length > 0 ||
+                    applyPlan.stages.length > 1 ||
+                    applyPlan.stages.some(stage =>
+                        stage.postAggregationFilters.length > 0 ||
+                        stage.skip !== undefined ||
+                        stage.top !== undefined ||
+                        (stage.orderBy?.length ?? 0) > 0,
+                    )
+                ),
+            );
+            const requiresPostFilter = Boolean(postFilterExpr) || planRequiresPostProcessing;
 
             if (requiresPostFilter) {
                 delete baseFilter.offset;
@@ -2100,6 +2431,9 @@ export function defineODataCrudController(def: EntitySetDef) {
                     delete fetchFilter.limit;
                     delete fetchFilter.offset;
 
+                    const planStages = applyPlan?.stages ?? [];
+                    const stageCount = planStages.length || 1;
+                    const stageForPushdown = planStages[0];
                     const pushdownResult = await this.tryExecuteApplyPushdown(
                         aggregationSpec,
                         applyPlan,
@@ -2111,6 +2445,9 @@ export function defineODataCrudController(def: EntitySetDef) {
                         postFilterExpr,
                         contextBase,
                         options,
+                        stageForPushdown,
+                        0,
+                        stageCount,
                     );
                     if (pushdownResult) {
                         ctx.result = pushdownResult;
@@ -2120,12 +2457,58 @@ export function defineODataCrudController(def: EntitySetDef) {
                     const entities = await this.repository.find(fetchFilter, options);
                     const plainEntities = entities.map(entity => this.toPlainEntity(entity) ?? {});
                     let working = plainEntities;
-                    if (applyPlan?.postFilters.length) {
-                        working = this.applyPostFilters(working, applyPlan.postFilters);
+                    if (applyPlan?.preAggregationFilters.length) {
+                        working = this.applyPostFilters(working, applyPlan.preAggregationFilters);
                     }
+
+                    const stages: ApplyAggregationStage[] = applyPlan?.stages?.length
+                        ? applyPlan.stages
+                        : aggregationSpec
+                            ? (() => {
+                                const fallbackSpec: AggregationSpec = {
+                                    groupBy: [...aggregationSpec.groupBy],
+                                    aggregates: aggregationSpec.aggregates.map(expr => ({...expr})),
+                                };
+                                return [{
+                                    spec: fallbackSpec,
+                                    postAggregationFilters: [],
+                                    navigationPaths: collectNavigationPathsForStage(
+                                        modelCtor,
+                                        fallbackSpec,
+                                        this.cfg?.maxExpandDepth ?? 5,
+                                    ),
+                                }];
+                            })()
+                            : [];
+
+                    let lastStageHasOrder = false;
+                    const fallbackStageCount = stages.length || 1;
+                    for (let localStageIndex = 0; localStageIndex < stages.length; localStageIndex++) {
+                        const stage = stages[localStageIndex];
+                        working = this.executeAggregation(working, stage);
+                        if (stage.postAggregationFilters.length) {
+                            working = this.applyPostFilters(working, stage.postAggregationFilters);
+                        }
+                        if (stage.orderBy?.length) {
+                            const stageOrder = stage.orderBy.map(item => `${item.field} ${item.direction.toUpperCase()}`);
+                            working = this.orderResults(working, stageOrder);
+                            lastStageHasOrder = true;
+                        } else {
+                            lastStageHasOrder = false;
+                        }
+                        if (stage.skip !== undefined || stage.top !== undefined) {
+                            working = this.sliceResults(working, stage.skip, stage.top);
+                        }
+                        this.emitApplyTelemetry('fallback', localStageIndex, fallbackStageCount, {
+                            rows: working.length,
+                            joinCount: stage.navigationPaths?.length,
+                        });
+                    }
+
                     if (postFilterExpr) {
                         working = this.applyPostFilter(working, postFilterExpr);
                     }
+
                     this.logApplyFallback('in-memory-apply', {
                         entitySet: setName,
                         transformations: applyPipeline?.transformations.length ?? 0,
@@ -2141,13 +2524,13 @@ export function defineODataCrudController(def: EntitySetDef) {
                         });
                         throw new HttpErrors.BadRequest(`$apply result exceeds the server limit of ${maxApplySize} records. Refine the query or increase maxApplyResultSize.`);
                     }
-                    const aggregated = this.executeAggregation(working, aggregationSpec);
-                    const planOrderClauses = applyPlan?.orderBy?.map(item => `${item.field} ${item.direction.toUpperCase()}`);
-                    const ordered = this.orderResults(aggregated, planOrderClauses ?? baseFilter.order);
-                    const afterPlanPaging = (applyPlan?.skip !== undefined || applyPlan?.top !== undefined)
-                        ? this.sliceResults(ordered, applyPlan?.skip, applyPlan?.top)
-                        : ordered;
-                    const paged = this.sliceResults(afterPlanPaging, requestedOffset, requestedLimit);
+
+                    let ordered = working;
+                    if (!lastStageHasOrder && baseFilter.order) {
+                        ordered = this.orderResults(working, baseFilter.order);
+                    }
+
+                    const paged = this.sliceResults(ordered, requestedOffset, requestedLimit);
 
                     this.ensureODataHeaders();
                     const result = {

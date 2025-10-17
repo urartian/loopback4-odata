@@ -30,6 +30,7 @@ export interface EntitySetDef<T extends Entity = Entity> {
     applyPushdown?: boolean;
     applyExecutorId?: string;
     sqlMetadata?: EntitySqlMetadata;
+    applySupportsNavigation?: boolean;
 }
 
 @injectable({ scope: BindingScope.SINGLETON })
@@ -53,6 +54,9 @@ export class EntitySetRegistry {
         }
         if (!def.sqlMetadata && existing?.sqlMetadata) {
             next.sqlMetadata = existing.sqlMetadata;
+        }
+        if (def.applySupportsNavigation === undefined && existing?.applySupportsNavigation !== undefined) {
+            next.applySupportsNavigation = existing.applySupportsNavigation;
         }
         this.sets.set(def.modelCtor, next);
         return next as EntitySetDef<T>;

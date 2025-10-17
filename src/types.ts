@@ -14,6 +14,9 @@ export interface ODataConfig {
     logApplyFallbacks?: boolean;
     maxApplyResultSize?: number;
     onApplyFallback?: (event: ODataApplyFallbackEvent) => void;
+    logApplyTelemetry?: boolean;
+    onApplyTelemetry?: (event: ODataApplyTelemetryEvent) => void;
+    maxApplyNavigationFanout?: number;
     // Search configuration
     searchMode?: 'annotated' | 'config-only' | 'all' | 'disabled';
     searchFields?: Record<string, string[]>; // per entity set
@@ -108,4 +111,17 @@ export interface ODataApplyFallbackEvent {
     transformations?: number;
     rows?: number;
     limit?: number;
+}
+
+export interface ODataApplyTelemetryEvent {
+    entitySet: string;
+    stageIndex: number;
+    stageCount: number;
+    mode: 'pushdown' | 'fallback';
+    executorId?: string;
+    durationMs?: number;
+    rows?: number;
+    joinCount?: number;
+    reason?: string;
+    navigationPaths?: string[];
 }

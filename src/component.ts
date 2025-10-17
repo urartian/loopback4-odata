@@ -28,6 +28,8 @@ export class ODataComponent implements Component {
                 aggregation: true,
                 applySupported: true,
             },
+            logApplyTelemetry: false,
+            maxApplyNavigationFanout: 1000,
         } as ODataConfig),
         Binding.bind(ODATA_BINDINGS.CSDL_GEN).toClass(CsdlGenerator).inScope(BindingScope.SINGLETON),
         Binding.bind(ODATA_BINDINGS.ENTITY_SET_REGISTRY).toClass(EntitySetRegistry).inScope(BindingScope.SINGLETON),
