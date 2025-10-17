@@ -27,6 +27,7 @@ export interface ODataConfig {
     maxSkip?: number;         // maximum allowed $skip (strict enforced)
     // $apply pushdown
     enableApplyPushdown?: boolean; // opt-in for datastore-backed $apply execution
+    pageSize?: number;        // default page size for server-driven paging
 }
 
 export interface ODataNavigationRestriction {

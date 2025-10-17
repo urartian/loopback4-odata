@@ -123,6 +123,41 @@ describe('OData component acceptance', () => {
     expect(res.body.value.length <= res.body['@odata.count']).to.be.true();
   });
 
+  it('returns @odata.nextLink with $skiptoken for server-driven paging', async () => {
+    const current = app.getSync(ODATA_BINDINGS.CONFIG) as ODataConfig;
+    app.bind(ODATA_BINDINGS.CONFIG).to({
+      ...current,
+      pageSize: 2,
+    });
+
+    const first = await client.get('/odata/Products').expect(200);
+    expect(first.body.value).to.be.Array();
+    expect(first.body.value.length).to.be.lessThanOrEqual(2);
+    const nextLink = first.body['@odata.nextLink'];
+    expect(nextLink).to.be.a.String();
+    const decodedLink = decodeURIComponent(String(nextLink));
+    expect(decodedLink).to.match(/\$skiptoken=/);
+
+    const second = await client.get(String(nextLink)).expect(200);
+    expect(second.body.value).to.be.Array();
+    expect(second.body.value).to.not.be.empty();
+    expect(second.body.value.every((item: AnyObject) => item != null)).to.be.true();
+    const firstIds = first.body.value.map((item: AnyObject) => item.id);
+    const secondIds = second.body.value.map((item: AnyObject) => item.id);
+    expect(secondIds.some((id: number) => !firstIds.includes(id))).to.be.true();
+  });
+
+  it('rejects invalid $skiptoken values', async () => {
+    const current = app.getSync(ODATA_BINDINGS.CONFIG) as ODataConfig;
+    app.bind(ODATA_BINDINGS.CONFIG).to({
+      ...current,
+      pageSize: 2,
+    });
+
+    await client.get('/odata/Products').expect(200); // ensure controller initialization
+    await client.get('/odata/Products?$skiptoken=invalid-token').expect(400);
+  });
+
   it('supports standalone $count endpoint', async () => {
     const res = await client.get('/odata/Products/$count').expect(200);
     expect(Number(res.text)).to.be.a.Number();
@@ -642,7 +677,7 @@ describe('OData component acceptance', () => {
 
     expect(topOne.body.value).to.have.lengthOf(1);
     expect(topOne.body.value[0].name).to.equal('Laptop');
-    expect(topOne.body.value[0]).to.not.have.property('id');
+    expect(topOne.body.value[0]).to.have.property('id');
     expect(topOne.body.value[0]).to.have.property('updatedAt');
     expect(topOne.body.value[0]['@odata.etag']).to.be.String();
 
@@ -653,6 +688,7 @@ describe('OData component acceptance', () => {
 
     expect(second.body.value).to.have.lengthOf(1);
     expect(second.body.value[0].name).to.equal('Decaf Coffee Beans');
+    expect(second.body.value[0]).to.have.property('id');
   });
 
   it('handles CRUD operations and path rewriting', async () => {

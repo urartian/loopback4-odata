@@ -95,6 +95,11 @@ interface AggregationAccumulatorState {
     distinct?: Set<unknown>;
 }
 
+interface OrderDescriptor {
+    field: string;
+    direction: 'ASC' | 'DESC';
+}
+
 function inferIdParamType(definition: any): 'string' | 'number' | 'boolean' {
     const idName = definition?.idProperties?.()[0];
     const property = definition?.properties?.[idName ?? ''] ?? {};
@@ -1946,6 +1951,223 @@ export function defineODataCrudController(def: EntitySetDef) {
             return { or: merged };
         }
 
+        normalizeOrderDescriptors(order: Filter<CrudEntity>['order'], idProperties: string[]): OrderDescriptor[] {
+            const orderArray = Array.isArray(order) ? order : order ? [order] : [];
+            const descriptors: OrderDescriptor[] = [];
+            const seen = new Set<string>();
+
+            for (const clause of orderArray) {
+                const segment = String(clause ?? '').trim();
+                if (!segment) continue;
+                const [rawField, rawDirection] = segment.split(/\s+/);
+                if (!rawField) continue;
+                if (rawField.includes('/')) {
+                    throw new HttpErrors.BadRequest('$orderby with navigation paths cannot be combined with server-driven paging.');
+                }
+                const direction = rawDirection?.toUpperCase() === 'DESC' ? 'DESC' : 'ASC';
+                if (seen.has(rawField)) continue;
+                seen.add(rawField);
+                descriptors.push({field: rawField, direction});
+            }
+
+            for (const id of idProperties) {
+                if (!id || seen.has(id)) continue;
+                seen.add(id);
+                descriptors.push({field: id, direction: 'ASC'});
+            }
+
+            if (!descriptors.length) {
+                const fallback = idProperties[0] ?? 'id';
+                descriptors.push({field: fallback, direction: 'ASC'});
+            }
+
+            return descriptors;
+        }
+
+        resolvePageSize(requested?: number): number {
+            const configSize = Number(this.cfg?.pageSize ?? 0);
+            const base = Number.isFinite(configSize) && configSize > 0 ? Math.floor(configSize) : 200;
+            if (!Number.isFinite(requested) || (requested as number) <= 0) return base;
+            const normalized = Math.floor(Number(requested));
+            if (normalized <= 0) return base;
+            return Math.min(normalized, base);
+        }
+
+        parseSkipTokenValues(token: string, descriptors: OrderDescriptor[], definition: ModelDefinition | undefined): unknown[] {
+            if (!token) {
+                throw new HttpErrors.BadRequest('Empty $skiptoken is not allowed.');
+            }
+            const segments = token.split(',');
+            if (segments.length !== descriptors.length) {
+                throw new HttpErrors.BadRequest('Invalid $skiptoken value.');
+            }
+            return descriptors.map((descriptor, index) => {
+                const raw = decodeURIComponent(segments[index] ?? '');
+                return this.coerceSkipTokenValue(descriptor.field, raw, definition);
+            });
+        }
+
+        coerceSkipTokenValue(field: string, raw: string, definition: ModelDefinition | undefined): unknown {
+            if (raw === 'null') return null;
+            const properties = (definition?.properties ?? {}) as Record<string, PropertyDefinition | undefined>;
+            const property = properties[field];
+            const type = property?.type ?? property?.jsonSchema?.type;
+            if (type === Number || type === 'number') {
+                const num = Number(raw);
+                if (Number.isNaN(num)) {
+                    throw new HttpErrors.BadRequest(`Invalid numeric value in $skiptoken for ${field}.`);
+                }
+                return num;
+            }
+            if (type === Boolean || type === 'boolean') {
+                if (raw === 'true' || raw === 'false') {
+                    return raw === 'true';
+                }
+                throw new HttpErrors.BadRequest(`Invalid boolean value in $skiptoken for ${field}.`);
+            }
+            if (type === Date || type === 'date' || type === 'datetime' || property?.jsonSchema?.format === 'date-time') {
+                const date = new Date(raw);
+                if (Number.isNaN(date.getTime())) {
+                    throw new HttpErrors.BadRequest(`Invalid date value in $skiptoken for ${field}.`);
+                }
+                return date;
+            }
+            return raw;
+        }
+
+        buildEqualityClause(field: string, value: unknown): CrudWhere {
+            const clause: AnyObject = value === null ? {[field]: null} : {[field]: value};
+            return clause as CrudWhere;
+        }
+
+        buildSkipTokenConstraint(token: string, descriptors: OrderDescriptor[], definition: ModelDefinition | undefined): CrudWhere | undefined {
+            if (!token) return undefined;
+            if (!descriptors.length) {
+                throw new HttpErrors.BadRequest('Unable to apply $skiptoken without an order clause.');
+            }
+            const values = this.parseSkipTokenValues(token, descriptors, definition);
+            const branches: CrudWhere[] = [];
+            for (let index = 0; index < descriptors.length; index++) {
+                const descriptor = descriptors[index];
+                const value = values[index];
+                const equalityParts: CrudWhere[] = [];
+                for (let eqIndex = 0; eqIndex < index; eqIndex++) {
+                    equalityParts.push(this.buildEqualityClause(descriptors[eqIndex].field, values[eqIndex]));
+                }
+
+                let comparison: CrudWhere | undefined;
+                if (value === null) {
+                    if (descriptor.direction === 'DESC') {
+                        comparison = {[descriptor.field]: {neq: null}} as CrudWhere;
+                    }
+                } else {
+                    const comparator = descriptor.direction === 'DESC' ? 'lt' : 'gt';
+                    comparison = {[descriptor.field]: {[comparator]: value}} as CrudWhere;
+                }
+
+                if (comparison) {
+                    equalityParts.push(comparison);
+                }
+                const branch = this.combineWithAnd(equalityParts);
+                if (branch) {
+                    branches.push(branch);
+                }
+            }
+            return this.combineWithOr(branches);
+        }
+
+        ensureOrderProjection(fields: Filter<CrudEntity>['fields'], descriptors: OrderDescriptor[]): Filter<CrudEntity>['fields'] {
+            if (!fields) return fields;
+            const includeField = (target: string) => {
+                if (!target) return;
+                if (Array.isArray(fields)) {
+                    if (!fields.includes(target)) fields.push(target);
+                    return;
+                }
+                if (typeof fields === 'object') {
+                    (fields as AnyObject)[target] = true;
+                    return;
+                }
+            };
+            for (const descriptor of descriptors) {
+                if (descriptor.field.includes('/')) continue;
+                includeField(descriptor.field);
+            }
+            return fields;
+        }
+
+        createSkipToken(record: AnyObject | undefined, descriptors: OrderDescriptor[]): string | undefined {
+            if (!record || !descriptors.length) return undefined;
+            const parts: string[] = [];
+            for (const descriptor of descriptors) {
+                const value = this.extractFieldValue(record, descriptor.field);
+                if (value === undefined) return undefined;
+                const encoded = encodeURIComponent(this.stringifySkipTokenValue(value));
+                parts.push(encoded);
+            }
+            return parts.join(',');
+        }
+
+        extractFieldValue(record: AnyObject | undefined, field: string): unknown {
+            if (!record) return undefined;
+            if (!field.includes('/')) {
+                return (record as AnyObject)[field];
+            }
+            const segments = field.split('/');
+            let current: any = record;
+            for (const segment of segments) {
+                if (current == null) return undefined;
+                current = current[segment];
+            }
+            return current;
+        }
+
+        stringifySkipTokenValue(value: unknown): string {
+            if (value === null || value === undefined) return 'null';
+            if (value instanceof Date) return value.toISOString();
+            if (typeof value === 'object') return JSON.stringify(value);
+            return String(value);
+        }
+
+        buildNextLink(skipToken: string): string {
+            const params = new URLSearchParams();
+            const query = this.request.query ?? {};
+            for (const [key, paramValue] of Object.entries(query)) {
+                if (!paramValue || key === '$skiptoken' || key === '$skip') continue;
+                if (Array.isArray(paramValue)) {
+                    for (const entry of paramValue) {
+                        params.append(key, String(entry));
+                    }
+                } else if (typeof paramValue === 'object') {
+                    params.append(key, String(paramValue));
+                } else {
+                    params.set(key, String(paramValue));
+                }
+            }
+            params.set('$skiptoken', skipToken);
+            const queryString = params.toString();
+            return queryString ? `${this.request.path}?${queryString}` : this.request.path;
+        }
+
+        applyServerDrivenPaging(data: AnyObject[], descriptors: OrderDescriptor[], pageSize: number): {items: AnyObject[]; token?: string} {
+            if (!pageSize || pageSize <= 0) {
+                return {items: data};
+            }
+            if (data.length <= pageSize) {
+                return {items: data};
+            }
+            const items = data.slice(0, pageSize);
+            const last = items[items.length - 1];
+            const token = this.createSkipToken(last, descriptors);
+            if (!token) {
+                throw new HttpErrors.InternalServerError('Unable to generate $skiptoken for next page.');
+            }
+            return {
+                items,
+                token,
+            };
+        }
+
         collectWhereFields(where: AnyObject | undefined, out: Set<string>) {
             if (!where || typeof where !== 'object') return;
             for (const [key, value] of Object.entries(where)) {
@@ -2264,6 +2486,7 @@ export function defineODataCrudController(def: EntitySetDef) {
             let lambdaExpression: LambdaExpression | undefined;
             let postFilterExpr: ParsedExpression | undefined;
             let unsupportedFunctions: string[] = [];
+            let skipTokenValue: string | undefined;
             try {
                 const parsed = parseODataQuery(
                     this.request.query as Record<string, string | string[] | undefined>,
@@ -2290,6 +2513,7 @@ export function defineODataCrudController(def: EntitySetDef) {
                 lambdaExpression = parsed.lambda;
                 postFilterExpr = parsed.postFilter;
                 unsupportedFunctions = parsed.unsupportedFunctions ?? [];
+                skipTokenValue = parsed.skipToken;
                 if (postFilterExpr && unsupportedFunctions.length && this.cfg?.strict) {
                     throw new HttpErrors.BadRequest(`Unsupported filter functions in strict mode: ${unsupportedFunctions.join(', ')}`);
                 }
@@ -2298,6 +2522,7 @@ export function defineODataCrudController(def: EntitySetDef) {
                     apply?: AggregationSpec;
                     applyPipeline?: ApplyPipeline;
                     lambda?: LambdaExpression;
+                    skipToken?: string;
                 };
                 delete (parsedFilter as { inlineCount?: boolean }).inlineCount;
                 delete (parsedFilter as { apply?: AggregationSpec }).apply;
@@ -2305,6 +2530,7 @@ export function defineODataCrudController(def: EntitySetDef) {
                 delete (parsedFilter as { lambda?: LambdaExpression }).lambda;
                 delete (parsedFilter as { postFilter?: ParsedExpression }).postFilter;
                 delete (parsedFilter as { unsupportedFunctions?: string[] }).unsupportedFunctions;
+                delete (parsedFilter as { skipToken?: string }).skipToken;
                 this.mergeFilters(baseFilter, parsedFilter);
                 hadClientExpand = Array.isArray(baseFilter.include)
                     ? baseFilter.include.length > 0
@@ -2366,6 +2592,9 @@ export function defineODataCrudController(def: EntitySetDef) {
                 if (!aggregationEnabled) {
                     throw new HttpErrors.NotImplemented('Aggregations are not enabled for this entity set.');
                 }
+                if (skipTokenValue) {
+                    throw new HttpErrors.BadRequest('$skiptoken is not supported together with $apply.');
+                }
             }
 
             if (lambdaExpression) {
@@ -2395,8 +2624,35 @@ export function defineODataCrudController(def: EntitySetDef) {
             this.validateFieldsStrict(baseFilter);
             this.enforceSkipLimit(baseFilter);
 
-            const requestedOffset = typeof baseFilter.offset === 'number' ? baseFilter.offset : 0;
-            const requestedLimit = typeof baseFilter.limit === 'number' ? baseFilter.limit : undefined;
+            const skipApplied = typeof baseFilter.offset === 'number' && baseFilter.offset > 0;
+            if (skipApplied && skipTokenValue) {
+                throw new HttpErrors.BadRequest('$skip cannot be combined with $skiptoken.');
+            }
+
+            const originalTop = typeof baseFilter.limit === 'number' ? baseFilter.limit : undefined;
+            const serverPagingEnabled = !aggregationSpec && !skipApplied;
+            let pageSize = serverPagingEnabled ? this.resolvePageSize(originalTop) : originalTop;
+            let orderDescriptors: OrderDescriptor[] = [];
+            if (serverPagingEnabled) {
+                orderDescriptors = this.normalizeOrderDescriptors(baseFilter.order as Filter<CrudEntity>['order'], idProperties);
+                baseFilter.order = orderDescriptors.map(item => `${item.field} ${item.direction}`);
+                const skipConstraint = skipTokenValue
+                    ? this.buildSkipTokenConstraint(skipTokenValue, orderDescriptors, modelDefinition)
+                    : undefined;
+                if (skipConstraint) {
+                    baseFilter.where = this.combineWithAnd([baseFilter.where as CrudWhere | undefined, skipConstraint]) ?? skipConstraint;
+                }
+                pageSize = pageSize ?? this.resolvePageSize(undefined);
+                baseFilter.limit = (pageSize ?? 0) + 1;
+                baseFilter.offset = 0;
+            }
+
+            if (serverPagingEnabled && baseFilter.fields) {
+                baseFilter.fields = this.ensureOrderProjection(baseFilter.fields, orderDescriptors);
+            }
+
+            const requestedOffset = serverPagingEnabled ? 0 : typeof baseFilter.offset === 'number' ? baseFilter.offset : 0;
+            const requestedLimit = serverPagingEnabled ? pageSize : typeof baseFilter.limit === 'number' ? baseFilter.limit : undefined;
             const planRequiresPostProcessing = Boolean(
                 applyPlan &&
                 (
@@ -2581,9 +2837,18 @@ export function defineODataCrudController(def: EntitySetDef) {
                 }
 
                 const ordered = this.orderResults(filteredResults, baseFilter.order);
-                const paged = requiresPostFilter
-                    ? this.sliceResults(ordered, requestedOffset, requestedLimit)
-                    : ordered;
+                let nextLinkToken: string | undefined;
+                let paged: AnyObject[];
+                if (serverPagingEnabled) {
+                    const effectivePageSize = pageSize ?? this.resolvePageSize(undefined);
+                    const pagination = this.applyServerDrivenPaging(ordered, orderDescriptors, effectivePageSize);
+                    paged = pagination.items;
+                    nextLinkToken = pagination.token;
+                } else if (requiresPostFilter) {
+                    paged = this.sliceResults(ordered, requestedOffset, requestedLimit);
+                } else {
+                    paged = ordered;
+                }
 
                 this.ensureODataHeaders();
                 const result = {
@@ -2591,6 +2856,9 @@ export function defineODataCrudController(def: EntitySetDef) {
                     ...(inlineCountRequested ? { '@odata.count': totalCount ?? filteredResults.length } : {}),
                     value: this.decoratePlainEntities(paged),
                 } as AnyObject;
+                if (serverPagingEnabled && nextLinkToken) {
+                    result['@odata.nextLink'] = this.buildNextLink(nextLinkToken);
+                }
                 ctx.result = result;
                 return result;
             };

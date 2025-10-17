@@ -852,6 +852,7 @@ this.bind(ODATA_BINDINGS.CONFIG).to({
     aggregation: true,
   },
   maxTop: 100,             // server paging cap
+  pageSize: 50,            // server-driven paging size (default: 200)
   maxSkip: 1000,           // max skip allowed
   maxExpandDepth: 2,       // max $expand nesting depth
   enableCount: true,       // enable inline and standalone $count
@@ -880,6 +881,7 @@ this.bind(ODATA_BINDINGS.CONFIG).to({
 - `basePath`: Externally visible service root. All OData routes are served under this path (via middleware rewrite) while internal routes remain at `/odata`. Response metadata (`@odata.context`) uses this value.
 - `maxTop`: Caps `$top` for collection reads. The server may return fewer results than requested per OData v4. In strict mode, requests with `$top` above the cap return 400; otherwise the value is clamped to the maximum.
 - `maxSkip`: Maximum allowed `$skip`. When strict mode is disabled, requests above the cap are clamped; with strict mode enabled they return `400 Bad Request`.
+- `pageSize`: Default number of records per page for server-driven paging. The service always returns at most this many entities and emits an `@odata.nextLink` with a human-readable `$skiptoken` so clients can resume the feed.
 - `maxApplyResultSize`: Maximum number of rows the server will process in-memory when executing `$apply` fallbacks (default: `2000`). Requests that exceed the limit are rejected with `400 Bad Request`.
 - `logApplyFallbacks`: When `true`, logs a warning whenever `$apply` falls back to in-memory execution (default: `false`).
 - `onApplyFallback(event)`: Optional callback invoked whenever `$apply` falls back; receives `{event, entitySet, transformations, rows, limit}` so you can integrate with metrics/telemetry.
@@ -925,6 +927,29 @@ Entity-set specific overrides are available via `EntitySetRegistry.register`:
 - `hasStream`: mark the backing entity type as streaming (`Org.OData.Core.V1.HasStream`).
 
 Both the global `capabilities` defaults and per-set overrides support the new `insertRestrictions`, `updateRestrictions`, `deleteRestrictions`, and `searchRestrictions` keys. Example: `insertRestrictions: {insertable: false, nonInsertableNavigationProperties: ['orders']}` emits `Org.OData.Capabilities.V1.InsertRestrictions`, while `searchRestrictions: {unsupportedExpressions: ['not']}` maps shorthand values (`and`, `or`, `not`, etc.) to the corresponding `Org.OData.Capabilities.V1.SearchExpressions/*` enum members.
+
+### Server-driven Paging & `$skiptoken`
+
+Collection reads now default to server-driven paging. The component takes the smaller of the requested `$top` and the configured `pageSize` (default `200`), returns that many entities, and emits an `@odata.nextLink` that includes a human-readable `$skiptoken`. Tokens are a comma-separated list of URL-escaped ordering values (for example, `"12,2024-10-15T12%3A00%3A00.000Z"`). Clients simply follow the `nextLink` to resume the feed.
+
+```http
+GET /odata/Products
+```
+
+```json
+{
+  "@odata.context": "/odata/$metadata#Products",
+  "value": [
+    {"id": 1, "name": "Laptop", "price": 1299},
+    {"id": 2, "name": "Phone", "price": 799}
+  ],
+  "@odata.nextLink": "/odata/Products?$skiptoken=2"
+}
+```
+
+The controller enforces deterministic ordering automatically by appending the entity key to any client-supplied `$orderby`. When a request arrives with `$skiptoken`, the backend composes a lexicographic filter so the database resumes exactly where the previous page stopped. Traditional `$skip` offsets are rejected when server-driven paging is active—stick with `$skiptoken`. (Skip tokens for `$apply` pipelines are on the roadmap; for now those pipelines continue to rely on client-driven paging.)
+
+If you need a different page size, override `pageSize` at startup or per test using the configuration examples above.
 
 ### Advanced `$apply` Examples
 
