@@ -1030,6 +1030,7 @@ For `hasOne`, use `PUT /EntitySet(key)/Relation/$ref` with the same payload shap
 - [ ] Rich lambda grammar with nested `any` / `all` and mixed logical operators
 - [ ] Virtual/calculated field exposure with CSDL annotations
 - [ ] Media stream and attachment handling via `$value` routes and `HasStream` entity sets
+- [ ] Structured telemetry / debug mode for production monitoring (pushdown vs fallback, rewrite diagnostics, hook execution traces)
 
 ## Contributing
 
