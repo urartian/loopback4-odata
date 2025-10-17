@@ -5,6 +5,7 @@ export interface ODataModelOptions {
     entitySetName?: string;
     etag?: string | string[];
     deepInsert?: boolean;
+    applyPushdown?: boolean;
 }
 
 export function odataModel(opts: ODataModelOptions = {}) {

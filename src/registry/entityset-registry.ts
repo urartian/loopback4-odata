@@ -5,6 +5,12 @@ import type {CrudHookBundle} from '../types/crud-hooks';
 import { ControllerSecurityMetadata, MethodAliasMap } from '../util/security-metadata';
 import { ODataCapabilitiesConfig } from '../types';
 
+export interface EntitySqlMetadata {
+    tableName?: string;
+    schema?: string;
+    columnMap?: Record<string, string>;
+}
+
 export interface EntitySetDef<T extends Entity = Entity> {
     name: string;                                      // e.g. "Products"
     modelCtor: typeof Entity & { prototype: T };       // LB4 model constructor
@@ -21,6 +27,9 @@ export interface EntitySetDef<T extends Entity = Entity> {
     hasStream?: boolean;
     capabilities?: ODataCapabilitiesConfig;
     deepInsert?: boolean;
+    applyPushdown?: boolean;
+    applyExecutorId?: string;
+    sqlMetadata?: EntitySqlMetadata;
 }
 
 @injectable({ scope: BindingScope.SINGLETON })
@@ -35,6 +44,15 @@ export class EntitySetRegistry {
         }
         if (def.deepInsert === undefined && existing?.deepInsert !== undefined) {
             next.deepInsert = existing.deepInsert;
+        }
+        if (def.applyPushdown === undefined && existing?.applyPushdown !== undefined) {
+            next.applyPushdown = existing.applyPushdown;
+        }
+        if (!def.applyExecutorId && existing?.applyExecutorId) {
+            next.applyExecutorId = existing.applyExecutorId;
+        }
+        if (!def.sqlMetadata && existing?.sqlMetadata) {
+            next.sqlMetadata = existing.sqlMetadata;
         }
         this.sets.set(def.modelCtor, next);
         return next as EntitySetDef<T>;

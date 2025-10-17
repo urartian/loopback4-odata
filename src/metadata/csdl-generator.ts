@@ -748,6 +748,7 @@ export class CsdlGenerator {
 
         for (const set of entitySets) {
             const capabilities = mergeCapabilities(defaultCapabilities, set.capabilities);
+            capabilities.applySupported = capabilities.applySupported !== false && Boolean(set.applyPushdown);
             const hasStream = Boolean(set.hasStream ?? capabilities.hasStream);
             const entityType = buildEntityType(set, namespace, setLookup, context, hasStream);
             if (!entityType) continue;

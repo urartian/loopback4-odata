@@ -1,7 +1,8 @@
 /// <reference path="../../types/testing.globals.d.ts" />
 
 import {Client, createRestAppClient, expect} from '@loopback/testlab';
-import {AnyObject} from '@loopback/repository';
+import {BindingScope} from '@loopback/core';
+import {AnyObject, juggler} from '@loopback/repository';
 import {
   TestApplication,
   givenODataApplication,
@@ -9,6 +10,11 @@ import {
 } from '../fixtures/odata-app.fixture';
 import {ODATA_BINDINGS} from '../../keys';
 import {ODataConfig} from '../../types';
+import {
+  ODataApplyExecutorRegistry,
+  ODataApplyExecutor,
+  ODataApplyExecutorContext,
+} from '../../services/odata-apply-executor.registry';
 
 if (typeof process.setMaxListeners === 'function') {
   process.setMaxListeners(20);
@@ -347,7 +353,6 @@ describe('OData component acceptance', () => {
       logApplyFallbacks: false,
       capabilities: {
         aggregation: true,
-        applySupported: true,
       },
     } as ODataConfig);
     await app.boot();
@@ -363,6 +368,74 @@ describe('OData component acceptance', () => {
       .expect(400);
 
     expect(String(res.body?.error?.message ?? '')).to.match(/exceeds the server limit/i);
+  });
+
+  it('executes $apply via a registered pushdown executor when available', async function (this: Mocha.Context) {
+    if (app.state === 'started') await app.stop();
+    app = await givenODataApplication({port: 0, host: '127.0.0.1'});
+
+    const fallbackEvents: string[] = [];
+    const sentinel = [{TotalProducts: 999}];
+
+    class MemoryApplyExecutor implements ODataApplyExecutor {
+      readonly id = 'memory-test';
+
+      supports(dataSource: juggler.DataSource): boolean {
+        const connectorName = (dataSource.connector as AnyObject | undefined)?.name;
+        return connectorName === 'memory';
+      }
+
+      async execute(ctx: ODataApplyExecutorContext) {
+        executedContext = ctx;
+        executionCount++;
+        return {rows: sentinel};
+      }
+    }
+
+    let executedContext: ODataApplyExecutorContext | undefined;
+    let executionCount = 0;
+
+    app.bind(ODATA_BINDINGS.CONFIG).to({
+      enableApplyPushdown: true,
+      onApplyFallback: event => fallbackEvents.push(event.event),
+      capabilities: {
+        aggregation: true,
+      },
+    } as ODataConfig);
+
+    app
+      .bind(ODATA_BINDINGS.APPLY_EXECUTOR_REGISTRY)
+      .toDynamicValue(() => {
+        const registry = new ODataApplyExecutorRegistry();
+        registry.register(new MemoryApplyExecutor());
+        return registry;
+      })
+      .inScope(BindingScope.SINGLETON);
+
+    await app.boot();
+    await seedExampleData(app);
+    try {
+      await app.start();
+      client = createRestAppClient(app);
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      const message = (err as Error).message ?? '';
+      if (code === 'EPERM' || message.includes('not listening')) {
+        this.skip();
+        return;
+      }
+      throw err;
+    }
+
+    const res = await client
+      .get('/odata/Products')
+      .query({$apply: 'aggregate(id with count as TotalProducts)'})
+      .expect(200);
+
+    expect(res.body.value).to.deepEqual(sentinel);
+    expect(executionCount).to.equal(1);
+    expect(executedContext).to.be.Object();
+    expect(fallbackEvents).to.be.empty();
   });
 
   it('supports lambda any filters', async () => {

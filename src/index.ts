@@ -9,4 +9,6 @@ export * from './decorators/hook.decorators';
 export * from './decorators/search.decorators';
 export * from './types/crud-hooks';
 export * from './services/odata-query-parser.service';
+export * from './services/odata-apply-executor.registry';
+export * from './services/postgres-apply-executor';
 export * from './controllers/service-document.controller';

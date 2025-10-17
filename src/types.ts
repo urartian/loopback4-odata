@@ -22,6 +22,8 @@ export interface ODataConfig {
     // Limits & safety
     maxExpandDepth?: number;  // maximum allowed $expand nesting depth (strict enforced)
     maxSkip?: number;         // maximum allowed $skip (strict enforced)
+    // $apply pushdown
+    enableApplyPushdown?: boolean; // opt-in for datastore-backed $apply execution
 }
 
 export interface ODataNavigationRestriction {
