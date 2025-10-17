@@ -1,5 +1,7 @@
 import {AnyObject, DataObject, ModelDefinition, PropertyDefinition, Where, juggler} from '@loopback/repository';
 import {ODataApplyExecutor, ODataApplyExecutorContext, ODataApplyExecutorResult} from './odata-apply-executor.registry';
+import {EntitySqlMetadata} from '../registry/entityset-registry';
+import {inferSqlMetadata} from '../util/sql-metadata';
 
 interface ColumnResolution {
   column: string;
@@ -22,7 +24,7 @@ export class PostgresApplyExecutor implements ODataApplyExecutor {
     const {repository, aggregation, plan, fetchFilter, entitySet} = ctx;
     if (!aggregation || !aggregation.aggregates?.length) return undefined;
 
-    const dataSource: {execute?: Function; connector?: {name?: string}} = (repository as any)?.dataSource;
+    const dataSource = (repository as {dataSource?: juggler.DataSource}).dataSource;
     if (!dataSource || typeof dataSource.execute !== 'function') {
       return undefined;
     }
@@ -37,11 +39,11 @@ export class PostgresApplyExecutor implements ODataApplyExecutor {
     const modelDefinition = (entitySet.modelCtor as {definition?: ModelDefinition}).definition;
     if (!modelDefinition) return undefined;
 
-    const tableInfo = this.resolveTable(modelDefinition);
+    const sqlMetadata = this.getOrInferSqlMetadata(ctx, dataSource);
+    const tableInfo = this.buildTableInfo(sqlMetadata);
     if (!tableInfo) return undefined;
 
-    const columnResolver = (field: string): ColumnResolution | undefined =>
-      this.resolveColumn(field, modelDefinition, tableInfo.alias);
+    const columnResolver = this.createColumnResolver(sqlMetadata, modelDefinition, tableInfo.alias);
 
     const selectParts: string[] = [];
     const groupByParts: string[] = [];
@@ -92,34 +94,51 @@ export class PostgresApplyExecutor implements ODataApplyExecutor {
     return {rows};
   }
 
-  private resolveTable(definition: ModelDefinition): {tableRef: string; alias: string} | undefined {
-    const name = definition.name ?? 'Entity';
-    const settings = (definition.settings ?? {}) as {postgresql?: {schema?: string; table?: string}};
-    const pgSettings = settings.postgresql ?? {};
-    const schema = pgSettings.schema;
-    const table = pgSettings.table ?? name;
-    const tableRef = schema
-      ? `${quoteIdentifier(schema)}.${quoteIdentifier(table)}`
-      : `${quoteIdentifier(table)}`;
+  private getOrInferSqlMetadata(
+    ctx: ODataApplyExecutorContext,
+    dataSource: juggler.DataSource,
+  ): EntitySqlMetadata | undefined {
+    if (ctx.entitySet.sqlMetadata?.tableName) {
+      return ctx.entitySet.sqlMetadata;
+    }
+    const inferred = inferSqlMetadata(ctx.entitySet.modelCtor, dataSource);
+    if (inferred) {
+      ctx.entitySet.sqlMetadata = inferred;
+      return inferred;
+    }
+    return ctx.entitySet.sqlMetadata;
+  }
+
+  private buildTableInfo(metadata: EntitySqlMetadata | undefined): {tableRef: string; alias: string} | undefined {
+    if (!metadata?.tableName) return undefined;
     const alias = 't';
+    const schemaPart = metadata.schema ? `${quoteIdentifier(metadata.schema)}.` : '';
+    const tableRef = `${schemaPart}${quoteIdentifier(metadata.tableName)}`;
     return {tableRef, alias};
   }
 
-  private resolveColumn(
-    property: string,
+  private createColumnResolver(
+    metadata: EntitySqlMetadata | undefined,
     definition: ModelDefinition,
     tableAlias: string,
-  ): ColumnResolution | undefined {
-    if (!property || property.includes('/')) return undefined;
-    const propertyDef = definition.properties?.[property] as PropertyDefinition | undefined;
-    const column =
-      (propertyDef?.postgresql as {columnName?: string} | undefined)?.columnName ??
-      propertyDef?.name ??
-      property;
-    const quoted = `${tableAlias}.${quoteIdentifier(column)}`;
-    return {
-      column: quoted,
-      rawColumn: quoteIdentifier(column),
+  ): (field: string) => ColumnResolution | undefined {
+    const properties = definition?.properties ?? {};
+    const columnMap = metadata?.columnMap ?? {};
+    return (property: string): ColumnResolution | undefined => {
+      if (!property || property.includes('/')) return undefined;
+      const propertyDef = properties[property] as PropertyDefinition | undefined;
+      if (!propertyDef && columnMap[property] === undefined) {
+        return undefined;
+      }
+      const columnName = columnMap[property] ??
+        (propertyDef?.postgresql as {columnName?: string} | undefined)?.columnName ??
+        propertyDef?.name ??
+        property;
+      const quoted = `${tableAlias}.${quoteIdentifier(columnName)}`;
+      return {
+        column: quoted,
+        rawColumn: quoteIdentifier(columnName),
+      };
     };
   }
 

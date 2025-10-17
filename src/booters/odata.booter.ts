@@ -16,6 +16,7 @@ import type {CrudHookBundle} from '../types/crud-hooks';
 import { ODataConfig } from '../types';
 import {ensureNavigationTargetKey} from '../util/relation-metadata';
 import { ODataApplyExecutorRegistry } from '../services/odata-apply-executor.registry';
+import { inferSqlMetadata } from '../util/sql-metadata';
 
 @injectable({ tags: { booters: 'odata' } })
 export class ODataBooter implements Booter {
@@ -93,7 +94,7 @@ export class ODataBooter implements Booter {
                 deepInsert,
             });
 
-            await this.configureApplyPushdown(def, repoBinding, modelMeta);
+            await this.configureApplyPushdown(def, repoBinding, modelMeta, modelCtor);
 
             const CrudController = defineODataCrudController(def);
             def.controllerCtor = CrudController;
@@ -107,6 +108,7 @@ export class ODataBooter implements Booter {
         def: EntitySetDef,
         repoBinding: Readonly<Binding<unknown>>,
         modelMeta: ODataModelOptions | undefined,
+        modelCtor: typeof Entity,
     ): Promise<void> {
         let preference = def.applyPushdown;
         if (preference === undefined && modelMeta?.applyPushdown !== undefined) {
@@ -123,6 +125,7 @@ export class ODataBooter implements Booter {
         }
 
         let repositoryInstance: unknown;
+        let dataSource: juggler.DataSource | undefined;
         try {
             repositoryInstance = await this.app.get(repoBinding.key);
         } catch {
@@ -131,7 +134,7 @@ export class ODataBooter implements Booter {
             return;
         }
 
-        const dataSource = (repositoryInstance as {dataSource?: juggler.DataSource}).dataSource;
+        dataSource = (repositoryInstance as {dataSource?: juggler.DataSource}).dataSource;
         if (!dataSource) {
             def.applyPushdown = false;
             def.applyExecutorId = undefined;
@@ -144,6 +147,10 @@ export class ODataBooter implements Booter {
                 const supported = existingExecutor.supports ? await existingExecutor.supports(dataSource) : true;
                 if (supported) {
                     def.applyPushdown = true;
+                    const inferred = inferSqlMetadata(modelCtor, dataSource);
+                    if (inferred) {
+                        def.sqlMetadata = inferred;
+                    }
                     return;
                 }
             }
@@ -153,6 +160,10 @@ export class ODataBooter implements Booter {
         if (autoExecutor) {
             def.applyPushdown = true;
             def.applyExecutorId = autoExecutor.id;
+            const inferred = inferSqlMetadata(modelCtor, dataSource);
+            if (inferred) {
+                def.sqlMetadata = inferred;
+            }
             return;
         }
 

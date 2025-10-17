@@ -896,7 +896,7 @@ this.bind(ODATA_BINDINGS.CONFIG).to({
 - `enableDeepInsert`: Opt-in global switch for accepting nested payloads (deep insert). When `true`, every entity set defaults to deep insert unless overridden per model. When `false` (default), only entity sets with `@odataModel({deepInsert: true})` participate.
 - `maxDeepInsertDepth`: Maximum recursion depth for deep insert traversal (default: `10`). Requests exceeding the limit are rejected with `400 Bad Request` to prevent runaway graphs.
 - `enableNavigationRefEndpoints`: Set to `false` to skip registration of navigation `$ref` routes if you prefer to manage linking manually (default: `true`).
-- `$apply` pipelines support chained `filter`, `groupby`, `aggregate`, `orderby`, `skip`, and `top` stages, including navigation-path aggregates. When a connector cannot push the pipeline down, the runtime executes it in memory with safety limits (`maxApplyResultSize`, logging callbacks, etc.).
+- `$apply` pipelines support chained `filter`, `groupby`, `aggregate`, `orderby`, `skip`, and `top` stages, including navigation-path aggregates. By default the runtime executes these pipelines in memory; this carries CPU and memory overhead and should be reserved for small result sets. Opt into pushdown to keep heavy analytics inside the database.
 - Lambda filters (`any` / `all`) support navigation collections (including multi-segment paths) and can be combined with additional predicates using `and`. Nesting lambdas, mixing multiple lambdas, or combining them with `or` remains unsupported.
 - `strict` (default: true): Enables stricter validations and policies:
   - Requires `If-Match` on `PATCH`/`DELETE` when ETags are enabled (428 if missing).
@@ -954,9 +954,11 @@ The second command now returns `400 Bad Request`, demonstrating the throttle.
 
 ### `$apply` Pushdown (PostgreSQL)
 
-- Pushdown is **opt-in**. Out of the box, `$apply` still executes in memory with the existing safety guards. Set `enableApplyPushdown: true` on `ODataConfig` to negotiate pushdown across datasources, or opt in per model with `@odataModel({applyPushdown: true})` / per entity set via `EntitySetRegistry.register({applyPushdown: true})`.
-- PostgreSQL is supported natively. The extension inspects each repository datasource and, when it detects a Postgres connector, routes aggregation pipelines through a SQL executor built on `dataSource.execute(...)`. No upstream connector changes are required.
-- Unsupported scenarios automatically fall back to the in-memory executor. When `logApplyFallbacks` is enabled (or `onApplyFallback` is provided), additional events (`executor-declined`, `executor-error`) surface whenever the pushdown path declines a request.
+- Pushdown is **opt-in**. Out of the box, `$apply` executes in memory. This is functionally correct but resource intensive; enable pushdown for production workloads.
+- Set `enableApplyPushdown: true` on `ODataConfig` to negotiate pushdown across datasources, or opt in per model with `@odataModel({applyPushdown: true})` / per entity set via `EntitySetRegistry.register({applyPushdown: true})`.
+- PostgreSQL is supported natively today. The extension inspects each repository datasource and, when it detects a Postgres connector, routes aggregation pipelines through a SQL executor built on `dataSource.execute(...)`. Support for additional connectors will follow.
+- Table and column names are inferred automatically from the connector metadata (including the default lowercase conversion), so the usual LoopBack naming conventions work without additional annotations. Override the metadata only when you map models to non-standard table names.
+- Unsupported scenarios automatically fall back to the in-memory executor. When `logApplyFallbacks` is enabled (or `onApplyFallback` is provided), additional events (`executor-declined`, `executor-error`) surface whenever the pushdown path declines a request. Use these signals to monitor unexpected CPU/memory usage.
 - Capability metadata reflects reality: entity sets only emit `Org.OData.Capabilities.V1.ApplySupported` when pushdown is active, so BI clients can rely on the annotation.
 - Custom connectors can participate by registering their own executor with `ODataApplyExecutorRegistry`. Executors decide at runtime whether they can satisfy a pipeline and can signal unsupported combinations by returning `undefined`, preserving the existing fallback behavior.
 
