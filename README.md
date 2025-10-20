@@ -958,7 +958,7 @@ GET /odata/Products
 }
 ```
 
-The controller enforces deterministic ordering automatically by appending the entity key to any client-supplied `$orderby`. When a request arrives with `$skiptoken`, the backend composes a lexicographic filter so the database (or in-memory fallback) resumes exactly where the previous page stopped. Traditional `$skip` offsets are rejected when server-driven paging is active—stick with `$skiptoken`. The same mechanism now applies to `$apply` pipelines, so aggregated feeds page the same way as raw collections (delta links remain disabled for `$apply` responses until change tracking for aggregated feeds ships).
+The controller enforces deterministic ordering automatically by appending the entity key to any client-supplied `$orderby`. When a request arrives with `$skiptoken`, the backend composes a lexicographic filter so the database (or in-memory fallback) resumes exactly where the previous page stopped. Traditional `$skip` offsets are rejected when server-driven paging is active—stick with `$skiptoken`. The same mechanism now applies to `$apply` pipelines, so aggregated feeds page the same way as raw collections.
 
 If you need a different page size, override `pageSize` at startup or per test using the configuration examples above.
 
@@ -978,7 +978,7 @@ GET /odata/Products
 }
 ```
 
-Following the delta link returns only the new or updated rows (and can be combined with regular paging via `@odata.nextLink`). `$apply` pipelines will emit `400` if a delta token is supplied until change tracking for aggregated feeds is introduced.
+Following the delta link returns only the new or updated rows (and can be combined with regular paging via `@odata.nextLink`). The same flow works for `$apply` pipelines: the engine reruns the pipeline over the rows that changed since the last token and returns the affected aggregates.
 
 Deleted entities show up as tombstones:
 
@@ -988,6 +988,8 @@ Deleted entities show up as tombstones:
   "@removed": {"reason": "deleted"}
 }
 ```
+
+For `$apply` pipelines, delta responses include the aggregated buckets that changed as well as `@removed` entries for buckets that disappeared since the previous sync (tracked per page).
 
 ### Advanced `$apply` Examples
 

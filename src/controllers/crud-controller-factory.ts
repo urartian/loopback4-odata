@@ -2318,16 +2318,21 @@ export function defineODataCrudController(def: EntitySetDef) {
             deltaField: string,
             idProps: string[],
             previousToken?: string,
+            buckets?: Record<string, unknown>[],
         ): string {
             if (!rows.length) {
-                return encodeDeltaToken({entitySet, lastValue: new Date().toISOString()});
+                return previousToken ?? encodeDeltaToken({entitySet, lastValue: new Date().toISOString(), buckets});
             }
             const first = rows[0];
             const deltaValue = this.extractFieldValue(first, deltaField);
+            if (deltaValue === undefined) {
+                return previousToken ?? encodeDeltaToken({entitySet, lastValue: new Date().toISOString(), buckets});
+            }
             const payload = {
                 entitySet,
                 lastValue: this.stringifySkipTokenValue(deltaValue),
-            } as {entitySet: string; lastValue: string; keyValues?: Record<string, unknown>;};
+                buckets,
+            } as DeltaTokenPayload;
             const keyValues: Record<string, unknown> = {};
             for (const key of idProps) {
                 const value = this.extractFieldValue(first, key);
@@ -2349,6 +2354,57 @@ export function defineODataCrudController(def: EntitySetDef) {
                 ...keyValues,
                 '@removed': {reason: 'deleted'},
             }];
+        }
+
+        async computeDeltaTokenFromRepository(
+            entitySet: string,
+            deltaField: string | undefined,
+            where: CrudWhere | undefined,
+            idProps: string[],
+            options: Options | undefined,
+        ): Promise<string | undefined> {
+            if (!deltaField) return undefined;
+            const order: string[] = [`${deltaField} DESC`];
+            for (const key of idProps) {
+                if (key !== deltaField) {
+                    order.push(`${key} DESC`);
+                }
+            }
+            const latest = await this.repository.findOne({where, order}, options);
+            if (!latest) return undefined;
+            const plain = this.toPlainEntity(latest) ?? {};
+            return this.createDeltaTokenForRows(entitySet, [plain], deltaField, idProps, undefined);
+        }
+
+        buildBucketState(groupKeys: string[], rows: AnyObject[]): Record<string, unknown>[] {
+            if (!groupKeys.length) {
+                return rows.length ? [{}] : [];
+            }
+            return rows.map(row => {
+                const bucket: Record<string, unknown> = {};
+                for (const key of groupKeys) {
+                    bucket[key] = this.extractFieldValue(row, key);
+                }
+                return bucket;
+            });
+        }
+
+        buildRemovedBuckets(
+            previous: Record<string, unknown>[] | undefined,
+            current: AnyObject[],
+            groupKeys: string[],
+        ): AnyObject[] {
+            if (!previous?.length) return [];
+            const currentState = this.buildBucketState(groupKeys, current).map(bucket => JSON.stringify(bucket));
+            const currentSet = new Set(currentState);
+            const tombstones: AnyObject[] = [];
+            for (const bucket of previous) {
+                const signature = JSON.stringify(bucket);
+                if (!currentSet.has(signature)) {
+                    tombstones.push({...bucket, '@removed': {reason: 'deleted'}});
+                }
+            }
+            return tombstones;
         }
 
         buildLexKeyPredicate(idProperties: string[], keyValues: Record<string, unknown>): CrudWhere | undefined {
@@ -2878,9 +2934,6 @@ export function defineODataCrudController(def: EntitySetDef) {
                 if (!aggregationEnabled) {
                     throw new HttpErrors.NotImplemented('Aggregations are not enabled for this entity set.');
                 }
-                if (deltaEnabled || deltaTokenValue) {
-                    throw new HttpErrors.BadRequest('$deltatoken is not supported together with $apply.');
-                }
             }
 
             if (lambdaExpression) {
@@ -3036,6 +3089,27 @@ export function defineODataCrudController(def: EntitySetDef) {
                         },
                     );
                     if (pushdownResult) {
+                        let pushdownRows = Array.isArray(pushdownResult.value) ? pushdownResult.value : [];
+                        pushdownRows = pushdownRows.map(row => this.decoratePlainEntity(row) ?? row);
+                        const bucketState = this.buildBucketState(finalStage?.spec.groupBy ?? [], pushdownRows);
+                        const aggregatedTombstones = deltaEnabled
+                            ? this.buildRemovedBuckets(deltaPayload?.buckets, pushdownRows, finalStage?.spec.groupBy ?? [])
+                            : [];
+                        const combinedRows = aggregatedTombstones.length
+                            ? [...pushdownRows, ...aggregatedTombstones]
+                            : pushdownRows;
+                        pushdownResult.value = combinedRows;
+                        if (deltaEnabled && deltaField) {
+                            const applyDeltaToken = this.createDeltaTokenForRows(
+                                setName,
+                                pushdownRows,
+                                deltaField,
+                                [],
+                                deltaTokenValue,
+                                bucketState,
+                            );
+                            pushdownResult['@odata.deltaLink'] = this.buildDeltaLink(applyDeltaToken);
+                        }
                         ctx.result = pushdownResult;
                         return pushdownResult;
                     }
@@ -3128,12 +3202,28 @@ export function defineODataCrudController(def: EntitySetDef) {
                     const nextLinkToken = pagination.token;
 
                     this.ensureODataHeaders();
+                    const decorated = paged.map(item => this.decoratePlainEntity(item) ?? item);
+                    const aggregatedTombstones = deltaEnabled
+                        ? this.buildRemovedBuckets(deltaPayload?.buckets, decorated, finalStage?.spec.groupBy ?? [])
+                        : [];
+                    const bucketState = this.buildBucketState(finalStage?.spec.groupBy ?? [], decorated);
                     const result = {
                         '@odata.context': contextBase,
-                        value: paged,
+                        value: aggregatedTombstones.length ? [...decorated, ...aggregatedTombstones] : decorated,
                     } as AnyObject;
                     if (nextLinkToken) {
                         result['@odata.nextLink'] = this.buildNextLink(nextLinkToken);
+                    }
+                    if (deltaEnabled && deltaField) {
+                        const applyDeltaToken = this.createDeltaTokenForRows(
+                            setName,
+                            decorated,
+                            deltaField,
+                            [],
+                            deltaTokenValue,
+                            bucketState,
+                        );
+                        result['@odata.deltaLink'] = this.buildDeltaLink(applyDeltaToken);
                     }
                     ctx.result = result;
                     return result;

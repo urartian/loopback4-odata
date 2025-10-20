@@ -2,9 +2,11 @@ export interface DeltaTokenPayload {
   entitySet: string;
   lastValue: string;
   keyValues?: Record<string, unknown>;
+  buckets?: Array<Record<string, unknown>>;
 }
 
-const VERSION_PREFIX = 'v1:';
+const LEGACY_PREFIX = 'v1:';
+const JSON_PREFIX = 'v2:';
 
 function serializeValue(value: unknown): string {
   if (value === null || value === undefined) return 'null';
@@ -33,49 +35,63 @@ function deserializeValue(value: string): unknown {
   return value;
 }
 
-function encodeKeyValues(keyValues?: Record<string, unknown>): string | undefined {
+function encodeKeyValues(keyValues?: Record<string, unknown>): Record<string, unknown> | undefined {
   if (!keyValues) return undefined;
   const entries = Object.entries(keyValues);
   if (!entries.length) return undefined;
-  const serialized = entries.map(([key, val]) => `${encodeURIComponent(key)}=${encodeURIComponent(serializeValue(val))}`);
-  return serialized.join('&');
+  const serialized: Record<string, unknown> = {};
+  for (const [key, value] of entries) {
+    serialized[key] = serializeValue(value);
+  }
+  return serialized;
 }
 
-function decodeKeyValues(raw?: string): Record<string, unknown> | undefined {
+function decodeKeyValuesObject(raw?: Record<string, unknown>): Record<string, unknown> | undefined {
   if (!raw) return undefined;
   const result: Record<string, unknown> = {};
-  for (const segment of raw.split('&')) {
-    if (!segment) continue;
-    const [keyRaw, valueRaw] = segment.split('=');
-    if (!keyRaw) continue;
-    const key = decodeURIComponent(keyRaw);
-    const value = valueRaw ? decodeURIComponent(valueRaw) : '';
-    result[key] = deserializeValue(value);
+  for (const [key, value] of Object.entries(raw)) {
+    result[key] = typeof value === 'string' ? deserializeValue(value) : value;
   }
   return result;
 }
 
 export function encodeDeltaToken(payload: DeltaTokenPayload): string {
-  const segments: string[] = [payload.entitySet, payload.lastValue];
-  const keySegment = encodeKeyValues(payload.keyValues);
-  if (keySegment) segments.push(keySegment);
-  const serialized = segments.join('|');
-  const encoded = Buffer.from(serialized, 'utf8').toString('base64');
-  return `${VERSION_PREFIX}${encoded}`;
+  const encoded = Buffer.from(JSON.stringify(payload), 'utf8').toString('base64');
+  return `${JSON_PREFIX}${encoded}`;
 }
 
-export function decodeDeltaToken(token: string): DeltaTokenPayload {
-  if (!token?.startsWith(VERSION_PREFIX)) {
-    throw new Error('Unsupported delta token format.');
-  }
-  const raw = Buffer.from(token.slice(VERSION_PREFIX.length), 'base64').toString('utf8');
+function decodeLegacyToken(token: string): DeltaTokenPayload {
+  const raw = Buffer.from(token.slice(LEGACY_PREFIX.length), 'base64').toString('utf8');
   const [entitySet, lastValue, keySegment] = raw.split('|');
   if (!entitySet || !lastValue) {
     throw new Error('Invalid delta token payload.');
   }
-  return {
-    entitySet,
-    lastValue,
-    keyValues: decodeKeyValues(keySegment),
-  };
+  const keyValues = keySegment
+    ? keySegment.split('&').reduce<Record<string, unknown>>((acc, pair) => {
+        if (!pair) return acc;
+        const [keyRaw, valueRaw] = pair.split('=');
+        if (!keyRaw) return acc;
+        const key = decodeURIComponent(keyRaw);
+        const value = valueRaw ? decodeURIComponent(valueRaw) : '';
+        acc[key] = deserializeValue(value);
+        return acc;
+      }, {})
+    : undefined;
+  return {entitySet, lastValue, keyValues};
+}
+
+export function decodeDeltaToken(token: string): DeltaTokenPayload {
+  if (!token) {
+    throw new Error('Invalid delta token format.');
+  }
+  if (token.startsWith(JSON_PREFIX)) {
+    const raw = Buffer.from(token.slice(JSON_PREFIX.length), 'base64').toString('utf8');
+    const parsed = JSON.parse(raw) as DeltaTokenPayload;
+    parsed.keyValues = decodeKeyValuesObject(parsed.keyValues);
+    return parsed;
+  }
+  if (token.startsWith(LEGACY_PREFIX)) {
+    return decodeLegacyToken(token);
+  }
+  throw new Error('Unsupported delta token format.');
 }
