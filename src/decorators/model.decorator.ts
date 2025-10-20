@@ -6,6 +6,10 @@ export interface ODataModelOptions {
     etag?: string | string[];
     deepInsert?: boolean;
     applyPushdown?: boolean;
+    delta?: {
+        enabled?: boolean;
+        field?: string;
+    };
 }
 
 export function odataModel(opts: ODataModelOptions = {}) {

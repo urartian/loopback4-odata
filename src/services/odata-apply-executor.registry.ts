@@ -17,6 +17,19 @@ export interface ApplyExecutorTelemetryPayload {
   executorId?: string;
 }
 
+export interface ApplyOrderDescriptor {
+  field: string;
+  direction: 'ASC' | 'DESC';
+}
+
+export interface ApplyPagingOptions {
+  order: ApplyOrderDescriptor[];
+  skipToken?: string[];
+  pageSize?: number;
+  stageTop?: number;
+  stageSkip?: number;
+}
+
 export interface ODataApplyExecutorContext {
   entitySet: EntitySetDef;
   repository: DefaultCrudRepository<any, unknown>;
@@ -31,6 +44,7 @@ export interface ODataApplyExecutorContext {
   stageIndex: number;
   stageCount: number;
   telemetry?: (payload: ApplyExecutorTelemetryPayload) => void;
+  paging?: ApplyPagingOptions;
 }
 
 export interface ODataApplyExecutorResult {
@@ -39,6 +53,7 @@ export interface ODataApplyExecutorResult {
   appliedPipelinePagination?: boolean;
   appliedExternalPagination?: boolean;
   appliedStageFilters?: boolean;
+  nextSkipToken?: string;
 }
 
 export interface ODataApplyExecutor {

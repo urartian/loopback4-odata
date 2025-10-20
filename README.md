@@ -47,7 +47,13 @@ export class MyAppApplication extends BootMixin(RepositoryMixin(RestApplication)
 import {Entity, model, property} from '@loopback/repository';
 import {odataModel, odataController} from '@loopback/odata';
 
-@odataModel()
+@odataModel({
+  etag: 'updatedAt',
+  delta: {
+    enabled: true,
+    field: 'updatedAt',
+  },
+})
 @model()
 export class Product extends Entity {
   @property({id: true})
@@ -58,6 +64,9 @@ export class Product extends Entity {
 
   @property()
   price!: number;
+
+  @property({type: 'date', defaultFn: 'now'})
+  updatedAt!: Date;
 }
 ```
 
@@ -852,10 +861,12 @@ this.bind(ODATA_BINDINGS.CONFIG).to({
     aggregation: true,
   },
   maxTop: 100,             // server paging cap
+  pageSize: 50,            // server-driven paging size (default: 200)
   maxSkip: 1000,           // max skip allowed
   maxExpandDepth: 2,       // max $expand nesting depth
   enableCount: true,       // enable inline and standalone $count
   strict: true,            // enable strict validations (default: true)
+  enableDelta: true,       // emit $deltatoken links for incremental syncs
 } as ODataConfig);
 ```
 
@@ -880,6 +891,8 @@ this.bind(ODATA_BINDINGS.CONFIG).to({
 - `basePath`: Externally visible service root. All OData routes are served under this path (via middleware rewrite) while internal routes remain at `/odata`. Response metadata (`@odata.context`) uses this value.
 - `maxTop`: Caps `$top` for collection reads. The server may return fewer results than requested per OData v4. In strict mode, requests with `$top` above the cap return 400; otherwise the value is clamped to the maximum.
 - `maxSkip`: Maximum allowed `$skip`. When strict mode is disabled, requests above the cap are clamped; with strict mode enabled they return `400 Bad Request`.
+- `pageSize`: Default number of records per page for server-driven paging. The service always returns at most this many entities and emits an `@odata.nextLink` with a human-readable `$skiptoken` so clients can resume the feed.
+- `enableDelta`: When `true`, collection responses include `@odata.deltaLink` so clients can poll only the rows that changed since the last snapshot.
 - `maxApplyResultSize`: Maximum number of rows the server will process in-memory when executing `$apply` fallbacks (default: `2000`). Requests that exceed the limit are rejected with `400 Bad Request`.
 - `logApplyFallbacks`: When `true`, logs a warning whenever `$apply` falls back to in-memory execution (default: `false`).
 - `onApplyFallback(event)`: Optional callback invoked whenever `$apply` falls back; receives `{event, entitySet, transformations, rows, limit}` so you can integrate with metrics/telemetry.
@@ -925,6 +938,66 @@ Entity-set specific overrides are available via `EntitySetRegistry.register`:
 - `hasStream`: mark the backing entity type as streaming (`Org.OData.Core.V1.HasStream`).
 
 Both the global `capabilities` defaults and per-set overrides support the new `insertRestrictions`, `updateRestrictions`, `deleteRestrictions`, and `searchRestrictions` keys. Example: `insertRestrictions: {insertable: false, nonInsertableNavigationProperties: ['orders']}` emits `Org.OData.Capabilities.V1.InsertRestrictions`, while `searchRestrictions: {unsupportedExpressions: ['not']}` maps shorthand values (`and`, `or`, `not`, etc.) to the corresponding `Org.OData.Capabilities.V1.SearchExpressions/*` enum members.
+
+### Server-driven Paging & `$skiptoken`
+
+Collection reads now default to server-driven paging. The component takes the smaller of the requested `$top` and the configured `pageSize` (default `200`), returns that many entities, and emits an `@odata.nextLink` that includes a human-readable `$skiptoken`. Tokens are a comma-separated list of URL-escaped ordering values (for example, `"12,2024-10-15T12%3A00%3A00.000Z"`). Clients simply follow the `nextLink` to resume the feed.
+
+```http
+GET /odata/Products
+```
+
+```json
+{
+  "@odata.context": "/odata/$metadata#Products",
+  "value": [
+    {"id": 1, "name": "Laptop", "price": 1299},
+    {"id": 2, "name": "Phone", "price": 799}
+  ],
+  "@odata.nextLink": "/odata/Products?$skiptoken=2"
+}
+```
+
+The controller enforces deterministic ordering automatically by appending the entity key to any client-supplied `$orderby`. When a request arrives with `$skiptoken`, the backend composes a lexicographic filter so the database (or in-memory fallback) resumes exactly where the previous page stopped. Traditional `$skip` offsets are rejected when server-driven paging is active—stick with `$skiptoken`. The same mechanism now applies to `$apply` pipelines, so aggregated feeds page the same way as raw collections.
+
+If you need a different page size, override `pageSize` at startup or per test using the configuration examples above.
+
+### Delta Links
+
+When `enableDelta` is `true`, the first page of a collection includes an `@odata.deltaLink`. Clients can store that URL and call it later to retrieve only the entities that changed since the last sync. The implementation relies on each entity set having a stable change stamp (the first configured ETag property, or the field supplied via `@odataModel({delta: {field: ...}})` / `EntitySetDef.deltaField`).
+
+```http
+GET /odata/Products
+```
+
+```json
+{
+  "@odata.context": "/odata/$metadata#Products",
+  "value": [ {"id":1,"name":"Laptop","updatedAt":"2025-10-17T14:53:52.705Z"} ],
+  "@odata.deltaLink": "/odata/Products?$deltatoken=v1:ZXhhbXBsZVRva2Vu"
+}
+```
+
+Following the delta link returns only the new or updated rows (and can be combined with regular paging via `@odata.nextLink`). The same flow works for `$apply` pipelines: the engine reruns the pipeline over the rows that changed since the last token and returns the affected aggregates.
+
+Deleted entities show up as tombstones:
+
+```json
+{
+  "id": 1,
+  "@removed": {"reason": "deleted"}
+}
+```
+
+For `$apply` pipelines, delta responses include the aggregated buckets that changed as well as `@removed` entries for buckets that disappeared since the previous sync. Tombstones now carry the last known aggregate snapshot, so clients continue to see the bucket keys **and** the previously computed measures:
+
+```json
+{
+  "name": "Laptop",
+  "TotalPrice": 1299,
+  "@removed": {"reason": "deleted"}
+}
+```
 
 ### Advanced `$apply` Examples
 

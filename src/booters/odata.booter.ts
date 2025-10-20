@@ -81,17 +81,30 @@ export class ODataBooter implements Booter {
                 }
             }
 
+            const etagProperties = normalizeEtagProperties(modelMeta?.etag);
             const deepInsert = modelMeta?.deepInsert ?? Boolean(this.config?.enableDeepInsert);
+            const modelDeltaMeta = modelMeta?.delta;
+            let deltaEnabled = modelDeltaMeta?.enabled;
+            if (deltaEnabled === undefined && this.config?.enableDelta !== undefined) {
+                deltaEnabled = this.config.enableDelta;
+            }
+            const deltaField = modelDeltaMeta?.field ?? (etagProperties?.[0]);
+            if (deltaEnabled && !deltaField) {
+                deltaEnabled = false;
+                console.warn(`[OData] Delta requested for ${setName} but no change tracking field was configured.`);
+            }
             const def = this.registry.register({
                 name: setName,
                 modelCtor,
                 repositoryBindingKey: repoBinding.key,
                 repositoryCtor: repoBinding.valueConstructor ?? undefined,
-                etagProperties: normalizeEtagProperties(modelMeta?.etag),
+                etagProperties,
                 securityMetadata,
                 hooks: hooks as CrudHookBundle,
                 sourceControllerBindingKey: binding.key,
                 deepInsert,
+                deltaEnabled,
+                deltaField,
             });
 
             await this.configureApplyPushdown(def, repoBinding, modelMeta, modelCtor);

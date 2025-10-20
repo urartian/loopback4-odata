@@ -48,6 +48,7 @@ import {
     parseIfNoneMatch,
     readEtagValue,
 } from '../util/etag';
+import {encodeDeltaToken, decodeDeltaToken, DeltaTokenPayload, DeltaTokenBucketState} from '../util/delta-token';
 import {
     applyControllerSecurityMetadata,
     mergeMethodAliasMaps,
@@ -93,6 +94,11 @@ interface AggregationAccumulatorState {
     min?: number;
     max?: number;
     distinct?: Set<unknown>;
+}
+
+interface OrderDescriptor {
+    field: string;
+    direction: 'ASC' | 'DESC';
 }
 
 function inferIdParamType(definition: any): 'string' | 'number' | 'boolean' {
@@ -1070,6 +1076,13 @@ export function defineODataCrudController(def: EntitySetDef) {
             _stage: ApplyAggregationStage | undefined,
             stageIndex: number,
             stageCount: number,
+            paging?: {
+                orderDescriptors: OrderDescriptor[];
+                skipTokenParts?: string[];
+                pageSize?: number;
+                stageTop?: number;
+                stageSkip?: number;
+            },
         ): Promise<AnyObject | undefined> {
             if (!def.applyPushdown || !def.applyExecutorId) return undefined;
             const registry = this.applyExecutors;
@@ -1163,6 +1176,16 @@ export function defineODataCrudController(def: EntitySetDef) {
                 fetchFilterCopy.include = [...fetchFilter.include];
             }
 
+            const executorPaging = paging
+                ? {
+                    order: paging.orderDescriptors.map(item => ({field: item.field, direction: item.direction})),
+                    skipToken: paging.skipTokenParts ? [...paging.skipTokenParts] : undefined,
+                    pageSize: paging.pageSize,
+                    stageTop: paging.stageTop,
+                    stageSkip: paging.stageSkip,
+                }
+                : undefined;
+
             const context: ODataApplyExecutorContext = {
                 entitySet: def,
                 repository: this.repository,
@@ -1183,6 +1206,7 @@ export function defineODataCrudController(def: EntitySetDef) {
                         joinCount: payload.joinCount,
                     });
                 },
+                paging: executorPaging,
             };
 
             try {
@@ -1240,18 +1264,40 @@ export function defineODataCrudController(def: EntitySetDef) {
                     if (execResult.appliedOrder !== true) {
                         ordered = this.orderResults(working, stageOrderClauses);
                     }
-                } else if (fallbackOrder) {
+                } else if (fallbackOrder && execResult.appliedOrder !== true) {
                     ordered = this.orderResults(working, fallbackOrder);
                 }
-                const paged = execResult.appliedExternalPagination
-                    ? ordered
-                    : this.sliceResults(ordered, requestedOffset, requestedLimit);
+
+                let nextLinkToken = execResult.nextSkipToken;
+
+                if (execResult.appliedExternalPagination !== true) {
+                    const descriptorList = paging?.orderDescriptors ?? [];
+                    if (descriptorList.length) {
+                        const descriptorOrder = descriptorList.map(item => `${item.field} ${item.direction}`);
+                        ordered = this.orderResults(ordered, descriptorOrder);
+                        ordered = this.filterRowsAfterSkipToken(ordered, descriptorList, paging?.skipTokenParts);
+                        const pageSize = paging?.pageSize ?? this.resolvePageSize(undefined);
+                        const pagination = this.applyServerDrivenPaging(ordered, descriptorList, pageSize);
+                        ordered = pagination.items;
+                        nextLinkToken = pagination.token;
+                    } else {
+                        ordered = this.sliceResults(ordered, requestedOffset, requestedLimit);
+                    }
+                }
+
+                if (postFilterExpr) {
+                    nextLinkToken = undefined;
+                }
 
                 this.ensureODataHeaders();
-                return {
+                const response = {
                     '@odata.context': contextBase,
-                    value: paged,
+                    value: ordered,
                 } as AnyObject;
+                if (nextLinkToken) {
+                    response['@odata.nextLink'] = this.buildNextLink(nextLinkToken);
+                }
+                return response;
             } catch (error) {
                 this.emitApplyTelemetry('pushdown', stageIndex, planStages.length, {
                     reason: 'executor-error',
@@ -1946,6 +1992,550 @@ export function defineODataCrudController(def: EntitySetDef) {
             return { or: merged };
         }
 
+        normalizeOrderDescriptors(order: Filter<CrudEntity>['order'], idProperties: string[]): OrderDescriptor[] {
+            const orderArray = Array.isArray(order) ? order : order ? [order] : [];
+            const descriptors: OrderDescriptor[] = [];
+            const seen = new Set<string>();
+
+            for (const clause of orderArray) {
+                const segment = String(clause ?? '').trim();
+                if (!segment) continue;
+                const [rawField, rawDirection] = segment.split(/\s+/);
+                if (!rawField) continue;
+                if (rawField.includes('/')) {
+                    throw new HttpErrors.BadRequest('$orderby with navigation paths cannot be combined with server-driven paging.');
+                }
+                const direction = rawDirection?.toUpperCase() === 'DESC' ? 'DESC' : 'ASC';
+                if (seen.has(rawField)) continue;
+                seen.add(rawField);
+                descriptors.push({field: rawField, direction});
+            }
+
+            for (const id of idProperties) {
+                if (!id || seen.has(id)) continue;
+                seen.add(id);
+                descriptors.push({field: id, direction: 'ASC'});
+            }
+
+            if (!descriptors.length) {
+                const fallback = idProperties[0] ?? 'id';
+                descriptors.push({field: fallback, direction: 'ASC'});
+            }
+
+            return descriptors;
+        }
+
+        resolvePageSize(requested?: number): number {
+            const configSize = Number(this.cfg?.pageSize ?? 0);
+            const base = Number.isFinite(configSize) && configSize > 0 ? Math.floor(configSize) : 200;
+            if (!Number.isFinite(requested) || (requested as number) <= 0) return base;
+            const normalized = Math.floor(Number(requested));
+            if (normalized <= 0) return base;
+            return Math.min(normalized, base);
+        }
+
+        buildApplyOrderDescriptors(stage: ApplyAggregationStage | undefined, fallbackSpec: AggregationSpec): OrderDescriptor[] {
+            const descriptors: OrderDescriptor[] = [];
+            const seen = new Set<string>();
+            const spec = stage?.spec ?? fallbackSpec;
+            const orderItems = stage?.orderBy ?? [];
+
+            const addDescriptor = (field: string | undefined, direction: 'ASC' | 'DESC' = 'ASC') => {
+                if (!field) return;
+                if (seen.has(field)) return;
+                seen.add(field);
+                descriptors.push({field, direction});
+            };
+
+            for (const item of orderItems) {
+                const direction = item.direction?.toUpperCase() === 'DESC' ? 'DESC' : 'ASC';
+                addDescriptor(item.field, direction);
+            }
+
+            if (!descriptors.length) {
+                for (const groupField of spec.groupBy ?? []) {
+                    addDescriptor(groupField, 'ASC');
+                }
+                for (const aggregate of spec.aggregates ?? []) {
+                    if (aggregate.alias) {
+                        addDescriptor(aggregate.alias, 'ASC');
+                    }
+                }
+            }
+
+            if (!descriptors.length) {
+                addDescriptor('value', 'ASC');
+            }
+
+            return descriptors;
+        }
+
+        parseApplySkipToken(token: string | undefined, expectedLength: number): string[] | undefined {
+            if (!token) return undefined;
+            const parts = token.split(',');
+            if (!parts.length) {
+                throw new HttpErrors.BadRequest('Invalid $skiptoken value.');
+            }
+            if (parts.length !== expectedLength) {
+                throw new HttpErrors.BadRequest('Invalid $skiptoken value.');
+            }
+            return parts.map(part => decodeURIComponent(part));
+        }
+
+        coerceTokenValue(raw: string, sample: unknown): unknown {
+            if (sample == null) {
+                return raw === 'null' ? null : raw;
+            }
+            if (sample instanceof Date) {
+                const date = new Date(raw);
+                if (Number.isNaN(date.getTime())) {
+                    throw new HttpErrors.BadRequest('Invalid date value in $skiptoken.');
+                }
+                return date;
+            }
+            switch (typeof sample) {
+                case 'number': {
+                    const num = Number(raw);
+                    if (Number.isNaN(num)) {
+                        throw new HttpErrors.BadRequest('Invalid numeric value in $skiptoken.');
+                    }
+                    return num;
+                }
+                case 'boolean':
+                    if (raw === 'true') return true;
+                    if (raw === 'false') return false;
+                    throw new HttpErrors.BadRequest('Invalid boolean value in $skiptoken.');
+                default:
+                    return raw;
+            }
+        }
+
+        compareRowAgainstToken(row: AnyObject, descriptors: OrderDescriptor[], tokenParts: string[]): number {
+            for (let index = 0; index < descriptors.length; index++) {
+                const descriptor = descriptors[index];
+                const tokenRaw = tokenParts[index];
+                const rowValue = this.extractFieldValue(row, descriptor.field);
+                const tokenValue = this.coerceTokenValue(tokenRaw, rowValue);
+                let cmp = this.compareValues(rowValue, tokenValue);
+                if (descriptor.direction === 'DESC') cmp = -cmp;
+                if (cmp > 0) return 1;
+                if (cmp < 0) return -1;
+            }
+            return 0;
+        }
+
+        filterRowsAfterSkipToken(rows: AnyObject[], descriptors: OrderDescriptor[], tokenParts: string[] | undefined): AnyObject[] {
+            if (!tokenParts || !tokenParts.length) return rows;
+            const filtered: AnyObject[] = [];
+            for (const row of rows) {
+                const cmp = this.compareRowAgainstToken(row, descriptors, tokenParts);
+                if (cmp > 0) {
+                    filtered.push(row);
+                }
+            }
+            return filtered;
+        }
+
+        parseSkipTokenValues(token: string, descriptors: OrderDescriptor[], definition: ModelDefinition | undefined): unknown[] {
+            if (!token) {
+                throw new HttpErrors.BadRequest('Empty $skiptoken is not allowed.');
+            }
+            const segments = token.split(',');
+            if (segments.length !== descriptors.length) {
+                throw new HttpErrors.BadRequest('Invalid $skiptoken value.');
+            }
+            return descriptors.map((descriptor, index) => {
+                const raw = decodeURIComponent(segments[index] ?? '');
+                return this.coerceSkipTokenValue(descriptor.field, raw, definition);
+            });
+        }
+
+        coerceSkipTokenValue(field: string, raw: string, definition: ModelDefinition | undefined): unknown {
+            if (raw === 'null') return null;
+            const properties = (definition?.properties ?? {}) as Record<string, PropertyDefinition | undefined>;
+            const property = properties[field];
+            const type = property?.type ?? property?.jsonSchema?.type;
+            if (type === Number || type === 'number') {
+                const num = Number(raw);
+                if (Number.isNaN(num)) {
+                    throw new HttpErrors.BadRequest(`Invalid numeric value in $skiptoken for ${field}.`);
+                }
+                return num;
+            }
+            if (type === Boolean || type === 'boolean') {
+                if (raw === 'true' || raw === 'false') {
+                    return raw === 'true';
+                }
+                throw new HttpErrors.BadRequest(`Invalid boolean value in $skiptoken for ${field}.`);
+            }
+            if (type === Date || type === 'date' || type === 'datetime' || property?.jsonSchema?.format === 'date-time') {
+                const date = new Date(raw);
+                if (Number.isNaN(date.getTime())) {
+                    throw new HttpErrors.BadRequest(`Invalid date value in $skiptoken for ${field}.`);
+                }
+                return date;
+            }
+            return raw;
+        }
+
+        buildEqualityClause(field: string, value: unknown): CrudWhere {
+            const clause: AnyObject = value === null ? {[field]: null} : {[field]: value};
+            return clause as CrudWhere;
+        }
+
+        buildSkipTokenConstraint(token: string, descriptors: OrderDescriptor[], definition: ModelDefinition | undefined): CrudWhere | undefined {
+            if (!token) return undefined;
+            if (!descriptors.length) {
+                throw new HttpErrors.BadRequest('Unable to apply $skiptoken without an order clause.');
+            }
+            const values = this.parseSkipTokenValues(token, descriptors, definition);
+            const branches: CrudWhere[] = [];
+            for (let index = 0; index < descriptors.length; index++) {
+                const descriptor = descriptors[index];
+                const value = values[index];
+                const equalityParts: CrudWhere[] = [];
+                for (let eqIndex = 0; eqIndex < index; eqIndex++) {
+                    equalityParts.push(this.buildEqualityClause(descriptors[eqIndex].field, values[eqIndex]));
+                }
+
+                let comparison: CrudWhere | undefined;
+                if (value === null) {
+                    if (descriptor.direction === 'DESC') {
+                        comparison = {[descriptor.field]: {neq: null}} as CrudWhere;
+                    }
+                } else {
+                    const comparator = descriptor.direction === 'DESC' ? 'lt' : 'gt';
+                    comparison = {[descriptor.field]: {[comparator]: value}} as CrudWhere;
+                }
+
+                if (comparison) {
+                    equalityParts.push(comparison);
+                }
+                const branch = this.combineWithAnd(equalityParts);
+                if (branch) {
+                    branches.push(branch);
+                }
+            }
+            return this.combineWithOr(branches);
+        }
+
+        ensureOrderProjection(fields: Filter<CrudEntity>['fields'], descriptors: OrderDescriptor[]): Filter<CrudEntity>['fields'] {
+            if (!fields) return fields;
+            const includeField = (target: string) => {
+                if (!target) return;
+                if (Array.isArray(fields)) {
+                    if (!fields.includes(target)) fields.push(target);
+                    return;
+                }
+                if (typeof fields === 'object') {
+                    (fields as AnyObject)[target] = true;
+                    return;
+                }
+            };
+            for (const descriptor of descriptors) {
+                if (descriptor.field.includes('/')) continue;
+                includeField(descriptor.field);
+            }
+            return fields;
+        }
+
+        createSkipToken(record: AnyObject | undefined, descriptors: OrderDescriptor[]): string | undefined {
+            if (!record || !descriptors.length) return undefined;
+            const parts: string[] = [];
+            for (const descriptor of descriptors) {
+                const value = this.extractFieldValue(record, descriptor.field);
+                if (value === undefined) return undefined;
+                const encoded = encodeURIComponent(this.stringifySkipTokenValue(value));
+                parts.push(encoded);
+            }
+            return parts.join(',');
+        }
+
+        extractFieldValue(record: AnyObject | undefined, field: string): unknown {
+            if (!record) return undefined;
+            if (!field.includes('/')) {
+                return (record as AnyObject)[field];
+            }
+            const segments = field.split('/');
+            let current: any = record;
+            for (const segment of segments) {
+                if (current == null) return undefined;
+                current = current[segment];
+            }
+            return current;
+        }
+
+        stringifySkipTokenValue(value: unknown): string {
+            if (value === null || value === undefined) return 'null';
+            if (value instanceof Date) return value.toISOString();
+            if (typeof value === 'object') return JSON.stringify(value);
+            return String(value);
+        }
+
+        buildNextLink(skipToken: string): string {
+            const params = new URLSearchParams();
+            const query = this.request.query ?? {};
+            for (const [key, paramValue] of Object.entries(query)) {
+                if (!paramValue || key === '$skiptoken' || key === '$skip') continue;
+                if (Array.isArray(paramValue)) {
+                    for (const entry of paramValue) {
+                        params.append(key, String(entry));
+                    }
+                } else if (typeof paramValue === 'object') {
+                    params.append(key, String(paramValue));
+                } else {
+                    params.set(key, String(paramValue));
+                }
+            }
+            params.set('$skiptoken', skipToken);
+            const queryString = params.toString();
+            return queryString ? `${this.request.path}?${queryString}` : this.request.path;
+        }
+
+        buildDeltaLink(deltaToken: string): string {
+            const params = new URLSearchParams();
+            const query = this.request.query ?? {};
+            for (const [key, paramValue] of Object.entries(query)) {
+                if (!paramValue || key === '$skiptoken' || key === '$skip' || key === '$deltatoken') continue;
+                if (Array.isArray(paramValue)) {
+                    for (const entry of paramValue) {
+                        params.append(key, String(entry));
+                    }
+                } else if (typeof paramValue === 'object') {
+                    params.set(key, String(paramValue));
+                } else {
+                    params.set(key, String(paramValue));
+                }
+            }
+            params.set('$deltatoken', deltaToken);
+            const queryString = params.toString();
+            return queryString ? `${this.request.path}?${queryString}` : this.request.path;
+        }
+
+        createDeltaTokenForRows(
+            entitySet: string,
+            rows: AnyObject[],
+            deltaField: string,
+            idProps: string[],
+            previousToken?: string,
+            buckets?: DeltaTokenBucketState[],
+        ): string {
+            if (!rows.length) {
+                return previousToken ?? encodeDeltaToken({entitySet, lastValue: new Date().toISOString(), buckets});
+            }
+            const first = rows[0];
+            const deltaValue = this.extractFieldValue(first, deltaField);
+            if (deltaValue === undefined) {
+                return previousToken ?? encodeDeltaToken({entitySet, lastValue: new Date().toISOString(), buckets});
+            }
+            const payload = {
+                entitySet,
+                lastValue: this.stringifySkipTokenValue(deltaValue),
+                buckets,
+            } as DeltaTokenPayload;
+            const keyValues: Record<string, unknown> = {};
+            for (const key of idProps) {
+                const value = this.extractFieldValue(first, key);
+                if (value !== undefined) {
+                    keyValues[key] = value;
+                }
+            }
+            if (Object.keys(keyValues).length) {
+                payload.keyValues = keyValues;
+            }
+            return encodeDeltaToken(payload);
+        }
+
+        async computeTombstones(keyValues: Record<string, unknown> | undefined): Promise<AnyObject[]> {
+            if (!keyValues || !Object.keys(keyValues).length) return [];
+            const existing = await this.repository.findOne({where: keyValues as CrudWhere});
+            if (existing) return [];
+            return [{
+                ...keyValues,
+                '@removed': {reason: 'deleted'},
+            }];
+        }
+
+        async computeDeltaTokenFromRepository(
+            entitySet: string,
+            deltaField: string | undefined,
+            where: CrudWhere | undefined,
+            idProps: string[],
+            options: Options | undefined,
+        ): Promise<string | undefined> {
+            if (!deltaField) return undefined;
+            const order: string[] = [`${deltaField} DESC`];
+            for (const key of idProps) {
+                if (key !== deltaField) {
+                    order.push(`${key} DESC`);
+                }
+            }
+            const latest = await this.repository.findOne({where, order}, options);
+            if (!latest) return undefined;
+            const plain = this.toPlainEntity(latest) ?? {};
+            return this.createDeltaTokenForRows(entitySet, [plain], deltaField, idProps, undefined);
+        }
+
+        buildBucketState(groupKeys: string[], rows: AnyObject[]): DeltaTokenBucketState[] {
+            if (!rows.length) return [];
+            const buckets = new Map<string, DeltaTokenBucketState>();
+            for (const row of rows) {
+                const key = this.buildBucketKeyFromRow(row, groupKeys);
+                const signature = this.serializeBucketKey(key, groupKeys);
+                const snapshot = this.cloneBucketSnapshot(row);
+                buckets.set(signature, snapshot ? {key, data: snapshot} : {key});
+            }
+            return Array.from(buckets.values());
+        }
+
+        buildRemovedBuckets(
+            previous: DeltaTokenBucketState[] | undefined,
+            current: AnyObject[],
+            groupKeys: string[],
+        ): AnyObject[] {
+            if (!previous?.length) return [];
+            const currentSignatures = new Set(
+                current.map(row => this.serializeBucketKey(this.buildBucketKeyFromRow(row, groupKeys), groupKeys)),
+            );
+            const tombstones: AnyObject[] = [];
+            for (const entry of previous) {
+                const key = entry?.key ?? {};
+                const signature = this.serializeBucketKey(key, groupKeys);
+                if (currentSignatures.has(signature)) continue;
+                const tombstoneBase = entry?.data ? this.clonePlainRecord(entry.data) : {};
+                Object.assign(tombstoneBase, key);
+                tombstoneBase['@removed'] = {reason: 'deleted'};
+                tombstones.push(tombstoneBase);
+            }
+            return tombstones;
+        }
+
+        serializeBucketKey(key: Record<string, unknown>, groupKeys: string[]): string {
+            if (!groupKeys.length) return JSON.stringify({});
+            const ordered: Record<string, unknown> = {};
+            for (const bucketKey of groupKeys) {
+                ordered[bucketKey] = key?.[bucketKey];
+            }
+            return JSON.stringify(ordered);
+        }
+
+        clonePlainRecord(source: Record<string, unknown> | undefined): Record<string, unknown> {
+            if (!source) return {};
+            const clone: Record<string, unknown> = {};
+            for (const [field, value] of Object.entries(source)) {
+                clone[field] = this.cloneBucketValue(value);
+            }
+            return clone;
+        }
+
+        cloneBucketSnapshot(row: AnyObject): Record<string, unknown> | undefined {
+            const snapshot: Record<string, unknown> = {};
+            for (const [field, value] of Object.entries(row)) {
+                if (field.startsWith('@')) continue;
+                snapshot[field] = this.cloneBucketValue(value);
+            }
+            return Object.keys(snapshot).length ? snapshot : undefined;
+        }
+
+        cloneBucketValue(value: unknown): unknown {
+            if (value === null || value === undefined) return value;
+            if (Array.isArray(value)) {
+                return value.map(item => this.cloneBucketValue(item));
+            }
+            if (value instanceof Date) {
+                return new Date(value.getTime());
+            }
+            if (typeof value === 'object') {
+                const record: Record<string, unknown> = {};
+                for (const [key, nested] of Object.entries(value as Record<string, unknown>)) {
+                    if (key.startsWith('@')) continue;
+                    record[key] = this.cloneBucketValue(nested);
+                }
+                return record;
+            }
+            return value;
+        }
+
+        buildBucketKeyFromRow(row: AnyObject, groupKeys: string[]): Record<string, unknown> {
+            if (!groupKeys.length) return {};
+            const key: Record<string, unknown> = {};
+            for (const bucketKey of groupKeys) {
+                key[bucketKey] = this.extractFieldValue(row, bucketKey);
+            }
+            return key;
+        }
+
+        buildLexKeyPredicate(idProperties: string[], keyValues: Record<string, unknown>): CrudWhere | undefined {
+            if (!idProperties.length) return undefined;
+            const branches: CrudWhere[] = [];
+            for (let index = 0; index < idProperties.length; index++) {
+                const parts: CrudWhere[] = [];
+                for (let eqIndex = 0; eqIndex < index; eqIndex++) {
+                    const eqField = idProperties[eqIndex];
+                    const eqValue = keyValues[eqField];
+                    if (eqValue === undefined) return undefined;
+                    parts.push({[eqField]: eqValue} as CrudWhere);
+                }
+                const field = idProperties[index];
+                const value = keyValues[field];
+                if (value === undefined) return undefined;
+                parts.push({[field]: {gt: value}} as CrudWhere);
+                const branch = this.combineWithAnd(parts);
+                if (branch) branches.push(branch);
+            }
+            return this.combineWithOr(branches);
+        }
+
+        buildDeltaPredicate(
+            deltaField: string,
+            lastValueRaw: string,
+            definition: ModelDefinition | undefined,
+            idProperties: string[],
+            rawKeyValues?: Record<string, unknown>,
+        ): CrudWhere {
+            const typedLast = this.coerceSkipTokenValue(deltaField, lastValueRaw, definition);
+            const greaterClause = { [deltaField]: { gt: typedLast } } as CrudWhere;
+            if (!idProperties.length || !rawKeyValues || !Object.keys(rawKeyValues).length) {
+                return greaterClause;
+            }
+            const typedKeyValues: Record<string, unknown> = {};
+            for (const key of idProperties) {
+                const raw = rawKeyValues[key];
+                if (raw === undefined) {
+                    return greaterClause;
+                }
+                typedKeyValues[key] = this.coerceSkipTokenValue(
+                    key,
+                    this.stringifySkipTokenValue(raw),
+                    definition,
+                );
+            }
+            const equalityClause = { [deltaField]: typedLast } as CrudWhere;
+            const keyPredicate = this.buildLexKeyPredicate(idProperties, typedKeyValues);
+            if (!keyPredicate) return greaterClause;
+            const combinedEquality = this.combineWithAnd([equalityClause, keyPredicate]);
+            return this.combineWithOr([greaterClause, combinedEquality]) ?? greaterClause;
+        }
+
+        applyServerDrivenPaging(data: AnyObject[], descriptors: OrderDescriptor[], pageSize: number): {items: AnyObject[]; token?: string} {
+            if (!pageSize || pageSize <= 0) {
+                return {items: data};
+            }
+            if (data.length <= pageSize) {
+                return {items: data};
+            }
+            const items = data.slice(0, pageSize);
+            const last = items[items.length - 1];
+            const token = this.createSkipToken(last, descriptors);
+            if (!token) {
+                throw new HttpErrors.InternalServerError('Unable to generate $skiptoken for next page.');
+            }
+            return {
+                items,
+                token,
+            };
+        }
+
         collectWhereFields(where: AnyObject | undefined, out: Set<string>) {
             if (!where || typeof where !== 'object') return;
             for (const [key, value] of Object.entries(where)) {
@@ -2264,6 +2854,11 @@ export function defineODataCrudController(def: EntitySetDef) {
             let lambdaExpression: LambdaExpression | undefined;
             let postFilterExpr: ParsedExpression | undefined;
             let unsupportedFunctions: string[] = [];
+            let deltaTokenValue: string | undefined;
+            let deltaEnabled = false;
+            let deltaField: string | undefined;
+            let deltaLinkToken: string | undefined;
+            let skipTokenValue: string | undefined;
             try {
                 const parsed = parseODataQuery(
                     this.request.query as Record<string, string | string[] | undefined>,
@@ -2274,6 +2869,7 @@ export function defineODataCrudController(def: EntitySetDef) {
                     throw new HttpErrors.BadRequest('The $count option is disabled by server configuration.');
                 }
                 const externalOrder = Array.isArray(parsed.order) ? [...parsed.order] : parsed.order;
+                deltaTokenValue = parsed.deltaToken;
                 applyPipeline = parsed.applyPipeline;
                 if (applyPipeline) {
                     applyPlan = buildApplyExecutionPlan(applyPipeline, {
@@ -2290,6 +2886,7 @@ export function defineODataCrudController(def: EntitySetDef) {
                 lambdaExpression = parsed.lambda;
                 postFilterExpr = parsed.postFilter;
                 unsupportedFunctions = parsed.unsupportedFunctions ?? [];
+                skipTokenValue = parsed.skipToken;
                 if (postFilterExpr && unsupportedFunctions.length && this.cfg?.strict) {
                     throw new HttpErrors.BadRequest(`Unsupported filter functions in strict mode: ${unsupportedFunctions.join(', ')}`);
                 }
@@ -2298,6 +2895,8 @@ export function defineODataCrudController(def: EntitySetDef) {
                     apply?: AggregationSpec;
                     applyPipeline?: ApplyPipeline;
                     lambda?: LambdaExpression;
+                    skipToken?: string;
+                    deltaToken?: string;
                 };
                 delete (parsedFilter as { inlineCount?: boolean }).inlineCount;
                 delete (parsedFilter as { apply?: AggregationSpec }).apply;
@@ -2305,6 +2904,8 @@ export function defineODataCrudController(def: EntitySetDef) {
                 delete (parsedFilter as { lambda?: LambdaExpression }).lambda;
                 delete (parsedFilter as { postFilter?: ParsedExpression }).postFilter;
                 delete (parsedFilter as { unsupportedFunctions?: string[] }).unsupportedFunctions;
+                delete (parsedFilter as { skipToken?: string }).skipToken;
+                delete (parsedFilter as { deltaToken?: string }).deltaToken;
                 this.mergeFilters(baseFilter, parsedFilter);
                 hadClientExpand = Array.isArray(baseFilter.include)
                     ? baseFilter.include.length > 0
@@ -2356,6 +2957,31 @@ export function defineODataCrudController(def: EntitySetDef) {
                 throw new HttpErrors.BadRequest(message);
             }
 
+            let deltaPayload: DeltaTokenPayload | undefined;
+            if (deltaTokenValue) {
+                try {
+                    deltaPayload = decodeDeltaToken(deltaTokenValue);
+                } catch {
+                    throw new HttpErrors.BadRequest('Invalid $deltatoken value.');
+                }
+            }
+
+            let deltaPreference = def.deltaEnabled;
+            if (deltaPreference === undefined) {
+                deltaPreference = this.cfg?.enableDelta;
+            }
+            deltaEnabled = Boolean(deltaPreference);
+            deltaField = deltaEnabled ? def.deltaField ?? (etagProperties?.[0]) : undefined;
+            if (deltaEnabled && !deltaField) {
+                deltaEnabled = false;
+            }
+            if (deltaTokenValue && !deltaEnabled) {
+                throw new HttpErrors.BadRequest('$deltatoken is not supported for this entity set.');
+            }
+            if (deltaPayload && deltaPayload.entitySet && deltaPayload.entitySet !== setName) {
+                throw new HttpErrors.BadRequest('$deltatoken does not match the requested entity set.');
+            }
+
             if (aggregationSpec) {
                 if (inlineCountRequested) {
                     throw new HttpErrors.BadRequest('The $count option cannot be combined with $apply.');
@@ -2395,8 +3021,62 @@ export function defineODataCrudController(def: EntitySetDef) {
             this.validateFieldsStrict(baseFilter);
             this.enforceSkipLimit(baseFilter);
 
-            const requestedOffset = typeof baseFilter.offset === 'number' ? baseFilter.offset : 0;
-            const requestedLimit = typeof baseFilter.limit === 'number' ? baseFilter.limit : undefined;
+            const skipApplied = typeof baseFilter.offset === 'number' && baseFilter.offset > 0;
+            if (skipApplied && skipTokenValue) {
+                throw new HttpErrors.BadRequest('$skip cannot be combined with $skiptoken.');
+            }
+
+            if (deltaPayload && deltaField) {
+                const deltaWhere = this.buildDeltaPredicate(
+                    deltaField,
+                    deltaPayload.lastValue,
+                    modelDefinition,
+                    idProperties,
+                    deltaPayload.keyValues,
+                );
+                baseFilter.where = this.combineWithAnd([
+                    baseFilter.where as CrudWhere | undefined,
+                    deltaWhere,
+                ]) ?? deltaWhere;
+                deltaEnabled = true;
+            }
+
+            const originalTop = typeof baseFilter.limit === 'number' ? baseFilter.limit : undefined;
+            const serverPagingEnabled = !aggregationSpec && !skipApplied;
+            let pageSize = serverPagingEnabled ? this.resolvePageSize(originalTop) : originalTop;
+            let orderDescriptors: OrderDescriptor[] = [];
+            if (serverPagingEnabled) {
+                orderDescriptors = this.normalizeOrderDescriptors(baseFilter.order as Filter<CrudEntity>['order'], idProperties);
+                baseFilter.order = orderDescriptors.map(item => `${item.field} ${item.direction}`);
+                const skipConstraint = skipTokenValue
+                    ? this.buildSkipTokenConstraint(skipTokenValue, orderDescriptors, modelDefinition)
+                    : undefined;
+                if (skipConstraint) {
+                    baseFilter.where = this.combineWithAnd([baseFilter.where as CrudWhere | undefined, skipConstraint]) ?? skipConstraint;
+                }
+                pageSize = pageSize ?? this.resolvePageSize(undefined);
+                baseFilter.limit = (pageSize ?? 0) + 1;
+                baseFilter.offset = 0;
+            }
+
+            if (serverPagingEnabled && baseFilter.fields) {
+                baseFilter.fields = this.ensureOrderProjection(baseFilter.fields, orderDescriptors);
+            }
+
+            if (!orderDescriptors.length) {
+                orderDescriptors = this.normalizeOrderDescriptors(baseFilter.order as Filter<CrudEntity>['order'], idProperties);
+            }
+            if (deltaEnabled && deltaField) {
+                const deduped = orderDescriptors.filter(item => item.field !== deltaField);
+                orderDescriptors = [{field: deltaField, direction: 'DESC'}, ...deduped];
+                baseFilter.order = orderDescriptors.map(item => `${item.field} ${item.direction}`);
+                if (baseFilter.fields) {
+                    baseFilter.fields = this.ensureOrderProjection(baseFilter.fields, orderDescriptors);
+                }
+            }
+
+            const requestedOffset = serverPagingEnabled ? 0 : typeof baseFilter.offset === 'number' ? baseFilter.offset : 0;
+            const requestedLimit = serverPagingEnabled ? pageSize : typeof baseFilter.limit === 'number' ? baseFilter.limit : undefined;
             const planRequiresPostProcessing = Boolean(
                 applyPlan &&
                 (
@@ -2426,6 +3106,16 @@ export function defineODataCrudController(def: EntitySetDef) {
                 const options = this.repositoryOptions();
 
                 if (aggregationSpec) {
+                    const finalStage = applyPlan?.stages?.[applyPlan.stages.length - 1];
+                    const applyOrderDescriptors = this.buildApplyOrderDescriptors(finalStage, aggregationSpec);
+                    if (!applyOrderDescriptors.length) {
+                        throw new HttpErrors.BadRequest('Unable to derive ordering for $apply pagination.');
+                    }
+                    const applyTokenParts = this.parseApplySkipToken(skipTokenValue, applyOrderDescriptors.length);
+                    let applyPageSize = this.resolvePageSize(originalTop);
+                    if (finalStage?.top != null) {
+                        applyPageSize = Math.min(applyPageSize, finalStage.top);
+                    }
                     const fetchFilter: Filter<CrudEntity> = { ...baseFilter };
                     delete fetchFilter.order;
                     delete fetchFilter.limit;
@@ -2448,8 +3138,36 @@ export function defineODataCrudController(def: EntitySetDef) {
                         stageForPushdown,
                         0,
                         stageCount,
+                        {
+                            orderDescriptors: applyOrderDescriptors,
+                            skipTokenParts: applyTokenParts,
+                            pageSize: applyPageSize,
+                            stageTop: finalStage?.top,
+                            stageSkip: finalStage?.skip,
+                        },
                     );
                     if (pushdownResult) {
+                        let pushdownRows = Array.isArray(pushdownResult.value) ? pushdownResult.value : [];
+                        pushdownRows = pushdownRows.map(row => this.decoratePlainEntity(row) ?? row);
+                        const bucketState = this.buildBucketState(finalStage?.spec.groupBy ?? [], pushdownRows);
+                        const aggregatedTombstones = deltaEnabled
+                            ? this.buildRemovedBuckets(deltaPayload?.buckets, pushdownRows, finalStage?.spec.groupBy ?? [])
+                            : [];
+                        const combinedRows = aggregatedTombstones.length
+                            ? [...pushdownRows, ...aggregatedTombstones]
+                            : pushdownRows;
+                        pushdownResult.value = combinedRows;
+                        if (deltaEnabled && deltaField) {
+                            const applyDeltaToken = this.createDeltaTokenForRows(
+                                setName,
+                                pushdownRows,
+                                deltaField,
+                                [],
+                                deltaTokenValue,
+                                bucketState,
+                            );
+                            pushdownResult['@odata.deltaLink'] = this.buildDeltaLink(applyDeltaToken);
+                        }
                         ctx.result = pushdownResult;
                         return pushdownResult;
                     }
@@ -2530,13 +3248,41 @@ export function defineODataCrudController(def: EntitySetDef) {
                         ordered = this.orderResults(working, baseFilter.order);
                     }
 
-                    const paged = this.sliceResults(ordered, requestedOffset, requestedLimit);
+                    const orderClauses = applyOrderDescriptors.map(item => `${item.field} ${item.direction}`);
+                    ordered = this.orderResults(ordered, orderClauses);
+                    ordered = this.filterRowsAfterSkipToken(ordered, applyOrderDescriptors, applyTokenParts);
+                    const pagination = this.applyServerDrivenPaging(
+                        ordered,
+                        applyOrderDescriptors,
+                        applyPageSize,
+                    );
+                    const paged = pagination.items;
+                    const nextLinkToken = pagination.token;
 
                     this.ensureODataHeaders();
+                    const decorated = paged.map(item => this.decoratePlainEntity(item) ?? item);
+                    const aggregatedTombstones = deltaEnabled
+                        ? this.buildRemovedBuckets(deltaPayload?.buckets, decorated, finalStage?.spec.groupBy ?? [])
+                        : [];
+                    const bucketState = this.buildBucketState(finalStage?.spec.groupBy ?? [], decorated);
                     const result = {
                         '@odata.context': contextBase,
-                        value: paged,
+                        value: aggregatedTombstones.length ? [...decorated, ...aggregatedTombstones] : decorated,
                     } as AnyObject;
+                    if (nextLinkToken) {
+                        result['@odata.nextLink'] = this.buildNextLink(nextLinkToken);
+                    }
+                    if (deltaEnabled && deltaField) {
+                        const applyDeltaToken = this.createDeltaTokenForRows(
+                            setName,
+                            decorated,
+                            deltaField,
+                            [],
+                            deltaTokenValue,
+                            bucketState,
+                        );
+                        result['@odata.deltaLink'] = this.buildDeltaLink(applyDeltaToken);
+                    }
                     ctx.result = result;
                     return result;
                 }
@@ -2569,6 +3315,9 @@ export function defineODataCrudController(def: EntitySetDef) {
                 const plainResults = results.map(entity => this.toPlainEntity(entity) ?? {});
                 const filteredResults = requiresPostFilter ? this.applyPostFilter(plainResults, postFilterExpr) : plainResults;
                 let totalCount: number | undefined;
+                const tombstones = deltaEnabled && deltaPayload?.keyValues
+                    ? await this.computeTombstones(deltaPayload.keyValues)
+                    : [];
 
                 if (inlineCountRequested) {
                     if (requiresPostFilter) {
@@ -2581,16 +3330,36 @@ export function defineODataCrudController(def: EntitySetDef) {
                 }
 
                 const ordered = this.orderResults(filteredResults, baseFilter.order);
-                const paged = requiresPostFilter
-                    ? this.sliceResults(ordered, requestedOffset, requestedLimit)
-                    : ordered;
+                if (deltaEnabled && deltaField) {
+                    deltaLinkToken = this.createDeltaTokenForRows(setName, ordered, deltaField, idProperties, deltaTokenValue);
+                }
+                let nextLinkToken: string | undefined;
+                let paged: AnyObject[];
+                if (serverPagingEnabled) {
+                    const effectivePageSize = pageSize ?? this.resolvePageSize(undefined);
+                    const pagination = this.applyServerDrivenPaging(ordered, orderDescriptors, effectivePageSize);
+                    paged = pagination.items;
+                    nextLinkToken = pagination.token;
+                } else if (requiresPostFilter) {
+                    paged = this.sliceResults(ordered, requestedOffset, requestedLimit);
+                } else {
+                    paged = ordered;
+                }
 
                 this.ensureODataHeaders();
+                const decorated = this.decoratePlainEntities(paged);
+                const combined = tombstones.length ? [...decorated, ...tombstones] : decorated;
                 const result = {
                     '@odata.context': contextBase,
                     ...(inlineCountRequested ? { '@odata.count': totalCount ?? filteredResults.length } : {}),
-                    value: this.decoratePlainEntities(paged),
+                    value: combined,
                 } as AnyObject;
+                if (serverPagingEnabled && nextLinkToken) {
+                    result['@odata.nextLink'] = this.buildNextLink(nextLinkToken);
+                }
+                if (deltaEnabled && deltaLinkToken) {
+                    result['@odata.deltaLink'] = this.buildDeltaLink(deltaLinkToken);
+                }
                 ctx.result = result;
                 return result;
             };
