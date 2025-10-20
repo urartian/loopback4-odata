@@ -1,5 +1,6 @@
 import { BindingScope, injectable } from '@loopback/core';
 import { Entity } from '@loopback/repository';
+import {DeltaTokenPayload} from '../util/delta-token';
 import { OperationMeta } from '../decorators/action.function.decorators';
 import type {CrudHookBundle} from '../types/crud-hooks';
 import { ControllerSecurityMetadata, MethodAliasMap } from '../util/security-metadata';
@@ -31,6 +32,9 @@ export interface EntitySetDef<T extends Entity = Entity> {
     applyExecutorId?: string;
     sqlMetadata?: EntitySqlMetadata;
     applySupportsNavigation?: boolean;
+    deltaEnabled?: boolean;
+    deltaField?: string;
+    deltaToken?: DeltaTokenPayload;
 }
 
 @injectable({ scope: BindingScope.SINGLETON })
@@ -57,6 +61,12 @@ export class EntitySetRegistry {
         }
         if (def.applySupportsNavigation === undefined && existing?.applySupportsNavigation !== undefined) {
             next.applySupportsNavigation = existing.applySupportsNavigation;
+        }
+        if (def.deltaEnabled === undefined && existing?.deltaEnabled !== undefined) {
+            next.deltaEnabled = existing.deltaEnabled;
+        }
+        if (!def.deltaField && existing?.deltaField) {
+            next.deltaField = existing.deltaField;
         }
         this.sets.set(def.modelCtor, next);
         return next as EntitySetDef<T>;

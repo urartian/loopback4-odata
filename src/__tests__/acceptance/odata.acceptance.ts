@@ -199,6 +199,79 @@ describe('OData component acceptance', () => {
       .expect(400);
   });
 
+  it('returns @odata.deltaLink for entity collections', async () => {
+    const current = app.getSync(ODATA_BINDINGS.CONFIG) as ODataConfig;
+    Object.assign(current, {enableDelta: true, pageSize: 2});
+    const registry = app.getSync(ODATA_BINDINGS.ENTITY_SET_REGISTRY);
+    const productsDef = registry.findByName('Products');
+    if (productsDef) {
+      productsDef.deltaEnabled = true;
+      productsDef.deltaField = productsDef.deltaField ?? 'updatedAt';
+    }
+
+    const first = await client.get('/odata/Products').expect(200);
+    expect(first.body['@odata.deltaLink']).to.be.String();
+    const deltaLink = String(first.body['@odata.deltaLink']);
+    expect(decodeURIComponent(deltaLink)).to.match(/\$deltatoken=/);
+
+    const second = await client.get(deltaLink).expect(200);
+    expect(second.body['@odata.deltaLink']).to.be.String();
+  });
+
+  it('emits tombstones when entities are deleted between delta requests', async () => {
+    const current = app.getSync(ODATA_BINDINGS.CONFIG) as ODataConfig;
+    Object.assign(current, {enableDelta: true, pageSize: 2});
+    const registry = app.getSync(ODATA_BINDINGS.ENTITY_SET_REGISTRY);
+    const productsDef = registry.findByName('Products');
+    if (productsDef) {
+      productsDef.deltaEnabled = true;
+      productsDef.deltaField = productsDef.deltaField ?? 'updatedAt';
+    }
+
+    const first = await client.get('/odata/Products').expect(200);
+    const deltaLink = String(first.body['@odata.deltaLink']);
+
+    const productRes = await client.get('/odata/Products(1)').expect(200);
+    const etag = productRes.headers['etag'] as string;
+    await client.del('/odata/Products(1)').set('If-Match', etag).expect(204);
+
+    const delta = await client.get(deltaLink).expect(200);
+    const removed = delta.body.value.find((entry: AnyObject) => entry?.['@removed']);
+    expect(removed).to.be.Object();
+    expect(removed.id).to.equal(1);
+    expect(removed['@removed']?.reason).to.equal('deleted');
+  });
+
+  it('rejects $deltatoken when delta support is disabled', async () => {
+    const current = app.getSync(ODATA_BINDINGS.CONFIG) as ODataConfig;
+    Object.assign(current, {enableDelta: false});
+    const registry = app.getSync(ODATA_BINDINGS.ENTITY_SET_REGISTRY);
+    const productsDef = registry.findByName('Products');
+    if (productsDef) {
+      productsDef.deltaEnabled = false;
+    }
+
+    await client.get('/odata/Products?$deltatoken=v1:Zm9v').expect(400);
+  });
+
+  it('rejects $deltatoken together with $apply', async () => {
+    const current = app.getSync(ODATA_BINDINGS.CONFIG) as ODataConfig;
+    Object.assign(current, {enableDelta: true});
+    const registry = app.getSync(ODATA_BINDINGS.ENTITY_SET_REGISTRY);
+    const productsDef = registry.findByName('Products');
+    if (productsDef) {
+      productsDef.deltaEnabled = true;
+      productsDef.deltaField = productsDef.deltaField ?? 'updatedAt';
+    }
+
+    const pipeline = 'groupby((name),aggregate(price with sum as TotalPrice))';
+
+    await client
+      .get('/odata/Products')
+      .query({$apply: pipeline, $deltatoken: 'v1:Zm9v'})
+      .expect(400);
+  });
+
   it('supports standalone $count endpoint', async () => {
     const res = await client.get('/odata/Products/$count').expect(200);
     expect(Number(res.text)).to.be.a.Number();

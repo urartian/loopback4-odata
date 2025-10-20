@@ -47,7 +47,13 @@ export class MyAppApplication extends BootMixin(RepositoryMixin(RestApplication)
 import {Entity, model, property} from '@loopback/repository';
 import {odataModel, odataController} from '@loopback/odata';
 
-@odataModel()
+@odataModel({
+  etag: 'updatedAt',
+  delta: {
+    enabled: true,
+    field: 'updatedAt',
+  },
+})
 @model()
 export class Product extends Entity {
   @property({id: true})
@@ -58,6 +64,9 @@ export class Product extends Entity {
 
   @property()
   price!: number;
+
+  @property({type: 'date', defaultFn: 'now'})
+  updatedAt!: Date;
 }
 ```
 
@@ -857,6 +866,7 @@ this.bind(ODATA_BINDINGS.CONFIG).to({
   maxExpandDepth: 2,       // max $expand nesting depth
   enableCount: true,       // enable inline and standalone $count
   strict: true,            // enable strict validations (default: true)
+  enableDelta: true,       // emit $deltatoken links for incremental syncs
 } as ODataConfig);
 ```
 
@@ -882,6 +892,7 @@ this.bind(ODATA_BINDINGS.CONFIG).to({
 - `maxTop`: Caps `$top` for collection reads. The server may return fewer results than requested per OData v4. In strict mode, requests with `$top` above the cap return 400; otherwise the value is clamped to the maximum.
 - `maxSkip`: Maximum allowed `$skip`. When strict mode is disabled, requests above the cap are clamped; with strict mode enabled they return `400 Bad Request`.
 - `pageSize`: Default number of records per page for server-driven paging. The service always returns at most this many entities and emits an `@odata.nextLink` with a human-readable `$skiptoken` so clients can resume the feed.
+- `enableDelta`: When `true`, collection responses include `@odata.deltaLink` so clients can poll only the rows that changed since the last snapshot.
 - `maxApplyResultSize`: Maximum number of rows the server will process in-memory when executing `$apply` fallbacks (default: `2000`). Requests that exceed the limit are rejected with `400 Bad Request`.
 - `logApplyFallbacks`: When `true`, logs a warning whenever `$apply` falls back to in-memory execution (default: `false`).
 - `onApplyFallback(event)`: Optional callback invoked whenever `$apply` falls back; receives `{event, entitySet, transformations, rows, limit}` so you can integrate with metrics/telemetry.
@@ -947,9 +958,36 @@ GET /odata/Products
 }
 ```
 
-The controller enforces deterministic ordering automatically by appending the entity key to any client-supplied `$orderby`. When a request arrives with `$skiptoken`, the backend composes a lexicographic filter so the database (or in-memory fallback) resumes exactly where the previous page stopped. Traditional `$skip` offsets are rejected when server-driven paging is active—stick with `$skiptoken`. The same mechanism now applies to `$apply` pipelines, so aggregated feeds page the same way as raw collections.
+The controller enforces deterministic ordering automatically by appending the entity key to any client-supplied `$orderby`. When a request arrives with `$skiptoken`, the backend composes a lexicographic filter so the database (or in-memory fallback) resumes exactly where the previous page stopped. Traditional `$skip` offsets are rejected when server-driven paging is active—stick with `$skiptoken`. The same mechanism now applies to `$apply` pipelines, so aggregated feeds page the same way as raw collections (delta links remain disabled for `$apply` responses until change tracking for aggregated feeds ships).
 
 If you need a different page size, override `pageSize` at startup or per test using the configuration examples above.
+
+### Delta Links
+
+When `enableDelta` is `true`, the first page of a collection includes an `@odata.deltaLink`. Clients can store that URL and call it later to retrieve only the entities that changed since the last sync. The implementation relies on each entity set having a stable change stamp (the first configured ETag property, or the field supplied via `@odataModel({delta: {field: ...}})` / `EntitySetDef.deltaField`).
+
+```http
+GET /odata/Products
+```
+
+```json
+{
+  "@odata.context": "/odata/$metadata#Products",
+  "value": [ {"id":1,"name":"Laptop","updatedAt":"2025-10-17T14:53:52.705Z"} ],
+  "@odata.deltaLink": "/odata/Products?$deltatoken=v1:ZXhhbXBsZVRva2Vu"
+}
+```
+
+Following the delta link returns only the new or updated rows (and can be combined with regular paging via `@odata.nextLink`). `$apply` pipelines will emit `400` if a delta token is supplied until change tracking for aggregated feeds is introduced.
+
+Deleted entities show up as tombstones:
+
+```json
+{
+  "id": 1,
+  "@removed": {"reason": "deleted"}
+}
+```
 
 ### Advanced `$apply` Examples
 

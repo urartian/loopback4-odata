@@ -1758,6 +1758,7 @@ export interface ParsedODataQuery extends Filter<AnyObject> {
   postFilter?: ParsedExpression;
   unsupportedFunctions?: string[];
   skipToken?: string;
+  deltaToken?: string;
 }
 
 export function parseODataQuery(query: QueryObject, options: ParseOptions = {}): ParsedODataQuery {
@@ -1765,7 +1766,7 @@ export function parseODataQuery(query: QueryObject, options: ParseOptions = {}):
   const {relations} = options;
 
   if (options.strict) {
-    const allowed = new Set(['$filter', '$orderby', '$top', '$skip', '$skiptoken', '$select', '$expand', '$count', '$search', '$apply']);
+    const allowed = new Set(['$filter', '$orderby', '$top', '$skip', '$skiptoken', '$deltatoken', '$select', '$expand', '$count', '$search', '$apply']);
     for (const key of Object.keys(query ?? {})) {
       if (key.startsWith('$') && !allowed.has(key)) {
         throw new Error(`Unsupported query option: ${key}`);
@@ -1821,6 +1822,11 @@ export function parseODataQuery(query: QueryObject, options: ParseOptions = {}):
   const skiptoken = typeof query['$skiptoken'] === 'string' ? query['$skiptoken'] : undefined;
   if (skiptoken) {
     filter.skipToken = skiptoken;
+  }
+
+  const delta = typeof query['$deltatoken'] === 'string' ? query['$deltatoken'] : undefined;
+  if (delta) {
+    filter.deltaToken = delta;
   }
 
   const select = typeof query['$select'] === 'string' ? query['$select'] : undefined;

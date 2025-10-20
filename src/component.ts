@@ -25,6 +25,7 @@ export class ODataComponent implements Component {
             maxSearchTerms: 5,
             maxApplyResultSize: 2000,
             pageSize: 200,
+            enableDelta: false,
             capabilities: {
                 aggregation: true,
                 applySupported: true,

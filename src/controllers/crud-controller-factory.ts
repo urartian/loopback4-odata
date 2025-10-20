@@ -48,6 +48,7 @@ import {
     parseIfNoneMatch,
     readEtagValue,
 } from '../util/etag';
+import {encodeDeltaToken, decodeDeltaToken, DeltaTokenPayload} from '../util/delta-token';
 import {
     applyControllerSecurityMetadata,
     mergeMethodAliasMaps,
@@ -2291,6 +2292,117 @@ export function defineODataCrudController(def: EntitySetDef) {
             return queryString ? `${this.request.path}?${queryString}` : this.request.path;
         }
 
+        buildDeltaLink(deltaToken: string): string {
+            const params = new URLSearchParams();
+            const query = this.request.query ?? {};
+            for (const [key, paramValue] of Object.entries(query)) {
+                if (!paramValue || key === '$skiptoken' || key === '$skip' || key === '$deltatoken') continue;
+                if (Array.isArray(paramValue)) {
+                    for (const entry of paramValue) {
+                        params.append(key, String(entry));
+                    }
+                } else if (typeof paramValue === 'object') {
+                    params.set(key, String(paramValue));
+                } else {
+                    params.set(key, String(paramValue));
+                }
+            }
+            params.set('$deltatoken', deltaToken);
+            const queryString = params.toString();
+            return queryString ? `${this.request.path}?${queryString}` : this.request.path;
+        }
+
+        createDeltaTokenForRows(
+            entitySet: string,
+            rows: AnyObject[],
+            deltaField: string,
+            idProps: string[],
+            previousToken?: string,
+        ): string {
+            if (!rows.length) {
+                return encodeDeltaToken({entitySet, lastValue: new Date().toISOString()});
+            }
+            const first = rows[0];
+            const deltaValue = this.extractFieldValue(first, deltaField);
+            const payload = {
+                entitySet,
+                lastValue: this.stringifySkipTokenValue(deltaValue),
+            } as {entitySet: string; lastValue: string; keyValues?: Record<string, unknown>;};
+            const keyValues: Record<string, unknown> = {};
+            for (const key of idProps) {
+                const value = this.extractFieldValue(first, key);
+                if (value !== undefined) {
+                    keyValues[key] = value;
+                }
+            }
+            if (Object.keys(keyValues).length) {
+                payload.keyValues = keyValues;
+            }
+            return encodeDeltaToken(payload);
+        }
+
+        async computeTombstones(keyValues: Record<string, unknown> | undefined): Promise<AnyObject[]> {
+            if (!keyValues || !Object.keys(keyValues).length) return [];
+            const existing = await this.repository.findOne({where: keyValues as CrudWhere});
+            if (existing) return [];
+            return [{
+                ...keyValues,
+                '@removed': {reason: 'deleted'},
+            }];
+        }
+
+        buildLexKeyPredicate(idProperties: string[], keyValues: Record<string, unknown>): CrudWhere | undefined {
+            if (!idProperties.length) return undefined;
+            const branches: CrudWhere[] = [];
+            for (let index = 0; index < idProperties.length; index++) {
+                const parts: CrudWhere[] = [];
+                for (let eqIndex = 0; eqIndex < index; eqIndex++) {
+                    const eqField = idProperties[eqIndex];
+                    const eqValue = keyValues[eqField];
+                    if (eqValue === undefined) return undefined;
+                    parts.push({[eqField]: eqValue} as CrudWhere);
+                }
+                const field = idProperties[index];
+                const value = keyValues[field];
+                if (value === undefined) return undefined;
+                parts.push({[field]: {gt: value}} as CrudWhere);
+                const branch = this.combineWithAnd(parts);
+                if (branch) branches.push(branch);
+            }
+            return this.combineWithOr(branches);
+        }
+
+        buildDeltaPredicate(
+            deltaField: string,
+            lastValueRaw: string,
+            definition: ModelDefinition | undefined,
+            idProperties: string[],
+            rawKeyValues?: Record<string, unknown>,
+        ): CrudWhere {
+            const typedLast = this.coerceSkipTokenValue(deltaField, lastValueRaw, definition);
+            const greaterClause = { [deltaField]: { gt: typedLast } } as CrudWhere;
+            if (!idProperties.length || !rawKeyValues || !Object.keys(rawKeyValues).length) {
+                return greaterClause;
+            }
+            const typedKeyValues: Record<string, unknown> = {};
+            for (const key of idProperties) {
+                const raw = rawKeyValues[key];
+                if (raw === undefined) {
+                    return greaterClause;
+                }
+                typedKeyValues[key] = this.coerceSkipTokenValue(
+                    key,
+                    this.stringifySkipTokenValue(raw),
+                    definition,
+                );
+            }
+            const equalityClause = { [deltaField]: typedLast } as CrudWhere;
+            const keyPredicate = this.buildLexKeyPredicate(idProperties, typedKeyValues);
+            if (!keyPredicate) return greaterClause;
+            const combinedEquality = this.combineWithAnd([equalityClause, keyPredicate]);
+            return this.combineWithOr([greaterClause, combinedEquality]) ?? greaterClause;
+        }
+
         applyServerDrivenPaging(data: AnyObject[], descriptors: OrderDescriptor[], pageSize: number): {items: AnyObject[]; token?: string} {
             if (!pageSize || pageSize <= 0) {
                 return {items: data};
@@ -2628,6 +2740,10 @@ export function defineODataCrudController(def: EntitySetDef) {
             let lambdaExpression: LambdaExpression | undefined;
             let postFilterExpr: ParsedExpression | undefined;
             let unsupportedFunctions: string[] = [];
+            let deltaTokenValue: string | undefined;
+            let deltaEnabled = false;
+            let deltaField: string | undefined;
+            let deltaLinkToken: string | undefined;
             let skipTokenValue: string | undefined;
             try {
                 const parsed = parseODataQuery(
@@ -2639,6 +2755,7 @@ export function defineODataCrudController(def: EntitySetDef) {
                     throw new HttpErrors.BadRequest('The $count option is disabled by server configuration.');
                 }
                 const externalOrder = Array.isArray(parsed.order) ? [...parsed.order] : parsed.order;
+                deltaTokenValue = parsed.deltaToken;
                 applyPipeline = parsed.applyPipeline;
                 if (applyPipeline) {
                     applyPlan = buildApplyExecutionPlan(applyPipeline, {
@@ -2665,6 +2782,7 @@ export function defineODataCrudController(def: EntitySetDef) {
                     applyPipeline?: ApplyPipeline;
                     lambda?: LambdaExpression;
                     skipToken?: string;
+                    deltaToken?: string;
                 };
                 delete (parsedFilter as { inlineCount?: boolean }).inlineCount;
                 delete (parsedFilter as { apply?: AggregationSpec }).apply;
@@ -2673,6 +2791,7 @@ export function defineODataCrudController(def: EntitySetDef) {
                 delete (parsedFilter as { postFilter?: ParsedExpression }).postFilter;
                 delete (parsedFilter as { unsupportedFunctions?: string[] }).unsupportedFunctions;
                 delete (parsedFilter as { skipToken?: string }).skipToken;
+                delete (parsedFilter as { deltaToken?: string }).deltaToken;
                 this.mergeFilters(baseFilter, parsedFilter);
                 hadClientExpand = Array.isArray(baseFilter.include)
                     ? baseFilter.include.length > 0
@@ -2724,6 +2843,31 @@ export function defineODataCrudController(def: EntitySetDef) {
                 throw new HttpErrors.BadRequest(message);
             }
 
+            let deltaPayload: DeltaTokenPayload | undefined;
+            if (deltaTokenValue) {
+                try {
+                    deltaPayload = decodeDeltaToken(deltaTokenValue);
+                } catch {
+                    throw new HttpErrors.BadRequest('Invalid $deltatoken value.');
+                }
+            }
+
+            let deltaPreference = def.deltaEnabled;
+            if (deltaPreference === undefined) {
+                deltaPreference = this.cfg?.enableDelta;
+            }
+            deltaEnabled = Boolean(deltaPreference);
+            deltaField = deltaEnabled ? def.deltaField ?? (etagProperties?.[0]) : undefined;
+            if (deltaEnabled && !deltaField) {
+                deltaEnabled = false;
+            }
+            if (deltaTokenValue && !deltaEnabled) {
+                throw new HttpErrors.BadRequest('$deltatoken is not supported for this entity set.');
+            }
+            if (deltaPayload && deltaPayload.entitySet && deltaPayload.entitySet !== setName) {
+                throw new HttpErrors.BadRequest('$deltatoken does not match the requested entity set.');
+            }
+
             if (aggregationSpec) {
                 if (inlineCountRequested) {
                     throw new HttpErrors.BadRequest('The $count option cannot be combined with $apply.');
@@ -2733,6 +2877,9 @@ export function defineODataCrudController(def: EntitySetDef) {
                 }
                 if (!aggregationEnabled) {
                     throw new HttpErrors.NotImplemented('Aggregations are not enabled for this entity set.');
+                }
+                if (deltaEnabled || deltaTokenValue) {
+                    throw new HttpErrors.BadRequest('$deltatoken is not supported together with $apply.');
                 }
             }
 
@@ -2768,6 +2915,21 @@ export function defineODataCrudController(def: EntitySetDef) {
                 throw new HttpErrors.BadRequest('$skip cannot be combined with $skiptoken.');
             }
 
+            if (deltaPayload && deltaField) {
+                const deltaWhere = this.buildDeltaPredicate(
+                    deltaField,
+                    deltaPayload.lastValue,
+                    modelDefinition,
+                    idProperties,
+                    deltaPayload.keyValues,
+                );
+                baseFilter.where = this.combineWithAnd([
+                    baseFilter.where as CrudWhere | undefined,
+                    deltaWhere,
+                ]) ?? deltaWhere;
+                deltaEnabled = true;
+            }
+
             const originalTop = typeof baseFilter.limit === 'number' ? baseFilter.limit : undefined;
             const serverPagingEnabled = !aggregationSpec && !skipApplied;
             let pageSize = serverPagingEnabled ? this.resolvePageSize(originalTop) : originalTop;
@@ -2788,6 +2950,18 @@ export function defineODataCrudController(def: EntitySetDef) {
 
             if (serverPagingEnabled && baseFilter.fields) {
                 baseFilter.fields = this.ensureOrderProjection(baseFilter.fields, orderDescriptors);
+            }
+
+            if (!orderDescriptors.length) {
+                orderDescriptors = this.normalizeOrderDescriptors(baseFilter.order as Filter<CrudEntity>['order'], idProperties);
+            }
+            if (deltaEnabled && deltaField) {
+                const deduped = orderDescriptors.filter(item => item.field !== deltaField);
+                orderDescriptors = [{field: deltaField, direction: 'DESC'}, ...deduped];
+                baseFilter.order = orderDescriptors.map(item => `${item.field} ${item.direction}`);
+                if (baseFilter.fields) {
+                    baseFilter.fields = this.ensureOrderProjection(baseFilter.fields, orderDescriptors);
+                }
             }
 
             const requestedOffset = serverPagingEnabled ? 0 : typeof baseFilter.offset === 'number' ? baseFilter.offset : 0;
@@ -2993,6 +3167,9 @@ export function defineODataCrudController(def: EntitySetDef) {
                 const plainResults = results.map(entity => this.toPlainEntity(entity) ?? {});
                 const filteredResults = requiresPostFilter ? this.applyPostFilter(plainResults, postFilterExpr) : plainResults;
                 let totalCount: number | undefined;
+                const tombstones = deltaEnabled && deltaPayload?.keyValues
+                    ? await this.computeTombstones(deltaPayload.keyValues)
+                    : [];
 
                 if (inlineCountRequested) {
                     if (requiresPostFilter) {
@@ -3005,6 +3182,9 @@ export function defineODataCrudController(def: EntitySetDef) {
                 }
 
                 const ordered = this.orderResults(filteredResults, baseFilter.order);
+                if (deltaEnabled && deltaField) {
+                    deltaLinkToken = this.createDeltaTokenForRows(setName, ordered, deltaField, idProperties, deltaTokenValue);
+                }
                 let nextLinkToken: string | undefined;
                 let paged: AnyObject[];
                 if (serverPagingEnabled) {
@@ -3019,13 +3199,18 @@ export function defineODataCrudController(def: EntitySetDef) {
                 }
 
                 this.ensureODataHeaders();
+                const decorated = this.decoratePlainEntities(paged);
+                const combined = tombstones.length ? [...decorated, ...tombstones] : decorated;
                 const result = {
                     '@odata.context': contextBase,
                     ...(inlineCountRequested ? { '@odata.count': totalCount ?? filteredResults.length } : {}),
-                    value: this.decoratePlainEntities(paged),
+                    value: combined,
                 } as AnyObject;
                 if (serverPagingEnabled && nextLinkToken) {
                     result['@odata.nextLink'] = this.buildNextLink(nextLinkToken);
+                }
+                if (deltaEnabled && deltaLinkToken) {
+                    result['@odata.deltaLink'] = this.buildDeltaLink(deltaLinkToken);
                 }
                 ctx.result = result;
                 return result;
