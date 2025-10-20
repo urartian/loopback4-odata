@@ -158,6 +158,47 @@ describe('OData component acceptance', () => {
     await client.get('/odata/Products?$skiptoken=invalid-token').expect(400);
   });
 
+  it('returns @odata.nextLink with $apply pipelines and skiptoken support', async () => {
+    const current = app.getSync(ODATA_BINDINGS.CONFIG) as ODataConfig;
+    app.bind(ODATA_BINDINGS.CONFIG).to({
+      ...current,
+      pageSize: 2,
+    });
+
+    const pipeline = 'groupby((name),aggregate(price with sum as TotalPrice))/orderby(TotalPrice desc)';
+
+    const first = await client
+      .get('/odata/Products')
+      .query({$apply: pipeline})
+      .expect(200);
+
+    expect(first.body.value).to.be.Array();
+    expect(first.body.value.length).to.be.lessThanOrEqual(2);
+    const firstNames = first.body.value.map((item: AnyObject) => item.name);
+    const applyNextLink = first.body['@odata.nextLink'];
+    expect(applyNextLink).to.be.a.String();
+
+    const second = await client.get(String(applyNextLink)).expect(200);
+    expect(second.body.value).to.be.Array();
+    const secondNames = second.body.value.map((item: AnyObject) => item.name);
+    expect(secondNames.some((name: string) => !firstNames.includes(name))).to.be.true();
+  });
+
+  it('rejects invalid $skiptoken for $apply pipelines', async () => {
+    const current = app.getSync(ODATA_BINDINGS.CONFIG) as ODataConfig;
+    app.bind(ODATA_BINDINGS.CONFIG).to({
+      ...current,
+      pageSize: 2,
+    });
+
+    const pipeline = 'groupby((name),aggregate(price with sum as TotalPrice))/orderby(TotalPrice desc)';
+
+    await client
+      .get('/odata/Products')
+      .query({$apply: pipeline, $skiptoken: 'invalid-token'})
+      .expect(400);
+  });
+
   it('supports standalone $count endpoint', async () => {
     const res = await client.get('/odata/Products/$count').expect(200);
     expect(Number(res.text)).to.be.a.Number();

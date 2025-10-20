@@ -947,7 +947,7 @@ GET /odata/Products
 }
 ```
 
-The controller enforces deterministic ordering automatically by appending the entity key to any client-supplied `$orderby`. When a request arrives with `$skiptoken`, the backend composes a lexicographic filter so the database resumes exactly where the previous page stopped. Traditional `$skip` offsets are rejected when server-driven paging is active—stick with `$skiptoken`. (Skip tokens for `$apply` pipelines are on the roadmap; for now those pipelines continue to rely on client-driven paging.)
+The controller enforces deterministic ordering automatically by appending the entity key to any client-supplied `$orderby`. When a request arrives with `$skiptoken`, the backend composes a lexicographic filter so the database (or in-memory fallback) resumes exactly where the previous page stopped. Traditional `$skip` offsets are rejected when server-driven paging is active—stick with `$skiptoken`. The same mechanism now applies to `$apply` pipelines, so aggregated feeds page the same way as raw collections.
 
 If you need a different page size, override `pageSize` at startup or per test using the configuration examples above.
 

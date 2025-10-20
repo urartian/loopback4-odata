@@ -1,5 +1,10 @@
 import {AnyObject, DataObject, ModelDefinition, PropertyDefinition, Where, juggler, Entity} from '@loopback/repository';
-import {ODataApplyExecutor, ODataApplyExecutorContext, ODataApplyExecutorResult} from './odata-apply-executor.registry';
+import {
+  ODataApplyExecutor,
+  ODataApplyExecutorContext,
+  ODataApplyExecutorResult,
+  ApplyOrderDescriptor,
+} from './odata-apply-executor.registry';
 import {ParsedExpression, AggregationSpec} from './odata-query-parser.service';
 import {ApplyAggregationStage, ApplyExecutionPlan, collectNavigationPathsForStage} from './odata-apply-planner.service';
 import {EntitySqlMetadata} from '../registry/entityset-registry';
@@ -27,6 +32,7 @@ interface StageSqlBuildResult {
   finalOrderClause?: string;
   finalLimitClause?: string;
   finalOffsetClause?: string;
+  finalWhereClause?: string;
   filtersApplied: boolean;
   paginationApplied: boolean;
   joinCountContribution: number;
@@ -160,7 +166,32 @@ export class PostgresApplyExecutor implements ODataApplyExecutor {
 
     if (!stageResults.length) return undefined;
 
+    const paging = ctx.paging;
+    const orderDescriptors = paging?.order ?? [];
+    if (paging?.pageSize && paging.pageSize > 0 && !orderDescriptors.length) {
+      return undefined;
+    }
+    if (paging?.skipToken && (!orderDescriptors.length || paging.skipToken.length !== orderDescriptors.length)) {
+      return undefined;
+    }
+
     const finalStage = stageResults[stageResults.length - 1];
+    if (paging?.pageSize && paging.pageSize > 0 && orderDescriptors.length) {
+      const limitCandidate = paging.pageSize + 1;
+      const stageTop = paging.stageTop;
+      const limitValue = stageTop != null ? Math.min(stageTop, limitCandidate) : limitCandidate;
+      if (limitValue > 0) {
+        finalStage.finalLimitClause = `LIMIT ${limitValue}`;
+      }
+    }
+    if (paging?.skipToken && orderDescriptors.length) {
+      const predicate = this.buildSkipTokenPredicate(orderDescriptors, paging.skipToken, params);
+      if (!predicate) return undefined;
+      finalStage.finalWhereClause = finalStage.finalWhereClause
+        ? `(${finalStage.finalWhereClause}) AND (${predicate})`
+        : predicate;
+    }
+
     const sql = this.composeFinalQuery(stageResults, finalStage);
     if (!sql) return undefined;
 
@@ -182,11 +213,25 @@ export class PostgresApplyExecutor implements ODataApplyExecutor {
     const hasStagePagination = stages.some(stageItem => stageItem.top !== undefined || stageItem.skip !== undefined);
     const finalStageHasOrder = Boolean(stages[stages.length - 1]?.orderBy?.length);
 
+    let processedRows = rows;
+    let nextSkipToken: string | undefined;
+    if (paging?.pageSize && paging.pageSize > 0 && orderDescriptors.length) {
+      const effectiveSize = Math.min(paging.pageSize, rows.length);
+      const hasMore = rows.length > paging.pageSize;
+      processedRows = rows.slice(0, effectiveSize);
+      if (hasMore && processedRows.length) {
+        const lastRow = processedRows[processedRows.length - 1];
+        nextSkipToken = this.createSkipToken(lastRow, orderDescriptors);
+      }
+    }
+
     return {
-      rows,
-      appliedOrder: finalStageHasOrder ? true : undefined,
+      rows: processedRows,
+      appliedOrder: finalStageHasOrder || orderDescriptors.length ? true : undefined,
       appliedPipelinePagination: hasStagePagination ? stagePaginationApplied : undefined,
       appliedStageFilters: hasStageFilters ? stageFiltersApplied : undefined,
+      appliedExternalPagination: paging?.pageSize && orderDescriptors.length ? true : undefined,
+      nextSkipToken,
     };
   }
 
@@ -308,6 +353,7 @@ export class PostgresApplyExecutor implements ODataApplyExecutor {
       finalOrderClause: isFinalStage && orderClause ? orderClause : undefined,
       finalLimitClause: isFinalStage && limitClause ? limitClause : undefined,
       finalOffsetClause: isFinalStage && offsetClause ? offsetClause : undefined,
+      finalWhereClause: undefined,
       filtersApplied: requiresFilters ? Boolean(havingClause) : true,
       paginationApplied: true,
       joinCountContribution,
@@ -350,20 +396,67 @@ export class PostgresApplyExecutor implements ODataApplyExecutor {
     finalStage: StageSqlBuildResult,
   ): string | undefined {
     if (!stages.length) return undefined;
-    if (stages.length === 1) {
-      let query = stages[0].sql;
-      if (finalStage.finalOrderClause) query += ` ${finalStage.finalOrderClause}`;
-      if (finalStage.finalLimitClause) query += ` ${finalStage.finalLimitClause}`;
-      if (finalStage.finalOffsetClause) query += ` ${finalStage.finalOffsetClause}`;
-      return query;
-    }
-
     const cteClause = stages.map(stage => `${stage.name} AS (${stage.sql})`).join(', ');
     let finalQuery = `SELECT * FROM ${finalStage.name}`;
+    if (finalStage.finalWhereClause) finalQuery += ` WHERE ${finalStage.finalWhereClause}`;
     if (finalStage.finalOrderClause) finalQuery += ` ${finalStage.finalOrderClause}`;
     if (finalStage.finalLimitClause) finalQuery += ` ${finalStage.finalLimitClause}`;
     if (finalStage.finalOffsetClause) finalQuery += ` ${finalStage.finalOffsetClause}`;
     return `WITH ${cteClause} ${finalQuery}`;
+  }
+
+  private extractTokenValue(row: AnyObject | undefined, field: string): unknown {
+    if (!row) return undefined;
+    return (row as AnyObject)[field];
+  }
+
+  private stringifyTokenValue(value: unknown): string {
+    if (value === null || value === undefined) return 'null';
+    if (value instanceof Date) return value.toISOString();
+    if (typeof value === 'object') return JSON.stringify(value);
+    return String(value);
+  }
+
+  private buildSkipTokenPredicate(
+    descriptors: ApplyOrderDescriptor[],
+    tokens: string[],
+    params: unknown[],
+  ): string | undefined {
+    if (!descriptors.length || !tokens.length) return undefined;
+    if (descriptors.length !== tokens.length) {
+      throw new Error('Skip token length mismatch.');
+    }
+    const branches: string[] = [];
+    for (let index = 0; index < descriptors.length; index++) {
+      const descriptor = descriptors[index];
+      const equalityParts: string[] = [];
+      for (let eqIndex = 0; eqIndex < index; eqIndex++) {
+        const placeholder = `$${params.length + 1}`;
+        params.push(tokens[eqIndex]);
+        equalityParts.push(`${quoteIdentifier(descriptors[eqIndex].field)} = ${placeholder}`);
+      }
+      const comparator = descriptor.direction === 'DESC' ? '<' : '>';
+      const placeholder = `$${params.length + 1}`;
+      params.push(tokens[index]);
+      equalityParts.push(`${quoteIdentifier(descriptor.field)} ${comparator} ${placeholder}`);
+      const clause = equalityParts.length === 1
+        ? equalityParts[0]
+        : equalityParts.map(part => `(${part})`).join(' AND ');
+      branches.push(`(${clause})`);
+    }
+    if (!branches.length) return undefined;
+    return branches.join(' OR ');
+  }
+
+  private createSkipToken(row: AnyObject | undefined, descriptors: ApplyOrderDescriptor[]): string | undefined {
+    if (!row || !descriptors.length) return undefined;
+    const parts: string[] = [];
+    for (const descriptor of descriptors) {
+      const value = this.extractTokenValue(row, descriptor.field);
+      if (value === undefined) return undefined;
+      parts.push(encodeURIComponent(this.stringifyTokenValue(value)));
+    }
+    return parts.join(',');
   }
 
   private getOrInferSqlMetadata(

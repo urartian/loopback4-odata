@@ -1075,6 +1075,13 @@ export function defineODataCrudController(def: EntitySetDef) {
             _stage: ApplyAggregationStage | undefined,
             stageIndex: number,
             stageCount: number,
+            paging?: {
+                orderDescriptors: OrderDescriptor[];
+                skipTokenParts?: string[];
+                pageSize?: number;
+                stageTop?: number;
+                stageSkip?: number;
+            },
         ): Promise<AnyObject | undefined> {
             if (!def.applyPushdown || !def.applyExecutorId) return undefined;
             const registry = this.applyExecutors;
@@ -1168,6 +1175,16 @@ export function defineODataCrudController(def: EntitySetDef) {
                 fetchFilterCopy.include = [...fetchFilter.include];
             }
 
+            const executorPaging = paging
+                ? {
+                    order: paging.orderDescriptors.map(item => ({field: item.field, direction: item.direction})),
+                    skipToken: paging.skipTokenParts ? [...paging.skipTokenParts] : undefined,
+                    pageSize: paging.pageSize,
+                    stageTop: paging.stageTop,
+                    stageSkip: paging.stageSkip,
+                }
+                : undefined;
+
             const context: ODataApplyExecutorContext = {
                 entitySet: def,
                 repository: this.repository,
@@ -1188,6 +1205,7 @@ export function defineODataCrudController(def: EntitySetDef) {
                         joinCount: payload.joinCount,
                     });
                 },
+                paging: executorPaging,
             };
 
             try {
@@ -1245,18 +1263,40 @@ export function defineODataCrudController(def: EntitySetDef) {
                     if (execResult.appliedOrder !== true) {
                         ordered = this.orderResults(working, stageOrderClauses);
                     }
-                } else if (fallbackOrder) {
+                } else if (fallbackOrder && execResult.appliedOrder !== true) {
                     ordered = this.orderResults(working, fallbackOrder);
                 }
-                const paged = execResult.appliedExternalPagination
-                    ? ordered
-                    : this.sliceResults(ordered, requestedOffset, requestedLimit);
+
+                let nextLinkToken = execResult.nextSkipToken;
+
+                if (execResult.appliedExternalPagination !== true) {
+                    const descriptorList = paging?.orderDescriptors ?? [];
+                    if (descriptorList.length) {
+                        const descriptorOrder = descriptorList.map(item => `${item.field} ${item.direction}`);
+                        ordered = this.orderResults(ordered, descriptorOrder);
+                        ordered = this.filterRowsAfterSkipToken(ordered, descriptorList, paging?.skipTokenParts);
+                        const pageSize = paging?.pageSize ?? this.resolvePageSize(undefined);
+                        const pagination = this.applyServerDrivenPaging(ordered, descriptorList, pageSize);
+                        ordered = pagination.items;
+                        nextLinkToken = pagination.token;
+                    } else {
+                        ordered = this.sliceResults(ordered, requestedOffset, requestedLimit);
+                    }
+                }
+
+                if (postFilterExpr) {
+                    nextLinkToken = undefined;
+                }
 
                 this.ensureODataHeaders();
-                return {
+                const response = {
                     '@odata.context': contextBase,
-                    value: paged,
+                    value: ordered,
                 } as AnyObject;
+                if (nextLinkToken) {
+                    response['@odata.nextLink'] = this.buildNextLink(nextLinkToken);
+                }
+                return response;
             } catch (error) {
                 this.emitApplyTelemetry('pushdown', stageIndex, planStages.length, {
                     reason: 'executor-error',
@@ -1993,6 +2033,108 @@ export function defineODataCrudController(def: EntitySetDef) {
             return Math.min(normalized, base);
         }
 
+        buildApplyOrderDescriptors(stage: ApplyAggregationStage | undefined, fallbackSpec: AggregationSpec): OrderDescriptor[] {
+            const descriptors: OrderDescriptor[] = [];
+            const seen = new Set<string>();
+            const spec = stage?.spec ?? fallbackSpec;
+            const orderItems = stage?.orderBy ?? [];
+
+            const addDescriptor = (field: string | undefined, direction: 'ASC' | 'DESC' = 'ASC') => {
+                if (!field) return;
+                if (seen.has(field)) return;
+                seen.add(field);
+                descriptors.push({field, direction});
+            };
+
+            for (const item of orderItems) {
+                const direction = item.direction?.toUpperCase() === 'DESC' ? 'DESC' : 'ASC';
+                addDescriptor(item.field, direction);
+            }
+
+            if (!descriptors.length) {
+                for (const groupField of spec.groupBy ?? []) {
+                    addDescriptor(groupField, 'ASC');
+                }
+                for (const aggregate of spec.aggregates ?? []) {
+                    if (aggregate.alias) {
+                        addDescriptor(aggregate.alias, 'ASC');
+                    }
+                }
+            }
+
+            if (!descriptors.length) {
+                addDescriptor('value', 'ASC');
+            }
+
+            return descriptors;
+        }
+
+        parseApplySkipToken(token: string | undefined, expectedLength: number): string[] | undefined {
+            if (!token) return undefined;
+            const parts = token.split(',');
+            if (!parts.length) {
+                throw new HttpErrors.BadRequest('Invalid $skiptoken value.');
+            }
+            if (parts.length !== expectedLength) {
+                throw new HttpErrors.BadRequest('Invalid $skiptoken value.');
+            }
+            return parts.map(part => decodeURIComponent(part));
+        }
+
+        coerceTokenValue(raw: string, sample: unknown): unknown {
+            if (sample == null) {
+                return raw === 'null' ? null : raw;
+            }
+            if (sample instanceof Date) {
+                const date = new Date(raw);
+                if (Number.isNaN(date.getTime())) {
+                    throw new HttpErrors.BadRequest('Invalid date value in $skiptoken.');
+                }
+                return date;
+            }
+            switch (typeof sample) {
+                case 'number': {
+                    const num = Number(raw);
+                    if (Number.isNaN(num)) {
+                        throw new HttpErrors.BadRequest('Invalid numeric value in $skiptoken.');
+                    }
+                    return num;
+                }
+                case 'boolean':
+                    if (raw === 'true') return true;
+                    if (raw === 'false') return false;
+                    throw new HttpErrors.BadRequest('Invalid boolean value in $skiptoken.');
+                default:
+                    return raw;
+            }
+        }
+
+        compareRowAgainstToken(row: AnyObject, descriptors: OrderDescriptor[], tokenParts: string[]): number {
+            for (let index = 0; index < descriptors.length; index++) {
+                const descriptor = descriptors[index];
+                const tokenRaw = tokenParts[index];
+                const rowValue = this.extractFieldValue(row, descriptor.field);
+                const tokenValue = this.coerceTokenValue(tokenRaw, rowValue);
+                let cmp = this.compareValues(rowValue, tokenValue);
+                if (descriptor.direction === 'DESC') cmp = -cmp;
+                if (cmp > 0) return 1;
+                if (cmp < 0) return -1;
+            }
+            return 0;
+        }
+
+        filterRowsAfterSkipToken(rows: AnyObject[], descriptors: OrderDescriptor[], tokenParts: string[] | undefined): AnyObject[] {
+            if (!tokenParts || !tokenParts.length) return rows;
+            const filtered: AnyObject[] = [];
+            for (const row of rows) {
+                const cmp = this.compareRowAgainstToken(row, descriptors, tokenParts);
+                if (cmp > 0) {
+                    filtered.push(row);
+                }
+            }
+            return filtered;
+        }
+
         parseSkipTokenValues(token: string, descriptors: OrderDescriptor[], definition: ModelDefinition | undefined): unknown[] {
             if (!token) {
                 throw new HttpErrors.BadRequest('Empty $skiptoken is not allowed.');
@@ -2592,9 +2734,6 @@ export function defineODataCrudController(def: EntitySetDef) {
                 if (!aggregationEnabled) {
                     throw new HttpErrors.NotImplemented('Aggregations are not enabled for this entity set.');
                 }
-                if (skipTokenValue) {
-                    throw new HttpErrors.BadRequest('$skiptoken is not supported together with $apply.');
-                }
             }
 
             if (lambdaExpression) {
@@ -2682,6 +2821,16 @@ export function defineODataCrudController(def: EntitySetDef) {
                 const options = this.repositoryOptions();
 
                 if (aggregationSpec) {
+                    const finalStage = applyPlan?.stages?.[applyPlan.stages.length - 1];
+                    const applyOrderDescriptors = this.buildApplyOrderDescriptors(finalStage, aggregationSpec);
+                    if (!applyOrderDescriptors.length) {
+                        throw new HttpErrors.BadRequest('Unable to derive ordering for $apply pagination.');
+                    }
+                    const applyTokenParts = this.parseApplySkipToken(skipTokenValue, applyOrderDescriptors.length);
+                    let applyPageSize = this.resolvePageSize(originalTop);
+                    if (finalStage?.top != null) {
+                        applyPageSize = Math.min(applyPageSize, finalStage.top);
+                    }
                     const fetchFilter: Filter<CrudEntity> = { ...baseFilter };
                     delete fetchFilter.order;
                     delete fetchFilter.limit;
@@ -2704,6 +2853,13 @@ export function defineODataCrudController(def: EntitySetDef) {
                         stageForPushdown,
                         0,
                         stageCount,
+                        {
+                            orderDescriptors: applyOrderDescriptors,
+                            skipTokenParts: applyTokenParts,
+                            pageSize: applyPageSize,
+                            stageTop: finalStage?.top,
+                            stageSkip: finalStage?.skip,
+                        },
                     );
                     if (pushdownResult) {
                         ctx.result = pushdownResult;
@@ -2786,13 +2942,25 @@ export function defineODataCrudController(def: EntitySetDef) {
                         ordered = this.orderResults(working, baseFilter.order);
                     }
 
-                    const paged = this.sliceResults(ordered, requestedOffset, requestedLimit);
+                    const orderClauses = applyOrderDescriptors.map(item => `${item.field} ${item.direction}`);
+                    ordered = this.orderResults(ordered, orderClauses);
+                    ordered = this.filterRowsAfterSkipToken(ordered, applyOrderDescriptors, applyTokenParts);
+                    const pagination = this.applyServerDrivenPaging(
+                        ordered,
+                        applyOrderDescriptors,
+                        applyPageSize,
+                    );
+                    const paged = pagination.items;
+                    const nextLinkToken = pagination.token;
 
                     this.ensureODataHeaders();
                     const result = {
                         '@odata.context': contextBase,
                         value: paged,
                     } as AnyObject;
+                    if (nextLinkToken) {
+                        result['@odata.nextLink'] = this.buildNextLink(nextLinkToken);
+                    }
                     ctx.result = result;
                     return result;
                 }
