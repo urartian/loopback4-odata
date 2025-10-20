@@ -252,7 +252,8 @@ describe('OData component acceptance', () => {
       productsDef.deltaField = productsDef.deltaField ?? 'updatedAt';
     }
 
-    const pipeline = 'groupby((name),aggregate(price with sum as TotalPrice))';
+    const pipeline =
+      'groupby((name),aggregate(price with sum as TotalPrice))/orderby(TotalPrice desc)';
 
     const first = await client
       .get('/odata/Products')
@@ -273,6 +274,39 @@ describe('OData component acceptance', () => {
     expect(delta.body['@odata.deltaLink']).to.be.String();
     const names = delta.body.value.map((entry: AnyObject) => entry.name);
     expect(names).to.containEql('Laptop');
+  });
+
+  it('returns aggregated tombstones with snapshot data for $apply delta feeds', async () => {
+    const current = app.getSync(ODATA_BINDINGS.CONFIG) as ODataConfig;
+    Object.assign(current, {enableDelta: true, pageSize: 2});
+    const registry = app.getSync(ODATA_BINDINGS.ENTITY_SET_REGISTRY);
+    const productsDef = registry.findByName('Products');
+    if (productsDef) {
+      productsDef.deltaEnabled = true;
+      productsDef.deltaField = productsDef.deltaField ?? 'updatedAt';
+    }
+
+    const pipeline =
+      'groupby((name),aggregate(price with sum as TotalPrice))/orderby(TotalPrice desc)';
+
+    const initial = await client
+      .get('/odata/Products')
+      .query({$apply: pipeline})
+      .expect(200);
+
+    const deltaLink = String(initial.body['@odata.deltaLink']);
+
+    const {etag} = await getProductWithEtag(1);
+    await client.del('/odata/Products(1)').set('If-Match', etag).expect(204);
+
+    const delta = await client.get(deltaLink).expect(200);
+    const tombstone = delta.body.value.find(
+      (entry: AnyObject) => entry?.['@removed'],
+    );
+    expect(tombstone).to.be.Object();
+    expect(tombstone.name).to.equal('Laptop');
+    expect(tombstone.TotalPrice).to.equal(1299);
+    expect(tombstone['@removed']?.reason).to.equal('deleted');
   });
 
   it('rejects $deltatoken when delta support is disabled', async () => {

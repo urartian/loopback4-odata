@@ -48,7 +48,7 @@ import {
     parseIfNoneMatch,
     readEtagValue,
 } from '../util/etag';
-import {encodeDeltaToken, decodeDeltaToken, DeltaTokenPayload} from '../util/delta-token';
+import {encodeDeltaToken, decodeDeltaToken, DeltaTokenPayload, DeltaTokenBucketState} from '../util/delta-token';
 import {
     applyControllerSecurityMetadata,
     mergeMethodAliasMaps,
@@ -2318,7 +2318,7 @@ export function defineODataCrudController(def: EntitySetDef) {
             deltaField: string,
             idProps: string[],
             previousToken?: string,
-            buckets?: Record<string, unknown>[],
+            buckets?: DeltaTokenBucketState[],
         ): string {
             if (!rows.length) {
                 return previousToken ?? encodeDeltaToken({entitySet, lastValue: new Date().toISOString(), buckets});
@@ -2376,35 +2376,93 @@ export function defineODataCrudController(def: EntitySetDef) {
             return this.createDeltaTokenForRows(entitySet, [plain], deltaField, idProps, undefined);
         }
 
-        buildBucketState(groupKeys: string[], rows: AnyObject[]): Record<string, unknown>[] {
-            if (!groupKeys.length) {
-                return rows.length ? [{}] : [];
+        buildBucketState(groupKeys: string[], rows: AnyObject[]): DeltaTokenBucketState[] {
+            if (!rows.length) return [];
+            const buckets = new Map<string, DeltaTokenBucketState>();
+            for (const row of rows) {
+                const key = this.buildBucketKeyFromRow(row, groupKeys);
+                const signature = this.serializeBucketKey(key, groupKeys);
+                const snapshot = this.cloneBucketSnapshot(row);
+                buckets.set(signature, snapshot ? {key, data: snapshot} : {key});
             }
-            return rows.map(row => {
-                const bucket: Record<string, unknown> = {};
-                for (const key of groupKeys) {
-                    bucket[key] = this.extractFieldValue(row, key);
-                }
-                return bucket;
-            });
+            return Array.from(buckets.values());
         }
 
         buildRemovedBuckets(
-            previous: Record<string, unknown>[] | undefined,
+            previous: DeltaTokenBucketState[] | undefined,
             current: AnyObject[],
             groupKeys: string[],
         ): AnyObject[] {
             if (!previous?.length) return [];
-            const currentState = this.buildBucketState(groupKeys, current).map(bucket => JSON.stringify(bucket));
-            const currentSet = new Set(currentState);
+            const currentSignatures = new Set(
+                current.map(row => this.serializeBucketKey(this.buildBucketKeyFromRow(row, groupKeys), groupKeys)),
+            );
             const tombstones: AnyObject[] = [];
-            for (const bucket of previous) {
-                const signature = JSON.stringify(bucket);
-                if (!currentSet.has(signature)) {
-                    tombstones.push({...bucket, '@removed': {reason: 'deleted'}});
-                }
+            for (const entry of previous) {
+                const key = entry?.key ?? {};
+                const signature = this.serializeBucketKey(key, groupKeys);
+                if (currentSignatures.has(signature)) continue;
+                const tombstoneBase = entry?.data ? this.clonePlainRecord(entry.data) : {};
+                Object.assign(tombstoneBase, key);
+                tombstoneBase['@removed'] = {reason: 'deleted'};
+                tombstones.push(tombstoneBase);
             }
             return tombstones;
+        }
+
+        serializeBucketKey(key: Record<string, unknown>, groupKeys: string[]): string {
+            if (!groupKeys.length) return JSON.stringify({});
+            const ordered: Record<string, unknown> = {};
+            for (const bucketKey of groupKeys) {
+                ordered[bucketKey] = key?.[bucketKey];
+            }
+            return JSON.stringify(ordered);
+        }
+
+        clonePlainRecord(source: Record<string, unknown> | undefined): Record<string, unknown> {
+            if (!source) return {};
+            const clone: Record<string, unknown> = {};
+            for (const [field, value] of Object.entries(source)) {
+                clone[field] = this.cloneBucketValue(value);
+            }
+            return clone;
+        }
+
+        cloneBucketSnapshot(row: AnyObject): Record<string, unknown> | undefined {
+            const snapshot: Record<string, unknown> = {};
+            for (const [field, value] of Object.entries(row)) {
+                if (field.startsWith('@')) continue;
+                snapshot[field] = this.cloneBucketValue(value);
+            }
+            return Object.keys(snapshot).length ? snapshot : undefined;
+        }
+
+        cloneBucketValue(value: unknown): unknown {
+            if (value === null || value === undefined) return value;
+            if (Array.isArray(value)) {
+                return value.map(item => this.cloneBucketValue(item));
+            }
+            if (value instanceof Date) {
+                return new Date(value.getTime());
+            }
+            if (typeof value === 'object') {
+                const record: Record<string, unknown> = {};
+                for (const [key, nested] of Object.entries(value as Record<string, unknown>)) {
+                    if (key.startsWith('@')) continue;
+                    record[key] = this.cloneBucketValue(nested);
+                }
+                return record;
+            }
+            return value;
+        }
+
+        buildBucketKeyFromRow(row: AnyObject, groupKeys: string[]): Record<string, unknown> {
+            if (!groupKeys.length) return {};
+            const key: Record<string, unknown> = {};
+            for (const bucketKey of groupKeys) {
+                key[bucketKey] = this.extractFieldValue(row, bucketKey);
+            }
+            return key;
         }
 
         buildLexKeyPredicate(idProperties: string[], keyValues: Record<string, unknown>): CrudWhere | undefined {

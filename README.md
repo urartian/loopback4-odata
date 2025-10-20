@@ -989,7 +989,15 @@ Deleted entities show up as tombstones:
 }
 ```
 
-For `$apply` pipelines, delta responses include the aggregated buckets that changed as well as `@removed` entries for buckets that disappeared since the previous sync (tracked per page).
+For `$apply` pipelines, delta responses include the aggregated buckets that changed as well as `@removed` entries for buckets that disappeared since the previous sync. Tombstones now carry the last known aggregate snapshot, so clients continue to see the bucket keys **and** the previously computed measures:
+
+```json
+{
+  "name": "Laptop",
+  "TotalPrice": 1299,
+  "@removed": {"reason": "deleted"}
+}
+```
 
 ### Advanced `$apply` Examples
 

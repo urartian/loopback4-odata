@@ -1,8 +1,13 @@
+export interface DeltaTokenBucketState {
+  key: Record<string, unknown>;
+  data?: Record<string, unknown>;
+}
+
 export interface DeltaTokenPayload {
   entitySet: string;
   lastValue: string;
   keyValues?: Record<string, unknown>;
-  buckets?: Array<Record<string, unknown>>;
+  buckets?: DeltaTokenBucketState[];
 }
 
 const LEGACY_PREFIX = 'v1:';
@@ -86,12 +91,57 @@ export function decodeDeltaToken(token: string): DeltaTokenPayload {
   }
   if (token.startsWith(JSON_PREFIX)) {
     const raw = Buffer.from(token.slice(JSON_PREFIX.length), 'base64').toString('utf8');
-    const parsed = JSON.parse(raw) as DeltaTokenPayload;
-    parsed.keyValues = decodeKeyValuesObject(parsed.keyValues);
-    return parsed;
+    const parsed = JSON.parse(raw) as {
+      entitySet: string;
+      lastValue: string;
+      keyValues?: Record<string, unknown>;
+      buckets?: unknown;
+    };
+    if (!parsed?.entitySet || !parsed?.lastValue) {
+      throw new Error('Invalid delta token payload.');
+    }
+    return {
+      entitySet: parsed.entitySet,
+      lastValue: parsed.lastValue,
+      keyValues: decodeKeyValuesObject(parsed.keyValues),
+      buckets: normalizeBucketStates(parsed.buckets),
+    };
   }
   if (token.startsWith(LEGACY_PREFIX)) {
     return decodeLegacyToken(token);
   }
   throw new Error('Unsupported delta token format.');
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function cloneRecord(source: Record<string, unknown> | undefined): Record<string, unknown> | undefined {
+  if (!source) return undefined;
+  const clone: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(source)) {
+    clone[key] = value;
+  }
+  return clone;
+}
+
+function normalizeBucketStates(raw?: unknown): DeltaTokenBucketState[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const normalized: DeltaTokenBucketState[] = [];
+  for (const entry of raw) {
+    if (!isPlainRecord(entry)) continue;
+    const candidate = entry as {
+      key?: Record<string, unknown>;
+      data?: Record<string, unknown>;
+    };
+    const key = isPlainRecord(candidate.key) ? cloneRecord(candidate.key) : undefined;
+    const data = isPlainRecord(candidate.data) ? cloneRecord(candidate.data) : undefined;
+    if (key) {
+      normalized.push(data ? {key, data} : {key});
+      continue;
+    }
+    normalized.push({key: cloneRecord(candidate as Record<string, unknown>) ?? {}});
+  }
+  return normalized.length ? normalized : undefined;
 }
