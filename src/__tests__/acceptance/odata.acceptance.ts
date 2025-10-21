@@ -466,6 +466,168 @@ describe('OData component acceptance', () => {
     expect(secondNotes.map((n: AnyObject) => n.text)).to.containEql('urgent delivery');
   });
 
+  it('rejects deep insert when collection navigation payload is not an array', async () => {
+    const res = await client
+      .post('/odata/Orders')
+      .send({
+        total: 200,
+        items: {
+          productId: 1,
+          quantity: 1,
+          unitPrice: 499,
+        },
+      })
+      .expect(422);
+
+    const details = (res.body?.error?.details ?? []) as AnyObject[];
+    const hasTypeError = details.some(
+      (d: AnyObject) => String(d.path ?? '').includes('/items') && (d.code === 'type' || /must be array/i.test(String(d.message ?? ''))),
+    );
+    expect(hasTypeError).to.be.true();
+  });
+
+  it('supports deep update for related entities when enabled', async () => {
+    const current = app.getSync(ODATA_BINDINGS.CONFIG) as ODataConfig;
+    Object.assign(current, {enableDeepInsert: true, enableDeepUpdate: true});
+    const registry = app.getSync(ODATA_BINDINGS.ENTITY_SET_REGISTRY);
+    const ordersDef = registry.findByName('Orders');
+    if (ordersDef) {
+      ordersDef.deepInsert = true;
+      ordersDef.deepUpdate = true;
+    }
+    const orderItemsDef = registry.findByName('OrderItems');
+    if (orderItemsDef) {
+      orderItemsDef.deepUpdate = true;
+    }
+
+    const orderId = 9802;
+    await client
+      .post('/odata/Orders')
+      .send({
+        id: orderId,
+        total: 500,
+        items: [
+          {
+            productId: 1,
+            quantity: 1,
+            unitPrice: 499,
+            notes: [{text: 'original note'}],
+          },
+          {
+            productId: 2,
+            quantity: 1,
+            unitPrice: 299,
+          },
+        ],
+      })
+      .expect(200);
+
+    const fetched = await client
+      .get(`/odata/Orders(${orderId})`)
+      .query({$expand: 'items($expand=notes)'})
+      .expect(200);
+    const etag = fetched.headers['etag'] as string | undefined;
+    const firstItem = fetched.body.items[0];
+    const secondItem = fetched.body.items[1];
+    const firstNote = firstItem.notes?.[0];
+
+    // Unlink the second item via navigation $ref endpoint (CAP-style)
+    if (secondItem?.id != null) {
+      await client
+        .del(`/odata/Orders(${orderId})/items(${secondItem.id})/$ref`)
+        .expect(204);
+    }
+
+    let patchRequest = client.patch(`/odata/Orders(${orderId})`);
+    if (etag) {
+      patchRequest = patchRequest.set('If-Match', etag);
+    }
+    const patchResponse = await patchRequest
+      .send({
+        total: fetched.body.total + 200,
+        items: [
+          {
+            id: firstItem.id,
+            quantity: firstItem.quantity + 2,
+            notes: [
+              ...(firstNote ? [{id: firstNote.id, text: 'updated note'}] : []),
+              {text: 'additional note'},
+            ],
+          },
+          {
+            productId: 3,
+            quantity: 1,
+            unitPrice: 799,
+            notes: [{text: 'new line note'}],
+          },
+        ],
+      });
+
+    if (patchResponse.status !== 200) {
+      // surface the response for easier debugging when expectations fail
+      // eslint-disable-next-line no-console
+      console.error('Deep update patch failed', patchResponse.status, patchResponse.body?.error ?? patchResponse.body);
+    }
+    expect(patchResponse.status).to.equal(200);
+
+    const updated = await client
+      .get(`/odata/Orders(${orderId})`)
+      .query({$expand: 'items($expand=notes)'})
+      .expect(200);
+
+    expect(updated.body.total).to.equal(fetched.body.total + 200);
+    const updatedItems = updated.body.items as AnyObject[];
+    const retained = updatedItems.find(item => item.productId === firstItem.productId);
+    expect(retained).to.be.Object();
+    if (!retained) throw new Error('Expected retained line item to be present');
+    expect(retained.quantity).to.equal(firstItem.quantity + 2);
+    expect(retained.notes.map((n: AnyObject) => n.text)).to.containEql('updated note');
+    expect(retained.notes.map((n: AnyObject) => n.text)).to.containEql('additional note');
+    expect(updatedItems.some(item => item.id === secondItem.id)).to.be.false();
+    const added = updatedItems.find(item => item.productId === 3);
+    expect(added).to.be.Object();
+    if (!added) throw new Error('Expected newly added line item');
+    expect(Array.isArray(added.notes)).to.be.true();
+    expect(added.notes[0]?.text).to.equal('new line note');
+  });
+
+  it('rejects deep update when collection navigation payload is not an array', async () => {
+    const newOrder = await client
+      .post('/odata/Orders')
+      .send({total: 0})
+      .expect(200);
+
+    const orderId = newOrder.body.id;
+    const createdItem = await client
+      .post(`/odata/OrderItems`)
+      .send({orderId, productId: 1, quantity: 1, unitPrice: 199})
+      .expect(200);
+
+    const fetched = await client
+      .get(`/odata/Orders(${orderId})`)
+      .query({$expand: 'items'})
+      .expect(200);
+    const etag = fetched.headers['etag'] as string | undefined;
+
+    let patchRequest = client.patch(`/odata/Orders(${orderId})`);
+    if (etag) patchRequest = patchRequest.set('If-Match', etag);
+
+    const response = await patchRequest
+      .send({
+        items: {
+          id: createdItem.body.id,
+          quantity: 2,
+        },
+      })
+      .expect(422);
+
+    const details = (response.body?.error?.details ?? []) as AnyObject[];
+    const hasTypeError = details.some(
+      (d: AnyObject) => String(d.path ?? '').includes('/items') && (d.code === 'type' || /must be array/i.test(String(d.message ?? ''))),
+    );
+    expect(hasTypeError).to.be.true();
+  });
+
   it('supports navigation $ref linking of existing entities', async () => {
     const newOrder = await client
       .post('/odata/Orders')

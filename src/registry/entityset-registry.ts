@@ -28,6 +28,7 @@ export interface EntitySetDef<T extends Entity = Entity> {
     hasStream?: boolean;
     capabilities?: ODataCapabilitiesConfig;
     deepInsert?: boolean;
+    deepUpdate?: boolean;
     applyPushdown?: boolean;
     applyExecutorId?: string;
     sqlMetadata?: EntitySqlMetadata;
@@ -49,6 +50,9 @@ export class EntitySetRegistry {
         }
         if (def.deepInsert === undefined && existing?.deepInsert !== undefined) {
             next.deepInsert = existing.deepInsert;
+        }
+        if (def.deepUpdate === undefined && existing?.deepUpdate !== undefined) {
+            next.deepUpdate = existing.deepUpdate;
         }
         if (def.applyPushdown === undefined && existing?.applyPushdown !== undefined) {
             next.applyPushdown = existing.applyPushdown;
