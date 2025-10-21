@@ -1173,6 +1173,19 @@ Content-Type: application/json
 
 The controller persists the order, its line items, and each item note inside a single transaction and annotates `$metadata` with `Org.OData.Capabilities.V1.DeepInsertSupport` for the entity set. Nested relations beyond the first level are followed recursively (subject to `maxDeepInsertDepth`). Associations via `through` are not accepted inline.
 
+Validation notes:
+
+- Collection navigation properties must be arrays. If a single object is sent for a `hasMany` relation, the request is rejected by the route validator with `422 Unprocessable Entity`.
+- The reason appears under `error.details`, not the top-level message. Look for an entry similar to:
+
+  ```json
+  {
+    "path": "/items",
+    "code": "type",
+    "message": "must be array"
+  }
+  ```
+
 ### Deep Update
 
 Deep updates follow the same composition-aware defaults. If a model has required hasMany/hasOne relations, the booter enables deep update automatically so PATCH requests can create/update child entities alongside the parent. You can override the default exactly like deep insert:
@@ -1211,6 +1224,18 @@ Validation and behavior:
 - Nested relations are traversed depth-first, obeying `maxDeepUpdateDepth`, and the entire graph is mutated inside the same transaction.
 - BelongsTo and many-to-many (`through`) relations are not accepted inline; link/unlink via navigation `$ref` endpoints or foreign keys.
 
+Validation notes:
+
+- As with deep insert, collection navigation properties in PATCH must be arrays. A single object for a `hasMany` relation results in `422 Unprocessable Entity` with an Ajv detail entry like:
+
+  ```json
+  {
+    "path": "/items",
+    "code": "type",
+    "message": "must be array"
+  }
+  ```
+
 ### Navigation `$ref`
 
 Link existing entities without PATCHing full payloads. For a `hasMany` relation:
@@ -1243,6 +1268,11 @@ DELETE /odata/Orders(9802)/items(20002)/$ref
 For `hasOne`, use `PUT /EntitySet(key)/Relation/$ref` to link and `DELETE /EntitySet(key)/Relation/$ref` to clear the link. Relations defined with `hasManyThrough` are skipped.
 
 For atomic multi-step graph changes (e.g., unlink + patch + insert), wrap the operations in a `$batch` atomic changeset.
+
+Error handling:
+
+- `DELETE /EntitySet(key)` returns `404 Not Found` when the entity does not exist.
+- `DELETE /EntitySet(key)/Relation(key)/$ref` returns `404 Not Found` when the link does not exist (target missing, already unlinked, or linked to a different parent).
 
 #### Atomic `$batch` changeset example (unlink + patch + insert)
 
