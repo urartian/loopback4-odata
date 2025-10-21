@@ -933,7 +933,7 @@ this.bind(ODATA_BINDINGS.CONFIG).to({
 - `logApplyTelemetry`: When `true`, emits a concise debug line for every `$apply` stage showing whether it was pushed down or processed in-memory (default: `false`).
 - `onApplyTelemetry(event)`: Structured hook invoked after each stage with `{entitySet, stageIndex, stageCount, mode, rows, durationMs, joinCount, reason}` so you can stream analytics into your own logging or monitoring pipeline.
 - `maxApplyNavigationFanout`: Maximum number of navigation combinations the in-memory fallback will materialize per stage before returning `400 Bad Request` (default: `1000`).
-- `enableApplyPushdown`: Opt-in switch that negotiates `$apply` pushdown with each datasource. When enabled, supported connectors (currently PostgreSQL) execute `groupby()/aggregate()` pipelines in the database. Combine with `@odataModel({applyPushdown: true})` or `EntitySetRegistry.register({applyPushdown: true})` for per-entity control.
+- `enableApplyPushdown`: Opt-in switch that negotiates `$apply` pushdown with each datasource. When enabled, supported connectors (currently PostgreSQL and MySQL/MariaDB) execute `groupby()/aggregate()` pipelines in the database. Combine with `@odataModel({applyPushdown: true})` or `EntitySetRegistry.register({applyPushdown: true})` for per-entity control.
 - `maxExpandDepth`: Maximum allowed `$expand` nesting depth; requests that exceed it return `400 Bad Request`.
 - `enableCount`:
   - When `false`, inline counts (`?$count=true`) return `400 Bad Request` with an OData error.
@@ -1068,26 +1068,33 @@ curl "http://127.0.0.1:3001/odata/OrderItems?\$apply=groupby((order/id),aggregat
 
 The second command now returns `400 Bad Request`, demonstrating the throttle.
 
-Multi-stage pipeline with navigation joins and chained groupings (runs entirely inside PostgreSQL when pushdown is enabled):
+Multi-stage pipeline with navigation joins and chained groupings (runs entirely inside the database when pushdown is enabled):
 
 ```bash
 curl "http://127.0.0.1:3001/odata/OrderItems?\$apply=groupby((order/customer/country),aggregate(order/total%20with%20sum%20as%20TotalSpend))/filter(TotalSpend%20gt%202000)/groupby((order/customer/country),aggregate(TotalSpend%20with%20max%20as%20PeakSpend))/orderby(PeakSpend%20desc)"
 ```
 
-### `$apply` Pushdown (PostgreSQL)
+### `$apply` Pushdown (PostgreSQL & MySQL)
 
-- Pushdown is **opt-in**. Out of the box, `$apply` executes in memory. This is functionally correct but resource intensive; enable pushdown for production workloads. Once enabled, the PostgreSQL executor keeps entire pipelines (multiple `groupby`/`aggregate` stages plus `filter`, `orderby`, `skip`, `top`) inside the database, emitting native `HAVING`, `ORDER BY`, `LIMIT`, and `OFFSET`.
+- Pushdown is **opt-in**. Out of the box, `$apply` executes in memory. This is functionally correct but resource intensive; enable pushdown for production workloads. Once enabled, the SQL executors keep entire pipelines (multiple `groupby`/`aggregate` stages plus `filter`, `orderby`, `skip`, `top`) inside the database, emitting native `HAVING`, `ORDER BY`, `LIMIT`, and `OFFSET`.
 - Set `enableApplyPushdown: true` on `ODataConfig` to negotiate pushdown across datasources, or opt in per model with `@odataModel({applyPushdown: true})` / per entity set via `EntitySetRegistry.register({applyPushdown: true})`.
-- PostgreSQL is supported natively today. The extension inspects each repository datasource and, when it detects a Postgres connector, routes aggregation pipelines through a SQL executor built on `dataSource.execute(...)`. Support for additional connectors will follow.
-- Navigation aggregates are compiled into `LEFT JOIN` chains, so queries like `groupby((order/customer/country), aggregate(order/total with sum as TotalSpend))` continue to run server-side even when later stages reference aliases or regroup the intermediate result set.
+- PostgreSQL **and** MySQL/MariaDB are supported natively today. The extension inspects each repository datasource and, when it detects a compatible connector, routes aggregation pipelines through a SQL executor built on `dataSource.execute(...)`.
+- Navigation aggregates are compiled into `LEFT JOIN` chains, so queries like `groupby((order/customer/country), aggregate(order/total with sum as TotalSpend))` continue to run server-side even when later stages reference aliases or regroup the intermediate result set. On MySQL the executor uses backticked identifiers and `?` placeholders, while PostgreSQL uses quoted identifiers and `$n` parameters.
 - Stage-level pagination and filters stay in SQL. Post-aggregate `filter(...)` segments translate to `HAVING` clauses, and `skip`/`top` stages map to `OFFSET`/`LIMIT` inside each stage rather than being re-applied in memory.
 - Telemetry hooks (`logApplyTelemetry: true` or a custom `onApplyFallback`) now capture per-stage execution mode, duration, row counts, and join counts so you can audit when a pipeline leaves the database.
 - Table and column names are inferred automatically from the connector metadata (including the default lowercase conversion), so the usual LoopBack naming conventions work without additional annotations. Override the metadata only when you map models to non-standard table names.
-- Unsupported scenarios automatically fall back to the in-memory executor. When `logApplyFallbacks` is enabled (or `onApplyFallback` is provided), additional events (`executor-declined`, `executor-error`, `missing-stage-filters`, `missing-stage-pagination`) surface whenever the pushdown path declines a request. Use these signals to monitor unexpected CPU/memory usage.
+- Unsupported scenarios automatically fall back to the in-memory executor. When `logApplyFallbacks` is enabled (or `onApplyFallback` is provided), additional events (`executor-declined`, `executor-error`, `missing-stage-filters`, `missing-stage-pagination`) surface whenever the pushdown path declines a request. Use these signals to monitor unexpected CPU/memory usage across both dialects.
 - Capability metadata reflects reality: entity sets only emit `Org.OData.Capabilities.V1.ApplySupported` when pushdown is active, so BI clients can rely on the annotation.
 - Custom connectors can participate by registering their own executor with `ODataApplyExecutorRegistry`. Executors decide at runtime whether they can satisfy a pipeline and can signal unsupported combinations by returning `undefined`, preserving the existing fallback behavior.
 
-To try pushdown with the example app (requires PostgreSQL running locally):
+To try pushdown with the example app (requires PostgreSQL or MySQL running locally):
+
+```bash
+USE_MYSQL=true MYSQL_HOST=127.0.0.1 MYSQL_USER=root MYSQL_PASSWORD=pass MYSQL_DATABASE=odata_dev \
+ENABLE_APPLY_PUSHDOWN=true LOG_APPLY_TELEMETRY=true npm run dev
+```
+
+Or, for PostgreSQL:
 
 ```bash
 USE_POSTGRES=true PG_HOST=127.0.0.1 PG_USER=postgres PG_PASSWORD=pass PG_DATABASE=odata_dev \
@@ -1170,7 +1177,7 @@ For `hasOne`, use `PUT /EntitySet(key)/Relation/$ref` with the same payload shap
 ## Roadmap
 
 - [ ] Draft/deep insert workflow
-- [ ] Additional `$apply` pushdown adapters (MySQL/MariaDB, MSSQL, Mongo aggregation)
+- [ ] Additional `$apply` pushdown adapters (MSSQL, Mongo aggregation)
 - [ ] Deep update / draft handling for composition hierarchies
 - [ ] Rich lambda grammar with nested `any` / `all` and mixed logical operators
 - [ ] Virtual/calculated field exposure with CSDL annotations

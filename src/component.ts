@@ -12,6 +12,7 @@ import { OdataPathRewriterProvider } from './middleware/odata-path-rewriter.prov
 import { ODataErrorProvider } from './providers/odata-error.provider';
 import { ODataApplyExecutorRegistry } from './services/odata-apply-executor.registry';
 import { PostgresApplyExecutor } from './services/postgres-apply-executor';
+import { MySqlApplyExecutor } from './services/mysql-apply-executor';
 
 export class ODataComponent implements Component {
     bindings = [
@@ -39,6 +40,7 @@ export class ODataComponent implements Component {
             .toDynamicValue(() => {
                 const registry = new ODataApplyExecutorRegistry();
                 registry.register(new PostgresApplyExecutor());
+                registry.register(new MySqlApplyExecutor());
                 return registry;
             })
             .inScope(BindingScope.SINGLETON),
