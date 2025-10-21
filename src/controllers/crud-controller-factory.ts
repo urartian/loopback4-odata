@@ -1,4 +1,5 @@
 import { inject } from '@loopback/core';
+import {ReferenceObject} from '@loopback/openapi-v3';
 import {
     HttpErrors,
     del,
@@ -11,6 +12,7 @@ import {
     Request,
     RestBindings,
     RequestContext,
+    SchemaObject,
 } from '@loopback/rest';
 import {
     DefaultCrudRepository,
@@ -24,6 +26,7 @@ import {
     PropertyDefinition,
     AnyObject,
     ModelDefinition,
+    EntityNotFoundError,
 } from '@loopback/repository';
 import { EntitySetDef } from '../registry/entityset-registry';
 import {
@@ -222,7 +225,172 @@ export function defineODataCrudController(def: EntitySetDef) {
 
     const hooks: CrudHookBundle | undefined = def.hooks;
     const deepInsertEnabledForSet = Boolean(def.deepInsert);
+    const deepUpdateEnabledForSet = Boolean(def.deepUpdate);
     const sourceCtrlBindingKey: string | undefined = def.sourceControllerBindingKey;
+    // Determine PATCH body schema at boot.
+    // - When deep update is disabled, use the model's partial schema (strict).
+    // - When deep update is enabled, allow only known model fields and
+    //   supported relation keys (hasOne/hasMany, excluding through). Unknown
+    //   top-level properties are rejected.
+    const basePatchSchema = getModelSchemaRef(modelCtor, {
+        title: `${modelCtor.name ?? 'Entity'}Patch`,
+        partial: true,
+    }) as SchemaObject;
+
+    const PROPERTY_CONSTRAINT_KEYS = [
+        'minimum',
+        'maximum',
+        'exclusiveMinimum',
+        'exclusiveMaximum',
+        'multipleOf',
+        'minLength',
+        'maxLength',
+        'pattern',
+        'format',
+        'minItems',
+        'maxItems',
+        'uniqueItems',
+    ];
+
+    const isReferenceSchema = (value: unknown): value is ReferenceObject => {
+        return Boolean(value && typeof value === 'object' && ('$ref' in (value as AnyObject)));
+    };
+
+    const cloneSchemaObject = (schema: AnyObject | undefined): SchemaObject => {
+        if (!schema) return {} as SchemaObject;
+        return JSON.parse(JSON.stringify(schema)) as SchemaObject;
+    };
+
+    const applyPropertyConstraints = (schema: SchemaObject, propDef?: PropertyDefinition): void => {
+        if (!propDef) return;
+        const source = propDef as AnyObject;
+        if (source.nullable === true) schema.nullable = true;
+        if (source.default !== undefined) schema.default = source.default;
+        if (Array.isArray(source.enum)) schema.enum = [...source.enum];
+        for (const key of PROPERTY_CONSTRAINT_KEYS) {
+            if (source[key] !== undefined) {
+                (schema as AnyObject)[key] = source[key];
+            }
+        }
+    };
+
+    const schemaForType = (type: unknown, propDef?: PropertyDefinition): SchemaObject | undefined => {
+        if (!type) return undefined;
+        const resolveName = (candidate: unknown): string | undefined => {
+            if (typeof candidate === 'string') return candidate.toLowerCase();
+            if (typeof candidate === 'function' && candidate.name) return candidate.name.toLowerCase();
+            return undefined;
+        };
+        const name = resolveName(type);
+        if (name === 'number') return {type: 'number'};
+        if (name === 'string') return {type: 'string'};
+        if (name === 'boolean') return {type: 'boolean'};
+        if (name === 'date' || name === 'datetime' || type === Date) {
+            return {type: 'string', format: 'date-time'};
+        }
+        if (name === 'buffer') {
+            return {type: 'string', format: 'byte'};
+        }
+        if (name === 'array' || type === Array) {
+            const itemType = (propDef as AnyObject)?.itemType;
+            let itemsSchema: SchemaObject | undefined;
+            const jsonSchemaItems = (propDef as AnyObject)?.jsonSchema?.items;
+            if (jsonSchemaItems && typeof jsonSchemaItems === 'object') {
+                itemsSchema = cloneSchemaObject(jsonSchemaItems as AnyObject);
+            } else if (itemType) {
+                if (typeof itemType === 'object' && (itemType as AnyObject).type) {
+                    itemsSchema = schemaForType((itemType as PropertyDefinition).type, itemType as PropertyDefinition) ?? {} as SchemaObject;
+                    if (itemType && typeof itemType === 'object') {
+                        applyPropertyConstraints(itemsSchema, itemType as PropertyDefinition);
+                    }
+                } else {
+                    itemsSchema = schemaForType(itemType, undefined) ?? ({} as SchemaObject);
+                }
+            }
+            return {type: 'array', items: itemsSchema ?? {} as SchemaObject};
+        }
+        if (name === 'object' || type === Object) {
+            return {type: 'object'};
+        }
+        return undefined;
+    };
+
+    const resolvePropertySchema = (
+        propDef: PropertyDefinition | undefined,
+        baseSchema: SchemaObject | ReferenceObject | undefined,
+    ): SchemaObject => {
+        if (propDef?.jsonSchema && typeof propDef.jsonSchema === 'object') {
+            return cloneSchemaObject(propDef.jsonSchema as AnyObject);
+        }
+        if (baseSchema && !isReferenceSchema(baseSchema)) {
+            const clone = cloneSchemaObject(baseSchema);
+            applyPropertyConstraints(clone, propDef);
+            return clone;
+        }
+        const derived = schemaForType(propDef?.type, propDef);
+        if (derived) {
+            applyPropertyConstraints(derived, propDef);
+            return derived;
+        }
+        if (baseSchema) {
+            if (isReferenceSchema(baseSchema)) {
+                return {allOf: [baseSchema]} as SchemaObject;
+            }
+            return cloneSchemaObject(baseSchema);
+        }
+        return {} as SchemaObject;
+    };
+
+    const buildNestedPatchSchema = (ctor: typeof Entity | undefined, depth: number): SchemaObject => {
+        if (!ctor) return {type: 'object', additionalProperties: false};
+        const maxDepth = 10;
+        if (depth > maxDepth) return {type: 'object', additionalProperties: false};
+        const def = (ctor as unknown as {definition?: ModelDefinition}).definition as ModelDefinition | undefined;
+        const title = `${ctor.name ?? 'Entity'}Patch`;
+        const base = getModelSchemaRef(ctor, {
+            title,
+            partial: true,
+        }) as SchemaObject;
+        const properties: Record<string, SchemaObject> = {};
+        const scalarProps = Object.entries(def?.properties ?? {}) as [string, PropertyDefinition | undefined][];
+        for (const [name, propDef] of scalarProps) {
+            const basePropSchema = base.properties?.[name] as SchemaObject | ReferenceObject | undefined;
+            properties[name] = resolvePropertySchema(propDef, basePropSchema);
+        }
+        const relations = (def?.relations ?? {}) as Record<string, AnyObject>;
+        for (const [relName, relMetaRaw] of Object.entries(relations)) {
+            const relMeta = relMetaRaw as AnyObject | undefined;
+            if (!relMeta || relMeta.through) continue;
+            const relType = relMeta?.type ?? relMeta?.relationType;
+            const targetCtor = typeof relMeta?.target === 'function' ? (relMeta.target() as typeof Entity) : undefined;
+            const childBase = buildNestedPatchSchema(targetCtor, depth + 1);
+            const childStrict: SchemaObject = {
+                type: 'object',
+                title: childBase.title,
+                properties: { ...(childBase.properties ?? {}) },
+                required: childBase.required as string[] | undefined,
+                additionalProperties: false,
+            };
+            if (relType === 'hasOne') {
+                properties[relName] = childStrict;
+            } else if (relType === 'hasMany') {
+                properties[relName] = { type: 'array', items: childStrict } as SchemaObject;
+            }
+        }
+        return {
+            type: 'object',
+            title,
+            properties,
+            additionalProperties: false,
+        } as SchemaObject;
+    };
+
+    let updateSchema: SchemaObject;
+    if (!deepUpdateEnabledForSet) {
+        updateSchema = basePatchSchema;
+    } else {
+        updateSchema = buildNestedPatchSchema(modelCtor as unknown as typeof Entity, 0);
+    }
 
     class ODataCrudController {
         formatOverridden = false;
@@ -285,9 +453,15 @@ export function defineODataCrudController(def: EntitySetDef) {
         }
 
         isDeepInsertEnabled(flagFromDefinition: boolean): boolean {
-            if (def.deepInsert !== undefined) return Boolean(def.deepInsert);
-            if (flagFromDefinition) return true;
-            return Boolean(this.cfg?.enableDeepInsert);
+            // Respect boot-time decision captured by caller; ignore runtime config
+            // or mutations to definition to avoid toggle-at-runtime behavior.
+            return Boolean(flagFromDefinition);
+        }
+
+        isDeepUpdateEnabled(flagFromDefinition: boolean): boolean {
+            // Respect boot-time decision captured by caller; ignore runtime config
+            // or mutations to definition to avoid toggle-at-runtime behavior.
+            return Boolean(flagFromDefinition);
         }
 
         async persistDeepInsertGraph(
@@ -392,11 +566,315 @@ export function defineODataCrudController(def: EntitySetDef) {
             };
         }
 
+        // CAP-style: no in-payload tombstones for deep updates.
+
+        extractIdValues(source: AnyObject | undefined, idProps: string[]): Record<string, unknown> | undefined {
+            if (!source) return undefined;
+            const values: Record<string, unknown> = {};
+            for (const prop of idProps) {
+                if (!Object.prototype.hasOwnProperty.call(source, prop)) {
+                    return undefined;
+                }
+                values[prop] = source[prop];
+            }
+            return values;
+        }
+
+        buildEntityIdKey(values: Record<string, unknown> | undefined, idProps: string[]): string | undefined {
+            if (!values || !idProps.length) return undefined;
+            const parts = idProps.map(prop => `${prop}:${JSON.stringify(values[prop])}`);
+            return parts.join('|');
+        }
+
+        buildRelationWhere(values: Record<string, unknown> | undefined, idProps: string[]): Where<AnyObject> | undefined {
+            if (!values || !idProps.length) return undefined;
+            const where: Where<AnyObject> = {};
+            for (const prop of idProps) {
+                where[prop] = values[prop];
+            }
+            return where;
+        }
+
+        removeIdProperties(data: AnyObject, idProps: string[]): void {
+            for (const prop of idProps) {
+                if (Object.prototype.hasOwnProperty.call(data, prop)) {
+                    delete data[prop];
+                }
+            }
+        }
+
+        buildFactoryIdArgument(values: Record<string, unknown> | undefined, idProps: string[]): unknown {
+            if (!values || !idProps.length) return undefined;
+            if (idProps.length === 1) {
+                return values[idProps[0]];
+            }
+            const composite: AnyObject = {};
+            for (const prop of idProps) {
+                composite[prop] = values[prop];
+            }
+            return composite;
+        }
+
         coercePayloadToObject(value: unknown): AnyObject {
             if (typeof value !== 'object' || value == null) {
-                throw new HttpErrors.BadRequest('Deep insert payloads for related entities must be objects.');
+                throw new HttpErrors.BadRequest('Deep update payloads for related entities must be objects.');
             }
             return {...(value as AnyObject)};
+        }
+
+        async applyDeepUpdateRelations(
+            parentId: unknown,
+            relations: Record<string, unknown> | undefined,
+            parentRepository: AnyObject,
+            parentCtor: typeof Entity,
+            options: Options | undefined,
+            depth: number,
+        ): Promise<void> {
+            if (!relations || !Object.keys(relations).length) return;
+            const maxDepth = this.cfg?.maxDeepUpdateDepth ?? this.cfg?.maxDeepInsertDepth ?? 10;
+            if (depth > maxDepth) {
+                throw new HttpErrors.BadRequest(`Deep update exceeds maximum supported depth of ${maxDepth}.`);
+            }
+            const parentDefinition = (parentCtor as {definition?: ModelDefinition}).definition as ModelDefinition | undefined;
+            const relationDefs = parentDefinition?.relations ?? {};
+            for (const [relationName, relationValue] of Object.entries(relations)) {
+                if (relationValue == null) continue;
+                const relationMeta = relationDefs[relationName] as AnyObject | undefined;
+                if (!relationMeta) {
+                    throw new HttpErrors.BadRequest(`Unknown relation ${relationName} on ${parentCtor.name ?? 'entity'} for deep update.`);
+                }
+                if (relationMeta.through) {
+                    throw new HttpErrors.NotImplemented(`Deep update is not supported for relation ${relationName} (through/ many-to-many).`);
+                }
+                const relationType = relationMeta?.type ?? relationMeta?.relationType;
+                if (relationType !== 'hasMany' && relationType !== 'hasOne') {
+                    throw new HttpErrors.BadRequest(`Deep update is only supported for hasOne/hasMany relations. Relation ${relationName} uses type ${relationType ?? 'unknown'}.`);
+                }
+                const factory = parentRepository[relationName];
+                if (typeof factory !== 'function') {
+                    throw new HttpErrors.BadRequest(`Repository for ${parentCtor.name ?? 'entity'} does not expose a relation factory for ${relationName}.`);
+                }
+                const relationRepo = factory(parentId, options);
+                await this.persistDeepUpdateGraph(
+                    relationName,
+                    relationMeta,
+                    relationRepo,
+                    relationValue,
+                    options,
+                    depth,
+                );
+            }
+        }
+
+        async persistDeepUpdateGraph(
+            relationName: string,
+            relationMeta: AnyObject,
+            relationRepository: AnyObject,
+            value: unknown,
+            options: Options | undefined,
+            depth: number,
+        ) {
+            const maxDepth = this.cfg?.maxDeepUpdateDepth ?? this.cfg?.maxDeepInsertDepth ?? 10;
+            if (depth > maxDepth) {
+                throw new HttpErrors.BadRequest(`Deep update exceeds maximum supported depth of ${maxDepth}.`);
+            }
+
+            const relationType = relationMeta?.type ?? relationMeta?.relationType;
+            if (relationType === 'hasMany') {
+                await this.persistHasManyDeepUpdate(relationName, relationMeta, relationRepository, value, options, depth);
+                return;
+            }
+            if (relationType === 'hasOne') {
+                await this.persistHasOneDeepUpdate(relationName, relationMeta, relationRepository, value, options, depth);
+                return;
+            }
+            throw new HttpErrors.BadRequest(`Deep update is only supported for hasOne/hasMany relations. Relation ${relationName} uses type ${relationType ?? 'unknown'}.`);
+        }
+
+        async persistHasManyDeepUpdate(
+            relationName: string,
+            relationMeta: AnyObject,
+            relationRepository: AnyObject,
+            value: unknown,
+            options: Options | undefined,
+            depth: number,
+        ) {
+            const targetCtor = typeof relationMeta.target === 'function' ? relationMeta.target() as typeof Entity : undefined;
+            if (!targetCtor) {
+                throw new HttpErrors.InternalServerError(`Unable to resolve target model for relation ${relationName}.`);
+            }
+            const targetDefinition = (targetCtor as {definition?: ModelDefinition}).definition as ModelDefinition | undefined;
+            const idProps = getIdProperties(targetDefinition);
+            if (!idProps.length) {
+                throw new HttpErrors.BadRequest(`Unable to determine identifier for related entity ${targetCtor.name ?? relationName}.`);
+            }
+
+            const targetRepository = await this.resolveTargetRepository(relationRepository, relationMeta);
+            const existingEntities = await relationRepository.find(undefined, options);
+            const existingMap = new Map<string, AnyObject>();
+            for (const entity of existingEntities) {
+                const plain = this.toPlainEntity(entity) ?? {};
+                const idValues = this.extractIdValues(plain, idProps);
+                const key = this.buildEntityIdKey(idValues, idProps);
+                if (key) {
+                    existingMap.set(key, plain);
+                }
+            }
+
+            const items = Array.isArray(value) ? value : [value];
+            for (const rawEntry of items) {
+                if (rawEntry == null) continue;
+                const entry = this.coercePayloadToObject(rawEntry);
+                const normalized = this.normalizeDeepInsertPayload(entry, targetCtor);
+                const childRoot = {...normalized.root};
+                const idValues = this.extractIdValues(childRoot, idProps);
+                const idKey = this.buildEntityIdKey(idValues, idProps);
+
+                // Deletions must be executed explicitly via DELETE/$ref unlink.
+
+                if (!idValues || !idKey) {
+                    const created = await relationRepository.create(childRoot, options);
+                    const createdPlain = this.toPlainEntity(created) ?? childRoot;
+                    const createdIdValues = this.extractIdValues(createdPlain, idProps);
+                    if (normalized.children && createdIdValues) {
+                        const childFactoryId = this.buildFactoryIdArgument(createdIdValues, idProps);
+                        await this.applyDeepUpdateRelations(
+                            childFactoryId,
+                            normalized.children as Record<string, unknown>,
+                            targetRepository,
+                            targetCtor,
+                            options,
+                            depth + 1,
+                        );
+                    }
+                    continue;
+                }
+
+                const updateData = {...childRoot};
+                this.removeIdProperties(updateData, idProps);
+                if (Object.keys(updateData).length) {
+                    const where = this.buildRelationWhere(idValues, idProps);
+                    if (!where) {
+                        throw new HttpErrors.BadRequest(`Unable to update related ${relationName}: missing identifier.`);
+                    }
+                    await relationRepository.patch(updateData, where, options);
+                }
+
+                if (normalized.children) {
+                    const where = this.buildRelationWhere(idValues, idProps);
+                    let currentChild = existingMap.get(idKey);
+                    if (where) {
+                        try {
+                            const refreshed = await targetRepository.findOne({where}, options);
+                            currentChild = this.toPlainEntity(refreshed) ?? currentChild ?? childRoot;
+                        } catch {
+                            currentChild = currentChild ?? childRoot;
+                        }
+                    }
+                    const childIdValues = this.extractIdValues(currentChild, idProps);
+                    const childFactoryId = this.buildFactoryIdArgument(childIdValues, idProps);
+                    if (childFactoryId !== undefined) {
+                        await this.applyDeepUpdateRelations(
+                            childFactoryId,
+                            normalized.children as Record<string, unknown>,
+                            targetRepository,
+                            targetCtor,
+                            options,
+                            depth + 1,
+                        );
+                    }
+                }
+
+        }
+    }
+
+        async persistHasOneDeepUpdate(
+            relationName: string,
+            relationMeta: AnyObject,
+            relationRepository: AnyObject,
+            value: unknown,
+            options: Options | undefined,
+            depth: number,
+        ) {
+            const targetCtor = typeof relationMeta.target === 'function' ? relationMeta.target() as typeof Entity : undefined;
+            if (!targetCtor) {
+                throw new HttpErrors.InternalServerError(`Unable to resolve target model for relation ${relationName}.`);
+            }
+
+            const targetDefinition = (targetCtor as {definition?: ModelDefinition}).definition as ModelDefinition | undefined;
+            const idProps = getIdProperties(targetDefinition);
+
+            const entry = value == null ? undefined : this.coercePayloadToObject(value as AnyObject);
+            if (!entry) return;
+
+            const normalized = this.normalizeDeepInsertPayload(entry, targetCtor);
+            const childRoot = {...normalized.root};
+
+            const targetRepository = await this.resolveTargetRepository(relationRepository, relationMeta);
+
+            // Deletions must be executed explicitly via DELETE/$ref unlink.
+
+            let existing: AnyObject | undefined;
+            try {
+                const current = await relationRepository.get(undefined, options);
+                existing = this.toPlainEntity(current) ?? {};
+            } catch (err) {
+                if (!(err instanceof EntityNotFoundError)) {
+                    throw err;
+                }
+                existing = undefined;
+            }
+
+            if (!existing) {
+                const created = await relationRepository.create(childRoot, options);
+                const createdPlain = this.toPlainEntity(created) ?? childRoot;
+                const createdIdValues = this.extractIdValues(createdPlain, idProps);
+                if (normalized.children && createdIdValues) {
+                    const childFactoryId = this.buildFactoryIdArgument(createdIdValues, idProps);
+                    if (childFactoryId !== undefined) {
+                        await this.applyDeepUpdateRelations(
+                            childFactoryId,
+                            normalized.children as Record<string, unknown>,
+                            targetRepository,
+                            targetCtor,
+                            options,
+                            depth + 1,
+                        );
+                    }
+                }
+                return;
+            }
+
+            const updateData = {...childRoot};
+            if (idProps.length) {
+                this.removeIdProperties(updateData, idProps);
+            }
+            if (Object.keys(updateData).length) {
+                await relationRepository.patch(updateData, options);
+            }
+
+            let currentPlain = existing;
+            try {
+                const refreshed = await relationRepository.get(undefined, options);
+                currentPlain = this.toPlainEntity(refreshed) ?? currentPlain;
+            } catch {
+                // ignore
+            }
+
+            if (normalized.children) {
+                const childIdValues = this.extractIdValues(currentPlain, idProps);
+                const childFactoryId = this.buildFactoryIdArgument(childIdValues, idProps);
+                if (childFactoryId !== undefined) {
+                    await this.applyDeepUpdateRelations(
+                        childFactoryId,
+                        normalized.children as Record<string, unknown>,
+                        targetRepository,
+                        targetCtor,
+                        options,
+                        depth + 1,
+                    );
+                }
+            }
         }
 
         resolveNavigationRelationMetadata(relationName: string): AnyObject {
@@ -530,6 +1008,10 @@ export function defineODataCrudController(def: EntitySetDef) {
                     ctx.navigationTargetId = navId;
                     ctx.navigationTargetEntity = existing;
                     const plain = this.toPlainEntity(existing) ?? {};
+                    // Ensure the link actually exists (entity is linked to this parent); otherwise 404.
+                    if (plain[keyTo] == null || plain[keyTo] !== parentId) {
+                        throw new HttpErrors.NotFound('Navigation link does not exist.');
+                    }
                     plain[keyTo] = null;
                     await navRepo.replaceById(navId as any, plain as AnyObject, this.repositoryOptions());
                     return;
@@ -538,11 +1020,14 @@ export function defineODataCrudController(def: EntitySetDef) {
                 const relationRepository = (ctx.navigationRelationRepository ?? relationRepo) as AnyObject;
                 const existing = await relationRepository
                     .get?.(undefined, this.repositoryOptions())
-                    .catch(() => undefined);
-                if (!existing) return;
+                    .catch((err: unknown) => {
+                        // Surface 404 when hasOne target does not exist
+                        throw new HttpErrors.NotFound('Navigation link does not exist.');
+                    });
+                if (!existing) throw new HttpErrors.NotFound('Navigation link does not exist.');
                 ctx.navigationTargetEntity = existing;
                 const navId = ctx.navigationTargetId ?? this.extractEntityId(existing);
-                if (navId == null) return;
+                if (navId == null) throw new HttpErrors.NotFound('Navigation link does not exist.');
                 ctx.navigationTargetId = navId;
                 const plain = this.toPlainEntity(existing) ?? {};
                 plain[keyTo] = null;
@@ -4044,7 +4529,7 @@ export function defineODataCrudController(def: EntitySetDef) {
             const execDefault = async () => {
                 const options = this.repositoryOptions();
                 const preference = preferences.returnPreference;
-                const deepInsertEnabled = this.isDeepInsertEnabled(deepInsertEnabledForSet);
+                const deepInsertEnabled = deepInsertEnabledForSet;
                 const payloadForCreate = this.coercePayloadToObject((ctx.payload ?? payload) as AnyObject);
                 const visited = new Set<AnyObject>();
                 const normalized = deepInsertEnabled
@@ -4154,10 +4639,7 @@ export function defineODataCrudController(def: EntitySetDef) {
             @requestBody({
                 content: {
                     'application/json': {
-                        schema: getModelSchemaRef(modelCtor, {
-                            title: `${modelCtor.name ?? 'Entity'}Patch`,
-                            partial: true,
-                        }),
+                        schema: updateSchema,
                     },
                 },
             })
@@ -4168,15 +4650,29 @@ export function defineODataCrudController(def: EntitySetDef) {
             this.ensureAcceptsJson();
             this.ensureJsonContentType();
 
+            const deepUpdateEnabled = deepUpdateEnabledForSet;
+            let relationPayloads: Record<string, unknown> | undefined;
+            let rootPayload: AnyObject | undefined;
+            if (deepUpdateEnabled && payload && typeof payload === 'object') {
+                const prepared = this.coercePayloadToObject(payload);
+                const normalized = this.normalizeDeepInsertPayload(prepared, modelCtor as typeof Entity);
+                relationPayloads = normalized.children;
+                rootPayload = {...normalized.root};
+            } else if (payload && typeof payload === 'object') {
+                rootPayload = {...(payload as AnyObject)};
+            }
+
             const op: CrudOperation = 'UPDATE';
             const scope: CrudScope | undefined = undefined;
-            const ctx = this.buildHookContext({operation: op, scope, id, payload: payload as AnyObject, options: this.repositoryOptions()});
+            const ctx = this.buildHookContext({operation: op, scope, id, payload: rootPayload as AnyObject, options: this.repositoryOptions()});
             await this.runBefore(op, scope, ctx);
 
             const execDefault = async () => {
                 const options = this.repositoryOptions();
                 const preference = preferences.returnPreference;
                 const ifMatch = this.parseIfMatchHeader();
+                const workingPayload = ctx.payload ?? rootPayload ?? {};
+                const parentIdValue = this.coerceParentId(id);
 
                 if (this.etagEnabled() && this.cfg?.strict && !ifMatch) {
                     const error = new HttpErrors.PreconditionRequired('If-Match header is required when ETags are enabled.');
@@ -4187,13 +4683,27 @@ export function defineODataCrudController(def: EntitySetDef) {
                     const { values, invalidComposite } = decodeIfMatchValues(ifMatch.values ?? [], etagProperties, etagPropertyDefs);
                     if (invalidComposite || !values.length) this.throwPreconditionFailed();
                     const where = this.buildConditionalWhere(id, values, false);
-                    const { count } = await this.repository.updateAll((ctx.payload ?? payload) as any, where, options);
+                    const { count } = await this.repository.updateAll(workingPayload as AnyObject, where, options);
                     if (!count) this.throwPreconditionFailed();
                 } else {
-                    await this.repository.updateById(id as any, (ctx.payload ?? payload) as any, options);
+                    if (Object.keys(workingPayload).length) {
+                        await this.repository.updateById(id as any, workingPayload as AnyObject, options);
+                    }
                 }
 
-                const updated = await this.repository.findById(id as any, undefined, options);
+                let updated = await this.repository.findById(id as any, undefined, options);
+                if (deepUpdateEnabled && relationPayloads && Object.keys(relationPayloads).length) {
+                    await this.applyDeepUpdateRelations(
+                        parentIdValue,
+                        relationPayloads,
+                        this.repository as AnyObject,
+                        modelCtor as typeof Entity,
+                        options,
+                        0,
+                    );
+                    updated = await this.repository.findById(id as any, undefined, options);
+                }
+
                 const plain = this.toPlainEntity(updated) ?? {};
                 const etag = this.computeEtagFromPlain(plain);
                 const decorated = this.decoratePlainEntity(plain, etag);

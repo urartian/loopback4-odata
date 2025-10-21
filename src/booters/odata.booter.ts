@@ -6,7 +6,7 @@ import { getODataControllerModel } from '../decorators/controller.decorator';
 import { defineODataCrudController } from '../controllers/crud-controller-factory';
 import { getODataModelMeta, ODataModelOptions } from '../decorators/model.decorator';
 import { ODATA_BINDINGS } from '../keys';
-import { AnyObject, Entity, ModelDefinition, juggler } from '@loopback/repository';
+import { AnyObject, Entity, ModelDefinition, juggler, RelationDefinitionMap } from '@loopback/repository';
 import { getODataActions, getODataFunctions, OperationMeta } from '../decorators/action.function.decorators';
 import { pluralize } from 'inflection';
 import { normalizeEtagProperties } from '../util/etag';
@@ -26,6 +26,69 @@ export class ODataBooter implements Booter {
         @inject(ODATA_BINDINGS.CONFIG) private readonly config: ODataConfig,
         @inject(ODATA_BINDINGS.APPLY_EXECUTOR_REGISTRY) private readonly executorRegistry: ODataApplyExecutorRegistry,
     ) { }
+
+    private identifyCompositionRelations(modelCtor: typeof Entity | undefined, modelDefinition: ModelDefinition | undefined): {
+        hasCompositionalRelation: boolean;
+        missingDeepUpdate: string[];
+    } {
+        if (!modelCtor) {
+            return {hasCompositionalRelation: false, missingDeepUpdate: []};
+        }
+        const relations = modelDefinition?.relations ?? {} as RelationDefinitionMap;
+        const missing: string[] = [];
+        let hasComposition = false;
+        for (const [name, relation] of Object.entries(relations)) {
+            if (!relation) continue;
+            const relationType = (relation as AnyObject).type ?? (relation as AnyObject).relationType;
+            if (relationType !== 'hasMany' && relationType !== 'hasOne') continue;
+            if ((relation as AnyObject).through) continue;
+            const keyTo = (relation as AnyObject).keyTo;
+            const targetGetter = (relation as AnyObject).target;
+            const targetCtor = typeof targetGetter === 'function' ? (targetGetter() as typeof Entity | undefined) : undefined;
+            const targetDef = targetCtor ? (targetCtor as unknown as {definition?: ModelDefinition}).definition as ModelDefinition | undefined : undefined;
+            let fkRequired = false;
+            if (keyTo && targetDef?.properties?.[keyTo]) {
+                const targetProp = targetDef.properties[keyTo];
+                fkRequired = targetProp?.required !== undefined ? Boolean(targetProp.required) : true;
+            } else if (targetDef) {
+                const targetRelations = targetDef.relations ?? {} as RelationDefinitionMap;
+                for (const relMeta of Object.values(targetRelations)) {
+                    if (!relMeta) continue;
+                    const relType = (relMeta as AnyObject).type ?? (relMeta as AnyObject).relationType;
+                    if (relType !== 'belongsTo') continue;
+                    const relTargetCtor = typeof (relMeta as AnyObject).target === 'function'
+                        ? ((relMeta as AnyObject).target() as typeof Entity | undefined)
+                        : undefined;
+                    if (relTargetCtor !== modelCtor) continue;
+                    const keyFrom = (relMeta as AnyObject).keyFrom as string | undefined;
+                    if (!keyFrom) continue;
+                    const targetProp = targetDef.properties?.[keyFrom];
+                    fkRequired = targetProp?.required !== undefined ? Boolean(targetProp.required) : true;
+                    break;
+                }
+            }
+            if (!fkRequired) continue;
+            hasComposition = true;
+            missing.push(name);
+        }
+        return {hasCompositionalRelation: hasComposition, missingDeepUpdate: missing};
+    }
+
+    private warnOnCompositionWithoutDeepUpdate(
+        setName: string,
+        modelCtor: typeof Entity,
+        deepUpdateEnabled: boolean,
+        compositionInfo: {hasCompositionalRelation: boolean; missingDeepUpdate: string[]},
+    ): void {
+        if (deepUpdateEnabled) return;
+        if (!compositionInfo.hasCompositionalRelation) return;
+        if (!compositionInfo.missingDeepUpdate.length) return;
+        console.warn(
+            `[OData] Entity set ${setName} (${modelCtor.name}) has required navigation ` +
+            `relations (${compositionInfo.missingDeepUpdate.join(', ')}) but deepUpdate is disabled. ` +
+            `Enable it via @odataModel({deepUpdate: true}) or acknowledge with deepUpdate: false.`,
+        );
+    }
 
     async load(): Promise<void> {
         const repositoryBindings = this.app.find('repositories.*');
@@ -82,7 +145,20 @@ export class ODataBooter implements Booter {
             }
 
             const etagProperties = normalizeEtagProperties(modelMeta?.etag);
-            const deepInsert = modelMeta?.deepInsert ?? Boolean(this.config?.enableDeepInsert);
+            const compositionRelations = this.identifyCompositionRelations(modelCtor, modelDefinition);
+            let deepInsert = modelMeta?.deepInsert;
+            if (deepInsert === undefined) {
+                deepInsert = compositionRelations.hasCompositionalRelation
+                    ? true
+                    : Boolean(this.config?.enableDeepInsert);
+            }
+            let deepUpdate = modelMeta?.deepUpdate;
+            if (deepUpdate === undefined) {
+                deepUpdate = compositionRelations.hasCompositionalRelation
+                    ? true
+                    : Boolean(this.config?.enableDeepUpdate);
+            }
+            this.warnOnCompositionWithoutDeepUpdate(setName, modelCtor, deepUpdate, compositionRelations);
             const modelDeltaMeta = modelMeta?.delta;
             let deltaEnabled = modelDeltaMeta?.enabled;
             if (deltaEnabled === undefined && this.config?.enableDelta !== undefined) {
@@ -102,7 +178,8 @@ export class ODataBooter implements Booter {
                 securityMetadata,
                 hooks: hooks as CrudHookBundle,
                 sourceControllerBindingKey: binding.key,
-                deepInsert,
+                deepInsert: Boolean(deepInsert),
+                deepUpdate: Boolean(deepUpdate),
                 deltaEnabled,
                 deltaField,
             });

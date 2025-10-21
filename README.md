@@ -944,7 +944,9 @@ this.bind(ODATA_BINDINGS.CONFIG).to({
 - `namespaceAlias`: Adds the optional `Alias` attribute to the CSDL schema so clients can refer to types using a short prefix.
 - `capabilities`: Sets default service-level annotations such as supported filter functions, countability, permissions, stream support, and now OData capability records for inserts/updates/deletes/search via the `insertRestrictions`, `updateRestrictions`, `deleteRestrictions`, and `searchRestrictions` options. Values can be overridden per entity set via `EntitySetDef.capabilities`.
 - `enableDeepInsert`: Opt-in global switch for accepting nested payloads (deep insert). When `true`, every entity set defaults to deep insert unless overridden per model. When `false` (default), only entity sets with `@odataModel({deepInsert: true})` participate.
+- `enableDeepUpdate`: Opt-in global switch for deep updates (PATCH payloads containing related entities). Entity sets can override with `@odataModel({deepUpdate: true})` or `EntitySetRegistry.register({deepUpdate: true})`.
 - `maxDeepInsertDepth`: Maximum recursion depth for deep insert traversal (default: `10`). Requests exceeding the limit are rejected with `400 Bad Request` to prevent runaway graphs.
+- `maxDeepUpdateDepth`: Maximum recursion depth for deep update traversal (defaults to `maxDeepInsertDepth` when not set).
 - `enableNavigationRefEndpoints`: Set to `false` to skip registration of navigation `$ref` routes if you prefer to manage linking manually (default: `true`).
 - `$apply` pipelines support chained `filter`, `groupby`, `aggregate`, `orderby`, `skip`, and `top` stages, including navigation-path aggregates. By default the runtime executes these pipelines in memory; this carries CPU and memory overhead and should be reserved for small result sets. Opt into pushdown to keep heavy analytics inside the database.
 - Lambda filters (`any` / `all`) support navigation collections (including multi-segment paths) and can be combined with additional predicates using `and`. Nesting lambdas, mixing multiple lambdas, or combining them with `or` remains unsupported.
@@ -1117,27 +1119,43 @@ this.bind(ODATA_BINDINGS.CONFIG).to({
 
 ### Deep Insert
 
-Enable deep insert globally:
+Deep insert is enabled automatically for entity sets that expose composition-style relations (hasOne/hasMany navigations whose foreign key is required on the target model). The booter analyses relation metadata from the model definitions at startup and turns on deep insert/update whenever it detects such compositions. This mirrors CAP’s default behaviour: composed children can be created alongside their parent without additional configuration.
 
-```ts
-this.bind(ODATA_BINDINGS.CONFIG).to({
-  enableDeepInsert: true,
-} as ODataConfig);
-```
+You can still control the behaviour explicitly:
 
-Or opt-in per model:
+- Opt out per model when you want to keep inserts shallow:
 
-```ts
-@odataModel({deepInsert: true})
-@model()
-export class Order extends Entity {
-  // … define properties …
-  @hasMany(() => OrderItem)
-  items?: OrderItem[];
-}
-```
+  ```ts
+  @odataModel({deepInsert: false})
+  @model()
+  export class Order extends Entity {
+    @hasMany(() => OrderItem)
+    items?: OrderItem[];
+  }
+  ```
 
-When enabled, `POST /odata/Orders` can include nested navigation data:
+- Force-enable deep insert for aggregates that do not meet the automatic detection criteria:
+
+  ```ts
+  @odataModel({deepInsert: true})
+  @model()
+  export class DraftOrder extends Entity {
+    @hasMany(() => OrderItem)
+    items?: OrderItem[];
+  }
+  ```
+
+- Set a global default before `app.boot()` if you prefer everything to opt in by default:
+
+  ```ts
+  this.bind(ODATA_BINDINGS.CONFIG).to({
+    enableDeepInsert: true,
+  } as ODataConfig);
+  ```
+
+If the booter notices composition-style relations but deep insert/update remain disabled (for example because you set `deepUpdate: false` explicitly), it logs a warning so you can review the decision.
+
+When enabled, `POST /odata/Orders` can include nested navigation data (compositions):
 
 ```http
 POST /odata/Orders
@@ -1153,7 +1171,70 @@ Content-Type: application/json
 }
 ```
 
-The controller persists the order, its line items, and each item note inside a single transaction and annotates `$metadata` with `Org.OData.Capabilities.V1.DeepInsertSupport` for the entity set. Nested relations beyond the first level are followed recursively (subject to `maxDeepInsertDepth`).
+The controller persists the order, its line items, and each item note inside a single transaction and annotates `$metadata` with `Org.OData.Capabilities.V1.DeepInsertSupport` for the entity set. Nested relations beyond the first level are followed recursively (subject to `maxDeepInsertDepth`). Associations via `through` are not accepted inline.
+
+Validation notes:
+
+- Collection navigation properties must be arrays. If a single object is sent for a `hasMany` relation, the request is rejected by the route validator with `422 Unprocessable Entity`.
+- The reason appears under `error.details`, not the top-level message. Look for an entry similar to:
+
+  ```json
+  {
+    "path": "/items",
+    "code": "type",
+    "message": "must be array"
+  }
+  ```
+
+### Deep Update
+
+Deep updates follow the same composition-aware defaults. If a model has required hasMany/hasOne relations, the booter enables deep update automatically so PATCH requests can create/update child entities alongside the parent. You can override the default exactly like deep insert:
+
+- Opt out per model with `@odataModel({deepUpdate: false})`
+- Force-enable with `@odataModel({deepUpdate: true})`
+- Or set `enableDeepUpdate: true` at the config level before boot
+
+Example request (update + add):
+
+```http
+PATCH /odata/Orders(9802)
+Content-Type: application/json
+If-Match: W/"..."
+
+{
+  "total": 1500,
+  "items": [
+    {
+      "id": 20001,
+      "quantity": 3,
+      "notes": [
+        {"id": 30001, "text": "updated note"},
+        {"text": "new note"}
+      ]
+    },
+    {"productId": 5, "quantity": 1, "unitPrice": 799}
+  ]
+}
+```
+
+Validation and behavior:
+
+- PATCH schema is strict. Only model fields and supported relation keys (hasOne/hasMany, excluding through) are accepted at the top level and recursively; unknown properties are rejected.
+- Child without key → inserted. Child with key → patched. Deletions are explicit operations (see below); use `DELETE /EntitySet(key)` or `$ref` unlink endpoints.
+- Nested relations are traversed depth-first, obeying `maxDeepUpdateDepth`, and the entire graph is mutated inside the same transaction.
+- BelongsTo and many-to-many (`through`) relations are not accepted inline; link/unlink via navigation `$ref` endpoints or foreign keys.
+
+Validation notes:
+
+- As with deep insert, collection navigation properties in PATCH must be arrays. A single object for a `hasMany` relation results in `422 Unprocessable Entity` with an Ajv detail entry like:
+
+  ```json
+  {
+    "path": "/items",
+    "code": "type",
+    "message": "must be array"
+  }
+  ```
 
 ### Navigation `$ref`
 
@@ -1172,11 +1253,86 @@ The handler reassigns `OrderItems(42)` to order `1` and returns `204 No Content`
 DELETE /odata/Orders(1)/items/42/$ref
 ```
 
-For `hasOne`, use `PUT /EntitySet(key)/Relation/$ref` with the same payload shape and `DELETE /EntitySet(key)/Relation/$ref` to clear the link. Relations defined with `hasManyThrough` are skipped.
+To delete a related row (instead of using in-payload markers), either:
+
+```http
+DELETE /odata/OrderItems(20002)
+```
+
+or unlink it from the parent collection:
+
+```http
+DELETE /odata/Orders(9802)/items(20002)/$ref
+```
+
+For `hasOne`, use `PUT /EntitySet(key)/Relation/$ref` to link and `DELETE /EntitySet(key)/Relation/$ref` to clear the link. Relations defined with `hasManyThrough` are skipped.
+
+For atomic multi-step graph changes (e.g., unlink + patch + insert), wrap the operations in a `$batch` atomic changeset.
+
+Error handling:
+
+- `DELETE /EntitySet(key)` returns `404 Not Found` when the entity does not exist.
+- `DELETE /EntitySet(key)/Relation(key)/$ref` returns `404 Not Found` when the link does not exist (target missing, already unlinked, or linked to a different parent).
+
+#### Atomic `$batch` changeset example (unlink + patch + insert)
+
+```http
+POST /odata/$batch
+Content-Type: multipart/mixed; boundary=batch_123
+
+--batch_123
+Content-Type: multipart/mixed; boundary=changeset_abc
+
+--changeset_abc
+Content-Type: application/http
+Content-Transfer-Encoding: binary
+
+DELETE /odata/Orders(9802)/items(20002)/$ref HTTP/1.1
+
+--changeset_abc
+Content-Type: application/http
+Content-Transfer-Encoding: binary
+
+PATCH /odata/Orders(9802) HTTP/1.1
+Content-Type: application/json
+If-Match: W/"..."
+
+{
+  "total": 1700,
+  "items": [
+    {
+      "id": 20001,
+      "quantity": 3,
+      "notes": [
+        {"id": 30001, "text": "updated note"}
+      ]
+    }
+  ]
+}
+
+--changeset_abc
+Content-Type: application/http
+Content-Transfer-Encoding: binary
+
+POST /odata/OrderItems HTTP/1.1
+Content-Type: application/json
+
+{
+  "orderId": 9802,
+  "productId": 5,
+  "quantity": 1,
+  "unitPrice": 799
+}
+
+--changeset_abc--
+--batch_123--
+```
+
+All three requests execute atomically. If any fails, the entire changeset is rolled back and the batch returns per-request error details.
 
 ## Roadmap
 
-- [ ] Draft/deep insert workflow
+- [ ] Draft workflow for deep updates
 - [ ] Additional `$apply` pushdown adapters (MSSQL, Mongo aggregation)
 - [ ] Deep update / draft handling for composition hierarchies
 - [ ] Rich lambda grammar with nested `any` / `all` and mixed logical operators

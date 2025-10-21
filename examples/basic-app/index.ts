@@ -122,7 +122,7 @@ export class Product extends Entity {
   orders?: Order[];
 }
 
-@odataModel()
+@odataModel({deepInsert: true, deepUpdate: true})
 @model()
 export class Order extends Entity {
   @property({

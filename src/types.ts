@@ -9,7 +9,9 @@ export interface ODataConfig {
     enableCount?: boolean;
     strict?: boolean;
     enableDeepInsert?: boolean;
+    enableDeepUpdate?: boolean;
     maxDeepInsertDepth?: number;
+    maxDeepUpdateDepth?: number;
     enableNavigationRefEndpoints?: boolean;
     logApplyFallbacks?: boolean;
     maxApplyResultSize?: number;
