@@ -46,6 +46,16 @@ const POSTGRES_DS_CONFIG = {
   ssl: process.env.PG_SSL === 'true',
 };
 
+const MYSQL_DS_CONFIG = {
+  name: 'db',
+  connector: 'mysql',
+  host: process.env.MYSQL_HOST ?? '127.0.0.1',
+  port: Number(process.env.MYSQL_PORT ?? 3306),
+  user: process.env.MYSQL_USER ?? 'root',
+  password: process.env.MYSQL_PASSWORD ?? 'pass',
+  database: process.env.MYSQL_DATABASE ?? 'odata_dev',
+};
+
 
 export class ExampleApp extends BootMixin(RepositoryMixin(RestApplication)) {
   constructor() {
@@ -53,7 +63,8 @@ export class ExampleApp extends BootMixin(RepositoryMixin(RestApplication)) {
     this.projectRoot = __dirname;
 
     const usePostgres = process.env.USE_POSTGRES === 'true';
-    const dsConfig = usePostgres ? POSTGRES_DS_CONFIG : MEMORY_DS_CONFIG;
+    const useMysql = process.env.USE_MYSQL === 'true';
+    const dsConfig = usePostgres ? POSTGRES_DS_CONFIG : useMysql ? MYSQL_DS_CONFIG : MEMORY_DS_CONFIG;
     this.dataSource(new juggler.DataSource(dsConfig), dsConfig.name);
     this.repository(OrderItemRepository);
     this.repository(ProductRepository);
