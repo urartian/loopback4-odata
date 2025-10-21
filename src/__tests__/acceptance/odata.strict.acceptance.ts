@@ -35,10 +35,11 @@ describe('OData strict mode acceptance', () => {
     if (app.state === 'started') await app.stop();
   });
 
-  it('rejects unknown $ query options', async () => {
-    const res = await client.get('/odata/Products').query({$levels: '2'} as any).expect(400);
-    expect(res.body?.error?.code).to.equal('BadRequest');
-    expect(String(res.body?.error?.message || '')).to.match(/Unsupported query option/i);
+  it('accepts supported $ query options such as $levels', async () => {
+    await client
+      .get('/odata/Orders')
+      .query({$expand: 'items($levels=2)'})
+      .expect(200);
   });
 
   it('rejects unknown properties in $select/$orderby/$filter', async () => {

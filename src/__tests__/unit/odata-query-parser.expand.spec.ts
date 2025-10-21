@@ -5,7 +5,11 @@ import {RelationDefinitionMap} from '@loopback/repository';
 import {parseODataQuery} from '../../services/odata-query-parser.service';
 
 class Customer {}
-(Customer as any).definition = {relations: {}};
+(Customer as any).definition = {
+  relations: {
+    customer: {name: 'customer', target: () => Customer},
+  },
+};
 
 class Product {}
 (Product as any).definition = {relations: {}};
@@ -138,11 +142,20 @@ describe('parseODataQuery expansions & counts', () => {
     ]);
   });
 
-  it('throws for unsupported options', () => {
-    assert.throws(
-      () => parse({'$expand': 'customer($levels=2)'}),
-      /Unsupported expand option/,
-    );
+  it('parses $levels option for recursive expansions', () => {
+    const result = parse({'$expand': 'customer($levels=2)'});
+    assert.deepStrictEqual(result.include, [
+      {
+        relation: 'customer',
+        scope: {
+          include: [
+            {
+              relation: 'customer',
+            },
+          ],
+        },
+      },
+    ]);
   });
 
   it('parses $count=true into inlineCount flag', () => {

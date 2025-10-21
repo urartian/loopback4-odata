@@ -130,6 +130,17 @@ export interface LambdaExpression {
   predicate: ParsedExpression;
 }
 
+export type ComputeNode =
+  | {type: 'path'; path: string[]}
+  | {type: 'literal'; value: unknown}
+  | {type: 'binary'; operator: 'add' | 'sub' | 'mul' | 'div' | 'mod'; left: ComputeNode; right: ComputeNode}
+  | {type: 'function'; name: 'tolower' | 'toupper' | 'concat'; args: ComputeNode[]};
+
+export interface ComputeExpression {
+  alias: string;
+  expression: ComputeNode;
+}
+
 export type ParsedExpression =
   | {operator: 'comparison'; field: string; comparator: string; value: unknown}
   | {operator: 'logical'; type: 'and' | 'or'; expressions: ParsedExpression[]}
@@ -1035,6 +1046,203 @@ function parseOrder(order?: string): string[] | undefined {
   }).filter(Boolean);
 }
 
+function parseCompute(compute: string): ComputeExpression[] {
+  const segments = splitTopLevel(compute, ',');
+  if (!segments.length) {
+    throw new Error('Invalid $compute expression.');
+  }
+  const results: ComputeExpression[] = [];
+  for (const segment of segments) {
+    const trimmed = segment.trim();
+    if (!trimmed) continue;
+    const tokens = tokenize(trimmed);
+    if (!tokens.length) {
+      throw new Error(`Invalid $compute expression: ${trimmed}`);
+    }
+    const {expressionTokens, alias} = extractComputeAlias(tokens);
+    if (!alias) {
+      throw new Error('Invalid $compute expression: missing alias.');
+    }
+    const node = parseComputeExpressionTokens(expressionTokens);
+    results.push({alias, expression: node});
+  }
+  if (!results.length) {
+    throw new Error('Invalid $compute expression.');
+  }
+  return results;
+}
+
+function extractComputeAlias(tokens: string[]): {expressionTokens: string[]; alias: string | undefined} {
+  let depth = 0;
+  for (let index = 0; index < tokens.length; index++) {
+    const token = tokens[index];
+    if (token === '(') {
+      depth++;
+      continue;
+    }
+    if (token === ')') {
+      depth = Math.max(depth - 1, 0);
+      continue;
+    }
+    if (depth === 0 && token.toLowerCase() === 'as') {
+      const expressionTokens = tokens.slice(0, index);
+      const aliasTokens = tokens.slice(index + 1).filter(Boolean);
+      if (!aliasTokens.length) {
+        throw new Error('Invalid $compute expression: alias is required.');
+      }
+      if (aliasTokens.length > 1) {
+        throw new Error('Invalid $compute alias. Use simple identifiers without spaces.');
+      }
+      const alias = aliasTokens[0];
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(alias)) {
+        throw new Error(`Invalid $compute alias: ${alias}`);
+      }
+      if (!expressionTokens.length) {
+        throw new Error('Invalid $compute expression: expression segment is empty.');
+      }
+      return {expressionTokens, alias};
+    }
+  }
+  return {expressionTokens: tokens, alias: undefined};
+}
+
+function parseComputeExpressionTokens(tokens: string[]): ComputeNode {
+  const {node, index} = parseComputeAddSub(tokens, 0);
+  if (index !== tokens.length) {
+    throw new Error(`Invalid $compute expression: unexpected token "${tokens[index]}"`);
+  }
+  return node;
+}
+
+function parseComputeAddSub(tokens: string[], index: number): {node: ComputeNode; index: number} {
+  let {node, index: current} = parseComputeMulDiv(tokens, index);
+  while (current < tokens.length) {
+    const token = tokens[current].toLowerCase();
+    if (token !== 'add' && token !== 'sub') break;
+    const operator = token === 'add' ? 'add' : 'sub';
+    const rhs = parseComputeMulDiv(tokens, current + 1);
+    node = {type: 'binary', operator, left: node, right: rhs.node};
+    current = rhs.index;
+  }
+  return {node, index: current};
+}
+
+function parseComputeMulDiv(tokens: string[], index: number): {node: ComputeNode; index: number} {
+  let {node, index: current} = parseComputePrimary(tokens, index);
+  while (current < tokens.length) {
+    const token = tokens[current].toLowerCase();
+    if (token !== 'mul' && token !== 'div' && token !== 'mod') break;
+    const operator = token as 'mul' | 'div' | 'mod';
+    const rhs = parseComputePrimary(tokens, current + 1);
+    node = {type: 'binary', operator, left: node, right: rhs.node};
+    current = rhs.index;
+  }
+  return {node, index: current};
+}
+
+function parseComputePrimary(tokens: string[], index: number): {node: ComputeNode; index: number} {
+  if (index >= tokens.length) {
+    throw new Error('Invalid $compute expression.');
+  }
+
+  const token = tokens[index];
+  if (token === '(') {
+    const inner = parseComputeAddSub(tokens, index + 1);
+    if (inner.index >= tokens.length || tokens[inner.index] !== ')') {
+      throw new Error('Invalid $compute expression: unmatched parenthesis.');
+    }
+    return {node: inner.node, index: inner.index + 1};
+  }
+
+  const lower = token.toLowerCase();
+  if (isComputeFunction(lower) && tokens[index + 1] === '(') {
+    const args: ComputeNode[] = [];
+    let cursor = index + 2;
+    if (cursor >= tokens.length) {
+      throw new Error(`Invalid $compute function: ${token}`);
+    }
+    if (tokens[cursor] === ')') {
+      cursor++;
+    } else {
+      while (cursor < tokens.length) {
+        const parsed = parseComputeAddSub(tokens, cursor);
+        args.push(parsed.node);
+        cursor = parsed.index;
+        if (cursor >= tokens.length) {
+          throw new Error(`Invalid $compute function: ${token}`);
+        }
+        const delimiter = tokens[cursor];
+        if (delimiter === ',') {
+          cursor++;
+          continue;
+        }
+        if (delimiter === ')') {
+          cursor++;
+          break;
+        }
+        throw new Error(`Invalid $compute function arguments for ${token}.`);
+      }
+    }
+    return {
+      node: {type: 'function', name: lower as 'tolower' | 'toupper' | 'concat', args},
+      index: cursor,
+    };
+  }
+
+  if (token.startsWith("'") && token.endsWith("'")) {
+    return {
+      node: {type: 'literal', value: unescapeStringLiteral(token)},
+      index: index + 1,
+    };
+  }
+
+  if (lower === 'null') {
+    return {
+      node: {type: 'literal', value: null},
+      index: index + 1,
+    };
+  }
+
+  if (lower === 'true' || lower === 'false') {
+    return {
+      node: {type: 'literal', value: lower === 'true'},
+      index: index + 1,
+    };
+  }
+
+  if (isNumericToken(token)) {
+    return {
+      node: {type: 'literal', value: Number(token)},
+      index: index + 1,
+    };
+  }
+
+  const pathSegments = token.split('/').map(part => part.trim()).filter(Boolean);
+  if (!pathSegments.length) {
+    throw new Error(`Invalid $compute path: ${token}`);
+  }
+  return {
+    node: {type: 'path', path: pathSegments},
+    index: index + 1,
+  };
+}
+
+function isComputeFunction(name: string): name is 'tolower' | 'toupper' | 'concat' {
+  return name === 'tolower' || name === 'toupper' || name === 'concat';
+}
+
+function unescapeStringLiteral(token: string): string {
+  const trimmed = token.slice(1, -1);
+  return trimmed.replace(/''/g, "'");
+}
+
+function isNumericToken(token: string): boolean {
+  if (!token) return false;
+  const num = Number(token);
+  return !Number.isNaN(num);
+}
+
+
 function parseSelect(select?: string): AnyObject | undefined {
   if (!select) return undefined;
   return select.split(',').reduce<AnyObject>((fields, field) => {
@@ -1591,10 +1799,11 @@ function mergeScopes(
 function parseExpandOptions(
   options: string,
   relations?: RelationDefinitionMap,
-): {scope?: Filter<AnyObject>; includes?: InclusionFilter[]} {
+): {scope?: Filter<AnyObject>; includes?: InclusionFilter[]; levels?: number} {
   const tokens = splitTopLevel(options, ';');
   let scope: Filter<AnyObject> | undefined;
   let nestedIncludes: InclusionFilter[] | undefined;
+  let levels: number | undefined;
 
   for (const token of tokens) {
     const entry = token.trim();
@@ -1661,12 +1870,26 @@ function parseExpandOptions(
         // Nested $count is currently ignored; LoopBack filter does not surface inline counts for includes.
         break;
       }
+      case '$levels': {
+        if (levels !== undefined) {
+          throw new Error('Duplicate $levels option is not allowed.');
+        }
+        if (rawValue.toLowerCase() === 'max') {
+          throw new Error('$levels=max is not supported. Specify a numeric depth.');
+        }
+        const parsedLevel = Number(rawValue);
+        if (!Number.isInteger(parsedLevel) || parsedLevel < 1) {
+          throw new Error(`Invalid $levels value: ${rawValue}`);
+        }
+        levels = parsedLevel;
+        break;
+      }
       default:
         throw new Error(`Unsupported expand option: ${key}`);
     }
   }
 
-  return {scope, includes: nestedIncludes};
+  return {scope, includes: nestedIncludes, levels};
 }
 
 function buildIncludeFromParts(
@@ -1694,16 +1917,74 @@ function buildIncludeFromParts(
   }
 
   if (options) {
-    const {scope, includes} = parseExpandOptions(options, nextRelations);
+    const {scope, includes, levels} = parseExpandOptions(options, nextRelations);
     if (scope) {
       include.scope = mergeScopes(include.scope, scope);
     }
     if (includes && includes.length) {
       include.scope = mergeScopes(include.scope, {include: includes});
     }
+    if (levels && levels > 1) {
+      expandLevels(include, current, levels, nextRelations);
+    }
   }
 
   return include;
+}
+
+function cloneScope(scope?: Filter<AnyObject>): Filter<AnyObject> | undefined {
+  if (!scope) return undefined;
+  const clone: Filter<AnyObject> = {...scope};
+  if (scope.include) {
+    const includes = Array.isArray(scope.include) ? scope.include : [scope.include];
+    clone.include = includes.map(entry => cloneInclusion(entry));
+  }
+  return clone;
+}
+
+function cloneInclusion(include: InclusionFilter | string): InclusionFilter {
+  if (typeof include === 'string') {
+    return {relation: include};
+  }
+  const cloned: InclusionFilter = {relation: include.relation};
+  if (include.scope) {
+    const scopeClone = cloneScope(include.scope as Filter<AnyObject>);
+    if (scopeClone) {
+      cloned.scope = scopeClone;
+    }
+  }
+  return cloned;
+}
+
+function expandLevels(
+  include: InclusionFilter,
+  relation: string,
+  levels: number,
+  relations?: RelationDefinitionMap,
+) {
+  if (typeof include === 'string') return;
+  let parent = include;
+  let currentRelations = relations;
+  const templateScope = cloneScope(include.scope as Filter<AnyObject> | undefined);
+  for (let depth = 1; depth < levels; depth++) {
+    const relationDef = currentRelations?.[relation];
+    if (!relationDef) break;
+    const childScope = cloneScope(templateScope);
+    const child: InclusionFilter = childScope ? {relation, scope: childScope} : {relation};
+    if (typeof parent === 'string') break;
+    const scope = (parent.scope ?? {}) as Filter<AnyObject>;
+    const existing = scope.include;
+    if (!existing) {
+      scope.include = [child];
+    } else if (Array.isArray(existing)) {
+      scope.include = [...existing, child];
+    } else {
+      scope.include = [existing, child];
+    }
+    parent.scope = scope;
+    parent = child;
+    currentRelations = getTargetRelations(relationDef);
+  }
 }
 
 function parseExpand(
@@ -1759,6 +2040,8 @@ export interface ParsedODataQuery extends Filter<AnyObject> {
   unsupportedFunctions?: string[];
   skipToken?: string;
   deltaToken?: string;
+  format?: string;
+  compute?: ComputeExpression[];
 }
 
 export function parseODataQuery(query: QueryObject, options: ParseOptions = {}): ParsedODataQuery {
@@ -1766,7 +2049,7 @@ export function parseODataQuery(query: QueryObject, options: ParseOptions = {}):
   const {relations} = options;
 
   if (options.strict) {
-    const allowed = new Set(['$filter', '$orderby', '$top', '$skip', '$skiptoken', '$deltatoken', '$select', '$expand', '$count', '$search', '$apply']);
+    const allowed = new Set(['$filter', '$orderby', '$top', '$skip', '$skiptoken', '$deltatoken', '$select', '$expand', '$count', '$search', '$apply', '$format', '$compute']);
     for (const key of Object.keys(query ?? {})) {
       if (key.startsWith('$') && !allowed.has(key)) {
         throw new Error(`Unsupported query option: ${key}`);
@@ -1856,6 +2139,16 @@ export function parseODataQuery(query: QueryObject, options: ParseOptions = {}):
     const pipeline = parseApplyPipeline(apply);
     filter.applyPipeline = pipeline;
     filter.apply = deriveAggregationSpecFromPipeline(pipeline);
+  }
+
+  const format = typeof query['$format'] === 'string' ? query['$format'] : undefined;
+  if (format) {
+    filter.format = format;
+  }
+
+  const computeRaw = typeof query['$compute'] === 'string' ? query['$compute'] : undefined;
+  if (computeRaw) {
+    filter.compute = parseCompute(computeRaw);
   }
 
   return filter;

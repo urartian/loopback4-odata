@@ -158,6 +158,24 @@ describe('OData component acceptance', () => {
     await client.get('/odata/Products?$skiptoken=invalid-token').expect(400);
   });
 
+  it('honors $format=json even when Accept header excludes JSON', async () => {
+    const res = await client
+      .get('/odata/Products')
+      .set('Accept', 'text/plain')
+      .query({$format: 'json'})
+      .expect(200);
+
+    expect(res.headers['content-type']).to.match(/application\/json/i);
+    expect(res.body.value).to.be.Array();
+  });
+
+  it('rejects unsupported $format values', async () => {
+    await client
+      .get('/odata/Products')
+      .query({$format: 'application/xml'})
+      .expect(406);
+  });
+
   it('returns @odata.nextLink with $apply pipelines and skiptoken support', async () => {
     const current = app.getSync(ODATA_BINDINGS.CONFIG) as ODataConfig;
     app.bind(ODATA_BINDINGS.CONFIG).to({
@@ -182,6 +200,67 @@ describe('OData component acceptance', () => {
     expect(second.body.value).to.be.Array();
     const secondNames = second.body.value.map((item: AnyObject) => item.name);
     expect(secondNames.some((name: string) => !firstNames.includes(name))).to.be.true();
+  });
+
+  it('serves $value payloads for scalar properties', async () => {
+    const res = await client.get('/odata/Products(1)/name/$value').expect(200);
+    expect(res.text).to.equal('Laptop');
+    expect(res.headers['content-type']).to.match(/text\/plain/);
+  });
+
+  it('returns ISO strings for date $value properties', async () => {
+    const entity = await client.get('/odata/Products(1)').expect(200);
+    const updatedAt = entity.body.updatedAt;
+    expect(updatedAt).to.be.String();
+
+    const res = await client.get('/odata/Products(1)/updatedAt/$value').expect(200);
+    expect(res.headers['content-type']).to.match(/text\/plain/);
+    expect(res.text).to.equal(new Date(updatedAt).toISOString());
+  });
+
+  it('computes derived properties with $compute', async () => {
+    const res = await client
+      .get('/odata/OrderItems')
+      .query({
+        $top: '1',
+        $compute: 'quantity mul unitPrice as LineTotal',
+        $select: 'id,LineTotal',
+      })
+      .expect(200);
+
+    expect(res.body.value).to.be.Array();
+    expect(res.body.value[0].LineTotal).to.equal(2598);
+  });
+
+  it('returns computed aliases for entity lookups', async () => {
+    const res = await client
+      .get('/odata/OrderItems(1)')
+      .query({$compute: 'quantity mul unitPrice as LineTotal'})
+      .expect(200);
+
+    expect(res.body.LineTotal).to.equal(2598);
+  });
+
+  it('rejects $compute combined with $apply pipelines', async () => {
+    await client
+      .get('/odata/Products')
+      .query({
+        $apply: 'groupby((name),aggregate(price with sum as TotalPrice))',
+        $compute: 'price add 1 as Increased',
+      })
+      .expect(400);
+  });
+
+  it('supports $levels within $expand options', async () => {
+    const res = await client
+      .get('/odata/Orders')
+      .query({$expand: 'items($levels=2;$expand=product)'})
+      .expect(200);
+
+    expect(res.body.value).to.be.Array();
+    const first = res.body.value[0];
+    expect(first.items).to.be.Array();
+    expect(first.items[0].product).to.be.Object();
   });
 
   it('rejects invalid $skiptoken for $apply pipelines', async () => {

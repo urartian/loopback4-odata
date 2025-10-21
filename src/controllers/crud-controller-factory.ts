@@ -34,6 +34,8 @@ import {
     ParsedExpression,
     FunctionArg,
     ApplyPipeline,
+    ComputeExpression,
+    ComputeNode,
 } from '../services/odata-query-parser.service';
 import { ODATA_ATOMICITY_STATE, ODATA_VERSION } from '../constants';
 import { AtomicityRequestState } from '../types/batch';
@@ -100,6 +102,8 @@ interface OrderDescriptor {
     field: string;
     direction: 'ASC' | 'DESC';
 }
+
+type PrimitivePropertyKind = 'string' | 'number' | 'boolean' | 'date' | 'buffer';
 
 function inferIdParamType(definition: any): 'string' | 'number' | 'boolean' {
     const idName = definition?.idProperties?.()[0];
@@ -221,6 +225,8 @@ export function defineODataCrudController(def: EntitySetDef) {
     const sourceCtrlBindingKey: string | undefined = def.sourceControllerBindingKey;
 
     class ODataCrudController {
+        formatOverridden = false;
+
         constructor(
             @inject(repoBindingKey)
             public readonly repository: CrudRepo,
@@ -1638,6 +1644,118 @@ export function defineODataCrudController(def: EntitySetDef) {
             return {props, relations};
         }
 
+        classifyPrimitiveProperty(definition: PropertyDefinition | undefined): PrimitivePropertyKind | undefined {
+            if (!definition) return undefined;
+            const jsonSchema = (definition as AnyObject)?.jsonSchema ?? {};
+            const schemaType = typeof jsonSchema.type === 'string' ? jsonSchema.type.toLowerCase() : undefined;
+            const schemaFormat = typeof jsonSchema.format === 'string' ? jsonSchema.format.toLowerCase() : undefined;
+            const rawType = (definition as AnyObject)?.type;
+            const normalizedType =
+                typeof rawType === 'function'
+                    ? rawType.name.toLowerCase()
+                    : typeof rawType === 'string'
+                        ? rawType.toLowerCase()
+                        : undefined;
+
+            const candidates = [
+                normalizedType,
+                schemaType,
+                schemaFormat === 'binary' || schemaFormat === 'base64' || schemaFormat === 'byte' ? 'buffer' : undefined,
+            ].filter(Boolean) as string[];
+
+            const candidate = candidates[0];
+            if (candidate === 'string') return 'string';
+            if (candidate === 'number' || candidate === 'float' || candidate === 'double' || candidate === 'decimal' || candidate === 'integer') {
+                return 'number';
+            }
+            if (candidate === 'boolean') return 'boolean';
+            if (candidate === 'date' || candidate === 'datetime' || candidate === 'datetimeoffset' || schemaFormat === 'date-time' || schemaFormat === 'date') {
+                return 'date';
+            }
+            if (candidate === 'buffer' || candidate === 'binary') return 'buffer';
+
+            if (rawType === String) return 'string';
+            if (rawType === Number) return 'number';
+            if (rawType === Boolean) return 'boolean';
+            if (rawType === Date) return 'date';
+            if (typeof Buffer !== 'undefined' && rawType === Buffer) return 'buffer';
+
+            return undefined;
+        }
+
+        serializePrimitiveValue(value: unknown, kind: PrimitivePropertyKind): {body: string | Buffer; contentType: string} {
+            switch (kind) {
+                case 'string': {
+                    return {
+                        body: value == null ? '' : String(value),
+                        contentType: 'text/plain; charset=utf-8',
+                    };
+                }
+                case 'number': {
+                    const numeric = typeof value === 'number' ? value : Number(value);
+                    if (Number.isNaN(numeric) || !Number.isFinite(numeric)) {
+                        throw new HttpErrors.InternalServerError('Property value is not a valid number.');
+                    }
+                    return {
+                        body: numeric.toString(),
+                        contentType: 'text/plain; charset=utf-8',
+                    };
+                }
+                case 'boolean': {
+                    const bool =
+                        typeof value === 'boolean'
+                            ? value
+                            : typeof value === 'string'
+                                ? value.toLowerCase() === 'true'
+                                : Boolean(value);
+                    return {
+                        body: bool ? 'true' : 'false',
+                        contentType: 'text/plain; charset=utf-8',
+                    };
+                }
+                case 'date': {
+                    let date: Date;
+                    if (value instanceof Date) {
+                        date = value;
+                    } else if (typeof value === 'string' || typeof value === 'number') {
+                        date = new Date(value);
+                    } else {
+                        throw new HttpErrors.InternalServerError('Property value is not a valid date.');
+                    }
+                    if (Number.isNaN(date.getTime())) {
+                        throw new HttpErrors.InternalServerError('Property value is not a valid date.');
+                    }
+                    return {
+                        body: date.toISOString(),
+                        contentType: 'text/plain; charset=utf-8',
+                    };
+                }
+                case 'buffer': {
+                    let buffer: Buffer;
+                    if (typeof Buffer === 'undefined') {
+                        throw new HttpErrors.InternalServerError('Binary responses are not supported in this runtime.');
+                    }
+                    if (Buffer.isBuffer(value)) {
+                        buffer = value;
+                    } else if (value instanceof Uint8Array) {
+                        buffer = Buffer.from(value);
+                    } else if (value instanceof ArrayBuffer) {
+                        buffer = Buffer.from(value);
+                    } else if (typeof value === 'string') {
+                        buffer = Buffer.from(value, 'base64');
+                    } else {
+                        throw new HttpErrors.InternalServerError('Property value is not binary data.');
+                    }
+                    return {
+                        body: buffer,
+                        contentType: 'application/octet-stream',
+                    };
+                }
+                default:
+                    throw new HttpErrors.InternalServerError('Unsupported primitive property kind.');
+            }
+        }
+
         stringPropertyNames(): string[] {
             const props = modelDefinition?.properties ?? {};
             const out: string[] = [];
@@ -1647,6 +1765,180 @@ export function defineODataCrudController(def: EntitySetDef) {
                 if (type === String || typeName === 'string') out.push(name);
             }
             return out;
+        }
+
+        stripComputedFields(
+            fields: Filter<CrudEntity>['fields'],
+            aliases: string[],
+        ): Filter<CrudEntity>['fields'] | undefined {
+            if (!fields || !aliases.length) return fields;
+            if (Array.isArray(fields)) {
+                const filtered = fields.filter(field => !aliases.includes(field));
+                return filtered.length ? filtered : undefined;
+            }
+            if (typeof fields === 'string') {
+                return aliases.includes(fields) ? undefined : fields;
+            }
+            if (typeof fields === 'object') {
+                const clone: AnyObject = {...(fields as AnyObject)};
+                let removed = false;
+                for (const alias of aliases) {
+                    if (Object.prototype.hasOwnProperty.call(clone, alias)) {
+                        delete clone[alias];
+                        removed = true;
+                    }
+                }
+                if (!removed) return fields;
+                return Object.keys(clone).length ? (clone as Filter<CrudEntity>['fields']) : undefined;
+            }
+            return fields;
+        }
+
+        applyComputeExpressions(rows: AnyObject[], expressions: ComputeExpression[] | undefined) {
+            if (!expressions?.length) return;
+            for (const row of rows) {
+                for (const expr of expressions) {
+                    row[expr.alias] = this.evaluateComputeNode(expr.expression, row);
+                }
+            }
+        }
+
+        collectComputeDependencies(expressions: ComputeExpression[] | undefined): Set<string> {
+            const deps = new Set<string>();
+            if (!expressions?.length) return deps;
+            const visit = (node: ComputeNode) => {
+                switch (node.type) {
+                    case 'path': {
+                        const head = node.path[0];
+                        if (head) deps.add(head);
+                        break;
+                    }
+                    case 'binary':
+                        visit(node.left);
+                        visit(node.right);
+                        break;
+                    case 'function':
+                        for (const arg of node.args) visit(arg);
+                        break;
+                    case 'literal':
+                    default:
+                        break;
+                }
+            };
+            for (const expr of expressions) {
+                visit(expr.expression);
+            }
+            return deps;
+        }
+
+        ensureComputeFieldProjection(
+            fields: Filter<CrudEntity>['fields'],
+            dependencies: Set<string>,
+        ): Filter<CrudEntity>['fields'] {
+            if (!dependencies.size) return fields;
+            const toObject = (source: Filter<CrudEntity>['fields']): Record<string, boolean> => {
+                if (!source) return {};
+                if (Array.isArray(source)) {
+                    return source.reduce<Record<string, boolean>>((acc, item) => {
+                        if (item) acc[item] = true;
+                        return acc;
+                    }, {});
+                }
+                if (typeof source === 'string') {
+                    return source ? {[source]: true} : {};
+                }
+                return {...(source as AnyObject)} as Record<string, boolean>;
+            };
+            const projection = toObject(fields);
+            for (const dep of dependencies) {
+                if (!Object.prototype.hasOwnProperty.call(projection, dep)) {
+                    projection[dep] = true;
+                }
+            }
+            return Object.keys(projection).length ? projection as Filter<CrudEntity>['fields'] : fields;
+        }
+
+        evaluateComputeNode(node: ComputeNode, current: AnyObject): unknown {
+            switch (node.type) {
+                case 'path':
+                    return this.resolvePath(current, node.path);
+                case 'literal':
+                    return node.value;
+                case 'binary': {
+                    const left = this.evaluateComputeNode(node.left, current);
+                    const right = this.evaluateComputeNode(node.right, current);
+                    return this.evaluateNumericBinary(node.operator, left, right);
+                }
+                case 'function': {
+                    return this.evaluateComputeFunction(node, current);
+                }
+                default:
+                    return undefined;
+            }
+        }
+
+        evaluateNumericBinary(
+            operator: 'add' | 'sub' | 'mul' | 'div' | 'mod',
+            left: unknown,
+            right: unknown,
+        ): number | null {
+            if (left == null || right == null) return null;
+            const a = this.coerceComputeNumber(left);
+            const b = this.coerceComputeNumber(right);
+            if (a == null || b == null) return null;
+            switch (operator) {
+                case 'add':
+                    return a + b;
+                case 'sub':
+                    return a - b;
+                case 'mul':
+                    return a * b;
+                case 'div':
+                    return b === 0 ? null : a / b;
+                case 'mod':
+                    return b === 0 ? null : a % b;
+                default:
+                    return null;
+            }
+        }
+
+        coerceComputeNumber(value: unknown): number | null {
+            if (value == null) return null;
+            if (typeof value === 'number') {
+                return Number.isFinite(value) ? value : null;
+            }
+            if (typeof value === 'bigint') {
+                return Number(value);
+            }
+            if (typeof value === 'string' && value.trim() !== '') {
+                const numeric = Number(value);
+                return Number.isNaN(numeric) ? null : numeric;
+            }
+            return null;
+        }
+
+        evaluateComputeFunction(node: Extract<ComputeNode, {type: 'function'}>, current: AnyObject): unknown {
+            const args = node.args.map(arg => this.evaluateComputeNode(arg, current));
+            switch (node.name) {
+                case 'tolower': {
+                    const value = args[0];
+                    if (value == null) return null;
+                    return String(value).toLowerCase();
+                }
+                case 'toupper': {
+                    const value = args[0];
+                    if (value == null) return null;
+                    return String(value).toUpperCase();
+                }
+                case 'concat': {
+                    if (!args.length) return '';
+                    return args
+                        .map(entry => (entry == null ? '' : String(entry)))
+                        .join('');
+                }
+                default:
+                    return undefined;
+            }
         }
 
         resolveSearchableFields(): string[] {
@@ -2617,7 +2909,28 @@ export function defineODataCrudController(def: EntitySetDef) {
             }
         }
 
+        applyFormatPreference(format?: string) {
+            this.formatOverridden = false;
+            if (!format) return;
+            const normalized = format.trim().toLowerCase();
+            if (!normalized) return;
+            const isJson =
+                normalized === 'json' ||
+                normalized.startsWith('json;') ||
+                normalized === 'application/json' ||
+                normalized.startsWith('application/json');
+            if (isJson) {
+                this.formatOverridden = true;
+                this.response.type('application/json');
+                return;
+            }
+            const err = new HttpErrors.NotAcceptable('Only JSON $format values are supported.');
+            (err as any).code = 'NotAcceptable';
+            throw err;
+        }
+
         ensureAcceptsJson() {
+            if (this.formatOverridden) return;
             if (!this.cfg?.strict) return;
             const accept = this.request.get('Accept') ?? (this.request.headers?.['accept'] as string | undefined);
             if (!accept || !accept.trim()) return; // no Accept means accept anything
@@ -2859,6 +3172,7 @@ export function defineODataCrudController(def: EntitySetDef) {
             let deltaField: string | undefined;
             let deltaLinkToken: string | undefined;
             let skipTokenValue: string | undefined;
+            let computeExpressions: ComputeExpression[] | undefined;
             try {
                 const parsed = parseODataQuery(
                     this.request.query as Record<string, string | string[] | undefined>,
@@ -2882,11 +3196,33 @@ export function defineODataCrudController(def: EntitySetDef) {
                         throw new HttpErrors.BadRequest('Combining $orderby outside $apply with orderby() inside the pipeline is not supported.');
                     }
                 }
+                computeExpressions = parsed.compute;
                 aggregationSpec = applyPlan?.stages?.[0]?.spec ?? parsed.apply;
+                if (computeExpressions?.length && (aggregationSpec || applyPlan)) {
+                    throw new HttpErrors.BadRequest('Combining $compute with $apply is not supported.');
+                }
                 lambdaExpression = parsed.lambda;
                 postFilterExpr = parsed.postFilter;
                 unsupportedFunctions = parsed.unsupportedFunctions ?? [];
                 skipTokenValue = parsed.skipToken;
+                const computeAliases = computeExpressions?.map(item => item.alias) ?? [];
+                const computeDeps = this.collectComputeDependencies(computeExpressions);
+                if (computeAliases.length && Array.isArray(externalOrder)) {
+                    const aliasOrdered = externalOrder.some(clause => {
+                        const [field] = clause.split(/\s+/);
+                        return computeAliases.includes(field);
+                    });
+                    if (aliasOrdered) {
+                        throw new HttpErrors.BadRequest('$orderby on $compute aliases is not supported.');
+                    }
+                }
+                if (computeAliases.length && parsed.fields) {
+                    parsed.fields = this.stripComputedFields(parsed.fields as Filter<CrudEntity>['fields'], computeAliases) as typeof parsed.fields;
+                }
+                if (computeDeps.size) {
+                    parsed.fields = this.ensureComputeFieldProjection(parsed.fields as Filter<CrudEntity>['fields'], computeDeps) as typeof parsed.fields;
+                }
+                this.applyFormatPreference(parsed.format);
                 if (postFilterExpr && unsupportedFunctions.length && this.cfg?.strict) {
                     throw new HttpErrors.BadRequest(`Unsupported filter functions in strict mode: ${unsupportedFunctions.join(', ')}`);
                 }
@@ -2906,6 +3242,8 @@ export function defineODataCrudController(def: EntitySetDef) {
                 delete (parsedFilter as { unsupportedFunctions?: string[] }).unsupportedFunctions;
                 delete (parsedFilter as { skipToken?: string }).skipToken;
                 delete (parsedFilter as { deltaToken?: string }).deltaToken;
+                delete (parsedFilter as { format?: string }).format;
+                delete (parsedFilter as { compute?: ComputeExpression[] }).compute;
                 this.mergeFilters(baseFilter, parsedFilter);
                 hadClientExpand = Array.isArray(baseFilter.include)
                     ? baseFilter.include.length > 0
@@ -2953,6 +3291,9 @@ export function defineODataCrudController(def: EntitySetDef) {
                 // enforce expand depth
                 this.enforceExpandDepth((parsed as any).include as InclusionFilter[] | undefined);
             } catch (error) {
+                if (error instanceof HttpErrors.HttpError) {
+                    throw error;
+                }
                 const message = (error as Error).message ?? 'Invalid OData query.';
                 throw new HttpErrors.BadRequest(message);
             }
@@ -3299,6 +3640,7 @@ export function defineODataCrudController(def: EntitySetDef) {
                     if (requiresPostFilter) {
                         filtered = this.applyPostFilter(filtered, postFilterExpr);
                     }
+                    this.applyComputeExpressions(filtered, computeExpressions);
                     const ordered = this.orderResults(filtered, baseFilter.order);
                     const paged = this.sliceResults(ordered, requestedOffset, requestedLimit);
 
@@ -3314,6 +3656,7 @@ export function defineODataCrudController(def: EntitySetDef) {
                 const results = await this.repository.find(baseFilter, options);
                 const plainResults = results.map(entity => this.toPlainEntity(entity) ?? {});
                 const filteredResults = requiresPostFilter ? this.applyPostFilter(plainResults, postFilterExpr) : plainResults;
+                this.applyComputeExpressions(filteredResults, computeExpressions);
                 let totalCount: number | undefined;
                 const tombstones = deltaEnabled && deltaPayload?.keyValues
                     ? await this.computeTombstones(deltaPayload.keyValues)
@@ -3403,6 +3746,14 @@ export function defineODataCrudController(def: EntitySetDef) {
                     this.request.query as Record<string, string | string[] | undefined>,
                     { relations: modelRelations, strict: Boolean(this.cfg?.strict) },
                 );
+                if (parsed.format) {
+                    const err = new HttpErrors.NotAcceptable('$format is not supported for $count responses.');
+                    (err as any).code = 'NotAcceptable';
+                    throw err;
+                }
+                if (parsed.compute?.length) {
+                    throw new HttpErrors.BadRequest('$compute is not supported for $count responses.');
+                }
                 const parsedFilter = { ...parsed } as Filter<CrudEntity> & { inlineCount?: boolean };
                 delete (parsedFilter as { inlineCount?: boolean }).inlineCount;
                 postFilterExpr = parsed.postFilter;
@@ -3412,10 +3763,15 @@ export function defineODataCrudController(def: EntitySetDef) {
                 }
                 delete (parsedFilter as { postFilter?: ParsedExpression }).postFilter;
                 delete (parsedFilter as { unsupportedFunctions?: string[] }).unsupportedFunctions;
+                delete (parsedFilter as { compute?: ComputeExpression[] }).compute;
+                delete (parsedFilter as { format?: string }).format;
                 this.mergeFilters(baseFilter, parsedFilter);
                 this.applySearch(baseFilter, (parsed as any).search);
                 this.enforceExpandDepth((parsed as any).include as InclusionFilter[] | undefined);
             } catch (error) {
+                if (error instanceof HttpErrors.HttpError) {
+                    throw error;
+                }
                 const message = (error as Error).message ?? 'Invalid OData query.';
                 throw new HttpErrors.BadRequest(message);
             }
@@ -3477,25 +3833,41 @@ export function defineODataCrudController(def: EntitySetDef) {
             const ifNoneMatch = this.parseIfNoneMatchHeader();
             let postFilterExpr: ParsedExpression | undefined;
             let unsupportedFunctions: string[] = [];
+            let computeExpressions: ComputeExpression[] | undefined;
 
             try {
                 const parsed = parseODataQuery(
                     this.request.query as Record<string, string | string[] | undefined>,
                     { relations: modelRelations, strict: Boolean(this.cfg?.strict) },
                 );
+                this.applyFormatPreference(parsed.format);
+                computeExpressions = parsed.compute;
                 postFilterExpr = parsed.postFilter;
                 unsupportedFunctions = parsed.unsupportedFunctions ?? [];
                 if (postFilterExpr && unsupportedFunctions.length && this.cfg?.strict) {
                     throw new HttpErrors.BadRequest(`Unsupported filter functions in strict mode: ${unsupportedFunctions.join(', ')}`);
                 }
                 const sanitized: Filter<CrudEntity> = {};
-                if (parsed.fields) sanitized.fields = parsed.fields;
+                if (parsed.fields) {
+                    const aliases = computeExpressions?.map(expr => expr.alias) ?? [];
+                    const adjusted = aliases.length
+                        ? this.stripComputedFields(parsed.fields as Filter<CrudEntity>['fields'], aliases)
+                        : parsed.fields;
+                    if (adjusted) sanitized.fields = adjusted;
+                    const dependencies = this.collectComputeDependencies(computeExpressions);
+                    if (dependencies.size) {
+                        sanitized.fields = this.ensureComputeFieldProjection(sanitized.fields, dependencies);
+                    }
+                }
                 if (parsed.include) sanitized.include = parsed.include;
                 this.mergeFilters(baseFilter as Filter<CrudEntity>, sanitized);
                 this.ensureEtagField(baseFilter as Filter<CrudEntity>);
                 this.applySearch(baseFilter as Filter<CrudEntity>, (parsed as any).search);
                 this.enforceExpandDepth((parsed as any).include as InclusionFilter[] | undefined);
             } catch (error) {
+                if (error instanceof HttpErrors.HttpError) {
+                    throw error;
+                }
                 const message = (error as Error).message ?? 'Invalid OData query.';
                 throw new HttpErrors.BadRequest(message);
             }
@@ -3528,6 +3900,7 @@ export function defineODataCrudController(def: EntitySetDef) {
                     return undefined;
                 }
 
+                this.applyComputeExpressions([plain], computeExpressions);
                 this.ensureODataHeaders();
                 this.setEtagHeaderFromPlain(plain);
                 const decorated = this.decoratePlainEntity(plain, etag);
@@ -3547,6 +3920,93 @@ export function defineODataCrudController(def: EntitySetDef) {
                 await this.runAfter(op, scope, ctx);
             }
             return ctx.result as AnyObject | undefined;
+        }
+
+        @get(`/odata/${setName}/{id}/{property}/$value`, {
+            responses: {
+                '200': {
+                    description: `Raw property value for ${setName}`,
+                    content: {
+                        'text/plain': {schema: {type: 'string'}},
+                        'application/octet-stream': {schema: {type: 'string', format: 'binary'}},
+                    },
+                },
+                '204': {description: 'Property is null.'},
+                '304': {description: 'Not Modified'},
+            },
+        })
+        async getPropertyValue(
+            @idParam id: unknown,
+            @param.path.string('property') property: string,
+        ) {
+            const propertyName = property;
+            if (!propertyName) {
+                throw new HttpErrors.BadRequest('Property name is required.');
+            }
+            if (modelRelations && Object.prototype.hasOwnProperty.call(modelRelations, propertyName)) {
+                throw new HttpErrors.NotFound('Property does not expose a scalar $value.');
+            }
+            const definition = (modelDefinition?.properties ?? {})[propertyName] as PropertyDefinition | undefined;
+            if (!definition) {
+                throw new HttpErrors.NotFound('Property not found.');
+            }
+            const primitiveKind = this.classifyPrimitiveProperty(definition);
+            if (!primitiveKind) {
+                throw new HttpErrors.NotFound('Property does not expose a scalar $value.');
+            }
+
+            const baseFilter: Filter<CrudEntity> = {
+                fields: {[propertyName]: true},
+            };
+            this.ensureEtagField(baseFilter);
+
+            const ifNoneMatch = this.parseIfNoneMatchHeader();
+            const op: CrudOperation = 'READ';
+            const scope: CrudScope = 'entity';
+            const ctx = this.buildHookContext({
+                operation: op,
+                scope,
+                id,
+                filter: baseFilter as any,
+                options: this.repositoryOptions(),
+            });
+            await this.runBefore(op, scope, ctx);
+
+            const execDefault = async () => {
+                const options = this.repositoryOptions();
+                const entity = await this.repository.findById(id as any, baseFilter, options);
+                const plain = this.toPlainEntity(entity) ?? {};
+                const etag = this.computeEtagFromPlain(plain);
+
+                if (ifNoneMatch && !ifNoneMatch.any && etag && matchesEtag(etag, ifNoneMatch.values)) {
+                    this.ensureODataHeaders();
+                    this.setEtagHeaderFromPlain(plain);
+                    this.response.status(304).end();
+                    return undefined;
+                }
+
+                const rawValue = (plain as AnyObject)[propertyName];
+                this.ensureODataHeaders();
+                this.setEtagHeaderFromPlain(plain);
+
+                if (rawValue === null || rawValue === undefined) {
+                    this.response.status(204).end();
+                    return undefined;
+                }
+
+                const serialized = this.serializePrimitiveValue(rawValue, primitiveKind);
+                this.response.type(serialized.contentType);
+                this.response.send(serialized.body);
+                ctx.result = rawValue;
+                return rawValue;
+            };
+
+            const result = await execDefault();
+            ctx.result = result;
+            if (!this.response.headersSent) {
+                await this.runAfter(op, scope, ctx);
+            }
+            return ctx.result as unknown;
         }
 
         @post(`/odata/${setName}`, {
