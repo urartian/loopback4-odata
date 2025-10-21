@@ -660,6 +660,25 @@ describe('OData component acceptance', () => {
       .expect(204);
   });
 
+  it('returns 404 when unlinking a non-existent navigation target', async () => {
+    // Create two orders and pick an item from the first
+    const orderA = await client.post('/odata/Orders').send({total: 0}).expect(200);
+    const orderB = await client.post('/odata/Orders').send({total: 0}).expect(200);
+    const item = await client
+      .post('/odata/OrderItems')
+      .send({orderId: orderA.body.id, productId: 1, quantity: 1, unitPrice: 100})
+      .expect(200);
+
+    // Attempt to unlink the item from the second order where it is not linked
+    await client
+      .del(`/odata/Orders(${orderB.body.id})/items(${item.body.id})/$ref`)
+      .expect(404);
+  });
+
+  it('returns 404 when deleting a non-existent entity', async () => {
+    await client.del('/odata/OrderItems(99999999)').expect(404);
+  });
+
   it('allows navigation $ref hooks to veto link operations', async () => {
     const orderItemsRes = await client.get('/odata/OrderItems').expect(200);
     const existingItem = orderItemsRes.body.value[0];

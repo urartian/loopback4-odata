@@ -1008,6 +1008,10 @@ export function defineODataCrudController(def: EntitySetDef) {
                     ctx.navigationTargetId = navId;
                     ctx.navigationTargetEntity = existing;
                     const plain = this.toPlainEntity(existing) ?? {};
+                    // Ensure the link actually exists (entity is linked to this parent); otherwise 404.
+                    if (plain[keyTo] == null || plain[keyTo] !== parentId) {
+                        throw new HttpErrors.NotFound('Navigation link does not exist.');
+                    }
                     plain[keyTo] = null;
                     await navRepo.replaceById(navId as any, plain as AnyObject, this.repositoryOptions());
                     return;
@@ -1016,11 +1020,14 @@ export function defineODataCrudController(def: EntitySetDef) {
                 const relationRepository = (ctx.navigationRelationRepository ?? relationRepo) as AnyObject;
                 const existing = await relationRepository
                     .get?.(undefined, this.repositoryOptions())
-                    .catch(() => undefined);
-                if (!existing) return;
+                    .catch((err: unknown) => {
+                        // Surface 404 when hasOne target does not exist
+                        throw new HttpErrors.NotFound('Navigation link does not exist.');
+                    });
+                if (!existing) throw new HttpErrors.NotFound('Navigation link does not exist.');
                 ctx.navigationTargetEntity = existing;
                 const navId = ctx.navigationTargetId ?? this.extractEntityId(existing);
-                if (navId == null) return;
+                if (navId == null) throw new HttpErrors.NotFound('Navigation link does not exist.');
                 ctx.navigationTargetId = navId;
                 const plain = this.toPlainEntity(existing) ?? {};
                 plain[keyTo] = null;
