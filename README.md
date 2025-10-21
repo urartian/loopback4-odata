@@ -219,6 +219,22 @@ GET /odata/Products(1)
 }
 ```
 
+##### Primitive values
+
+Use the `$value` path segment to stream a single primitive property:
+
+```http
+GET /odata/Products(1)/name/$value
+```
+
+###### Response (`text/plain`):
+
+```
+Laptop
+```
+
+For binary fields the server responds with `application/octet-stream` and streams the raw payload.
+
 ##### Create
 
 ```bash
@@ -325,6 +341,24 @@ The extension validates relation names against the model metadata and produces t
 `$expand` is also supported on single-entity requests (`/odata/Orders(1)?$expand=customer`). Unknown relation names result in a `400 Bad Request` response so clients get immediate feedback when requesting unsupported navigation properties.
 
 > **Note:** OData identifiers are case-sensitive. Use the exact navigation property names exposed in `$metadata` (for example, `$expand=orders` not `$expand=Orders`).
+
+Use `$levels` to follow a recursive navigation property for multiple hops while reusing the same scoped options at every depth:
+
+```http
+GET /odata/Employees?$expand=manager($levels=2;$select=id,name)
+```
+
+This returns each employee with their direct manager and that manager's manager in a single round trip.
+
+The `$compute` option projects virtual fields evaluated after the repository fetch. Expressions support arithmetic (`add`, `sub`, `mul`, `div`, `mod`), simple string helpers (`tolower`, `toupper`, `concat`), literals, and property paths:
+
+```http
+GET /odata/OrderItems?$compute=quantity mul unitPrice as LineTotal&$select=id,LineTotal
+```
+
+The response includes the additional `LineTotal` column without altering/store schemas. Computed aliases can participate in `$select` and client-side sorting but are currently incompatible with `$apply` pushdowns or server-driven ordering.
+
+Responses are emitted as JSON by default. Clients can force a JSON payload regardless of the `Accept` header via `?$format=json`. Other media types (XML, CSV, etc.) are not yet supported.
 
 Advanced filter helpers supported:
 
