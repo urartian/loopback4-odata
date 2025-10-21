@@ -1171,7 +1171,6 @@ For `hasOne`, use `PUT /EntitySet(key)/Relation/$ref` with the same payload shap
 
 - [ ] Draft/deep insert workflow
 - [ ] Additional `$apply` pushdown adapters (MySQL/MariaDB, MSSQL, Mongo aggregation)
-- [ ] Broader query option coverage including `$compute`, `$skiptoken`, `$levels`, `$value`, `$format`, and delta links
 - [ ] Deep update / draft handling for composition hierarchies
 - [ ] Rich lambda grammar with nested `any` / `all` and mixed logical operators
 - [ ] Virtual/calculated field exposure with CSDL annotations
