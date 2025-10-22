@@ -197,7 +197,7 @@ describe('CsdlGenerator', () => {
     expect(xml.includes('<ComplexType Name="Dimensions">')).to.be.true();
     expect(xml.includes('<Property Name="dimensions" Type="Catalog.Dimensions" Nullable="true"')).to.be.true();
     expect(xml.includes('<EnumType Name="WidgetStatusEnum"')).to.be.true();
-    expect(xml.includes('Type="Catalog.WidgetStatusEnum"')).to.be.true();
+    expect(xml.includes('<Member Name="draft" Value="0"')).to.be.true();
     expect(xml.includes('Annotation Term="Org.OData.Core.V1.HasStream" Bool="true"')).to.be.true();
     expect(xml.includes('Annotation Term="Org.OData.Capabilities.V1.CountRestrictions"')).to.be.true();
     expect(xml.includes('Annotation Term="Org.OData.Capabilities.V1.FilterFunctions"')).to.be.true();
@@ -251,6 +251,7 @@ describe('CsdlGenerator', () => {
     expect(schema.Widget.status.$Type).to.equal('Catalog.WidgetStatusEnum');
     expect(schema.WidgetStatusEnum.$Kind).to.equal('EnumType');
     expect(schema.WidgetStatusEnum.Members).to.have.length(3);
+    expect(schema.WidgetStatusEnum.Members[0]).to.containEql({Name: 'draft', Value: 0});
     expect(schema.Widget.status.DefaultValue).to.equal('draft');
     expect(schema.Widget.gadgets.$Kind).to.equal('NavigationProperty');
     expect(schema.Widget.gadgets.$Type).to.equal('Collection(Catalog.Gadget)');
