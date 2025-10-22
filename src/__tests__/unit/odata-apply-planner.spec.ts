@@ -127,4 +127,27 @@ describe('OData $apply planner', () => {
     const paths = plan.stages[0].navigationPaths.map(p => p.originalPath).sort();
     expect(paths).to.deepEqual(['orderItems/productId', 'orderItems/quantity']);
   });
+
+  it('builds plans for concat pipelines with branch stages', () => {
+    const pipeline = parseApplyPipeline(
+      "concat(aggregate(quantity with sum as TotalQuantity),groupby((product/name), aggregate(quantity with sum as TotalQuantity))/concat(aggregate(* with count as UI5__count),top(3)))",
+    );
+
+    const plan = buildApplyExecutionPlan(pipeline);
+
+    expect(plan.stages).to.have.length(0);
+    expect(plan.concat).to.be.an.Array();
+    expect(plan.concat).to.have.length(2);
+
+    const [summaryPlan, detailPlan] = plan.concat!;
+    expect(summaryPlan.stages).to.have.length(1);
+    expect(summaryPlan.stages[0].spec.aggregates[0].alias).to.equal('TotalQuantity');
+
+    expect(detailPlan.stages).to.have.length(1);
+    expect(detailPlan.stages[0].spec.aggregates[0].alias).to.equal('TotalQuantity');
+    expect(detailPlan.concat).to.have.length(2);
+
+    const [, detailBranches] = detailPlan.concat!;
+    expect(detailBranches?.postTop).to.equal(3);
+  });
 });

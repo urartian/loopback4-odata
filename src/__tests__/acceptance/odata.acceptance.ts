@@ -830,6 +830,29 @@ describe('OData component acceptance', () => {
     expect(first.OverallCount).to.be.greaterThan(0);
   });
 
+  it('supports $apply pipelines that use concat transformations', async () => {
+    const pipeline =
+      "concat(aggregate(quantity with sum as TotalQuantity),groupby((product/name), aggregate(quantity with sum as TotalQuantity))/concat(aggregate(* with count as UI5__count),top(3)))";
+
+    const res = await client
+      .get('/odata/OrderItems')
+      .query({$apply: pipeline})
+      .expect(200);
+
+    expect(res.body.value).to.be.Array();
+    const rows: AnyObject[] = res.body.value;
+    expect(rows.length).to.equal(5);
+
+    const [summary, countRow, ...detail] = rows;
+    expect(summary.TotalQuantity).to.equal(12);
+    expect(countRow.UI5__count).to.equal(5);
+    expect(detail).to.have.length(3);
+    detail.forEach((row: AnyObject) => {
+      expect(row).to.have.property('product/name');
+      expect(row.TotalQuantity).to.be.a.Number();
+    });
+  });
+
   it('supports $apply pipelines with post-aggregate filter stages', async () => {
     const res = await client
       .get('/odata/Orders')

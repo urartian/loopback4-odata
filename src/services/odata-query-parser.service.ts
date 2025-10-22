@@ -69,7 +69,8 @@ export type ApplyTransformation =
   | ApplyOrderByTransformation
   | ApplySkipTransformation
   | ApplyTopTransformation
-  | ApplyBottomTransformation;
+  | ApplyBottomTransformation
+  | ApplyConcatTransformation;
 
 export interface ApplyFilterTransformation {
   type: 'filter';
@@ -105,6 +106,11 @@ export interface ApplyTopTransformation {
 export interface ApplyBottomTransformation {
   type: 'bottom';
   count: number;
+}
+
+export interface ApplyConcatTransformation {
+  type: 'concat';
+  pipelines: ApplyPipeline[];
 }
 
 function isValidIdentifierSegment(segment: string): boolean {
@@ -1399,6 +1405,8 @@ function parseApplyTransformation(segment: string): ApplyTransformation {
       return parseApplyTop(inner);
     case 'bottom':
       return parseApplyBottom(inner);
+    case 'concat':
+      return parseApplyConcat(inner);
     default:
       throw new Error(`Unsupported $apply transformation: ${name}`);
   }
@@ -1509,6 +1517,18 @@ function parseApplyBottom(body: string): ApplyBottomTransformation {
   return {type: 'bottom', count};
 }
 
+function parseApplyConcat(body: string): ApplyConcatTransformation {
+  const segments = splitTopLevel(body, ',');
+  if (segments.length < 2) {
+    throw new Error('concat() requires at least two pipeline arguments.');
+  }
+  const pipelines = segments.map(segment => parseApplyPipeline(segment));
+  return {
+    type: 'concat',
+    pipelines,
+  };
+}
+
 function parseNonNegativeInteger(value: string, transformation: string): number {
   const trimmed = value.trim();
   if (!trimmed) {
@@ -1545,6 +1565,24 @@ function deriveAggregationSpecFromPipeline(pipeline: ApplyPipeline): Aggregation
     } else if (transformation.type === 'aggregate') {
       aggregates.push(...transformation.expressions);
       hasGroupingStage = true;
+    } else if (transformation.type === 'concat') {
+      if (hasGroupingStage) {
+        continue;
+      }
+      let selectedSpec: AggregationSpec | undefined;
+      let selectedHasPaging = false;
+      for (const branch of transformation.pipelines) {
+        const branchSpec = deriveAggregationSpecFromPipeline(branch);
+        if (!branchSpec) continue;
+        const branchHasPaging = pipelineHasPaging(branch);
+        if (!selectedSpec || (branchHasPaging && !selectedHasPaging)) {
+          selectedSpec = branchSpec;
+          selectedHasPaging = branchHasPaging;
+        }
+      }
+      if (selectedSpec) {
+        return selectedSpec;
+      }
     }
   }
 
@@ -1602,6 +1640,24 @@ function parseAggregateExpression(raw: string): AggregationExpression {
     operator,
     alias,
   };
+}
+
+function pipelineHasPaging(pipeline: ApplyPipeline): boolean {
+  for (const transformation of pipeline.transformations) {
+    switch (transformation.type) {
+      case 'top':
+      case 'skip':
+        return true;
+      case 'concat':
+        if (transformation.pipelines.some(branch => pipelineHasPaging(branch))) {
+          return true;
+        }
+        break;
+      default:
+        break;
+    }
+  }
+  return false;
 }
 
 function extractPathAndOptions(segment: string): {path: string; options?: string} {

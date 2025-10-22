@@ -139,4 +139,44 @@ describe('parseODataQuery basics', () => {
     assert.deepStrictEqual(parsed.apply?.groupBy, ['customer/country']);
     assert.equal(parsed.apply?.aggregates[0].field, 'order/total');
   });
+
+  it('parses concat transformations inside $apply pipelines', () => {
+    const expression =
+      "concat(aggregate(quantity with sum as TotalQuantity),groupby((product/name), aggregate(quantity with sum as TotalQuantity))/concat(aggregate(* with count as UI5__count),top(5)))";
+    const pipeline = parseApplyPipeline(expression);
+    assert.equal(pipeline.transformations.length, 1);
+    const [root] = pipeline.transformations;
+    assert.equal(root.type, 'concat');
+    if (root.type === 'concat') {
+      assert.equal(root.pipelines.length, 2);
+      const summary = root.pipelines.find(branch => branch.transformations[0]?.type === 'aggregate');
+      const detail = root.pipelines.find(branch => branch.transformations[0]?.type === 'groupby');
+      assert(summary);
+      assert(detail);
+      if (summary && summary.transformations[0].type === 'aggregate') {
+        assert.equal(summary.transformations[0].expressions[0].alias, 'TotalQuantity');
+      }
+      if (detail) {
+        assert.equal(detail.transformations.length, 2);
+        const [aggregateStage, innerConcat] = detail.transformations;
+        assert.equal(aggregateStage.type, 'groupby');
+        assert.equal(innerConcat.type, 'concat');
+        if (aggregateStage.type === 'groupby') {
+          assert.equal(aggregateStage.aggregates[0].alias, 'TotalQuantity');
+        }
+        if (innerConcat.type === 'concat') {
+          assert.equal(innerConcat.pipelines.length, 2);
+          const trailing = innerConcat.pipelines[1];
+          const [firstTransform] = trailing.transformations;
+          assert(firstTransform);
+          assert.equal(firstTransform.type, 'top');
+        }
+      }
+    }
+
+    const parsed = parseODataQuery({'$apply': expression});
+    assert(parsed.applyPipeline);
+    assert(parsed.apply);
+    assert.equal(parsed.apply?.aggregates[0].alias, 'TotalQuantity');
+  });
 });
