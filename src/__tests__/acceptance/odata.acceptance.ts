@@ -83,6 +83,17 @@ describe('OData component acceptance', () => {
     expect(res.body.value).to.not.be.empty();
   });
 
+  it('serializes DateTimeOffset properties using ISO 8601 format', async () => {
+    const res = await client.get('/odata/Products').expect(200);
+    expect(res.body.value).to.be.Array();
+    expect(res.body.value).to.not.be.empty();
+    const sample = res.body.value[0];
+    expect(sample).to.have.property('updatedAt');
+    expect(sample.updatedAt).to.be.a.String();
+    expect(sample.updatedAt).to.match(/T/);
+    expect(sample.updatedAt).to.match(/(Z|[+-]\d{2}:\d{2})$/);
+  });
+
   it('exposes action/function definitions in $metadata', async () => {
     const res = await client.get('/odata/$metadata').expect(200);
     expect(res.text.includes('<Action Name="discount"')).to.be.true();

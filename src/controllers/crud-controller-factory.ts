@@ -394,6 +394,7 @@ export function defineODataCrudController(def: EntitySetDef) {
 
     class ODataCrudController {
         formatOverridden = false;
+        readonly entityCtor = modelCtor as typeof Entity;
 
         constructor(
             @inject(repoBindingKey)
@@ -422,13 +423,23 @@ export function defineODataCrudController(def: EntitySetDef) {
             };
 
             if (typeof candidate.toObject === 'function') {
-                return candidate.toObject({}) ?? undefined;
+                const plain = candidate.toObject({}) ?? undefined;
+                if (plain) {
+                    this.normalizePlainEntityGraph(plain, this.getModelDefinition(this.getModelCtorFromEntity(entity)));
+                }
+                return plain ?? undefined;
             }
             if (typeof candidate.toJSON === 'function') {
-                return candidate.toJSON() ?? undefined;
+                const plain = candidate.toJSON() ?? undefined;
+                if (plain) {
+                    this.normalizePlainEntityGraph(plain, this.getModelDefinition(this.getModelCtorFromEntity(entity)));
+                }
+                return plain ?? undefined;
             }
             if (typeof entity === 'object') {
-                return { ...(entity as AnyObject) };
+                const clone = { ...(entity as AnyObject) };
+                this.normalizePlainEntityGraph(clone, this.getModelDefinition(this.getModelCtorFromEntity(entity)));
+                return clone;
             }
             return undefined;
         }
@@ -441,15 +452,222 @@ export function defineODataCrudController(def: EntitySetDef) {
         }
 
         decoratePlainEntity(plain: AnyObject, etag?: string): AnyObject {
-            if (!etag) return { ...plain };
-            return { ...plain, '@odata.etag': etag };
+            const normalized = this.normalizePlainEntityForResponse(plain, this.entityCtor);
+            if (!etag) return normalized;
+            if (normalized['@odata.etag'] === etag) return normalized;
+            return { ...normalized, '@odata.etag': etag };
         }
 
         decoratePlainEntities(plainEntities: AnyObject[]): AnyObject[] {
             if (!this.etagEnabled()) {
-                return plainEntities.map(entity => ({ ...entity }));
+                return plainEntities.map(entity => this.normalizePlainEntityForResponse(entity, this.entityCtor));
             }
             return plainEntities.map(plain => this.decoratePlainEntity(plain, this.computeEtagFromPlain(plain)));
+        }
+
+        getModelCtorFromEntity(entity: CrudEntity | AnyObject | undefined): typeof Entity | undefined {
+            if (!entity) return undefined;
+            const ctor = (entity as AnyObject)?.constructor;
+            if (typeof ctor !== 'function') return undefined;
+            if ((ctor as unknown) === Object) return undefined;
+            const maybeDefinition = (ctor as unknown as {definition?: ModelDefinition}).definition;
+            if (maybeDefinition) return ctor as typeof Entity;
+            if ((ctor as unknown as {prototype?: unknown}).prototype instanceof Entity) {
+                return ctor as typeof Entity;
+            }
+            return undefined;
+        }
+
+        getModelDefinition(ctor?: typeof Entity): ModelDefinition | undefined {
+            const targetCtor = (ctor ?? this.entityCtor) as unknown as {definition?: ModelDefinition};
+            return targetCtor?.definition as ModelDefinition | undefined;
+        }
+
+        normalizePlainEntityForResponse(plain: AnyObject, ctor?: typeof Entity): AnyObject {
+            const clone = { ...plain };
+            this.normalizePlainEntityGraph(clone, this.getModelDefinition(ctor));
+            return clone;
+        }
+
+        normalizePlainEntityGraph(target: AnyObject, definition?: ModelDefinition) {
+            if (!target || !definition) return;
+            this.normalizeTemporalProperties(target, definition);
+            this.normalizeRelationGraphs(target, definition);
+        }
+
+        normalizeTemporalProperties(target: AnyObject, definition: ModelDefinition) {
+            const props = definition.properties ?? {};
+            for (const [propName, propMeta] of Object.entries(props)) {
+                if (!Object.prototype.hasOwnProperty.call(target, propName)) continue;
+                const value = target[propName];
+                if (value === undefined || value === null) continue;
+                const kind = this.classifyTemporalProperty(propMeta as PropertyDefinition | undefined);
+                if (!kind) continue;
+                target[propName] = kind === 'date'
+                    ? this.normalizeDateValue(value)
+                    : this.normalizeDateTimeOffsetValue(value);
+            }
+        }
+
+        normalizeRelationGraphs(target: AnyObject, definition: ModelDefinition) {
+            const relations = (definition.relations ?? {}) as RelationDefinitionMap;
+            for (const [relationName, relationMetaRaw] of Object.entries(relations)) {
+                if (!Object.prototype.hasOwnProperty.call(target, relationName)) continue;
+                const relationValue = target[relationName];
+                if (relationValue === undefined || relationValue === null) continue;
+                const relationMeta = relationMetaRaw as AnyObject | undefined;
+                if (!relationMeta) continue;
+                let relationCtor: typeof Entity | undefined;
+                if (typeof relationMeta.target === 'function') {
+                    try {
+                        relationCtor = relationMeta.target();
+                    } catch {
+                        relationCtor = undefined;
+                    }
+                }
+                if (!relationCtor) continue;
+                const relationDefinition = this.getModelDefinition(relationCtor);
+                if (!relationDefinition) continue;
+                if (Array.isArray(relationValue)) {
+                    target[relationName] = relationValue.map(item => {
+                        if (!item || typeof item !== 'object') return item;
+                        const nested = { ...(item as AnyObject) };
+                        this.normalizePlainEntityGraph(nested, relationDefinition);
+                        return nested;
+                    });
+                } else if (typeof relationValue === 'object') {
+                    const nested = { ...(relationValue as AnyObject) };
+                    this.normalizePlainEntityGraph(nested, relationDefinition);
+                    target[relationName] = nested;
+                }
+            }
+        }
+
+        classifyTemporalProperty(def: PropertyDefinition | undefined): 'date' | 'datetimeoffset' | undefined {
+            if (!def) return undefined;
+            const rawType = def.type;
+            if (rawType === Date) return 'datetimeoffset';
+
+            const typeName = typeof rawType === 'string' ? rawType.toLowerCase() : undefined;
+            if (typeName === 'date' || typeName === 'datetime' || typeName === 'datetimeoffset' || typeName === 'timestamp') {
+                return 'datetimeoffset';
+            }
+
+            const schema = (def as AnyObject)?.jsonSchema as AnyObject | undefined;
+            const schemaFormat = typeof schema?.format === 'string' ? schema.format.toLowerCase() : undefined;
+            const schemaType = typeof schema?.type === 'string' ? schema.type.toLowerCase() : undefined;
+            const schemaDataType = typeof schema?.dataType === 'string' ? schema.dataType.toLowerCase() : undefined;
+
+            if (schemaFormat === 'date') return 'date';
+            if (schemaDataType === 'date') return 'date';
+            if (schemaFormat === 'date-time') return 'datetimeoffset';
+            if (schemaDataType === 'datetimeoffset' || schemaDataType === 'datetime' || schemaDataType === 'timestamp') {
+                return 'datetimeoffset';
+            }
+            if (schemaType === 'string' && schemaFormat === 'date') return 'date';
+
+            return undefined;
+        }
+
+        normalizeDateTimeOffsetValue(value: unknown): unknown {
+            if (value instanceof Date || typeof value === 'number') {
+                const coerced = this.coerceDate(value);
+                return coerced ? coerced.toISOString() : value;
+            }
+
+            if (typeof value === 'string') {
+                const normalized = this.normalizeDateTimeOffsetString(value);
+                if (normalized) return normalized;
+                const fallback = this.coerceDate(value);
+                return fallback ? fallback.toISOString() : value;
+            }
+
+            const coerced = this.coerceDate(value);
+            return coerced ? coerced.toISOString() : value;
+        }
+
+        normalizeDateValue(value: unknown): unknown {
+            if (typeof value === 'string') {
+                const trimmed = value.trim();
+                if (!trimmed) return value;
+                if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) return trimmed;
+                const parsed = this.coerceDate(trimmed);
+                return parsed ? parsed.toISOString().slice(0, 10) : value;
+            }
+            const date = this.coerceDate(value);
+            if (!date) return value;
+            return date.toISOString().slice(0, 10);
+        }
+
+        coerceDate(value: unknown): Date | undefined {
+            if (value instanceof Date) return value;
+            if (typeof value === 'number') {
+                const date = new Date(value);
+                return Number.isNaN(date.getTime()) ? undefined : date;
+            }
+            if (typeof value === 'string') {
+                const trimmed = value.trim();
+                if (!trimmed) return undefined;
+                const parsedFromNormalized = this.normalizeDateTimeOffsetString(trimmed);
+                if (parsedFromNormalized) {
+                    const date = new Date(parsedFromNormalized);
+                    return Number.isNaN(date.getTime()) ? undefined : date;
+                }
+                const direct = new Date(trimmed);
+                if (!Number.isNaN(direct.getTime())) return direct;
+                const withT = new Date(trimmed.replace(' ', 'T'));
+                if (!Number.isNaN(withT.getTime())) return withT;
+                const withOffsetColon = trimmed.replace(
+                    /([+-]\d{2})(\d{2})$/,
+                    (_match, hours: string, minutes: string) => `${hours}:${minutes}`,
+                );
+                if (withOffsetColon !== trimmed) {
+                    const colonDate = new Date(withOffsetColon.replace(' ', 'T'));
+                    if (!Number.isNaN(colonDate.getTime())) return colonDate;
+                    const colonDirect = new Date(withOffsetColon);
+                    if (!Number.isNaN(colonDirect.getTime())) return colonDirect;
+                }
+                return undefined;
+            }
+            return undefined;
+        }
+
+        normalizeDateTimeOffsetString(raw: string): string | undefined {
+            const trimmed = raw.trim();
+            if (!trimmed) return undefined;
+
+            const canonical = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,7})?(?:Z|[+-]\d{2}:\d{2})$/;
+            if (canonical.test(trimmed)) return trimmed;
+
+            const partial =
+                /^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})(\.\d+)?(Z|z|[+-]\d{2}(?::?\d{2})?)?$/;
+            const match = partial.exec(trimmed);
+            if (!match) return undefined;
+
+            const [, date, time, fraction = '', offsetRaw = ''] = match;
+
+            let offset = offsetRaw ?? '';
+            if (!offset) {
+                offset = 'Z';
+            } else if (offset.toUpperCase() === 'Z') {
+                offset = 'Z';
+            } else {
+                const sign = offset[0];
+                let rest = offset.slice(1).replace(':', '');
+                if (!/^[+-]$/.test(sign) || rest.length > 4) return undefined;
+                if (!/^\d*$/.test(rest)) return undefined;
+                if (rest.length === 0) rest = '0000';
+                if (rest.length === 2) rest = `${rest}00`;
+                if (rest.length !== 4) return undefined;
+                const hours = rest.slice(0, 2);
+                const minutes = rest.slice(2, 4);
+                offset = `${sign}${hours}:${minutes}`;
+                if (offset === '+00:00' || offset === '-00:00') {
+                    offset = 'Z';
+                }
+            }
+
+            return `${date}T${time}${fraction ?? ''}${offset}`;
         }
 
         isDeepInsertEnabled(flagFromDefinition: boolean): boolean {

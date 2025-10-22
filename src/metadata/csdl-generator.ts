@@ -194,18 +194,18 @@ function registerEnumType(
     const isNumeric = nonNullValues.every(v => typeof v === 'number' && Number.isFinite(v as number));
     const isString = nonNullValues.every(v => typeof v === 'string');
     if (!isNumeric && !isString) return undefined;
+    if (isString && !isNumeric) {
+        // OData enums must use an integral underlying type; fall back to a string property.
+        return undefined;
+    }
 
     const baseName = `${ownerName}${capitalize(propertyName)}Enum`;
     const enumName = reserveTypeName(context, baseName);
-    const underlyingType = isNumeric
-        ? nonNullValues.some(v => Math.abs(v as number) > 2147483647)
-            ? 'Edm.Int64'
-            : 'Edm.Int32'
-        : 'Edm.String';
+    const underlyingType = nonNullValues.some(v => Math.abs(v as number) > 2147483647) ? 'Edm.Int64' : 'Edm.Int32';
 
-    const numericValues = isNumeric ? (nonNullValues as number[]) : [];
+    const numericValues = nonNullValues as number[];
     const hasNonZero = numericValues.some(v => v !== 0);
-    const isFlags = isNumeric && numericValues.every(v => v === 0 || (v & (v - 1)) === 0) && hasNonZero;
+    const isFlags = numericValues.every(v => v === 0 || (v & (v - 1)) === 0) && hasNonZero;
 
     const seenNames = new Set<string>();
     const membersXml: string[] = [];
@@ -219,14 +219,10 @@ function registerEnumType(
             memberName = `${nameCandidate}_${++counter}`;
         }
         seenNames.add(memberName);
-        const valueAttr = isNumeric ? String(value) : xmlEscape(String(value));
-        membersXml.push(
-            `    <Member Name="${xmlEscape(memberName)}"${isNumeric ? ` Value="${valueAttr}"` : ` Value="${valueAttr}"`} />`,
-        );
+        const valueAttr = String(value);
+        membersXml.push(`    <Member Name="${xmlEscape(memberName)}" Value="${xmlEscape(valueAttr)}" />`);
         const memberJson: Record<string, unknown> = { Name: memberName };
-        if (isNumeric || isString) {
-            memberJson.Value = value;
-        }
+        memberJson.Value = value;
         membersJson.push(memberJson);
     });
 
