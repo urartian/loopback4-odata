@@ -181,56 +181,105 @@ function mergeCapabilities(
     };
 }
 
+const SIMPLE_IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
 function registerEnumType(
     context: SchemaBuildContext,
     ownerName: string,
     propertyName: string,
-    values: unknown[],
+    schema: Record<string, unknown> | undefined,
 ): string | undefined {
-    if (!values.length) return undefined;
-    const nonNullValues = values.filter(v => v !== undefined && v !== null);
+    const enumValues = Array.isArray(schema?.enum) ? schema?.enum : [];
+    if (!enumValues.length) return undefined;
+    const nonNullValues = enumValues.filter(v => v !== undefined && v !== null);
     if (!nonNullValues.length) return undefined;
 
     const isNumeric = nonNullValues.every(v => typeof v === 'number' && Number.isFinite(v as number));
     const isString = nonNullValues.every(v => typeof v === 'string');
     if (!isNumeric && !isString) return undefined;
-    if (isString && !isNumeric) {
-        // OData enums must use an integral underlying type; fall back to a string property.
-        return undefined;
+
+    let providedNames = Array.isArray((schema as Record<string, unknown>)?.['x-odata.enumMemberNames'])
+        ? ((schema as Record<string, unknown>)['x-odata.enumMemberNames'] as unknown[])
+        : undefined;
+    if (providedNames && providedNames.length !== nonNullValues.length) {
+        providedNames = undefined;
     }
 
     const baseName = `${ownerName}${capitalize(propertyName)}Enum`;
     const enumName = reserveTypeName(context, baseName);
-    const underlyingType = nonNullValues.some(v => Math.abs(v as number) > 2147483647) ? 'Edm.Int64' : 'Edm.Int32';
 
-    const numericValues = nonNullValues as number[];
+    const memberNames: string[] = [];
+    const seenNames = new Set<string>();
+    for (let index = 0; index < nonNullValues.length; index++) {
+        const value = nonNullValues[index];
+        let rawName: string;
+        if (providedNames) {
+            rawName = String(providedNames[index] ?? '');
+            if (!SIMPLE_IDENTIFIER.test(rawName)) {
+                rawName = sanitizeEnumMemberName(rawName);
+            }
+        } else if (isString) {
+            rawName = String(value);
+            if (!SIMPLE_IDENTIFIER.test(rawName)) {
+                return undefined;
+            }
+        } else {
+            rawName = sanitizeEnumMemberName(value ?? index);
+        }
+
+        if (!SIMPLE_IDENTIFIER.test(rawName)) {
+            return undefined;
+        }
+
+        let candidate = rawName;
+        let counter = 1;
+        while (seenNames.has(candidate)) {
+            candidate = `${rawName}_${++counter}`;
+        }
+        seenNames.add(candidate);
+        memberNames.push(candidate);
+    }
+
+    if (!memberNames.length || memberNames.length !== nonNullValues.length) return undefined;
+
+    let numericValues: number[];
+    if (isNumeric) {
+        numericValues = (nonNullValues as number[]).map(value => Math.trunc(value));
+    } else {
+        const providedNumeric = Array.isArray((schema as Record<string, unknown>)?.['x-odata.enumNumericValues'])
+            ? ((schema as Record<string, unknown>)['x-odata.enumNumericValues'] as unknown[])
+            : undefined;
+        if (providedNumeric && providedNumeric.length === nonNullValues.length) {
+            const parsed = providedNumeric.map(val => Number(val));
+            if (parsed.every(num => Number.isFinite(num) && Number.isInteger(num))) {
+                numericValues = parsed.map(num => Math.trunc(num));
+            } else {
+                return undefined;
+            }
+        } else {
+            numericValues = nonNullValues.map((_, index) => index);
+        }
+    }
+
+    const maxAbs = numericValues.reduce((max, value) => Math.max(max, Math.abs(value)), 0);
+    const underlyingType = maxAbs > 2147483647 ? 'Edm.Int64' : 'Edm.Int32';
     const hasNonZero = numericValues.some(v => v !== 0);
     const isFlags = numericValues.every(v => v === 0 || (v & (v - 1)) === 0) && hasNonZero;
 
-    const seenNames = new Set<string>();
     const membersXml: string[] = [];
     const membersJson: Array<Record<string, unknown>> = [];
 
-    nonNullValues.forEach((value, index) => {
-        const nameCandidate = sanitizeEnumMemberName(value ?? index);
-        let memberName = nameCandidate;
-        let counter = 1;
-        while (seenNames.has(memberName)) {
-            memberName = `${nameCandidate}_${++counter}`;
-        }
-        seenNames.add(memberName);
-        const valueAttr = String(value);
-        membersXml.push(`    <Member Name="${xmlEscape(memberName)}" Value="${xmlEscape(valueAttr)}" />`);
-        const memberJson: Record<string, unknown> = { Name: memberName };
-        memberJson.Value = value;
-        membersJson.push(memberJson);
+    numericValues.forEach((value, index) => {
+        const name = memberNames[index] ?? `Value_${index}`;
+        membersXml.push(`    <Member Name="${xmlEscape(name)}" Value="${xmlEscape(String(value))}" />`);
+        membersJson.push({ Name: name, Value: value });
     });
 
     const attributes: string[] = [`Name="${xmlEscape(enumName)}"`];
     if (underlyingType !== 'Edm.Int32') {
         attributes.push(`UnderlyingType="${underlyingType}"`);
     }
-    if (isFlags) {
+    if (isFlags || Boolean(schema?.['x-odata.enumIsFlags'])) {
         attributes.push('IsFlags="true"');
     }
 
@@ -246,7 +295,7 @@ function registerEnumType(
     if (underlyingType !== 'Edm.Int32') {
         enumJson.$UnderlyingType = underlyingType;
     }
-    if (isFlags) {
+    if (isFlags || Boolean(schema?.['x-odata.enumIsFlags'])) {
         enumJson.$IsFlags = true;
     }
     enumJson.Members = membersJson;
@@ -442,7 +491,7 @@ function resolveEdmType(
     }
 
     if (schemaAny && Array.isArray(schemaAny.enum) && schemaAny.enum.length) {
-        const fqEnum = registerEnumType(context, ownerName, propertyName, schemaAny.enum);
+        const fqEnum = registerEnumType(context, ownerName, propertyName, schemaAny);
         if (fqEnum) {
             const facets = defaultValue !== undefined ? { DefaultValue: defaultValue } : undefined;
             return { type: fqEnum, facets };

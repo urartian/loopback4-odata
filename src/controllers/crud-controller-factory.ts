@@ -108,6 +108,18 @@ interface OrderDescriptor {
 
 type PrimitivePropertyKind = 'string' | 'number' | 'boolean' | 'date' | 'buffer';
 
+interface PropertyNormalizationPlan {
+    kind: 'datetimeoffset' | 'date' | 'timeOfDay' | 'duration' | 'int64' | 'decimal';
+    edmType: string;
+    isCollection: boolean;
+    collectionEdmType?: string;
+}
+
+interface NormalizedPropertyValue {
+    value: unknown;
+    typeAnnotation?: string;
+}
+
 function inferIdParamType(definition: any): 'string' | 'number' | 'boolean' {
     const idName = definition?.idProperties?.()[0];
     const property = definition?.properties?.[idName ?? ''] ?? {};
@@ -491,21 +503,24 @@ export function defineODataCrudController(def: EntitySetDef) {
 
         normalizePlainEntityGraph(target: AnyObject, definition?: ModelDefinition) {
             if (!target || !definition) return;
-            this.normalizeTemporalProperties(target, definition);
+            this.normalizeScalarProperties(target, definition);
             this.normalizeRelationGraphs(target, definition);
         }
 
-        normalizeTemporalProperties(target: AnyObject, definition: ModelDefinition) {
+        normalizeScalarProperties(target: AnyObject, definition: ModelDefinition) {
             const props = definition.properties ?? {};
             for (const [propName, propMeta] of Object.entries(props)) {
                 if (!Object.prototype.hasOwnProperty.call(target, propName)) continue;
                 const value = target[propName];
                 if (value === undefined || value === null) continue;
-                const kind = this.classifyTemporalProperty(propMeta as PropertyDefinition | undefined);
-                if (!kind) continue;
-                target[propName] = kind === 'date'
-                    ? this.normalizeDateValue(value)
-                    : this.normalizeDateTimeOffsetValue(value);
+                const plan = this.classifyProperty(propMeta as PropertyDefinition | undefined);
+                if (!plan) continue;
+                const normalized = this.applyPropertyNormalization(value, plan);
+                if (!normalized) continue;
+                target[propName] = normalized.value;
+                if (normalized.typeAnnotation) {
+                    target[`${propName}@odata.type`] = normalized.typeAnnotation;
+                }
             }
         }
 
@@ -569,6 +584,123 @@ export function defineODataCrudController(def: EntitySetDef) {
             return undefined;
         }
 
+        classifyProperty(def: PropertyDefinition | undefined): PropertyNormalizationPlan | undefined {
+            if (!def) return undefined;
+            const schema = (def as AnyObject)?.jsonSchema as AnyObject | undefined;
+            const isArray = Array.isArray(def.type) || def.type === 'array' || def.type === Array || schema?.type === 'array';
+            if (isArray) {
+                const itemSchema = schema?.items as AnyObject | undefined;
+                const itemType = Array.isArray(def.type)
+                    ? def.type[0]
+                    : (def as AnyObject).itemType ?? (itemSchema ? itemSchema.type : undefined);
+                const nestedDef = itemSchema || itemType
+                    ? ({
+                        type: itemType ?? itemSchema?.type,
+                        jsonSchema: itemSchema,
+                    } as PropertyDefinition)
+                    : undefined;
+                const nestedPlan = this.classifyProperty(nestedDef);
+                if (!nestedPlan) return undefined;
+                return {
+                    kind: nestedPlan.kind,
+                    edmType: nestedPlan.edmType,
+                    isCollection: true,
+                    collectionEdmType: nestedPlan.collectionEdmType ?? `Collection(${nestedPlan.edmType})`,
+                };
+            }
+
+            const temporalKind = this.classifyTemporalProperty(def);
+            if (temporalKind === 'datetimeoffset') {
+                return {kind: 'datetimeoffset', edmType: 'Edm.DateTimeOffset', isCollection: false};
+            }
+            if (temporalKind === 'date') {
+                return {kind: 'date', edmType: 'Edm.Date', isCollection: false};
+            }
+
+            const schemaAny = schema ?? {};
+            const format = typeof schemaAny.format === 'string' ? schemaAny.format.toLowerCase() : undefined;
+            const schemaType = typeof schemaAny.type === 'string' ? schemaAny.type.toLowerCase() : undefined;
+            const dataType = typeof schemaAny.dataType === 'string' ? schemaAny.dataType.toLowerCase() : undefined;
+            const rawType = typeof def.type === 'string' ? def.type.toLowerCase() : def.type;
+
+            if (format === 'time' || format === 'time-of-day' || dataType === 'timeofday' || rawType === 'time') {
+                return {kind: 'timeOfDay', edmType: 'Edm.TimeOfDay', isCollection: false};
+            }
+            if (format === 'duration' || dataType === 'duration') {
+                return {kind: 'duration', edmType: 'Edm.Duration', isCollection: false};
+            }
+            if (format === 'decimal' || dataType === 'decimal' || schemaAny.precision != null || schemaAny.scale != null) {
+                return {kind: 'decimal', edmType: 'Edm.Decimal', isCollection: false};
+            }
+            const int64Formats = new Set(['int64', 'long']);
+            if (
+                int64Formats.has(format ?? '') ||
+                int64Formats.has(dataType ?? '') ||
+                rawType === 'bigint' ||
+                rawType === BigInt
+            ) {
+                return {kind: 'int64', edmType: 'Edm.Int64', isCollection: false};
+            }
+
+            return undefined;
+        }
+
+        applyPropertyNormalization(value: unknown, plan: PropertyNormalizationPlan): NormalizedPropertyValue | undefined {
+            if (plan.isCollection) {
+                if (!Array.isArray(value)) return undefined;
+                const items: unknown[] = [];
+                let mutated = false;
+                let annotation = false;
+                for (const entry of value) {
+                    const normalized = this.normalizeSingleValue(entry, {kind: plan.kind, edmType: plan.edmType, isCollection: false});
+                    if (normalized) {
+                        items.push(normalized.value);
+                        if (normalized.value !== entry) mutated = true;
+                        if (normalized.typeAnnotation) annotation = true;
+                    } else {
+                        items.push(entry);
+                    }
+                }
+                if (!mutated && !annotation) return undefined;
+                return {
+                    value: mutated ? items : value,
+                    typeAnnotation: annotation ? (plan.collectionEdmType ?? `Collection(${plan.edmType})`) : undefined,
+                };
+            }
+            return this.normalizeSingleValue(value, plan);
+        }
+
+        normalizeSingleValue(value: unknown, plan: PropertyNormalizationPlan): NormalizedPropertyValue | undefined {
+            switch (plan.kind) {
+                case 'datetimeoffset': {
+                    const normalized = this.normalizeDateTimeOffsetValue(value);
+                    if (normalized === undefined) return undefined;
+                    return normalized === value ? {value} : {value: normalized};
+                }
+                case 'date': {
+                    const normalized = this.normalizeDateValue(value);
+                    if (normalized === undefined) return undefined;
+                    return normalized === value ? {value} : {value: normalized};
+                }
+                case 'timeOfDay': {
+                    const normalized = this.normalizeTimeOfDayValue(value);
+                    if (normalized === undefined) return undefined;
+                    return normalized === value ? {value} : {value: normalized};
+                }
+                case 'duration': {
+                    const normalized = this.normalizeDurationValue(value);
+                    if (normalized === undefined) return undefined;
+                    return normalized === value ? {value} : {value: normalized};
+                }
+                case 'int64':
+                    return this.normalizeInt64Value(value);
+                case 'decimal':
+                    return this.normalizeDecimalValue(value);
+                default:
+                    return undefined;
+            }
+        }
+
         normalizeDateTimeOffsetValue(value: unknown): unknown {
             if (value instanceof Date || typeof value === 'number') {
                 const coerced = this.coerceDate(value);
@@ -584,19 +716,6 @@ export function defineODataCrudController(def: EntitySetDef) {
 
             const coerced = this.coerceDate(value);
             return coerced ? coerced.toISOString() : value;
-        }
-
-        normalizeDateValue(value: unknown): unknown {
-            if (typeof value === 'string') {
-                const trimmed = value.trim();
-                if (!trimmed) return value;
-                if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) return trimmed;
-                const parsed = this.coerceDate(trimmed);
-                return parsed ? parsed.toISOString().slice(0, 10) : value;
-            }
-            const date = this.coerceDate(value);
-            if (!date) return value;
-            return date.toISOString().slice(0, 10);
         }
 
         coerceDate(value: unknown): Date | undefined {
@@ -668,6 +787,249 @@ export function defineODataCrudController(def: EntitySetDef) {
             }
 
             return `${date}T${time}${fraction ?? ''}${offset}`;
+        }
+
+        normalizeDateValue(value: unknown): unknown {
+            if (value instanceof Date) {
+                if (
+                    value.getUTCHours() === 0 &&
+                    value.getUTCMinutes() === 0 &&
+                    value.getUTCSeconds() === 0 &&
+                    value.getUTCMilliseconds() === 0
+                ) {
+                    return value.toISOString().slice(0, 10);
+                }
+                const year = value.getFullYear();
+                const month = value.getMonth() + 1;
+                const day = value.getDate();
+                return `${this.padNumber(year, 4)}-${this.padNumber(month, 2)}-${this.padNumber(day, 2)}`;
+            }
+            if (typeof value === 'string') {
+                const trimmed = value.trim();
+                if (!trimmed) return value;
+                if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) return trimmed;
+                const simple = /^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$/;
+                const match = simple.exec(trimmed);
+                if (match) {
+                    const [, yearStr, monthStr, dayStr] = match;
+                    const year = Number(yearStr);
+                    const month = Number(monthStr);
+                    const day = Number(dayStr);
+                    if (Number.isInteger(year) && Number.isInteger(month) && Number.isInteger(day)) {
+                        return `${this.padNumber(year, 4)}-${this.padNumber(month, 2)}-${this.padNumber(day, 2)}`;
+                    }
+                }
+                const parsed = this.coerceDate(trimmed);
+                if (parsed) return parsed.toISOString().slice(0, 10);
+            }
+            return value;
+        }
+
+        normalizeTimeOfDayValue(value: unknown): unknown {
+            if (value instanceof Date) {
+                const hours = value.getUTCHours();
+                const minutes = value.getUTCMinutes();
+                const seconds = value.getUTCSeconds();
+                const millis = value.getUTCMilliseconds();
+                return this.formatTimeOfDay(hours, minutes, seconds, millis);
+            }
+            if (typeof value === 'number') {
+                if (!Number.isFinite(value)) return value;
+                const totalMillis = Math.trunc(value);
+                if (!Number.isFinite(totalMillis)) return value;
+                const millis = ((totalMillis % 1000) + 1000) % 1000;
+                const totalSeconds = (totalMillis - millis) / 1000;
+                const seconds = ((totalSeconds % 60) + 60) % 60;
+                const totalMinutes = (totalSeconds - seconds) / 60;
+                const minutes = ((totalMinutes % 60) + 60) % 60;
+                const hours = ((totalMinutes - minutes) / 60) % 24;
+                return this.formatTimeOfDay(hours, minutes, seconds, millis);
+            }
+            if (typeof value === 'string') {
+                const trimmed = value.trim();
+                if (!trimmed) return value;
+                if (/^\d{2}:\d{2}:\d{2}(?:\.\d{1,7})?$/.test(trimmed)) return trimmed;
+                const partial = /^(\d{1,2}):(\d{2})(?::(\d{2})(\.\d{1,7})?)?$/;
+                const match = partial.exec(trimmed);
+                if (match) {
+                    const hours = Number(match[1]);
+                    const minutes = Number(match[2]);
+                    const seconds = match[3] ? Number(match[3]) : 0;
+                    const fraction = match[4] ?? '';
+                    if (
+                        Number.isInteger(hours) &&
+                        Number.isInteger(minutes) &&
+                        Number.isInteger(seconds) &&
+                        hours >= 0 &&
+                        hours < 24 &&
+                        minutes >= 0 &&
+                        minutes < 60 &&
+                        seconds >= 0 &&
+                        seconds < 60
+                    ) {
+                        return `${this.padNumber(hours, 2)}:${this.padNumber(minutes, 2)}:${this.padNumber(seconds, 2)}${fraction}`;
+                    }
+                }
+            }
+            return value;
+        }
+
+        normalizeDurationValue(value: unknown): unknown {
+            if (typeof value === 'number' || typeof value === 'bigint') {
+                const millis = typeof value === 'bigint' ? Number(value) : value;
+                if (!Number.isFinite(millis)) return value;
+                return this.formatDurationFromMilliseconds(millis);
+            }
+            if (typeof value === 'string') {
+                const trimmed = value.trim();
+                if (!trimmed) return value;
+                const canonical = /^-?P(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+(?:\.\d+)?)S)?)?$/i;
+                if (canonical.test(trimmed)) {
+                    return trimmed.toUpperCase().replace('P0DT', 'P0DT');
+                }
+                const timeLike = /^(-)?(\d{1,2}):(\d{2}):(\d{2})(\.\d+)?$/;
+                const match = timeLike.exec(trimmed);
+                if (match) {
+                    const sign = match[1] ? -1 : 1;
+                    const hours = Number(match[2]);
+                    const minutes = Number(match[3]);
+                    const seconds = Number(match[4]);
+                    const fraction = match[5] ?? '';
+                    if (
+                        hours >= 0 &&
+                        minutes >= 0 &&
+                        minutes < 60 &&
+                        seconds >= 0 &&
+                        seconds < 60
+                    ) {
+                        const fractionNumeric = fraction ? fraction : '';
+                        const signPrefix = sign < 0 ? '-' : '';
+                        const normalized = `${signPrefix}PT${hours ? `${hours}H` : ''}${minutes ? `${minutes}M` : ''}${seconds || fractionNumeric ? `${seconds}${fractionNumeric}S` : ''}`;
+                        return normalized || `${signPrefix}PT0S`;
+                    }
+                }
+            }
+            return value;
+        }
+
+        normalizeInt64Value(value: unknown): NormalizedPropertyValue | undefined {
+            if (value === undefined || value === null) return undefined;
+            let str: string | undefined;
+            if (typeof value === 'string') {
+                const trimmed = value.trim();
+                if (!trimmed) return undefined;
+                if (!/^-?\d+$/.test(trimmed)) return undefined;
+                str = trimmed;
+            } else if (typeof value === 'number') {
+                if (!Number.isFinite(value) || !Number.isInteger(value)) return undefined;
+                str = value.toFixed(0);
+            } else if (typeof value === 'bigint') {
+                str = value.toString();
+            }
+            if (!str) return undefined;
+            return {value: str, typeAnnotation: 'Edm.Int64'};
+        }
+
+        normalizeDecimalValue(value: unknown): NormalizedPropertyValue | undefined {
+            if (value === undefined || value === null) return undefined;
+            if (typeof value === 'string') {
+                const normalized = this.normalizeDecimalString(value);
+                if (!normalized) return undefined;
+                return {value: normalized, typeAnnotation: 'Edm.Decimal'};
+            }
+            if (typeof value === 'number') {
+                if (!Number.isFinite(value)) return undefined;
+                const plain = this.toPlainString(value);
+                return {value: plain, typeAnnotation: 'Edm.Decimal'};
+            }
+            return undefined;
+        }
+
+        padNumber(value: number, digits: number): string {
+            const sign = value < 0 ? '-' : '';
+            const absolute = Math.abs(Math.trunc(value));
+            return `${sign}${absolute.toString().padStart(digits, '0')}`;
+        }
+
+        formatTimeOfDay(hours: number, minutes: number, seconds: number, millis: number): string {
+            const fractionDigits = millis ? this.padNumber(millis, 3).replace(/0+$/, '') : '';
+            const suffix = fractionDigits ? `.${fractionDigits}` : '';
+            return `${this.padNumber(hours, 2)}:${this.padNumber(minutes, 2)}:${this.padNumber(seconds, 2)}${suffix}`;
+        }
+
+        formatDurationFromMilliseconds(totalMillis: number): string {
+            if (!Number.isFinite(totalMillis)) return 'PT0S';
+            const sign = totalMillis < 0 ? '-' : '';
+            let remaining = Math.abs(Math.trunc(totalMillis));
+            const millis = remaining % 1000;
+            remaining = (remaining - millis) / 1000;
+            const seconds = remaining % 60;
+            remaining = (remaining - seconds) / 60;
+            const minutes = remaining % 60;
+            remaining = (remaining - minutes) / 60;
+            const hours = remaining % 24;
+            const days = (remaining - hours) / 24;
+
+            let fraction = '';
+            if (millis) {
+                fraction = this.padNumber(millis, 3).replace(/0+$/, '');
+            }
+
+            const timeParts = [] as string[];
+            if (hours) timeParts.push(`${hours}H`);
+            if (minutes) timeParts.push(`${minutes}M`);
+            if (seconds || fraction) {
+                const secondPart = fraction ? `${seconds}.${fraction}` : String(seconds);
+                timeParts.push(`${secondPart}S`);
+            }
+
+            if (!timeParts.length && !days) return `${sign}PT0S`;
+            const dayPart = days ? `${days}D` : '';
+            const timeSection = timeParts.length ? `T${timeParts.join('')}` : '';
+            return `${sign}P${dayPart}${timeSection}`;
+        }
+
+        normalizeDecimalString(input: string): string | undefined {
+            const trimmed = input.trim();
+            if (!trimmed) return undefined;
+            const scientific = /^[+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?$/i;
+            if (!scientific.test(trimmed)) return undefined;
+            if (/e/i.test(trimmed)) {
+                const asNumber = Number(trimmed);
+                if (!Number.isFinite(asNumber)) return undefined;
+                return this.toPlainString(asNumber);
+            }
+            const sign = trimmed.startsWith('-') ? '-' : trimmed.startsWith('+') ? '' : '';
+            const unsigned = trimmed.replace(/^[+-]/, '');
+            const parts = unsigned.split('.');
+            const integer = parts[0].replace(/^0+(?=\d)/, '') || '0';
+            const fraction = (parts[1] ?? '').replace(/0+$/, '');
+            return fraction ? `${sign}${integer}.${fraction}` : `${sign}${integer}`;
+        }
+
+        toPlainString(value: number): string {
+            if (!Number.isFinite(value)) return String(value);
+            const str = value.toString();
+            if (!/e/i.test(str)) return str;
+            const [mantissa, exponentRaw] = str.toLowerCase().split('e');
+            const exponent = Number(exponentRaw);
+            if (!Number.isFinite(exponent)) return str;
+            const sign = mantissa.startsWith('-') ? '-' : '';
+            const normalizedMantissa = mantissa.replace(/^[+-]/, '');
+            const decimalIndex = normalizedMantissa.indexOf('.');
+            const digits = normalizedMantissa.replace('.', '');
+            const initialIndex = decimalIndex === -1 ? digits.length : decimalIndex;
+            const targetIndex = initialIndex + exponent;
+
+            if (targetIndex <= 0) {
+                return `${sign}0.${'0'.repeat(-targetIndex)}${digits}`.replace(/\.$/, '');
+            }
+            if (targetIndex >= digits.length) {
+                return `${sign}${digits}${'0'.repeat(targetIndex - digits.length)}`;
+            }
+            const integerPart = digits.slice(0, targetIndex) || '0';
+            const fractionalPart = digits.slice(targetIndex).replace(/0+$/, '');
+            return fractionalPart ? `${sign}${integerPart}.${fractionalPart}` : `${sign}${integerPart}`;
         }
 
         isDeepInsertEnabled(flagFromDefinition: boolean): boolean {
