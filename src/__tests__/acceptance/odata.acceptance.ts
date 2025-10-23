@@ -1099,6 +1099,30 @@ describe('OData component acceptance', () => {
     expect(first.orders).to.be.Array();
   });
 
+  it('returns expanded relation data when combining $select and $expand on Orders', async () => {
+    const res = await client
+      .get('/odata/Orders')
+      .query({
+        $expand: 'items($select=id,quantity,unitPrice)',
+        $select: 'id,total',
+        $skip: '0',
+        $top: '100',
+      })
+      .expect(200);
+
+    expect(res.body.value).to.be.Array();
+    expect(res.body.value).to.not.be.empty();
+    for (const order of res.body.value) {
+      expect(order).to.have.property('items');
+      expect(order.items).to.be.Array();
+      for (const item of order.items as AnyObject[]) {
+        expect(item).to.have.property('id');
+        expect(item).to.have.property('quantity');
+        expect(item).to.have.property('unitPrice');
+      }
+    }
+  });
+
   it('executes unbound actions with raw responses', async () => {
     const result = await client
       .post('/odata/resetInventory')
