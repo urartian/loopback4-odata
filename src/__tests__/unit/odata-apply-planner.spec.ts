@@ -130,7 +130,7 @@ describe('OData $apply planner', () => {
 
   it('builds plans for concat pipelines with branch stages', () => {
     const pipeline = parseApplyPipeline(
-      "concat(aggregate(quantity with sum as TotalQuantity),groupby((product/name), aggregate(quantity with sum as TotalQuantity))/concat(aggregate(* with count as UI5__count),top(3)))",
+      "concat(aggregate(quantity with sum as TotalQuantity),groupby((product/name), aggregate(quantity with sum as TotalQuantity))/concat(aggregate($count as UI5__count),top(3)))",
     );
 
     const plan = buildApplyExecutionPlan(pipeline);

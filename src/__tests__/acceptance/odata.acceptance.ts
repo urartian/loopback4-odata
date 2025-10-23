@@ -832,7 +832,7 @@ describe('OData component acceptance', () => {
 
   it('supports $apply pipelines that use concat transformations', async () => {
     const pipeline =
-      "concat(aggregate(quantity with sum as TotalQuantity),groupby((product/name), aggregate(quantity with sum as TotalQuantity))/concat(aggregate(* with count as UI5__count),top(3)))";
+      "concat(aggregate(quantity with sum as TotalQuantity),groupby((product/name), aggregate(quantity with sum as TotalQuantity))/concat(aggregate($count as UI5__count),top(3)))";
 
     const res = await client
       .get('/odata/OrderItems')

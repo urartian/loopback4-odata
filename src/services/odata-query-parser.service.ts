@@ -1599,6 +1599,19 @@ function parseAggregateExpression(raw: string): AggregationExpression {
     throw new Error('Empty aggregate expression.');
   }
 
+  const countOnly = expr.match(/^\$count\s+as\s+([A-Za-z_][A-Za-z0-9_]*)$/i);
+  if (countOnly) {
+    const alias = countOnly[1];
+    if (!/^[_A-Za-z][_A-Za-z0-9]*$/.test(alias)) {
+      throw new Error(`Invalid aggregate alias: ${alias}`);
+    }
+    return {
+      field: undefined,
+      operator: 'count',
+      alias,
+    };
+  }
+
   const match = expr.match(/^([^\s]+)\s+with\s+([A-Za-z]+)\s+as\s+([A-Za-z_][A-Za-z0-9_]*)$/i);
   if (!match) {
     throw new Error(`Invalid aggregate expression: ${expr}`);

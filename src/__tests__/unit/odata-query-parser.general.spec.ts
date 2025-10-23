@@ -142,7 +142,7 @@ describe('parseODataQuery basics', () => {
 
   it('parses concat transformations inside $apply pipelines', () => {
     const expression =
-      "concat(aggregate(quantity with sum as TotalQuantity),groupby((product/name), aggregate(quantity with sum as TotalQuantity))/concat(aggregate(* with count as UI5__count),top(5)))";
+      "concat(aggregate(quantity with sum as TotalQuantity),groupby((product/name), aggregate(quantity with sum as TotalQuantity))/concat(aggregate($count as UI5__count),top(5)))";
     const pipeline = parseApplyPipeline(expression);
     assert.equal(pipeline.transformations.length, 1);
     const [root] = pipeline.transformations;
