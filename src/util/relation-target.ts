@@ -2,7 +2,7 @@ import {AnyObject, Entity} from '@loopback/repository';
 import {createRequire} from 'module';
 
 const nodeRequire = createRequire(__filename);
-const targetByNameCache = new Map<string, typeof Entity | null>();
+const targetByNameCache = new Map<string, typeof Entity>();
 
 type AnyFn = (...args: unknown[]) => unknown;
 
@@ -160,8 +160,8 @@ function resolveByModelName(
   if (!normalized) return undefined;
 
   const cached = targetByNameCache.get(normalized);
-  if (cached !== undefined) {
-    return cached ?? undefined;
+  if (cached) {
+    return cached;
   }
 
   const maybeResolve = (candidate: unknown): typeof Entity | undefined =>
@@ -182,8 +182,6 @@ function resolveByModelName(
       return resolved;
     }
   }
-
-  targetByNameCache.set(normalized, null);
   return undefined;
 }
 
