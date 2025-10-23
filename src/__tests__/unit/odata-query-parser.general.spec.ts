@@ -140,6 +140,24 @@ describe('parseODataQuery basics', () => {
     assert.equal(parsed.apply?.aggregates[0].field, 'order/total');
   });
 
+  it('parses arithmetic aggregate operands', () => {
+    const parsed = parseODataQuery({
+      '$apply': 'aggregate(quantity mul unitPrice with sum as TotalRevenue)',
+    });
+
+    assert(parsed.applyPipeline);
+    assert(parsed.apply);
+    const aggregate = parsed.apply?.aggregates[0];
+    assert(aggregate);
+    assert.equal(aggregate.alias, 'TotalRevenue');
+    assert(!aggregate.field);
+    assert(aggregate.expression);
+    if (aggregate.expression) {
+      assert.equal(aggregate.expression.type, 'binary');
+      assert.equal(aggregate.expression.operator, 'mul');
+    }
+  });
+
   it('parses concat transformations inside $apply pipelines', () => {
     const expression =
       "concat(aggregate(quantity with sum as TotalQuantity),groupby((product/name), aggregate(quantity with sum as TotalQuantity))/concat(aggregate($count as UI5__count),top(5)))";

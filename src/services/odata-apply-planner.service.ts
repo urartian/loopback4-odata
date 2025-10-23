@@ -9,6 +9,7 @@ import {
   ApplyTopTransformation,
   AggregationExpression,
   AggregationSpec,
+  ComputeNode,
   ParsedExpression,
   UnsupportedFilterError,
   buildWhereFromParsedExpression,
@@ -32,6 +33,7 @@ export interface ApplyExecutionPlan {
   readonly postOrderBy?: Array<{field: string; direction: 'asc' | 'desc'}>;
   readonly postTop?: number;
   readonly postSkip?: number;
+  readonly postFilters?: ParsedExpression[];
 }
 
 export interface ApplyPlannerOptions {
@@ -55,6 +57,7 @@ export function buildApplyExecutionPlan(
   const preAggregationFilters: ParsedExpression[] = [];
   const stages: ApplyAggregationStage[] = [];
   const concatBranches: ApplyExecutionPlan[] = [];
+  const planPostFilters: ParsedExpression[] = [];
   let planOrderBy: Array<{field: string; direction: 'asc' | 'desc'}> | undefined;
   let planTop: number | undefined;
   let planSkip: number | undefined;
@@ -79,11 +82,16 @@ export function buildApplyExecutionPlan(
         if (currentStage) {
           currentStage.postAggregationFilters.push(transformation.expression);
         } else {
-          const whereCandidate = buildWhereCandidate(transformation.expression, options);
-          if (whereCandidate) {
-            pushdownWhere = mergeWhereClauses(pushdownWhere, whereCandidate);
+          const hasPlanResults = stages.length > 0 || concatBranches.length > 0;
+          if (hasPlanResults) {
+            planPostFilters.push(transformation.expression);
           } else {
-            preAggregationFilters.push(transformation.expression);
+            const whereCandidate = buildWhereCandidate(transformation.expression, options);
+            if (whereCandidate) {
+              pushdownWhere = mergeWhereClauses(pushdownWhere, whereCandidate);
+            } else {
+              preAggregationFilters.push(transformation.expression);
+            }
           }
         }
         break;
@@ -103,6 +111,7 @@ export function buildApplyExecutionPlan(
         break;
       }
       case 'orderby': {
+        const planHasResults = stages.length > 0 || concatBranches.length > 0;
         if (currentStage) {
           if (currentStage.orderBy && currentStage.orderBy.length) {
             throw new Error('Multiple orderby() transformations are not supported within the same stage.');
@@ -112,7 +121,8 @@ export function buildApplyExecutionPlan(
             direction: item.direction,
           }));
         } else {
-          if (!allowNonAggregate) {
+          const hasPlanResults = stages.length > 0 || concatBranches.length > 0;
+          if (!allowNonAggregate && !hasPlanResults) {
             throw new Error('orderby() transformation requires a preceding groupby() or aggregate().');
           }
           if (planOrderBy && planOrderBy.length) {
@@ -132,7 +142,8 @@ export function buildApplyExecutionPlan(
           }
           currentStage.skip = transformation.count;
         } else {
-          if (!allowNonAggregate) {
+          const hasPlanResults = stages.length > 0 || concatBranches.length > 0;
+          if (!allowNonAggregate && !hasPlanResults) {
             throw new Error('skip() transformation requires a preceding groupby() or aggregate().');
           }
           if (planSkip !== undefined) {
@@ -149,7 +160,8 @@ export function buildApplyExecutionPlan(
           }
           currentStage.top = transformation.count;
         } else {
-          if (!allowNonAggregate) {
+          const hasPlanResults = stages.length > 0 || concatBranches.length > 0;
+          if (!allowNonAggregate && !hasPlanResults) {
             throw new Error('top() transformation requires a preceding groupby() or aggregate().');
           }
           if (planTop !== undefined) {
@@ -163,9 +175,6 @@ export function buildApplyExecutionPlan(
         throw new Error('bottom() transformation is not supported yet.');
       }
       case 'concat': {
-        if (index !== pipeline.transformations.length - 1) {
-          throw new Error('concat() must be the final transformation in the $apply pipeline.');
-        }
         const branches = transformation.pipelines.map(branch => buildApplyExecutionPlan(branch, options, true));
         concatBranches.push(...branches);
         currentStage = undefined;
@@ -189,6 +198,7 @@ export function buildApplyExecutionPlan(
     ...(planOrderBy && planOrderBy.length ? {postOrderBy: planOrderBy} : {}),
     ...(planTop !== undefined ? {postTop: planTop} : {}),
     ...(planSkip !== undefined ? {postSkip: planSkip} : {}),
+    ...(planPostFilters.length ? {postFilters: planPostFilters} : {}),
   };
 
   if (options.modelCtor) {
@@ -280,6 +290,9 @@ function collectNavigationPaths(
   spec.groupBy.forEach(collect);
   for (const aggregate of spec.aggregates) {
     collect(aggregate.field);
+    if (aggregate.expression) {
+      collectPathsFromComputeNode(aggregate.expression, collect);
+    }
   }
 
   return Array.from(seen.values());
@@ -291,4 +304,24 @@ export function collectNavigationPathsForStage(
   maxDepth: number = DEFAULT_MAX_NAVIGATION_DEPTH,
 ): ResolvedNavigationPath[] {
   return collectNavigationPaths(modelCtor, spec, maxDepth);
+}
+
+function collectPathsFromComputeNode(node: ComputeNode, visitor: (path: string | undefined) => void) {
+  switch (node.type) {
+    case 'path': {
+      const joined = node.path.join('/');
+      visitor(joined);
+      break;
+    }
+    case 'binary':
+      collectPathsFromComputeNode(node.left, visitor);
+      collectPathsFromComputeNode(node.right, visitor);
+      break;
+    case 'function':
+      node.args.forEach(arg => collectPathsFromComputeNode(arg, visitor));
+      break;
+    case 'literal':
+    default:
+      break;
+  }
 }

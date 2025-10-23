@@ -853,6 +853,44 @@ describe('OData component acceptance', () => {
     });
   });
 
+  it('aggregates arithmetic operands inside $apply', async () => {
+    const res = await client
+      .get('/odata/OrderItems')
+      .query({
+        $apply: 'aggregate(quantity mul unitPrice with sum as TotalRevenue)',
+      })
+      .expect(200);
+
+    expect(res.body.value).to.be.Array();
+    expect(res.body.value).to.have.length(1);
+    expect(res.body.value[0].TotalRevenue).to.equal(5138);
+  });
+
+  it('supports concat pipelines followed by filter and orderby stages', async () => {
+    const pipeline =
+      "concat(aggregate(price with sum as price),aggregate(price with sum as price)/concat(aggregate($count as UI5__count),top(5)))/filter(price ge 0)/orderby(price desc)";
+
+    const res = await client
+      .get('/odata/OrderItems')
+      .query({$apply: pipeline})
+      .expect(200);
+
+    const rows: AnyObject[] = res.body.value;
+    expect(rows).to.be.Array();
+    expect(rows.length).to.be.greaterThan(1);
+
+    const [summary, countRow, ...detail] = rows;
+    expect(summary.price).to.be.a.Number();
+    expect(summary.price).to.be.greaterThan(0);
+    expect(countRow.UI5__count).to.equal(detail.length);
+    detail.forEach((item: AnyObject, index: number, list: AnyObject[]) => {
+      expect(item.price).to.be.a.Number();
+      if (index > 0) {
+        expect(list[index - 1].price >= item.price).to.be.true();
+      }
+    });
+  });
+
   it('supports $apply pipelines with post-aggregate filter stages', async () => {
     const res = await client
       .get('/odata/Orders')

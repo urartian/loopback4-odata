@@ -150,4 +150,16 @@ describe('OData $apply planner', () => {
     const [, detailBranches] = detailPlan.concat!;
     expect(detailBranches?.postTop).to.equal(3);
   });
+
+  it('collects navigation paths from compute aggregate operands', () => {
+    const pipeline = parseApplyPipeline(
+      'groupby((productId), aggregate(quantity mul product/price with sum as TotalRevenue))',
+    );
+
+    const plan = buildApplyExecutionPlan(pipeline, {modelCtor: Product});
+
+    expect(plan.stages).to.have.length(1);
+    const [stage] = plan.stages;
+    expect(stage.navigationPaths.some(path => path.originalPath === 'product/price')).to.be.true();
+  });
 });

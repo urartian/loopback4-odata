@@ -33,6 +33,7 @@ import {
     parseODataQuery,
     AggregationSpec,
     AggregationOperator,
+    AggregationExpression,
     LambdaExpression,
     ParsedExpression,
     FunctionArg,
@@ -1765,7 +1766,7 @@ export function defineODataCrudController(def: EntitySetDef) {
                     }
 
                     for (const aggregate of spec.aggregates) {
-                        const value = aggregate.field ? this.resolveVariantValue(row, variant, aggregate.field) : undefined;
+                        const value = this.evaluateAggregateOperand(aggregate, row, variant);
                         this.updateAccumulatorState(entry.aggregates[aggregate.alias], value);
                     }
                 }
@@ -1784,6 +1785,20 @@ export function defineODataCrudController(def: EntitySetDef) {
             }
 
             return results;
+        }
+
+        evaluateAggregateOperand(
+            aggregate: AggregationExpression,
+            row: AnyObject,
+            variant: {values: Record<string, unknown>},
+        ): unknown {
+            if (aggregate.expression) {
+                return this.evaluateComputeNode(aggregate.expression, row, variant);
+            }
+            if (aggregate.field) {
+                return this.resolveVariantValue(row, variant, aggregate.field);
+            }
+            return undefined;
         }
 
         groupNavigationPaths(paths: ResolvedNavigationPath[]): Map<string, ResolvedNavigationPath[]> {
@@ -2046,6 +2061,33 @@ export function defineODataCrudController(def: EntitySetDef) {
             return result;
         }
 
+        applyPostFiltersPreservingFields(data: AnyObject[], expressions: ParsedExpression[]): AnyObject[] {
+            if (!expressions.length) return data;
+            
+            // For concat operations, we only filter entities that have the relevant field,
+            // but preserve entities that don't have the field
+            let result = data;
+            for (const expr of expressions) {
+                if ('field' in expr && typeof expr.field === 'string') {
+                    const fieldName = expr.field.split('/')[0];
+                    // Only apply filter to entities that have the field, keep those that don't
+                    result = result.filter(entity => {
+                        if (entity.hasOwnProperty(fieldName)) {
+                            // If entity has the field, evaluate the predicate normally
+                            return this.evaluatePredicate(expr, entity, '', entity);
+                        } else {
+                            // If entity doesn't have the field, preserve it in results
+                            return true;
+                        }
+                    });
+                } else {
+                    // For other filter types, apply normal filtering
+                    result = this.applyPostFilter(result, expr);
+                }
+            }
+            return result;
+        }
+
         collectAggregationRelations(plan: ApplyExecutionPlan | undefined): string[] {
             const relations = new Set<string>();
             const addRelation = (name?: string) => {
@@ -2072,6 +2114,9 @@ export function defineODataCrudController(def: EntitySetDef) {
                             const [head] = field.split('/');
                             addRelation(head);
                         }
+                        if (aggregate.expression) {
+                            this.collectRelationsFromComputeNode(aggregate.expression, addRelation);
+                        }
                     }
                 }
                 current.concat?.forEach(branch => traverse(branch));
@@ -2080,10 +2125,41 @@ export function defineODataCrudController(def: EntitySetDef) {
             return Array.from(relations);
         }
 
+        collectRelationsFromComputeNode(node: ComputeNode, addRelation: (name?: string) => void) {
+            switch (node.type) {
+                case 'path': {
+                    if (node.path.length > 1) {
+                        addRelation(node.path[0]);
+                    }
+                    break;
+                }
+                case 'binary':
+                    this.collectRelationsFromComputeNode(node.left, addRelation);
+                    this.collectRelationsFromComputeNode(node.right, addRelation);
+                    break;
+                case 'function':
+                    for (const arg of node.args) {
+                        this.collectRelationsFromComputeNode(arg, addRelation);
+                    }
+                    break;
+                case 'literal':
+                default:
+                    break;
+            }
+        }
+
         planHasConcat(plan: ApplyExecutionPlan | undefined): boolean {
             if (!plan) return false;
             if (plan.concat && plan.concat.length) return true;
             return plan.concat?.some(branch => this.planHasConcat(branch)) ?? false;
+        }
+
+        planHasComputedAggregates(plan: ApplyExecutionPlan | undefined): boolean {
+            if (!plan) return false;
+            if (plan.stages.some(stage => stage.spec.aggregates.some(aggregate => Boolean(aggregate.expression)))) {
+                return true;
+            }
+            return plan.concat?.some(branch => this.planHasComputedAggregates(branch)) ?? false;
         }
 
         planHasInternalOrder(plan: ApplyExecutionPlan | undefined): boolean {
@@ -2106,6 +2182,9 @@ export function defineODataCrudController(def: EntitySetDef) {
                 return true;
             }
             if ((plan.postOrderBy?.length ?? 0) > 0 || plan.postTop !== undefined || plan.postSkip !== undefined) {
+                return true;
+            }
+            if (plan.postFilters && plan.postFilters.length) {
                 return true;
             }
             if (plan.concat && plan.concat.length) {
@@ -2147,7 +2226,7 @@ export function defineODataCrudController(def: EntitySetDef) {
             return undefined;
         }
 
-        runApplyPlanFallback(plan: ApplyExecutionPlan, input: AnyObject[]): { rows: AnyObject[]; lastStageOrdered: boolean } {
+        runApplyPlanFallback(plan: ApplyExecutionPlan, input: AnyObject[]): { rows: AnyObject[]; lastStageOrdered: boolean; branchSegments?: AnyObject[][] } {
             const stageCount = Math.max(this.countApplyPlanStages(plan), 1);
             const cursor = { value: 0 };
             return this.executeApplyPlanBranch(plan, input, stageCount, cursor);
@@ -2158,13 +2237,14 @@ export function defineODataCrudController(def: EntitySetDef) {
             input: AnyObject[],
             stageCount: number,
             cursor: { value: number },
-        ): { rows: AnyObject[]; lastStageOrdered: boolean } {
+        ): { rows: AnyObject[]; lastStageOrdered: boolean; branchSegments?: AnyObject[][] } {
             let working = input;
             if (plan.preAggregationFilters.length) {
                 working = this.applyPostFilters(working, plan.preAggregationFilters);
             }
 
             let lastStageOrdered = false;
+            let branchSegments: AnyObject[][] | undefined;
 
             for (const stage of plan.stages) {
                 working = this.executeAggregation(working, stage);
@@ -2190,25 +2270,46 @@ export function defineODataCrudController(def: EntitySetDef) {
 
             if (plan.concat && plan.concat.length) {
                 const branchResults: AnyObject[] = [];
+                const segments: AnyObject[][] = [];
                 for (const branch of plan.concat) {
                     const branchOutcome = this.executeApplyPlanBranch(branch, working, stageCount, cursor);
                     branchResults.push(...branchOutcome.rows);
+                    if (branchOutcome.branchSegments && branchOutcome.branchSegments.length) {
+                        segments.push(...branchOutcome.branchSegments);
+                    } else {
+                        segments.push([...branchOutcome.rows]);
+                    }
                 }
                 working = branchResults;
                 lastStageOrdered = false;
+                branchSegments = segments;
+            }
+
+            if (plan.postFilters && plan.postFilters.length) {
+                if (branchSegments && branchSegments.length) {
+                    // For concat operations with post-filters, apply filters to the complete flattened result
+                    // This ensures filters are applied across all segments appropriately
+                    working = this.applyPostFiltersPreservingFields(working, plan.postFilters);
+                    branchSegments = undefined; // Clear segments since we flattened and applied filters
+                } else {
+                    working = this.applyPostFilters(working, plan.postFilters);
+                    branchSegments = undefined;
+                }
             }
 
             if (plan.postOrderBy && plan.postOrderBy.length) {
                 const clauses = plan.postOrderBy.map(item => `${item.field} ${item.direction.toUpperCase()}`);
                 working = this.orderResults(working, clauses);
                 lastStageOrdered = true;
+                branchSegments = undefined;
             }
 
             if (plan.postSkip !== undefined || plan.postTop !== undefined) {
                 working = this.sliceResults(working, plan.postSkip, plan.postTop);
+                branchSegments = undefined;
             }
 
-            return { rows: working, lastStageOrdered };
+            return { rows: working, lastStageOrdered, branchSegments };
         }
 
         getValueAtPath(source: AnyObject, path: string): unknown {
@@ -2300,6 +2401,18 @@ export function defineODataCrudController(def: EntitySetDef) {
                 this.emitApplyTelemetry('pushdown', stageIndex, stageCount || 1, {reason});
             };
 
+            if (aggregation.aggregates.some(item => Boolean(item.expression)) || this.planHasComputedAggregates(plan)) {
+                emitReason('computed-aggregate');
+                return undefined;
+            }
+
+            const planContainsConcat = this.planHasConcat(plan);
+            const executorSupportsConcat = executor.capabilities?.concat === true;
+            if (planContainsConcat && !executorSupportsConcat) {
+                emitReason('concat-unsupported');
+                return undefined;
+            }
+
             const cloneExpression = (expression: ParsedExpression): ParsedExpression =>
                 JSON.parse(JSON.stringify(expression));
 
@@ -2327,6 +2440,7 @@ export function defineODataCrudController(def: EntitySetDef) {
                     .filter((branch): branch is ApplyExecutionPlan => Boolean(branch));
                 const clonedOrder =
                     sourcePlan.postOrderBy?.map(item => ({field: item.field, direction: item.direction})) ?? undefined;
+                const clonedFilters = sourcePlan.postFilters?.map(cloneExpression) ?? undefined;
                 return {
                     pushdownWhere: sourcePlan.pushdownWhere,
                     preAggregationFilters: [...sourcePlan.preAggregationFilters],
@@ -2335,6 +2449,7 @@ export function defineODataCrudController(def: EntitySetDef) {
                     ...(clonedOrder && clonedOrder.length ? {postOrderBy: clonedOrder} : {}),
                     ...(sourcePlan.postTop !== undefined ? {postTop: sourcePlan.postTop} : {}),
                     ...(sourcePlan.postSkip !== undefined ? {postSkip: sourcePlan.postSkip} : {}),
+                    ...(clonedFilters && clonedFilters.length ? {postFilters: clonedFilters} : {}),
                 };
             };
 
@@ -2364,6 +2479,7 @@ export function defineODataCrudController(def: EntitySetDef) {
                             navigationPaths,
                         },
                     ],
+                    postFilters: [],
                 };
             };
 
@@ -3067,19 +3183,30 @@ export function defineODataCrudController(def: EntitySetDef) {
             return Object.keys(projection).length ? projection as Filter<CrudEntity>['fields'] : fields;
         }
 
-        evaluateComputeNode(node: ComputeNode, current: AnyObject): unknown {
+        evaluateComputeNode(node: ComputeNode, current: AnyObject, variant?: {values: Record<string, unknown>}): unknown {
             switch (node.type) {
-                case 'path':
+                case 'path': {
+                    const joined = node.path.join('/');
+                    if (variant && node.path.length) {
+                        if (variant.values && Object.prototype.hasOwnProperty.call(variant.values, joined)) {
+                            return variant.values[joined];
+                        }
+                        if (joined.includes('/')) {
+                            const values = this.extractPathValues(current, joined.split('/'));
+                            return values.length ? values[0] : undefined;
+                        }
+                    }
                     return this.resolvePath(current, node.path);
+                }
                 case 'literal':
                     return node.value;
                 case 'binary': {
-                    const left = this.evaluateComputeNode(node.left, current);
-                    const right = this.evaluateComputeNode(node.right, current);
+                    const left = this.evaluateComputeNode(node.left, current, variant);
+                    const right = this.evaluateComputeNode(node.right, current, variant);
                     return this.evaluateNumericBinary(node.operator, left, right);
                 }
                 case 'function': {
-                    return this.evaluateComputeFunction(node, current);
+                    return this.evaluateComputeFunction(node, current, variant);
                 }
                 default:
                     return undefined;
@@ -3126,8 +3253,8 @@ export function defineODataCrudController(def: EntitySetDef) {
             return null;
         }
 
-        evaluateComputeFunction(node: Extract<ComputeNode, {type: 'function'}>, current: AnyObject): unknown {
-            const args = node.args.map(arg => this.evaluateComputeNode(arg, current));
+        evaluateComputeFunction(node: Extract<ComputeNode, {type: 'function'}>, current: AnyObject, variant?: {values: Record<string, unknown>}): unknown {
+            const args = node.args.map(arg => this.evaluateComputeNode(arg, current, variant));
             switch (node.name) {
                 case 'tolower': {
                     const value = args[0];
@@ -4661,31 +4788,29 @@ export function defineODataCrudController(def: EntitySetDef) {
                     delete fetchFilter.offset;
 
                     const stageCount = this.countApplyPlanStages(applyPlan);
-                    const primaryStage = this.planHasConcat(applyPlan) ? undefined : applyPlan?.stages?.[0];
-                    const pushdownResult = this.planHasConcat(applyPlan)
-                        ? undefined
-                        : await this.tryExecuteApplyPushdown(
-                            aggregationSpec,
-                            applyPlan,
-                            applyPipeline,
-                            fetchFilter,
-                            baseFilter,
-                            requestedOffset,
-                            requestedLimit,
-                            postFilterExpr,
-                            contextBase,
-                            options,
-                            primaryStage,
-                            0,
-                            stageCount || 1,
-                            {
-                                orderDescriptors: applyOrderDescriptors,
-                                skipTokenParts: applyTokenParts,
-                                pageSize: applyPageSize,
-                                stageTop: finalStage?.top,
-                                stageSkip: finalStage?.skip,
-                            },
-                        );
+                    const primaryStage = applyPlan?.stages?.[0];
+                    const pushdownResult = await this.tryExecuteApplyPushdown(
+                        aggregationSpec,
+                        applyPlan,
+                        applyPipeline,
+                        fetchFilter,
+                        baseFilter,
+                        requestedOffset,
+                        requestedLimit,
+                        postFilterExpr,
+                        contextBase,
+                        options,
+                        primaryStage,
+                        0,
+                        stageCount || 1,
+                        {
+                            orderDescriptors: applyOrderDescriptors,
+                            skipTokenParts: applyTokenParts,
+                            pageSize: applyPageSize,
+                            stageTop: finalStage?.top,
+                            stageSkip: finalStage?.skip,
+                        },
+                    );
                     if (pushdownResult) {
                         let pushdownRows = Array.isArray(pushdownResult.value) ? pushdownResult.value : [];
                         pushdownRows = pushdownRows.map(row => this.decoratePlainEntity(row) ?? row);
@@ -4716,6 +4841,7 @@ export function defineODataCrudController(def: EntitySetDef) {
                     const plainEntities = entities.map(entity => this.toPlainEntity(entity) ?? {});
                     let working = plainEntities;
                     let lastStageHasOrder = false;
+                    let branchSegments: AnyObject[][] | undefined;
 
                     let planForFallback: ApplyExecutionPlan | undefined = applyPlan;
                     if (!planForFallback && aggregationSpec) {
@@ -4742,10 +4868,12 @@ export function defineODataCrudController(def: EntitySetDef) {
                         const fallbackOutcome = this.runApplyPlanFallback(planForFallback, working);
                         working = fallbackOutcome.rows;
                         lastStageHasOrder = fallbackOutcome.lastStageOrdered;
+                        branchSegments = fallbackOutcome.branchSegments;
                     }
 
                     if (postFilterExpr) {
                         working = this.applyPostFilter(working, postFilterExpr);
+                        branchSegments = undefined;
                     }
 
                     this.logApplyFallback('in-memory-apply', {
@@ -4765,17 +4893,37 @@ export function defineODataCrudController(def: EntitySetDef) {
                     }
 
                     const planIncludesConcat = this.planHasConcat(applyPlan);
-                    let ordered = working;
+                    const orderClauses = applyOrderDescriptors.map(item => `${item.field} ${item.direction}`);
                     let paged: AnyObject[];
                     let nextLinkToken: string | undefined;
-                    if (!planIncludesConcat) {
+
+                    if (planIncludesConcat && branchSegments && branchSegments.length) {
+                        const preservedSegments = branchSegments.slice(0, Math.max(branchSegments.length - 1, 0));
+                        const preservedRows = preservedSegments.flat();
+                        let detailRows = branchSegments[branchSegments.length - 1] ?? [];
+
+                        if (!lastStageHasOrder && baseFilter.order) {
+                            detailRows = this.orderResults(detailRows, baseFilter.order);
+                        }
+                        detailRows = this.orderResults(detailRows, orderClauses);
+                        detailRows = this.filterRowsAfterSkipToken(detailRows, applyOrderDescriptors, applyTokenParts);
+
+                        const pagination = this.applyServerDrivenPaging(
+                            detailRows,
+                            applyOrderDescriptors,
+                            applyPageSize,
+                        );
+                        const pagedDetail = pagination.items;
+                        paged = preservedRows.length ? [...preservedRows, ...pagedDetail] : pagedDetail;
+                        nextLinkToken = pagination.token;
+                    } else {
+                        let ordered = working;
                         if (!lastStageHasOrder && baseFilter.order) {
                             ordered = this.orderResults(working, baseFilter.order);
                         }
-
-                        const orderClauses = applyOrderDescriptors.map(item => `${item.field} ${item.direction}`);
                         ordered = this.orderResults(ordered, orderClauses);
                         ordered = this.filterRowsAfterSkipToken(ordered, applyOrderDescriptors, applyTokenParts);
+
                         const pagination = this.applyServerDrivenPaging(
                             ordered,
                             applyOrderDescriptors,
@@ -4783,9 +4931,6 @@ export function defineODataCrudController(def: EntitySetDef) {
                         );
                         paged = pagination.items;
                         nextLinkToken = pagination.token;
-                    } else {
-                        paged = ordered;
-                        nextLinkToken = undefined;
                     }
 
                     this.ensureODataHeaders();

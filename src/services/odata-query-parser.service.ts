@@ -49,6 +49,7 @@ export type AggregationOperator = 'sum' | 'average' | 'min' | 'max' | 'count' | 
 
 export interface AggregationExpression {
   field?: string;
+  expression?: ComputeNode;
   operator: AggregationOperator;
   alias: string;
 }
@@ -1595,11 +1596,20 @@ function deriveAggregationSpecFromPipeline(pipeline: ApplyPipeline): Aggregation
 
 function parseAggregateExpression(raw: string): AggregationExpression {
   const expr = raw.trim();
+  let normalized = expr.replace(/%24/gi, '$');
+  // Best-effort URL decoding for encoded operands inside aggregate(), e.g. %24count
+  try {
+    // Replace '+' with space before decoding (common in querystrings)
+    const plusFixed = normalized.replace(/\+/g, ' ');
+    normalized = decodeURIComponent(plusFixed);
+  } catch {
+    // ignore decoding errors and continue with the best available string
+  }
   if (!expr) {
     throw new Error('Empty aggregate expression.');
   }
 
-  const countOnly = expr.match(/^\$count\s+as\s+([A-Za-z_][A-Za-z0-9_]*)$/i);
+  const countOnly = normalized.match(/^\$count\s+as\s+([A-Za-z_][A-Za-z0-9_]*)$/i);
   if (countOnly) {
     const alias = countOnly[1];
     if (!/^[_A-Za-z][_A-Za-z0-9]*$/.test(alias)) {
@@ -1612,12 +1622,12 @@ function parseAggregateExpression(raw: string): AggregationExpression {
     };
   }
 
-  const match = expr.match(/^([^\s]+)\s+with\s+([A-Za-z]+)\s+as\s+([A-Za-z_][A-Za-z0-9_]*)$/i);
+  const match = normalized.match(/^(.+)\s+with\s+([A-Za-z]+)\s+as\s+([A-Za-z_][A-Za-z0-9_]*)$/i);
   if (!match) {
     throw new Error(`Invalid aggregate expression: ${expr}`);
   }
 
-  const fieldToken = match[1];
+  const rawOperand = match[1].trim();
   const operatorToken = match[2].toLowerCase();
   const alias = match[3];
 
@@ -1640,16 +1650,36 @@ function parseAggregateExpression(raw: string): AggregationExpression {
     throw new Error(`Unsupported aggregation operator: ${operatorToken}`);
   }
 
-  if (fieldToken === '*' && operator !== 'count') {
+  if (rawOperand === '*' && operator !== 'count') {
     throw new Error('Only count(*) is supported for the wildcard aggregator.');
   }
 
-  if (fieldToken !== '*' && !isValidPath(fieldToken)) {
-    throw new Error(`Unsupported aggregate property: ${fieldToken}`);
+  let field: string | undefined;
+  let expression: ComputeNode | undefined;
+
+  if (rawOperand === '*') {
+    field = undefined;
+  } else if (isValidPath(rawOperand)) {
+    field = rawOperand;
+  } else {
+    const tokens = tokenize(rawOperand);
+    if (!tokens.length) {
+      throw new Error(`Unsupported aggregate operand: ${rawOperand}`);
+    }
+    try {
+      expression = parseComputeExpressionTokens(tokens);
+    } catch (err) {
+      throw new Error(`Unsupported aggregate operand: ${rawOperand}`);
+    }
+  }
+
+  if (!field && !expression && operator !== 'count') {
+    throw new Error(`Invalid aggregate operand for ${operatorToken}.`);
   }
 
   return {
-    field: fieldToken === '*' ? undefined : fieldToken,
+    field,
+    expression,
     operator,
     alias,
   };
