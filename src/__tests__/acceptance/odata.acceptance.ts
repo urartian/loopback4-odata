@@ -868,7 +868,7 @@ describe('OData component acceptance', () => {
 
   it('supports concat pipelines followed by filter and orderby stages', async () => {
     const pipeline =
-      "concat(aggregate(price with sum as price),aggregate(price with sum as price)/concat(aggregate($count as UI5__count),top(5)))/filter(price ge 0)/orderby(price desc)";
+      "concat(aggregate(unitPrice with sum as price),aggregate(unitPrice with sum as price)/concat(aggregate($count as UI5__count),top(5)))/filter(price ge 0)/orderby(price desc)";
 
     const res = await client
       .get('/odata/OrderItems')

@@ -2286,22 +2286,26 @@ export function defineODataCrudController(def: EntitySetDef) {
             }
 
             if (plan.postFilters && plan.postFilters.length) {
+                const filters = plan.postFilters;
                 if (branchSegments && branchSegments.length) {
-                    // For concat operations with post-filters, apply filters to the complete flattened result
-                    // This ensures filters are applied across all segments appropriately
-                    working = this.applyPostFiltersPreservingFields(working, plan.postFilters);
-                    branchSegments = undefined; // Clear segments since we flattened and applied filters
+                    branchSegments = branchSegments.map(segment =>
+                        this.applyPostFiltersPreservingFields(segment, filters),
+                    );
+                    working = branchSegments.flat();
                 } else {
-                    working = this.applyPostFilters(working, plan.postFilters);
-                    branchSegments = undefined;
+                    working = this.applyPostFilters(working, filters);
                 }
             }
 
             if (plan.postOrderBy && plan.postOrderBy.length) {
                 const clauses = plan.postOrderBy.map(item => `${item.field} ${item.direction.toUpperCase()}`);
-                working = this.orderResults(working, clauses);
+                if (branchSegments && branchSegments.length) {
+                    branchSegments = branchSegments.map(segment => this.orderResults(segment, clauses));
+                    working = branchSegments.flat();
+                } else {
+                    working = this.orderResults(working, clauses);
+                }
                 lastStageOrdered = true;
-                branchSegments = undefined;
             }
 
             if (plan.postSkip !== undefined || plan.postTop !== undefined) {
