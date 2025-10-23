@@ -209,25 +209,96 @@ export function defineODataCrudController(def: EntitySetDef) {
         ],
     };
 
+    const normalizeInclude = (include: InclusionFilter): NormalizedInclusion =>
+        (typeof include === 'string' ? { relation: include } : include);
+
+    const projectRelationField = (
+        fields: Filter<AnyObject>['fields'] | undefined,
+        relation: string,
+    ): Filter<AnyObject>['fields'] | undefined => {
+        if (fields == null) return fields;
+        if (Array.isArray(fields)) {
+            return fields.includes(relation) ? fields : [...fields, relation];
+        }
+        if (typeof fields === 'object') {
+            return { ...(fields as Record<string, boolean>), [relation]: true };
+        }
+        if (typeof fields === 'string') {
+            return fields === relation ? fields : [fields, relation];
+        }
+        return fields;
+    };
+
+    const resolveTargetRelations = (meta: AnyObject | undefined): RelationDefinitionMap | undefined => {
+        if (!meta) return undefined;
+        const target = meta.target as (() => typeof Entity) | typeof Entity | undefined;
+        if (!target) return undefined;
+        let ctor: typeof Entity | undefined;
+        const maybeCtor = target as typeof Entity;
+        if (typeof maybeCtor === 'function' && maybeCtor.prototype instanceof Entity) {
+            ctor = maybeCtor;
+        } else if (typeof target === 'function') {
+            try {
+                ctor = (target as () => typeof Entity)();
+            } catch {
+                ctor = undefined;
+            }
+        }
+        if (!ctor) return undefined;
+        const definition = (ctor as {definition?: ModelDefinition}).definition as ModelDefinition | undefined;
+        return (definition?.relations ?? {}) as RelationDefinitionMap;
+    };
+
+    const ensureIncludeProjection = (
+        target: Filter<AnyObject> | undefined,
+        includes: InclusionFilter[] | undefined,
+        relations?: RelationDefinitionMap,
+    ) => {
+        if (!target || !includes?.length) return;
+        for (const include of includes) {
+            const normalized = normalizeInclude(include);
+            if (!normalized.relation) continue;
+            const nextFields = projectRelationField(target.fields as Filter<AnyObject>['fields'], normalized.relation);
+            if (nextFields !== undefined || target.fields !== undefined) {
+                target.fields = nextFields;
+            }
+            const relationMeta = relations?.[normalized.relation] as AnyObject | undefined;
+            const foreignKey = relationMeta ? ensureNavigationTargetKey(relationMeta) : undefined;
+            if (foreignKey && normalized.scope?.fields) {
+                const scoped = projectRelationField(
+                    normalized.scope.fields as Filter<AnyObject>['fields'],
+                    foreignKey,
+                );
+                if (scoped !== undefined || normalized.scope.fields !== undefined) {
+                    normalized.scope.fields = scoped;
+                }
+            }
+            const childRelations = resolveTargetRelations(relationMeta);
+            if (normalized.scope) {
+                ensureIncludeProjection(
+                    normalized.scope as Filter<AnyObject>,
+                    (normalized.scope.include as InclusionFilter[] | undefined),
+                    childRelations,
+                );
+            }
+        }
+    };
+
     const mergeIncludes = (
         target: InclusionFilter[] = [],
         source: InclusionFilter[] = [],
     ): InclusionFilter[] => {
-        type NormalizedInclude = Exclude<InclusionFilter, string>;
-        const normalize = (include: InclusionFilter): NormalizedInclude =>
-            (typeof include === 'string' ? { relation: include } : include);
-
-        const merged = new Map<string, NormalizedInclude>();
+        const merged = new Map<string, NormalizedInclusion>();
 
         for (const include of target) {
-            const normalized = normalize(include);
+            const normalized = normalizeInclude(include);
             if (normalized.relation) {
                 merged.set(normalized.relation, { ...normalized });
             }
         }
 
         for (const include of source) {
-            const normalized = normalize(include);
+            const normalized = normalizeInclude(include);
             if (!normalized.relation) continue;
             const existing = merged.get(normalized.relation);
             merged.set(normalized.relation, existing ? { ...existing, ...normalized } : { ...normalized });
@@ -2712,6 +2783,11 @@ export function defineODataCrudController(def: EntitySetDef) {
             const includeList = this.normalizeIncludeList(filter.include);
             this.ensureIncludePath(includeList, lambda.path);
             filter.include = includeList;
+            ensureIncludeProjection(
+                filter as Filter<AnyObject>,
+                filter.include as InclusionFilter[] | undefined,
+                modelRelations,
+            );
             this.ensureLambdaFieldProjection(filter, lambda.path[0]);
         }
 
@@ -4599,7 +4675,15 @@ export function defineODataCrudController(def: EntitySetDef) {
                     const relationsToInclude = this.collectAggregationRelations(applyPlan);
                     if (relationsToInclude.length) {
                         const additions = relationsToInclude.map(relation => ({ relation }));
-                        baseFilter.include = mergeIncludes(baseFilter.include as InclusionFilter[] | undefined, additions);
+                        baseFilter.include = mergeIncludes(
+                            baseFilter.include as InclusionFilter[] | undefined,
+                            additions,
+                        );
+                        ensureIncludeProjection(
+                            baseFilter as Filter<AnyObject>,
+                            baseFilter.include as InclusionFilter[] | undefined,
+                            modelRelations,
+                        );
                     }
                 } else if (aggregationSpec) {
                     const fallbackSpec: AggregationSpec = {
@@ -4623,7 +4707,15 @@ export function defineODataCrudController(def: EntitySetDef) {
                     const relationsToInclude = this.collectAggregationRelations(tempPlan);
                     if (relationsToInclude.length) {
                         const additions = relationsToInclude.map(relation => ({ relation }));
-                        baseFilter.include = mergeIncludes(baseFilter.include as InclusionFilter[] | undefined, additions);
+                        baseFilter.include = mergeIncludes(
+                            baseFilter.include as InclusionFilter[] | undefined,
+                            additions,
+                        );
+                        ensureIncludeProjection(
+                            baseFilter as Filter<AnyObject>,
+                            baseFilter.include as InclusionFilter[] | undefined,
+                            modelRelations,
+                        );
                     }
                 }
                 this.ensureEtagField(baseFilter);
@@ -5720,6 +5812,11 @@ export function defineODataCrudController(def: EntitySetDef) {
                 target.include = mergeIncludes(existing, source.include);
             }
 
+            ensureIncludeProjection(
+                target as Filter<AnyObject>,
+                target.include as InclusionFilter[] | undefined,
+                modelRelations,
+            );
             this.ensureEtagField(target);
         }
     }
