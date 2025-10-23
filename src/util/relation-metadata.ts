@@ -1,9 +1,10 @@
 import {AnyObject, Entity, ModelDefinition} from '@loopback/repository';
+import {resolveRelationTarget} from './relation-target';
 
 interface RelationMetaLike extends AnyObject {
     keyTo?: string;
     source?: typeof Entity;
-    target?: (() => typeof Entity) | typeof Entity;
+    target?: unknown;
 }
 
 /**
@@ -20,22 +21,8 @@ export function ensureNavigationTargetKey(meta: RelationMetaLike | undefined): s
     if (meta.keyTo) return meta.keyTo;
 
     const sourceModel = meta.source;
-    const targetResolver = meta.target;
-    if (!sourceModel || typeof targetResolver !== 'function') return undefined;
-
-    let targetModel: typeof Entity | undefined;
-    const maybeCtor = targetResolver as unknown as typeof Entity;
-    const prototype = (maybeCtor as AnyObject)?.prototype;
-    if (prototype && prototype instanceof Entity) {
-        targetModel = maybeCtor;
-    } else {
-        try {
-            targetModel = (targetResolver as () => typeof Entity)();
-        } catch {
-            return undefined;
-        }
-    }
-    if (!targetModel) return undefined;
+    const targetModel = resolveRelationTarget(meta as AnyObject);
+    if (!sourceModel || !targetModel) return undefined;
 
     const targetDef = (targetModel as {definition?: ModelDefinition}).definition as ModelDefinition | undefined;
     const properties = targetDef?.properties ?? {};

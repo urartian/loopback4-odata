@@ -4,6 +4,12 @@ import {expect} from '@loopback/testlab';
 import 'reflect-metadata';
 import {NavigationPathError, resolveNavigationPath} from '../../util/navigation-path';
 import {OrderItem, Order, Product} from '../../../examples/basic-app';
+import {
+  ModelPropSource,
+  ModelPropTarget,
+  StringSource,
+  StringTarget,
+} from '../fixtures/navigation-models';
 
 describe('Navigation path resolver', () => {
   it('resolves belongsTo path on OrderItem', () => {
@@ -40,5 +46,23 @@ describe('Navigation path resolver', () => {
     expect(() => resolveNavigationPath(Product, 'orderItems/order/product', {maxDepth: 2})).to.throw(
       NavigationPathError,
     );
+  });
+
+  it('resolves relation when metadata stores target constructor under "model"', () => {
+    const result = resolveNavigationPath(ModelPropSource, 'modelRel/id');
+
+    expect(result.targetModel).to.equal(ModelPropTarget);
+    expect(result.joins).to.have.length(1);
+    const join = result.joins[0];
+    expect(join.targetModel).to.equal(ModelPropTarget);
+  });
+
+  it('resolves relation when metadata only exposes target model name', () => {
+    const result = resolveNavigationPath(StringSource, 'stringRel/id');
+
+    expect(result.targetModel).to.equal(StringTarget);
+    expect(result.joins).to.have.length(1);
+    const join = result.joins[0];
+    expect(join.targetModel).to.equal(StringTarget);
   });
 });

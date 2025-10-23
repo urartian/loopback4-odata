@@ -1,15 +1,12 @@
 import {AnyObject, Entity, ModelDefinition} from '@loopback/repository';
 import {ensureNavigationTargetKey} from './relation-metadata';
+import {RelationMetaLike, resolveRelationTarget} from './relation-target';
 
-type RelationMeta = AnyObject & {
-  name?: string;
+type RelationMeta = RelationMetaLike & {
   type?: string;
   relationType?: string;
-  source?: typeof Entity;
-  target?: (() => typeof Entity) | typeof Entity;
   keyFrom?: string;
   keyTo?: string;
-  through?: AnyObject;
 };
 
 export type SupportedRelationType = 'hasMany' | 'hasOne' | 'belongsTo';
@@ -123,30 +120,6 @@ function normalizeRelationType(meta: RelationMeta): SupportedRelationType | unde
   if (type === 'hasone') return 'hasOne';
   if (type === 'belongsto') return 'belongsTo';
   return undefined;
-}
-
-function resolveRelationTarget(meta: RelationMeta): typeof Entity | undefined {
-  const targetResolver = meta.target;
-  if (!targetResolver) return undefined;
-
-  if (isEntityConstructor(targetResolver as AnyObject)) {
-    return targetResolver as typeof Entity;
-  }
-
-  if (typeof targetResolver === 'function' && !isEntityConstructor(targetResolver as AnyObject)) {
-    try {
-      const target = (targetResolver as () => typeof Entity)();
-      if (isEntityConstructor(target)) return target;
-    } catch {
-      // ignore and attempt to interpret the resolver as constructor
-    }
-  }
-
-  return undefined;
-}
-
-function isEntityConstructor(value: AnyObject): value is typeof Entity {
-  return typeof value === 'function' && value.prototype instanceof Entity;
 }
 
 function buildJoinSegment(
