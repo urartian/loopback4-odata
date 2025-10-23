@@ -162,4 +162,31 @@ describe('OData $apply planner', () => {
     const [stage] = plan.stages;
     expect(stage.navigationPaths.some(path => path.originalPath === 'product/price')).to.be.true();
   });
+
+  it('records compute() transformations before aggregation stages', () => {
+    const pipeline = parseApplyPipeline(
+      'compute(quantity mul unitPrice as LineTotal)/aggregate(LineTotal with sum as Total)',
+    );
+
+    const plan = buildApplyExecutionPlan(pipeline);
+
+    expect(plan.hasCompute).to.be.true();
+    expect(plan.preTransforms).to.have.length(1);
+    expect(plan.preTransforms?.[0]).to.containDeep({type: 'compute'});
+    expect(plan.stages).to.have.length(1);
+  });
+
+  it('retains compute() transformations after aggregation stages', () => {
+    const pipeline = parseApplyPipeline(
+      'aggregate(quantity with sum as TotalQty)/compute(TotalQty mul 2 as DoubleQty)',
+    );
+
+    const plan = buildApplyExecutionPlan(pipeline);
+
+    expect(plan.hasCompute).to.be.true();
+    expect(plan.stages).to.have.length(1);
+    const [stage] = plan.stages;
+    expect(stage.postTransforms).to.be.Array();
+    expect(stage.postTransforms?.some(transform => transform.type === 'compute')).to.be.true();
+  });
 });

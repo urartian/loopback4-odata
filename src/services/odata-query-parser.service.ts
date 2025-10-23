@@ -71,7 +71,8 @@ export type ApplyTransformation =
   | ApplySkipTransformation
   | ApplyTopTransformation
   | ApplyBottomTransformation
-  | ApplyConcatTransformation;
+  | ApplyConcatTransformation
+  | ApplyComputeTransformation;
 
 export interface ApplyFilterTransformation {
   type: 'filter';
@@ -112,6 +113,11 @@ export interface ApplyBottomTransformation {
 export interface ApplyConcatTransformation {
   type: 'concat';
   pipelines: ApplyPipeline[];
+}
+
+export interface ApplyComputeTransformation {
+  type: 'compute';
+  expressions: ComputeExpression[];
 }
 
 function isValidIdentifierSegment(segment: string): boolean {
@@ -1408,6 +1414,8 @@ function parseApplyTransformation(segment: string): ApplyTransformation {
       return parseApplyBottom(inner);
     case 'concat':
       return parseApplyConcat(inner);
+    case 'compute':
+      return parseApplyCompute(inner);
     default:
       throw new Error(`Unsupported $apply transformation: ${name}`);
   }
@@ -1527,6 +1535,18 @@ function parseApplyConcat(body: string): ApplyConcatTransformation {
   return {
     type: 'concat',
     pipelines,
+  };
+}
+
+function parseApplyCompute(body: string): ApplyComputeTransformation {
+  const trimmed = body.trim();
+  if (!trimmed) {
+    throw new Error('compute() requires at least one expression.');
+  }
+  const expressions = parseCompute(trimmed);
+  return {
+    type: 'compute',
+    expressions,
   };
 }
 

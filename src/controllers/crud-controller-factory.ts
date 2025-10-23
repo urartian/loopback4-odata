@@ -67,7 +67,14 @@ import { ODataConfig, ODataApplyTelemetryEvent } from '../types';
 import { getODataSearchableProps } from '../decorators/search.decorators';
 import {ensureNavigationTargetKey} from '../util/relation-metadata';
 import {ResolvedNavigationPath} from '../util/navigation-path';
-import { ApplyExecutionPlan, ApplyAggregationStage, buildApplyExecutionPlan, collectNavigationPathsForStage } from '../services/odata-apply-planner.service';
+import {
+    ApplyExecutionPlan,
+    ApplyAggregationStage,
+    ApplyPreAggregationTransform,
+    StagePostAggregationTransform,
+    buildApplyExecutionPlan,
+    collectNavigationPathsForStage,
+} from '../services/odata-apply-planner.service';
 import { ODataApplyExecutorRegistry, ODataApplyExecutorContext } from '../services/odata-apply-executor.registry';
 type CrudEntity = Entity & { [key: string]: unknown };
 type CrudRepo = DefaultCrudRepository<CrudEntity, unknown>;
@@ -2171,9 +2178,14 @@ export function defineODataCrudController(def: EntitySetDef) {
 
         planRequiresPostProcessing(plan: ApplyExecutionPlan | undefined): boolean {
             if (!plan) return false;
+            if (plan.hasCompute) return true;
+            if (plan.preTransforms && plan.preTransforms.some(t => t.type === 'compute')) {
+                return true;
+            }
             if (plan.preAggregationFilters.length > 0) return true;
             if (plan.stages.length > 1) return true;
             if (plan.stages.some(stage =>
+                (stage.postTransforms?.some(t => t.type === 'compute') ?? false) ||
                 stage.postAggregationFilters.length > 0 ||
                 stage.skip !== undefined ||
                 stage.top !== undefined ||
@@ -2239,7 +2251,9 @@ export function defineODataCrudController(def: EntitySetDef) {
             cursor: { value: number },
         ): { rows: AnyObject[]; lastStageOrdered: boolean; branchSegments?: AnyObject[][] } {
             let working = input;
-            if (plan.preAggregationFilters.length) {
+            if (plan.preTransforms && plan.preTransforms.length) {
+                working = this.applyPreAggregationTransforms(working, plan.preTransforms);
+            } else if (plan.preAggregationFilters.length) {
                 working = this.applyPostFilters(working, plan.preAggregationFilters);
             }
 
@@ -2248,18 +2262,24 @@ export function defineODataCrudController(def: EntitySetDef) {
 
             for (const stage of plan.stages) {
                 working = this.executeAggregation(working, stage);
-                if (stage.postAggregationFilters.length) {
-                    working = this.applyPostFilters(working, stage.postAggregationFilters);
-                }
-                if (stage.orderBy?.length) {
-                    const clauses = stage.orderBy.map(item => `${item.field} ${item.direction.toUpperCase()}`);
-                    working = this.orderResults(working, clauses);
-                    lastStageOrdered = true;
+                if (stage.postTransforms && stage.postTransforms.length) {
+                    const outcome = this.applyStagePostTransforms(working, stage.postTransforms);
+                    working = outcome.rows;
+                    lastStageOrdered = outcome.ordered;
                 } else {
-                    lastStageOrdered = false;
-                }
-                if (stage.skip !== undefined || stage.top !== undefined) {
-                    working = this.sliceResults(working, stage.skip, stage.top);
+                    if (stage.postAggregationFilters.length) {
+                        working = this.applyPostFilters(working, stage.postAggregationFilters);
+                    }
+                    if (stage.orderBy?.length) {
+                        const clauses = stage.orderBy.map(item => `${item.field} ${item.direction.toUpperCase()}`);
+                        working = this.orderResults(working, clauses);
+                        lastStageOrdered = true;
+                    } else {
+                        lastStageOrdered = false;
+                    }
+                    if (stage.skip !== undefined || stage.top !== undefined) {
+                        working = this.sliceResults(working, stage.skip, stage.top);
+                    }
                 }
                 this.emitApplyTelemetry('fallback', cursor.value, stageCount, {
                     rows: working.length,
@@ -2420,6 +2440,49 @@ export function defineODataCrudController(def: EntitySetDef) {
             const cloneExpression = (expression: ParsedExpression): ParsedExpression =>
                 JSON.parse(JSON.stringify(expression));
 
+            const cloneComputeExpressions = (expressions: ComputeExpression[]): ComputeExpression[] =>
+                expressions.map(expr => ({
+                    alias: expr.alias,
+                    expression: JSON.parse(JSON.stringify(expr.expression)) as ComputeNode,
+                }));
+
+            const cloneStageTransforms = (
+                transforms?: StagePostAggregationTransform[],
+            ): StagePostAggregationTransform[] | undefined => {
+                if (!transforms || !transforms.length) return undefined;
+                return transforms.map(transform => {
+                    switch (transform.type) {
+                        case 'filter':
+                            return {type: 'filter', expression: cloneExpression(transform.expression)};
+                        case 'compute':
+                            return {type: 'compute', expressions: cloneComputeExpressions(transform.expressions)};
+                        case 'orderby':
+                            return {
+                                type: 'orderby',
+                                items: transform.items.map(item => ({field: item.field, direction: item.direction})),
+                            };
+                        case 'skip':
+                            return {type: 'skip', count: transform.count};
+                        case 'top':
+                            return {type: 'top', count: transform.count};
+                        default:
+                            return transform;
+                    }
+                });
+            };
+
+            const clonePreTransforms = (
+                transforms?: ApplyPreAggregationTransform[],
+            ): ApplyPreAggregationTransform[] | undefined => {
+                if (!transforms || !transforms.length) return undefined;
+                return transforms.map(transform => {
+                    if (transform.type === 'filter') {
+                        return {type: 'filter', expression: cloneExpression(transform.expression)};
+                    }
+                    return {type: 'compute', expressions: cloneComputeExpressions(transform.expressions)};
+                });
+            };
+
             const cloneStage = (stageToClone: ApplyAggregationStage): ApplyAggregationStage => ({
                 spec: {
                     groupBy: [...stageToClone.spec.groupBy],
@@ -2435,6 +2498,7 @@ export function defineODataCrudController(def: EntitySetDef) {
                         joins: path.joins.map(join => ({...join})),
                     }))
                     : [],
+                postTransforms: cloneStageTransforms(stageToClone.postTransforms),
             });
 
             const clonePlan = (sourcePlan?: ApplyExecutionPlan): ApplyExecutionPlan | undefined => {
@@ -2445,15 +2509,18 @@ export function defineODataCrudController(def: EntitySetDef) {
                 const clonedOrder =
                     sourcePlan.postOrderBy?.map(item => ({field: item.field, direction: item.direction})) ?? undefined;
                 const clonedFilters = sourcePlan.postFilters?.map(cloneExpression) ?? undefined;
+                const clonedPre = clonePreTransforms(sourcePlan.preTransforms);
                 return {
                     pushdownWhere: sourcePlan.pushdownWhere,
                     preAggregationFilters: [...sourcePlan.preAggregationFilters],
+                    ...(clonedPre && clonedPre.length ? {preTransforms: clonedPre} : {}),
                     stages: sourcePlan.stages.map(cloneStage),
                     ...(clonedConcat && clonedConcat.length ? {concat: clonedConcat} : {}),
                     ...(clonedOrder && clonedOrder.length ? {postOrderBy: clonedOrder} : {}),
                     ...(sourcePlan.postTop !== undefined ? {postTop: sourcePlan.postTop} : {}),
                     ...(sourcePlan.postSkip !== undefined ? {postSkip: sourcePlan.postSkip} : {}),
                     ...(clonedFilters && clonedFilters.length ? {postFilters: clonedFilters} : {}),
+                    ...(sourcePlan.hasCompute ? {hasCompute: sourcePlan.hasCompute} : {}),
                 };
             };
 
@@ -3130,6 +3197,63 @@ export function defineODataCrudController(def: EntitySetDef) {
                     row[expr.alias] = this.evaluateComputeNode(expr.expression, row);
                 }
             }
+        }
+
+        applyPreAggregationTransforms(
+            rows: AnyObject[],
+            transforms: ApplyPreAggregationTransform[],
+        ): AnyObject[] {
+            if (!transforms.length) return rows;
+            let working = rows;
+            for (const transform of transforms) {
+                switch (transform.type) {
+                    case 'filter':
+                        working = this.applyPostFilters(working, [transform.expression]);
+                        break;
+                    case 'compute':
+                        this.applyComputeExpressions(working, transform.expressions);
+                        break;
+                    default:
+                        break;
+                }
+            }
+            return working;
+        }
+
+        applyStagePostTransforms(
+            rows: AnyObject[],
+            transforms: StagePostAggregationTransform[],
+        ): { rows: AnyObject[]; ordered: boolean } {
+            if (!transforms.length) {
+                return { rows, ordered: false };
+            }
+            let working = rows;
+            let ordered = false;
+            for (const transform of transforms) {
+                switch (transform.type) {
+                    case 'filter':
+                        working = this.applyPostFilters(working, [transform.expression]);
+                        break;
+                    case 'compute':
+                        this.applyComputeExpressions(working, transform.expressions);
+                        break;
+                    case 'orderby': {
+                        const clauses = transform.items.map(item => `${item.field} ${item.direction.toUpperCase()}`);
+                        working = this.orderResults(working, clauses);
+                        ordered = clauses.length > 0;
+                        break;
+                    }
+                    case 'skip':
+                        working = this.sliceResults(working, transform.count, undefined);
+                        break;
+                    case 'top':
+                        working = this.sliceResults(working, undefined, transform.count);
+                        break;
+                    default:
+                        break;
+                }
+            }
+            return { rows: working, ordered };
         }
 
         collectComputeDependencies(expressions: ComputeExpression[] | undefined): Set<string> {

@@ -356,7 +356,7 @@ The `$compute` option projects virtual fields evaluated after the repository fet
 GET /odata/OrderItems?$compute=quantity mul unitPrice as LineTotal&$select=id,LineTotal
 ```
 
-The response includes the additional `LineTotal` column without altering/store schemas. Computed aliases can participate in `$select` and client-side sorting but are currently incompatible with `$apply` pushdowns or server-driven ordering.
+The response includes the additional `LineTotal` column without altering/store schemas. Computed aliases can participate in `$select`, client-side sorting, and in-memory `$apply` pipelines (for example, `compute()/aggregate()`), but they remain incompatible with `$apply` pushdowns or server-driven ordering.
 
 Responses are emitted as JSON by default. Clients can force a JSON payload regardless of the `Accept` header via `?$format=json`. Other media types (XML, CSV, etc.) are not yet supported.
 
@@ -1059,6 +1059,12 @@ Apply post-aggregation filters (similar to SQL `HAVING`):
 
 ```bash
 curl "http://127.0.0.1:3001/odata/Orders?\$apply=groupby((customerId),aggregate(total%20with%20sum%20as%20TotalRevenue))/filter(TotalRevenue%20gt%205000)/orderby(TotalRevenue%20desc)"
+```
+
+Inject computed measures into the pipeline and reuse them in later stages:
+
+```bash
+curl "http://127.0.0.1:3001/odata/OrderItems?\$apply=compute(quantity%20mul%20unitPrice%20as%20LineTotal)/aggregate(LineTotal%20with%20sum%20as%20TotalPrice)"
 ```
 
 Guard in-memory fallbacks by capping the allowed result size:

@@ -78,6 +78,9 @@ export class PostgresApplyExecutor implements ODataApplyExecutor {
     const effectivePlan = plan ?? this.buildPlanFromAggregation(ctx);
     const stages = effectivePlan?.stages ?? [];
     if (!stages.length) return undefined;
+    if (effectivePlan?.hasCompute) {
+      return undefined;
+    }
     if (effectivePlan?.preAggregationFilters?.length) {
       return undefined;
     }

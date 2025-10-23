@@ -252,14 +252,17 @@ describe('OData component acceptance', () => {
     expect(res.body.LineTotal).to.equal(2598);
   });
 
-  it('rejects $compute combined with $apply pipelines', async () => {
-    await client
-      .get('/odata/Products')
+  it('supports $compute inside $apply pipelines', async () => {
+    const res = await client
+      .get('/odata/OrderItems')
       .query({
-        $apply: 'groupby((name),aggregate(price with sum as TotalPrice))',
-        $compute: 'price add 1 as Increased',
+        $apply:
+          'compute(quantity mul unitPrice as LineTotal)/aggregate(LineTotal with sum as TotalPrice)',
       })
-      .expect(400);
+      .expect(200);
+
+    expect(res.body.value).to.be.Array();
+    expect(res.body.value[0].TotalPrice).to.equal(5138);
   });
 
   it('supports $levels within $expand options', async () => {

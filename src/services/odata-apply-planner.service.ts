@@ -7,8 +7,10 @@ import {
   ApplyOrderByTransformation,
   ApplySkipTransformation,
   ApplyTopTransformation,
+  ApplyComputeTransformation,
   AggregationExpression,
   AggregationSpec,
+  ComputeExpression,
   ComputeNode,
   ParsedExpression,
   UnsupportedFilterError,
@@ -23,10 +25,12 @@ export interface ApplyAggregationStage {
   top?: number;
   skip?: number;
   navigationPaths: ResolvedNavigationPath[];
+  postTransforms?: StagePostAggregationTransform[];
 }
 
 export interface ApplyExecutionPlan {
   readonly pushdownWhere?: Where<AnyObject>;
+  readonly preTransforms?: ApplyPreAggregationTransform[];
   readonly preAggregationFilters: ParsedExpression[];
   readonly stages: ApplyAggregationStage[];
   readonly concat?: ApplyExecutionPlan[];
@@ -34,7 +38,19 @@ export interface ApplyExecutionPlan {
   readonly postTop?: number;
   readonly postSkip?: number;
   readonly postFilters?: ParsedExpression[];
+  readonly hasCompute?: boolean;
 }
+
+export type ApplyPreAggregationTransform =
+  | {type: 'filter'; expression: ParsedExpression}
+  | {type: 'compute'; expressions: ComputeExpression[]};
+
+export type StagePostAggregationTransform =
+  | {type: 'filter'; expression: ParsedExpression}
+  | {type: 'compute'; expressions: ComputeExpression[]}
+  | {type: 'orderby'; items: Array<{field: string; direction: 'asc' | 'desc'}>}
+  | {type: 'skip'; count: number}
+  | {type: 'top'; count: number};
 
 export interface ApplyPlannerOptions {
   strict?: boolean;
@@ -55,6 +71,7 @@ export function buildApplyExecutionPlan(
 
   let pushdownWhere: Where<AnyObject> | undefined;
   const preAggregationFilters: ParsedExpression[] = [];
+  const preTransforms: ApplyPreAggregationTransform[] = [];
   const stages: ApplyAggregationStage[] = [];
   const concatBranches: ApplyExecutionPlan[] = [];
   const planPostFilters: ParsedExpression[] = [];
@@ -62,6 +79,8 @@ export function buildApplyExecutionPlan(
   let planTop: number | undefined;
   let planSkip: number | undefined;
   let currentStage: ApplyAggregationStage | undefined;
+  let seenComputeBeforeStage = false;
+  let hasCompute = false;
 
   const startStage = (spec: AggregationSpec) => {
     const stage: ApplyAggregationStage = {
@@ -71,6 +90,7 @@ export function buildApplyExecutionPlan(
       },
       postAggregationFilters: [],
       navigationPaths: [],
+      postTransforms: [],
     };
     stages.push(stage);
     currentStage = stage;
@@ -81,16 +101,21 @@ export function buildApplyExecutionPlan(
       case 'filter': {
         if (currentStage) {
           currentStage.postAggregationFilters.push(transformation.expression);
+          currentStage.postTransforms?.push({type: 'filter', expression: transformation.expression});
         } else {
           const hasPlanResults = stages.length > 0 || concatBranches.length > 0;
           if (hasPlanResults) {
             planPostFilters.push(transformation.expression);
           } else {
-            const whereCandidate = buildWhereCandidate(transformation.expression, options);
+            const canPushDown = !seenComputeBeforeStage;
+            const whereCandidate = canPushDown
+              ? buildWhereCandidate(transformation.expression, options)
+              : undefined;
             if (whereCandidate) {
               pushdownWhere = mergeWhereClauses(pushdownWhere, whereCandidate);
             } else {
               preAggregationFilters.push(transformation.expression);
+              preTransforms.push({type: 'filter', expression: transformation.expression});
             }
           }
         }
@@ -120,6 +145,7 @@ export function buildApplyExecutionPlan(
             field: item.field,
             direction: item.direction,
           }));
+          currentStage.postTransforms?.push({type: 'orderby', items: currentStage.orderBy});
         } else {
           const hasPlanResults = stages.length > 0 || concatBranches.length > 0;
           if (!allowNonAggregate && !hasPlanResults) {
@@ -141,6 +167,7 @@ export function buildApplyExecutionPlan(
             throw new Error('Only one skip() transformation is supported per stage.');
           }
           currentStage.skip = transformation.count;
+          currentStage.postTransforms?.push({type: 'skip', count: transformation.count});
         } else {
           const hasPlanResults = stages.length > 0 || concatBranches.length > 0;
           if (!allowNonAggregate && !hasPlanResults) {
@@ -159,6 +186,7 @@ export function buildApplyExecutionPlan(
             throw new Error('Only one top() transformation is supported per stage.');
           }
           currentStage.top = transformation.count;
+          currentStage.postTransforms?.push({type: 'top', count: transformation.count});
         } else {
           const hasPlanResults = stages.length > 0 || concatBranches.length > 0;
           if (!allowNonAggregate && !hasPlanResults) {
@@ -180,6 +208,17 @@ export function buildApplyExecutionPlan(
         currentStage = undefined;
         break;
       }
+      case 'compute': {
+        hasCompute = true;
+        const computeTransformation = transformation as ApplyComputeTransformation;
+        if (currentStage) {
+          currentStage.postTransforms?.push({type: 'compute', expressions: computeTransformation.expressions});
+        } else {
+          preTransforms.push({type: 'compute', expressions: computeTransformation.expressions});
+          seenComputeBeforeStage = true;
+        }
+        break;
+      }
       default:
         throw new Error(`Unsupported $apply transformation: ${(transformation as ApplyTransformation).type}`);
     }
@@ -190,6 +229,9 @@ export function buildApplyExecutionPlan(
     throw new Error('groupby() or aggregate() transformation is required in the $apply pipeline.');
   }
 
+  const planContainsCompute =
+    hasCompute || preTransforms.some(item => item.type === 'compute') || concatBranches.some(planHasCompute);
+
   const plan: ApplyExecutionPlan = {
     pushdownWhere,
     preAggregationFilters,
@@ -199,6 +241,8 @@ export function buildApplyExecutionPlan(
     ...(planTop !== undefined ? {postTop: planTop} : {}),
     ...(planSkip !== undefined ? {postSkip: planSkip} : {}),
     ...(planPostFilters.length ? {postFilters: planPostFilters} : {}),
+    ...(preTransforms.length ? {preTransforms} : {}),
+    ...(planContainsCompute ? {hasCompute: true} : {}),
   };
 
   if (options.modelCtor) {
@@ -238,6 +282,12 @@ function planHasAggregation(plan: ApplyExecutionPlan): boolean {
   if (plan.stages.length > 0) return true;
   if (!plan.concat || !plan.concat.length) return false;
   return plan.concat.some(child => planHasAggregation(child));
+}
+
+function planHasCompute(plan: ApplyExecutionPlan): boolean {
+  if (plan.hasCompute) return true;
+  if (!plan.concat || !plan.concat.length) return false;
+  return plan.concat.some(child => planHasCompute(child));
 }
 
 function populatePlanNavigationPaths(
