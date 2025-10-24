@@ -20,37 +20,42 @@ export interface RelationMetaLike extends AnyObject {
 export function resolveRelationTarget(meta: RelationMetaLike | undefined): typeof Entity | undefined {
   if (!meta) return undefined;
 
-  const visited = new Set<unknown>();
-  const queue: unknown[] = [];
+  const directVisited = new Set<unknown>();
+  const directCandidates = [
+    meta.target,
+    meta.targetResolver,
+    meta.model,
+    meta.modelTo,
+    meta.modelCtor,
+    meta.through?.model,
+  ];
 
-  queue.push(meta.target);
-  queue.push(meta.targetResolver);
-  queue.push(meta.model);
-  queue.push(meta.modelTo);
-  queue.push(meta.modelCtor);
-  queue.push(meta.through?.model);
-
-  while (queue.length) {
-    const candidate = queue.shift();
-    const resolved = tryResolveCandidate(candidate, meta, visited);
+  for (const candidate of directCandidates) {
+    const resolved = resolveCandidate(candidate, meta, directVisited);
     if (resolved) return resolved;
   }
 
-  const nameCandidates = collectNameCandidates(meta);
-  for (const name of nameCandidates) {
-    const resolved = resolveByModelName(name, meta, visited);
+  for (const hint of collectNameHints(meta)) {
+    const resolved = resolveByModelName(hint, meta, new Set<unknown>());
     if (resolved) return resolved;
   }
 
   return undefined;
 }
 
-function tryResolveCandidate(
+function resolveCandidate(
   candidate: unknown,
   meta: RelationMetaLike,
   visited: Set<unknown>,
 ): typeof Entity | undefined {
-  if (!candidate || visited.has(candidate)) return undefined;
+  if (candidate === undefined || candidate === null) return undefined;
+  if (typeof candidate === 'string') {
+    return resolveByModelName(candidate, meta, new Set<unknown>());
+  }
+  if (typeof candidate !== 'object' && typeof candidate !== 'function') {
+    return undefined;
+  }
+  if (visited.has(candidate)) return undefined;
   visited.add(candidate);
 
   if (isEntityConstructor(candidate as AnyObject)) {
@@ -58,77 +63,65 @@ function tryResolveCandidate(
   }
 
   if (typeof candidate === 'function') {
-    // Handle functions that are actually constructors first
-    if (isEntityConstructor((candidate as AnyObject).prototype)) {
-      return candidate as typeof Entity;
-    }
-
     try {
       const result = (candidate as AnyFn)();
-      const resolved = tryResolveCandidate(result, meta, visited);
+      const resolved = resolveCandidate(result, meta, visited);
       if (resolved) return resolved;
     } catch {
-      // Ignore errors from invoking the resolver; fall through to inspect the function
+      // ignore resolvers that require context
     }
 
     for (const key of Object.keys(candidate)) {
-      const nested = (candidate as AnyObject)[key];
-      const resolved = tryResolveCandidate(nested, meta, visited);
+      const resolved = resolveCandidate((candidate as AnyObject)[key], meta, visited);
       if (resolved) return resolved;
     }
     return undefined;
   }
 
-  if (typeof candidate === 'object') {
-    const obj = candidate as AnyObject;
-    const nestedResolvers = [
-      obj.model,
-      obj.Model,
-      obj.modelCtor,
-      obj.target,
-      obj.entityClass,
-      obj.constructor,
-    ];
-    for (const nested of nestedResolvers) {
-      const resolved = tryResolveCandidate(nested, meta, visited);
+  if (Array.isArray(candidate)) {
+    for (const entry of candidate) {
+      const resolved = resolveCandidate(entry, meta, visited);
       if (resolved) return resolved;
-    }
-
-    if (typeof obj.modelName === 'string') {
-      const resolved = resolveByModelName(obj.modelName, meta, visited);
-      if (resolved) return resolved;
-    }
-
-    if (Array.isArray(obj)) {
-      for (const value of obj) {
-        const resolved = tryResolveCandidate(value, meta, visited);
-        if (resolved) return resolved;
-      }
-      return undefined;
-    }
-
-    if (!isPlainObject(obj)) return undefined;
-
-    try {
-      for (const value of Object.values(obj)) {
-        const resolved = tryResolveCandidate(value, meta, visited);
-        if (resolved) return resolved;
-      }
-    } catch {
-      // Ignore objects with throwing property accessors
     }
     return undefined;
   }
 
-  if (typeof candidate === 'string') {
-    return resolveByModelName(candidate, meta, visited);
+  const obj = candidate as AnyObject;
+  const nested = [
+    obj.model,
+    obj.Model,
+    obj.modelCtor,
+    obj.target,
+    obj.entityClass,
+    obj.through?.model,
+  ];
+
+  for (const value of nested) {
+    const resolved = resolveCandidate(value, meta, visited);
+    if (resolved) return resolved;
+  }
+
+  if (typeof obj.modelName === 'string') {
+    const resolved = resolveByModelName(obj.modelName, meta, new Set<unknown>());
+    if (resolved) return resolved;
+  }
+
+  if (!isPlainObject(obj)) return undefined;
+
+  try {
+    for (const value of Object.values(obj)) {
+      const resolved = resolveCandidate(value, meta, visited);
+      if (resolved) return resolved;
+    }
+  } catch {
+    // ignore objects with throwing accessors
   }
 
   return undefined;
 }
 
-function collectNameCandidates(meta: RelationMetaLike): string[] {
-  const names = new Set<string>();
+function collectNameHints(meta: RelationMetaLike): string[] {
+  const hints = new Set<string>();
   const rawCandidates = [
     meta.target,
     meta.model,
@@ -141,14 +134,19 @@ function collectNameCandidates(meta: RelationMetaLike): string[] {
 
   for (const raw of rawCandidates) {
     if (typeof raw === 'string' && raw.trim()) {
-      names.add(raw.trim());
+      hints.add(raw.trim());
+      continue;
     }
-    if (typeof raw === 'object' && raw && typeof (raw as AnyObject).name === 'string') {
-      names.add(((raw as AnyObject).name as string).trim());
+
+    if (raw && typeof raw === 'object') {
+      const name = (raw as AnyObject).name;
+      if (typeof name === 'string' && name.trim()) {
+        hints.add(name.trim());
+      }
     }
   }
 
-  return [...names];
+  return [...hints];
 }
 
 function resolveByModelName(
@@ -156,18 +154,13 @@ function resolveByModelName(
   meta: RelationMetaLike,
   visited: Set<unknown>,
 ): typeof Entity | undefined {
-  const normalized = name.trim().toLowerCase();
+  const normalized = normalizeName(name);
   if (!normalized) return undefined;
 
   const cached = targetByNameCache.get(normalized);
-  if (cached) {
-    return cached;
-  }
+  if (cached) return cached;
 
-  const maybeResolve = (candidate: unknown): typeof Entity | undefined =>
-    scanForModel(candidate, normalized, visited);
-
-  const direct = maybeResolve(meta.source);
+  const direct = scanForNamedModel(meta.source, normalized, visited);
   if (direct) {
     targetByNameCache.set(normalized, direct);
     return direct;
@@ -176,67 +169,82 @@ function resolveByModelName(
   const cache = nodeRequire.cache ?? {};
   for (const moduleId of Object.keys(cache)) {
     const exported = cache[moduleId]?.exports;
-    const resolved = maybeResolve(exported);
+    const resolved = scanForNamedModel(exported, normalized, visited);
     if (resolved) {
       targetByNameCache.set(normalized, resolved);
       return resolved;
     }
   }
+
   return undefined;
 }
 
-function scanForModel(
+function scanForNamedModel(
   candidate: unknown,
   normalized: string,
   visited: Set<unknown>,
 ): typeof Entity | undefined {
-  if (!candidate || visited.has(candidate)) return undefined;
+  if (candidate === undefined || candidate === null) return undefined;
+  if (visited.has(candidate)) return undefined;
+  if (typeof candidate !== 'object' && typeof candidate !== 'function') {
+    return undefined;
+  }
+
   visited.add(candidate);
 
   if (isEntityConstructor(candidate as AnyObject)) {
     const ctor = candidate as typeof Entity;
-    const definition = (ctor as AnyObject).definition as {name?: string} | undefined;
-    const namesToCheck = [
-      definition?.name,
-      (ctor as AnyObject).modelName,
-      (ctor as AnyObject).name,
-    ];
-    for (const value of namesToCheck) {
-      if (typeof value === 'string' && value.trim().toLowerCase() === normalized) {
-        return ctor;
-      }
+    if (entityNameMatches(ctor, normalized)) {
+      return ctor;
     }
   }
 
   if (typeof candidate === 'function') {
     for (const key of Object.keys(candidate)) {
-      const resolved = scanForModel((candidate as AnyObject)[key], normalized, visited);
+      const resolved = scanForNamedModel((candidate as AnyObject)[key], normalized, visited);
       if (resolved) return resolved;
     }
     return undefined;
   }
 
   if (Array.isArray(candidate)) {
-    for (const value of candidate) {
-      const resolved = scanForModel(value, normalized, visited);
+    for (const entry of candidate) {
+      const resolved = scanForNamedModel(entry, normalized, visited);
       if (resolved) return resolved;
     }
     return undefined;
   }
 
-  if (typeof candidate === 'object' && candidate) {
-    if (!isPlainObject(candidate as AnyObject)) return undefined;
-    try {
-      for (const value of Object.values(candidate as AnyObject)) {
-        const resolved = scanForModel(value, normalized, visited);
-        if (resolved) return resolved;
-      }
-    } catch {
-      // Ignore objects with throwing property accessors
+  const obj = candidate as AnyObject;
+  if (typeof obj.modelName === 'string' && normalizeName(obj.modelName) === normalized) {
+    if (isEntityConstructor(obj.constructor as AnyObject)) {
+      return obj.constructor as typeof Entity;
     }
   }
 
+  if (!isPlainObject(obj)) return undefined;
+
+  try {
+    for (const value of Object.values(obj)) {
+      const resolved = scanForNamedModel(value, normalized, visited);
+      if (resolved) return resolved;
+    }
+  } catch {
+    // ignore throwing accessors
+  }
+
   return undefined;
+}
+
+function entityNameMatches(ctor: typeof Entity, normalized: string): boolean {
+  const definition = (ctor as AnyObject).definition as {name?: string} | undefined;
+  const candidates = [definition?.name, (ctor as AnyObject).modelName, ctor.name];
+  return candidates.some(value => normalizeName(value) === normalized);
+}
+
+function normalizeName(value: unknown): string {
+  if (typeof value !== 'string') return '';
+  return value.trim().toLowerCase();
 }
 
 function isEntityConstructor(value: AnyObject | undefined): value is typeof Entity {
