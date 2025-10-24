@@ -137,6 +137,10 @@ function resolveRelationTarget(meta: RelationMeta): typeof Entity | undefined {
     try {
       const target = (targetResolver as () => typeof Entity)();
       if (isEntityConstructor(target)) return target;
+      // Fallback for circular dependency resolution issues
+      if (typeof target === 'function') {
+        return target as typeof Entity;
+      }
     } catch {
       // ignore and attempt to interpret the resolver as constructor
     }
