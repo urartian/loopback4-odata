@@ -126,23 +126,166 @@ function normalizeRelationType(meta: RelationMeta): SupportedRelationType | unde
 }
 
 function resolveRelationTarget(meta: RelationMeta): typeof Entity | undefined {
-  const targetResolver = meta.target;
-  if (!targetResolver) return undefined;
+  const resolver = meta.target;
+  if (!resolver) return undefined;
+  return unwrapRelationTarget(meta, resolver, new Set());
+}
 
-  if (isEntityConstructor(targetResolver as AnyObject)) {
-    return targetResolver as typeof Entity;
+function unwrapRelationTarget(
+  meta: RelationMeta,
+  candidate: unknown,
+  visited: Set<unknown>,
+): typeof Entity | undefined {
+  if (!candidate) return undefined;
+  if (visited.has(candidate)) return undefined;
+  visited.add(candidate);
+
+  if (isEntityConstructor(candidate as AnyObject)) {
+    return candidate as typeof Entity;
   }
 
-  if (typeof targetResolver === 'function' && !isEntityConstructor(targetResolver as AnyObject)) {
-    try {
-      const target = (targetResolver as () => typeof Entity)();
-      if (isEntityConstructor(target)) return target;
-    } catch {
-      // ignore and attempt to interpret the resolver as constructor
+  if (typeof candidate === 'function') {
+    if (isEntityConstructor(candidate as AnyObject)) {
+      return candidate as typeof Entity;
+    }
+    if (candidate.length === 0 && !isPromiseHandler(candidate)) {
+      try {
+        const result = (candidate as () => unknown)();
+        const resolved = unwrapRelationTarget(meta, result, visited);
+        if (resolved) return resolved;
+      } catch {
+        // Ignore errors from invoking resolver candidates and continue probing
+      }
+    }
+  }
+
+  if (typeof candidate === 'string') {
+    const resolved = resolveModelByName(meta, candidate, visited);
+    if (resolved) return resolved;
+  }
+
+  if (Array.isArray(candidate)) {
+    for (const entry of candidate) {
+      const resolved = unwrapRelationTarget(meta, entry, visited);
+      if (resolved) return resolved;
+    }
+    return undefined;
+  }
+
+  if (candidate instanceof Map) {
+    for (const value of candidate.values()) {
+      const resolved = unwrapRelationTarget(meta, value, visited);
+      if (resolved) return resolved;
+    }
+    return undefined;
+  }
+
+  if (candidate instanceof Set) {
+    for (const value of candidate.values()) {
+      const resolved = unwrapRelationTarget(meta, value, visited);
+      if (resolved) return resolved;
+    }
+    return undefined;
+  }
+
+  if (typeof candidate === 'object') {
+    const record = candidate as AnyObject;
+    for (const value of Object.values(record)) {
+      if (typeof value === 'function' && (value as AnyObject).length !== 0) continue;
+      const resolved = unwrapRelationTarget(meta, value, visited);
+      if (resolved) return resolved;
     }
   }
 
   return undefined;
+}
+
+function resolveModelByName(
+  meta: RelationMeta,
+  name: string,
+  visited: Set<unknown>,
+): typeof Entity | undefined {
+  const source = meta.source as AnyObject | undefined;
+  if (!source) return undefined;
+
+  const builders = collectModelBuilders(source);
+  for (const builder of builders) {
+    const resolved = resolveFromModelBuilder(meta, builder, name, visited);
+    if (resolved) return resolved;
+  }
+
+  return undefined;
+}
+
+function collectModelBuilders(source: AnyObject): AnyObject[] {
+  const builders: AnyObject[] = [];
+  const enqueue = (value: unknown) => {
+    if (!value || typeof value !== 'object') return;
+    if (builders.includes(value as AnyObject)) return;
+    builders.push(value as AnyObject);
+  };
+
+  enqueue(source.modelBuilder);
+  const ctor = (source as AnyObject).constructor as AnyObject | undefined;
+  if (ctor) enqueue(ctor.modelBuilder);
+
+  const definition = (source.definition ?? {}) as AnyObject;
+  enqueue(definition.modelBuilder);
+  const settings = definition.settings;
+  if (settings instanceof Map) {
+    enqueue(settings.get('modelBuilder'));
+  } else if (settings && typeof settings === 'object') {
+    enqueue((settings as AnyObject).modelBuilder);
+  }
+
+  return builders;
+}
+
+function resolveFromModelBuilder(
+  meta: RelationMeta,
+  builder: AnyObject | undefined,
+  name: string,
+  visited: Set<unknown>,
+): typeof Entity | undefined {
+  if (!builder) return undefined;
+
+  const containers = ['models', 'definitions', 'classes'] as const;
+  for (const key of containers) {
+    const container = builder[key as keyof typeof builder] as AnyObject | Map<string, unknown> | undefined;
+    if (!container) continue;
+    if (container instanceof Map) {
+      if (!container.has(name)) continue;
+      const resolved = unwrapRelationTarget(meta, container.get(name), visited);
+      if (resolved) return resolved;
+      continue;
+    }
+    const value = (container as AnyObject)[name];
+    if (value) {
+      const resolved = unwrapRelationTarget(meta, value, visited);
+      if (resolved) return resolved;
+    }
+  }
+
+  const methods = ['getModelClass', 'getModelCtor', 'getModel', 'model'] as const;
+  for (const method of methods) {
+    const fn = builder[method];
+    if (typeof fn !== 'function') continue;
+    try {
+      const value = fn.call(builder, name);
+      const resolved = unwrapRelationTarget(meta, value, visited);
+      if (resolved) return resolved;
+    } catch {
+      // Swallow errors and continue probing additional builder sources
+    }
+  }
+
+  return undefined;
+}
+
+function isPromiseHandler(candidate: unknown): candidate is (...args: unknown[]) => unknown {
+  if (typeof candidate !== 'function') return false;
+  const name = (candidate as AnyObject).name;
+  return name === 'then' || name === 'catch' || name === 'finally';
 }
 
 function isEntityConstructor(value: AnyObject): value is typeof Entity {

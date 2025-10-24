@@ -5,6 +5,7 @@ import {expect} from '@loopback/testlab';
 import {buildApplyExecutionPlan} from '../../services/odata-apply-planner.service';
 import {parseApplyPipeline} from '../../services/odata-query-parser.service';
 import {Product} from '../../../examples/basic-app';
+import {SapSalesOrder, SapSalesOrderItem} from '../fixtures/sap-app.fixture';
 
 describe('OData $apply planner', () => {
   it('pushes down filter() expressions when possible', () => {
@@ -161,5 +162,26 @@ describe('OData $apply planner', () => {
     expect(plan.stages).to.have.length(1);
     const [stage] = plan.stages;
     expect(stage.navigationPaths.some(path => path.originalPath === 'product/price')).to.be.true();
+  });
+
+  it('collects navigation paths for SAP-style $apply pipelines with belongsTo relations', () => {
+    const relation = SapSalesOrderItem.definition.relations.salesOrder as {target: unknown};
+    const originalTarget = relation.target;
+    relation.target = () => ({model: SapSalesOrder});
+
+    try {
+      const pipeline = parseApplyPipeline(
+        'groupby((salesOrder/ID), aggregate(salesOrder/netAmount with sum as TotalNetAmount))',
+      );
+
+      const plan = buildApplyExecutionPlan(pipeline, {modelCtor: SapSalesOrderItem});
+
+      expect(plan.stages).to.have.length(1);
+      const [stage] = plan.stages;
+      const navigationPaths = stage.navigationPaths.map(path => path.originalPath).sort();
+      expect(navigationPaths).to.deepEqual(['salesOrder/ID', 'salesOrder/netAmount']);
+    } finally {
+      relation.target = originalTarget;
+    }
   });
 });

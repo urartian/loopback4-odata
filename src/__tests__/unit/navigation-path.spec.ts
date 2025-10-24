@@ -4,6 +4,7 @@ import {expect} from '@loopback/testlab';
 import 'reflect-metadata';
 import {NavigationPathError, resolveNavigationPath} from '../../util/navigation-path';
 import {OrderItem, Order, Product} from '../../../examples/basic-app';
+import {SapSalesOrder, SapSalesOrderItem} from '../fixtures/sap-app.fixture';
 
 describe('Navigation path resolver', () => {
   it('resolves belongsTo path on OrderItem', () => {
@@ -40,5 +41,24 @@ describe('Navigation path resolver', () => {
     expect(() => resolveNavigationPath(Product, 'orderItems/order/product', {maxDepth: 2})).to.throw(
       NavigationPathError,
     );
+  });
+
+  it('resolves belongsTo path when target resolver returns a factory object', () => {
+    const relation = SapSalesOrderItem.definition.relations.salesOrder as {target: unknown};
+    const originalTarget = relation.target;
+    relation.target = () => ({entity: SapSalesOrder});
+
+    try {
+      const result = resolveNavigationPath(SapSalesOrderItem, 'salesOrder/ID');
+
+      expect(result.joins).to.have.length(1);
+      const [join] = result.joins;
+      expect(join.relationType).to.equal('belongsTo');
+      expect(join.targetKey).to.equal('ID');
+      expect(result.targetModel).to.equal(SapSalesOrder);
+      expect(result.propertyPath).to.equal('ID');
+    } finally {
+      relation.target = originalTarget;
+    }
   });
 });
