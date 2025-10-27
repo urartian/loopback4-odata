@@ -60,6 +60,7 @@ export interface ODataApplyExecutor {
   readonly id: string;
   readonly capabilities?: {
     navigation?: boolean;
+    concat?: boolean;
   };
   /**
    * Quick guard invoked during boot to determine whether the executor can handle

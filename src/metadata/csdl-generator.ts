@@ -1161,7 +1161,7 @@ export class CsdlGenerator {
             }
 
             if (capabilities.applySupported) {
-                const transformations = ['filter', 'groupby', 'aggregate', 'orderby', 'top', 'skip'];
+                const transformations = ['filter', 'groupby', 'aggregate', 'orderby', 'top', 'skip', 'concat'];
                 capabilityAnnotationsXml.push(
                     '        <Annotation Term="Org.OData.Capabilities.V1.ApplySupported">',
                     '          <Record>',

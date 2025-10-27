@@ -9,6 +9,7 @@ import {
   ApplyTopTransformation,
   AggregationExpression,
   AggregationSpec,
+  ComputeNode,
   ParsedExpression,
   UnsupportedFilterError,
   buildWhereFromParsedExpression,
@@ -28,6 +29,11 @@ export interface ApplyExecutionPlan {
   readonly pushdownWhere?: Where<AnyObject>;
   readonly preAggregationFilters: ParsedExpression[];
   readonly stages: ApplyAggregationStage[];
+  readonly concat?: ApplyExecutionPlan[];
+  readonly postOrderBy?: Array<{field: string; direction: 'asc' | 'desc'}>;
+  readonly postTop?: number;
+  readonly postSkip?: number;
+  readonly postFilters?: ParsedExpression[];
 }
 
 export interface ApplyPlannerOptions {
@@ -41,6 +47,7 @@ const DEFAULT_MAX_NAVIGATION_DEPTH = 5;
 export function buildApplyExecutionPlan(
   pipeline: ApplyPipeline,
   options: ApplyPlannerOptions = {},
+  allowNonAggregate = false,
 ): ApplyExecutionPlan {
   if (!pipeline.transformations.length) {
     throw new Error('Empty $apply pipeline.');
@@ -49,6 +56,11 @@ export function buildApplyExecutionPlan(
   let pushdownWhere: Where<AnyObject> | undefined;
   const preAggregationFilters: ParsedExpression[] = [];
   const stages: ApplyAggregationStage[] = [];
+  const concatBranches: ApplyExecutionPlan[] = [];
+  const planPostFilters: ParsedExpression[] = [];
+  let planOrderBy: Array<{field: string; direction: 'asc' | 'desc'}> | undefined;
+  let planTop: number | undefined;
+  let planSkip: number | undefined;
   let currentStage: ApplyAggregationStage | undefined;
 
   const startStage = (spec: AggregationSpec) => {
@@ -70,11 +82,16 @@ export function buildApplyExecutionPlan(
         if (currentStage) {
           currentStage.postAggregationFilters.push(transformation.expression);
         } else {
-          const whereCandidate = buildWhereCandidate(transformation.expression, options);
-          if (whereCandidate) {
-            pushdownWhere = mergeWhereClauses(pushdownWhere, whereCandidate);
+          const hasPlanResults = stages.length > 0 || concatBranches.length > 0;
+          if (hasPlanResults) {
+            planPostFilters.push(transformation.expression);
           } else {
-            preAggregationFilters.push(transformation.expression);
+            const whereCandidate = buildWhereCandidate(transformation.expression, options);
+            if (whereCandidate) {
+              pushdownWhere = mergeWhereClauses(pushdownWhere, whereCandidate);
+            } else {
+              preAggregationFilters.push(transformation.expression);
+            }
           }
         }
         break;
@@ -94,41 +111,82 @@ export function buildApplyExecutionPlan(
         break;
       }
       case 'orderby': {
-        ensureStageExists(currentStage, transformation, index);
-        if (currentStage!.orderBy && currentStage!.orderBy!!.length) {
-          throw new Error('Multiple orderby() transformations are not supported within the same stage.');
+        const planHasResults = stages.length > 0 || concatBranches.length > 0;
+        if (currentStage) {
+          if (currentStage.orderBy && currentStage.orderBy.length) {
+            throw new Error('Multiple orderby() transformations are not supported within the same stage.');
+          }
+          currentStage.orderBy = transformation.items.map(item => ({
+            field: item.field,
+            direction: item.direction,
+          }));
+        } else {
+          const hasPlanResults = stages.length > 0 || concatBranches.length > 0;
+          if (!allowNonAggregate && !hasPlanResults) {
+            throw new Error('orderby() transformation requires a preceding groupby() or aggregate().');
+          }
+          if (planOrderBy && planOrderBy.length) {
+            throw new Error('Multiple orderby() transformations are not supported for the same pipeline.');
+          }
+          planOrderBy = transformation.items.map(item => ({
+            field: item.field,
+            direction: item.direction,
+          }));
         }
-        currentStage!.orderBy = transformation.items.map(item => ({
-          field: item.field,
-          direction: item.direction,
-        }));
         break;
       }
       case 'skip': {
-        ensureStageExists(currentStage, transformation, index);
-        if (currentStage!.skip !== undefined) {
-          throw new Error('Only one skip() transformation is supported per stage.');
+        if (currentStage) {
+          if (currentStage.skip !== undefined) {
+            throw new Error('Only one skip() transformation is supported per stage.');
+          }
+          currentStage.skip = transformation.count;
+        } else {
+          const hasPlanResults = stages.length > 0 || concatBranches.length > 0;
+          if (!allowNonAggregate && !hasPlanResults) {
+            throw new Error('skip() transformation requires a preceding groupby() or aggregate().');
+          }
+          if (planSkip !== undefined) {
+            throw new Error('Only one skip() transformation is supported per pipeline.');
+          }
+          planSkip = transformation.count;
         }
-        currentStage!.skip = transformation.count;
         break;
       }
       case 'top': {
-        ensureStageExists(currentStage, transformation, index);
-        if (currentStage!.top !== undefined) {
-          throw new Error('Only one top() transformation is supported per stage.');
+        if (currentStage) {
+          if (currentStage.top !== undefined) {
+            throw new Error('Only one top() transformation is supported per stage.');
+          }
+          currentStage.top = transformation.count;
+        } else {
+          const hasPlanResults = stages.length > 0 || concatBranches.length > 0;
+          if (!allowNonAggregate && !hasPlanResults) {
+            throw new Error('top() transformation requires a preceding groupby() or aggregate().');
+          }
+          if (planTop !== undefined) {
+            throw new Error('Only one top() transformation is supported per pipeline.');
+          }
+          planTop = transformation.count;
         }
-        currentStage!.top = transformation.count;
         break;
       }
       case 'bottom': {
         throw new Error('bottom() transformation is not supported yet.');
+      }
+      case 'concat': {
+        const branches = transformation.pipelines.map(branch => buildApplyExecutionPlan(branch, options, true));
+        concatBranches.push(...branches);
+        currentStage = undefined;
+        break;
       }
       default:
         throw new Error(`Unsupported $apply transformation: ${(transformation as ApplyTransformation).type}`);
     }
   });
 
-  if (!stages.length) {
+  const hasAggregation = stages.length > 0 || concatBranches.some(planHasAggregation);
+  if (!hasAggregation && !allowNonAggregate) {
     throw new Error('groupby() or aggregate() transformation is required in the $apply pipeline.');
   }
 
@@ -136,17 +194,16 @@ export function buildApplyExecutionPlan(
     pushdownWhere,
     preAggregationFilters,
     stages,
+    ...(concatBranches.length ? {concat: concatBranches} : {}),
+    ...(planOrderBy && planOrderBy.length ? {postOrderBy: planOrderBy} : {}),
+    ...(planTop !== undefined ? {postTop: planTop} : {}),
+    ...(planSkip !== undefined ? {postSkip: planSkip} : {}),
+    ...(planPostFilters.length ? {postFilters: planPostFilters} : {}),
   };
 
   if (options.modelCtor) {
     const maxDepth = options.maxNavigationDepth ?? DEFAULT_MAX_NAVIGATION_DEPTH;
-    for (const stage of stages) {
-      stage.navigationPaths = collectNavigationPaths(
-        options.modelCtor,
-        stage.spec,
-        maxDepth,
-      );
-    }
+    populatePlanNavigationPaths(plan, options.modelCtor, maxDepth);
   }
 
   return plan;
@@ -175,6 +232,27 @@ function mergeWhereClauses(
 ): Where<AnyObject> {
   if (!target) return candidate;
   return {and: [target, candidate]};
+}
+
+function planHasAggregation(plan: ApplyExecutionPlan): boolean {
+  if (plan.stages.length > 0) return true;
+  if (!plan.concat || !plan.concat.length) return false;
+  return plan.concat.some(child => planHasAggregation(child));
+}
+
+function populatePlanNavigationPaths(
+  plan: ApplyExecutionPlan,
+  modelCtor: typeof Entity,
+  maxDepth: number,
+) {
+  for (const stage of plan.stages) {
+    stage.navigationPaths = collectNavigationPaths(modelCtor, stage.spec, maxDepth);
+  }
+  if (plan.concat) {
+    for (const branch of plan.concat) {
+      populatePlanNavigationPaths(branch, modelCtor, maxDepth);
+    }
+  }
 }
 
 function ensureStageExists(
@@ -212,6 +290,9 @@ function collectNavigationPaths(
   spec.groupBy.forEach(collect);
   for (const aggregate of spec.aggregates) {
     collect(aggregate.field);
+    if (aggregate.expression) {
+      collectPathsFromComputeNode(aggregate.expression, collect);
+    }
   }
 
   return Array.from(seen.values());
@@ -223,4 +304,24 @@ export function collectNavigationPathsForStage(
   maxDepth: number = DEFAULT_MAX_NAVIGATION_DEPTH,
 ): ResolvedNavigationPath[] {
   return collectNavigationPaths(modelCtor, spec, maxDepth);
+}
+
+function collectPathsFromComputeNode(node: ComputeNode, visitor: (path: string | undefined) => void) {
+  switch (node.type) {
+    case 'path': {
+      const joined = node.path.join('/');
+      visitor(joined);
+      break;
+    }
+    case 'binary':
+      collectPathsFromComputeNode(node.left, visitor);
+      collectPathsFromComputeNode(node.right, visitor);
+      break;
+    case 'function':
+      node.args.forEach(arg => collectPathsFromComputeNode(arg, visitor));
+      break;
+    case 'literal':
+    default:
+      break;
+  }
 }
