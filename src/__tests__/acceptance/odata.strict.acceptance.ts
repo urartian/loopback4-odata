@@ -1,16 +1,20 @@
 /// <reference path="../../types/testing.globals.d.ts" />
 
-import {Client, createRestAppClient, expect} from '@loopback/testlab';
-import {TestApplication, givenODataApplication, seedExampleData} from '../fixtures/odata-app.fixture';
-import {ODATA_BINDINGS} from '../../keys';
-import {ODataConfig} from '../../types';
+import { Client, createRestAppClient, expect } from '@loopback/testlab';
+import {
+  TestApplication,
+  givenODataApplication,
+  seedExampleData,
+} from '../fixtures/odata-app.fixture';
+import { ODATA_BINDINGS } from '../../keys';
+import { ODataConfig } from '../../types';
 
 describe('OData strict mode acceptance', () => {
   let app: TestApplication;
   let client: Client;
 
   beforeEach(async function () {
-    app = await givenODataApplication({port: 0, host: '127.0.0.1'});
+    app = await givenODataApplication({ port: 0, host: '127.0.0.1' });
     app.bind(ODATA_BINDINGS.CONFIG).to({
       basePath: '/odata',
       strict: true,
@@ -36,16 +40,13 @@ describe('OData strict mode acceptance', () => {
   });
 
   it('accepts supported $ query options such as $levels', async () => {
-    await client
-      .get('/odata/Orders')
-      .query({$expand: 'items($levels=2)'})
-      .expect(200);
+    await client.get('/odata/Orders').query({ $expand: 'items($levels=2)' }).expect(200);
   });
 
   it('rejects unknown properties in $select/$orderby/$filter', async () => {
-    await client.get('/odata/Products').query({$select: 'doesNotExist'}).expect(400);
-    await client.get('/odata/Products').query({$orderby: 'doesNotExist desc'}).expect(400);
-    await client.get('/odata/Products').query({$filter: "doesNotExist eq 1"}).expect(400);
+    await client.get('/odata/Products').query({ $select: 'doesNotExist' }).expect(400);
+    await client.get('/odata/Products').query({ $orderby: 'doesNotExist desc' }).expect(400);
+    await client.get('/odata/Products').query({ $filter: 'doesNotExist eq 1' }).expect(400);
   });
 
   it('enforces Accept header for JSON on CRUD endpoints', async () => {
@@ -69,8 +70,10 @@ describe('OData strict mode acceptance', () => {
 
   it('rejects $expand deeper than maxExpandDepth', async function () {
     if (app.state === 'started') await app.stop();
-    app = await givenODataApplication({port: 0, host: '127.0.0.1'});
-    app.bind(ODATA_BINDINGS.CONFIG).to({ basePath: '/odata', strict: true, maxExpandDepth: 2 } as ODataConfig);
+    app = await givenODataApplication({ port: 0, host: '127.0.0.1' });
+    app
+      .bind(ODATA_BINDINGS.CONFIG)
+      .to({ basePath: '/odata', strict: true, maxExpandDepth: 2 } as ODataConfig);
     await app.boot();
     await seedExampleData(app);
     await app.start();
@@ -79,61 +82,48 @@ describe('OData strict mode acceptance', () => {
     // Depth 3: orders -> items -> product
     await client
       .get('/odata/Products')
-      .query({$expand: 'orders($expand=items($expand=product))'})
+      .query({ $expand: 'orders($expand=items($expand=product))' })
       .expect(400);
   });
 
   it('rejects $skip greater than maxSkip', async function () {
     if (app.state === 'started') await app.stop();
-    app = await givenODataApplication({port: 0, host: '127.0.0.1'});
-    app.bind(ODATA_BINDINGS.CONFIG).to({ basePath: '/odata', strict: true, maxSkip: 5 } as ODataConfig);
+    app = await givenODataApplication({ port: 0, host: '127.0.0.1' });
+    app
+      .bind(ODATA_BINDINGS.CONFIG)
+      .to({ basePath: '/odata', strict: true, maxSkip: 5 } as ODataConfig);
     await app.boot();
     await seedExampleData(app);
     await app.start();
     client = createRestAppClient(app);
 
-    await client
-      .get('/odata/Products')
-      .query({$skip: '100'})
-      .expect(400);
+    await client.get('/odata/Products').query({ $skip: '100' }).expect(400);
   });
 
   it('rejects trim() filters in strict mode', async () => {
-    await client
-      .get('/odata/Products')
-      .query({$filter: "trim(name) eq 'Laptop'"})
-      .expect(400);
+    await client.get('/odata/Products').query({ $filter: "trim(name) eq 'Laptop'" }).expect(400);
   });
 
   it('rejects month() filters in strict mode', async () => {
-    await client
-      .get('/odata/Products')
-      .query({$filter: 'month(updatedAt) eq 1'})
-      .expect(400);
+    await client.get('/odata/Products').query({ $filter: 'month(updatedAt) eq 1' }).expect(400);
   });
 
   it('rejects unsupported indexof comparator in strict mode', async function () {
     // default strict app from beforeEach
-    await client
-      .get('/odata/Products')
-      .query({$filter: "indexof(name,'Lap') eq 2"})
-      .expect(400);
+    await client.get('/odata/Products').query({ $filter: "indexof(name,'Lap') eq 2" }).expect(400);
   });
 
   it('rejects unsupported substring comparator in strict mode', async function () {
-    await client
-      .get('/odata/Products')
-      .query({$filter: "substring(name,1) gt 'A'"})
-      .expect(400);
+    await client.get('/odata/Products').query({ $filter: "substring(name,1) gt 'A'" }).expect(400);
   });
 
   it('rejects unsupported length comparator in strict mode', async function () {
     const res = await client
       .get('/odata/Products')
-      .query({$filter: 'length(name) eq 5'})
+      .query({ $filter: 'length(name) eq 5' })
       .expect(200);
 
     expect(res.body.value).to.be.Array();
-    expect(res.body.value.some((item: {name: string}) => item.name === 'Phone')).to.be.true();
+    expect(res.body.value.some((item: { name: string }) => item.name === 'Phone')).to.be.true();
   });
 });

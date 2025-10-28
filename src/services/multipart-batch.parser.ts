@@ -1,5 +1,5 @@
-import {Readable} from 'stream';
-import {HttpErrors} from '@loopback/rest';
+import { Readable } from 'stream';
+import { HttpErrors } from '@loopback/rest';
 
 export interface ParsedBatch {
   requests: ParsedBatchRequest[];
@@ -19,7 +19,10 @@ interface MultipartPart {
   body: string;
 }
 
-export async function parseMultipartBatch(stream: Readable, boundary: string): Promise<ParsedBatch> {
+export async function parseMultipartBatch(
+  stream: Readable,
+  boundary: string,
+): Promise<ParsedBatch> {
   const content = await streamToString(stream);
   const parts = parseMultipart(content, boundary);
   const requests: ParsedBatchRequest[] = [];
@@ -50,7 +53,7 @@ export async function parseMultipartBatch(stream: Readable, boundary: string): P
     throw new HttpErrors.BadRequest(`Unsupported part content-type: ${contentType || 'unknown'}.`);
   }
 
-  return {requests};
+  return { requests };
 }
 
 function parseHttpPart(
@@ -141,7 +144,7 @@ function parseMultipart(content: string, boundary: string): MultipartPart[] {
     const headerText = segment.slice(0, headerEnd);
     const bodyText = segment.slice(headerEnd).replace(/^\r?\n\r?\n/, '');
     const headers = parseHeaders(headerText);
-    parts.push({headers, body: bodyText});
+    parts.push({ headers, body: bodyText });
   }
 
   return parts;

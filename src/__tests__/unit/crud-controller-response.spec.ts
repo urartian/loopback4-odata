@@ -1,41 +1,41 @@
 import 'reflect-metadata';
-import {Entity, model, property} from '@loopback/repository';
-import {expect} from '@loopback/testlab';
-import {defineODataCrudController} from '../../controllers/crud-controller-factory';
-import {EntitySetDef} from '../../registry/entityset-registry';
+import { Entity, model, property } from '@loopback/repository';
+import { expect } from '@loopback/testlab';
+import { defineODataCrudController } from '../../controllers/crud-controller-factory';
+import { EntitySetDef } from '../../registry/entityset-registry';
 
 describe('CRUD controller response normalization', () => {
   @model()
   class Invoice extends Entity {
-    @property({id: true})
+    @property({ id: true })
     id!: string;
 
-    @property({type: 'date'})
+    @property({ type: 'date' })
     issuedAt?: Date;
 
-    @property({type: 'string'})
+    @property({ type: 'string' })
     status?: string;
 
-    @property({type: 'number', jsonSchema: {format: 'int64'}})
+    @property({ type: 'number', jsonSchema: { format: 'int64' } })
     recordNo?: number;
 
     @property({
       type: 'array',
       itemType: 'number',
-      jsonSchema: {type: 'array', items: {type: 'number', format: 'int64'}},
+      jsonSchema: { type: 'array', items: { type: 'number', format: 'int64' } },
     })
     history?: number[];
 
-    @property({type: 'number', jsonSchema: {format: 'decimal', precision: 18, scale: 6}})
+    @property({ type: 'number', jsonSchema: { format: 'decimal', precision: 18, scale: 6 } })
     total?: number;
 
-    @property({type: 'string', jsonSchema: {format: 'date'}})
+    @property({ type: 'string', jsonSchema: { format: 'date' } })
     dueDate?: string;
 
-    @property({type: 'string', jsonSchema: {format: 'time'}})
+    @property({ type: 'string', jsonSchema: { format: 'time' } })
     startTime?: string;
 
-    @property({type: 'string', jsonSchema: {format: 'duration'}})
+    @property({ type: 'string', jsonSchema: { format: 'duration' } })
     elapsed?: string;
   }
 
@@ -51,7 +51,13 @@ describe('CRUD controller response normalization', () => {
     new Controller(
       {} as any,
       {} as any,
-      {set() {}, status() {return this;}, end() {}} as any,
+      {
+        set() {},
+        status() {
+          return this;
+        },
+        end() {},
+      } as any,
       {} as any,
       {} as any,
       {} as any,
@@ -59,7 +65,7 @@ describe('CRUD controller response normalization', () => {
 
   it('normalizes DateTimeOffset strings in decorated entities', () => {
     const controller = createController();
-    const raw = {id: 'A1', issuedAt: '2025-10-22 00:00:00+00', status: 'sent'};
+    const raw = { id: 'A1', issuedAt: '2025-10-22 00:00:00+00', status: 'sent' };
     const decorated = controller.decoratePlainEntity(raw);
     expect(decorated.issuedAt).to.equal('2025-10-22T00:00:00Z');
     expect(raw.issuedAt).to.equal('2025-10-22 00:00:00+00');
@@ -68,8 +74,8 @@ describe('CRUD controller response normalization', () => {
   it('normalizes collections when ETags are disabled', () => {
     const controller = createController();
     const collection = controller.decoratePlainEntities([
-      {id: 'A1', issuedAt: '2025-10-22 00:00:00+00'},
-      {id: 'A2', issuedAt: '2025-11-05 12:30:00+0400'},
+      { id: 'A1', issuedAt: '2025-10-22 00:00:00+00' },
+      { id: 'A2', issuedAt: '2025-11-05 12:30:00+0400' },
     ]);
 
     expect(collection[0].issuedAt).to.equal('2025-10-22T00:00:00Z');
@@ -79,7 +85,7 @@ describe('CRUD controller response normalization', () => {
   it('normalizes toPlainEntity results derived from JSON payloads', () => {
     const controller = createController();
     const plain = controller.toPlainEntity({
-      toJSON: () => ({id: 'A3', issuedAt: '2025-12-01 09:15:00+00'}),
+      toJSON: () => ({ id: 'A3', issuedAt: '2025-12-01 09:15:00+00' }),
     } as any);
 
     expect(plain).to.not.be.undefined();

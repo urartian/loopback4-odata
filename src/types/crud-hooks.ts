@@ -1,6 +1,6 @@
-import {Request, Response} from '@loopback/rest';
-import {AnyObject, Entity, Filter, FilterExcludingWhere, Options} from '@loopback/repository';
-import type {EntitySetDef} from '../registry/entityset-registry';
+import { Request, Response } from '@loopback/rest';
+import { AnyObject, Entity, Filter, FilterExcludingWhere, Options } from '@loopback/repository';
+import type { EntitySetDef } from '../registry/entityset-registry';
 
 export type CrudOperation =
   | 'READ'

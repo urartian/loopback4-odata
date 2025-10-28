@@ -56,7 +56,6 @@ const MYSQL_DS_CONFIG = {
   database: process.env.MYSQL_DATABASE ?? 'odata_dev',
 };
 
-
 export class ExampleApp extends BootMixin(RepositoryMixin(RestApplication)) {
   constructor() {
     super({ rest: { port: 3001, host: '127.0.0.1' } });
@@ -64,7 +63,11 @@ export class ExampleApp extends BootMixin(RepositoryMixin(RestApplication)) {
 
     const usePostgres = process.env.USE_POSTGRES === 'true';
     const useMysql = process.env.USE_MYSQL === 'true';
-    const dsConfig = usePostgres ? POSTGRES_DS_CONFIG : useMysql ? MYSQL_DS_CONFIG : MEMORY_DS_CONFIG;
+    const dsConfig = usePostgres
+      ? POSTGRES_DS_CONFIG
+      : useMysql
+        ? MYSQL_DS_CONFIG
+        : MEMORY_DS_CONFIG;
     this.dataSource(new juggler.DataSource(dsConfig), dsConfig.name);
     this.repository(OrderItemRepository);
     this.repository(ProductRepository);
@@ -89,7 +92,7 @@ export class ExampleApp extends BootMixin(RepositoryMixin(RestApplication)) {
       ...current,
       enableApplyPushdown: enablePushdown,
       logApplyFallbacks: true, // optional so you see the warning
-      ...(logTelemetry ? {logApplyTelemetry: true} : {}),
+      ...(logTelemetry ? { logApplyTelemetry: true } : {}),
     });
   }
 }
@@ -122,7 +125,7 @@ export class Product extends Entity {
   orders?: Order[];
 }
 
-@odataModel({deepInsert: true, deepUpdate: true})
+@odataModel({ deepInsert: true, deepUpdate: true })
 @model()
 export class Order extends Entity {
   @property({
@@ -167,10 +170,7 @@ export class OrderItem extends Entity {
   unitPrice!: number;
 }
 
-export class ProductRepository extends DefaultCrudRepository<
-  Product,
-  typeof Product.prototype.id
-> {
+export class ProductRepository extends DefaultCrudRepository<Product, typeof Product.prototype.id> {
   public readonly orderItems: HasManyRepositoryFactory<OrderItem, typeof Product.prototype.id>;
   public readonly orders: HasManyThroughRepositoryFactory<
     Order,
@@ -191,7 +191,10 @@ export class ProductRepository extends DefaultCrudRepository<
     protected orderItemRepositoryGetter: Getter<OrderItemRepository>,
   ) {
     super(Product, dataSource);
-    this.orderItems = this.createHasManyRepositoryFactoryFor('orderItems', orderItemRepositoryGetter);
+    this.orderItems = this.createHasManyRepositoryFactoryFor(
+      'orderItems',
+      orderItemRepositoryGetter,
+    );
     this.registerInclusionResolver('orderItems', this.orderItems.inclusionResolver);
     this.orders = this.createHasManyThroughRepositoryFactoryFor(
       'orders',
@@ -216,26 +219,35 @@ export class ProductRepository extends DefaultCrudRepository<
     return super.createAll(entities, options);
   }
 
-  async updateById(id: typeof Product.prototype.id, data: DataObject<Product>, options?: Options): Promise<void> {
+  async updateById(
+    id: typeof Product.prototype.id,
+    data: DataObject<Product>,
+    options?: Options,
+  ): Promise<void> {
     this.touch(data);
     return super.updateById(id, data, options);
   }
 
-  async updateAll(data: DataObject<Product>, where?: AnyObject, options?: Options): Promise<{ count: number }> {
+  async updateAll(
+    data: DataObject<Product>,
+    where?: AnyObject,
+    options?: Options,
+  ): Promise<{ count: number }> {
     this.touch(data);
     return super.updateAll(data, where, options);
   }
 
-  async replaceById(id: typeof Product.prototype.id, data: DataObject<Product>, options?: Options): Promise<void> {
+  async replaceById(
+    id: typeof Product.prototype.id,
+    data: DataObject<Product>,
+    options?: Options,
+  ): Promise<void> {
     this.touch(data);
     return super.replaceById(id, data, options);
   }
 }
 
-export class OrderRepository extends DefaultCrudRepository<
-  Order,
-  typeof Order.prototype.id
-> {
+export class OrderRepository extends DefaultCrudRepository<Order, typeof Order.prototype.id> {
   public readonly items: HasManyRepositoryFactory<OrderItem, typeof Order.prototype.id>;
   public readonly products: HasManyThroughRepositoryFactory<
     Product,
@@ -287,9 +299,7 @@ export class OrderItemRepository extends DefaultCrudRepository<
 
 @odataController(Product)
 class ProductODataController {
-  constructor(
-    @repository(ProductRepository) private readonly products: ProductRepository,
-  ) { }
+  constructor(@repository(ProductRepository) private readonly products: ProductRepository) {}
 
   @odataAction({
     binding: 'entity',
@@ -317,10 +327,10 @@ class ProductODataController {
 }
 
 @odataController(Order)
-class OrderODataController { }
+class OrderODataController {}
 
 @odataController(OrderItem)
-class OrderItemODataController { }
+class OrderItemODataController {}
 
 export async function main() {
   const app = new ExampleApp();
@@ -347,10 +357,7 @@ async function seedData(app: ExampleApp) {
       { name: 'Monitor', price: 349 },
     ]);
 
-    const [orderOne, orderTwo] = await orderRepo.createAll([
-      { total: 0 },
-      { total: 0 },
-    ]);
+    const [orderOne, orderTwo] = await orderRepo.createAll([{ total: 0 }, { total: 0 }]);
 
     const items = [
       { orderId: orderOne.id!, productId: laptop.id!, quantity: 2, unitPrice: laptop.price },
@@ -376,7 +383,7 @@ async function seedData(app: ExampleApp) {
 }
 
 if (require.main === module) {
-  main().catch(err => {
+  main().catch((err) => {
     console.error('Failed to start example app', err);
     process.exit(1);
   });

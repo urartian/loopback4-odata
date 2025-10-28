@@ -1,13 +1,10 @@
-import {BindingScope, Provider, inject, injectable} from '@loopback/core';
-import {RestBindings, Reject} from '@loopback/rest';
-import {HttpError} from 'http-errors';
-import {
-  ErrorWriterOptions,
-  writeErrorToResponse,
-} from 'strong-error-handler';
-import {ODATA_VERSION} from '../constants';
-import {ODATA_BINDINGS} from '../keys';
-import {ODataConfig} from '../types';
+import { BindingScope, Provider, inject, injectable } from '@loopback/core';
+import { RestBindings, Reject } from '@loopback/rest';
+import { HttpError } from 'http-errors';
+import { ErrorWriterOptions, writeErrorToResponse } from 'strong-error-handler';
+import { ODATA_VERSION } from '../constants';
+import { ODATA_BINDINGS } from '../keys';
+import { ODataConfig } from '../types';
 
 type ExtendedHttpError = HttpError & {
   statusCode?: number;
@@ -19,17 +16,17 @@ type ExtendedHttpError = HttpError & {
   stack?: string;
 };
 
-@injectable({scope: BindingScope.SINGLETON})
+@injectable({ scope: BindingScope.SINGLETON })
 export class ODataErrorProvider implements Provider<Reject> {
   constructor(
-    @inject(RestBindings.ERROR_WRITER_OPTIONS, {optional: true})
+    @inject(RestBindings.ERROR_WRITER_OPTIONS, { optional: true })
     private readonly options: ErrorWriterOptions = {},
     @inject(ODATA_BINDINGS.CONFIG)
     private readonly cfg: ODataConfig,
   ) {}
 
   value(): Reject {
-    return ({request, response}, err: Error) => {
+    return ({ request, response }, err: Error) => {
       const url = request.originalUrl ?? request.url ?? '';
       const normalizeBasePath = (configured?: string): string => {
         let basePath = configured?.trim() ?? '';
@@ -50,9 +47,10 @@ export class ODataErrorProvider implements Provider<Reject> {
         httpError.status ??
         (httpError.code ? this.mapCodeToStatus(httpError.code) : undefined) ??
         500;
-      const code = httpError.code === 'PreferenceNotSupported'
-        ? 'PreferenceNotSupported'
-        : this.mapStatusToCode(statusCode);
+      const code =
+        httpError.code === 'PreferenceNotSupported'
+          ? 'PreferenceNotSupported'
+          : this.mapStatusToCode(statusCode);
       const message = httpError.message || this.defaultMessage(statusCode);
       const target = httpError.target ?? null;
       const details = this.normalizeDetails(httpError);
@@ -137,7 +135,7 @@ export class ODataErrorProvider implements Provider<Reject> {
   }
 
   private normalizeDetails(error: ExtendedHttpError): unknown[] {
-    const {details} = error;
+    const { details } = error;
     if (Array.isArray(details)) return details;
     return [];
   }
@@ -148,7 +146,7 @@ export class ODataErrorProvider implements Provider<Reject> {
       inner.stack = error.stack;
     }
     if (error.innerError) {
-      return {...inner, ...error.innerError};
+      return { ...inner, ...error.innerError };
     }
     if (Object.keys(inner).length === 0) {
       return {};

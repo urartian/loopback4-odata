@@ -15,43 +15,45 @@ import { PostgresApplyExecutor } from './services/postgres-apply-executor';
 import { MySqlApplyExecutor } from './services/mysql-apply-executor';
 
 export class ODataComponent implements Component {
-    bindings = [
-        Binding.bind(ODATA_BINDINGS.CONFIG).to({
-            basePath: '/odata',
-            strict: true,
-            namespace: 'Default',
-            entityContainerName: 'DefaultContainer',
-            searchMode: 'annotated',
-            maxSearchFields: 5,
-            maxSearchTerms: 5,
-            maxApplyResultSize: 2000,
-            pageSize: 200,
-            enableDelta: false,
-            capabilities: {
-                aggregation: true,
-                applySupported: true,
-            },
-            logApplyTelemetry: false,
-            maxApplyNavigationFanout: 1000,
-        } as ODataConfig),
-        Binding.bind(ODATA_BINDINGS.CSDL_GEN).toClass(CsdlGenerator).inScope(BindingScope.SINGLETON),
-        Binding.bind(ODATA_BINDINGS.ENTITY_SET_REGISTRY).toClass(EntitySetRegistry).inScope(BindingScope.SINGLETON),
-        Binding.bind(ODATA_BINDINGS.APPLY_EXECUTOR_REGISTRY)
-            .toDynamicValue(() => {
-                const registry = new ODataApplyExecutorRegistry();
-                registry.register(new PostgresApplyExecutor());
-                registry.register(new MySqlApplyExecutor());
-                return registry;
-            })
-            .inScope(BindingScope.SINGLETON),
-        createMiddlewareBinding(OdataPathRewriterProvider, {
-            key: 'middleware.odataPathRewriter',
-        }),
-        Binding.bind(RestBindings.SequenceActions.REJECT)
-            .toProvider(ODataErrorProvider)
-            .inScope(BindingScope.SINGLETON),
-    ];
+  bindings = [
+    Binding.bind(ODATA_BINDINGS.CONFIG).to({
+      basePath: '/odata',
+      strict: true,
+      namespace: 'Default',
+      entityContainerName: 'DefaultContainer',
+      searchMode: 'annotated',
+      maxSearchFields: 5,
+      maxSearchTerms: 5,
+      maxApplyResultSize: 2000,
+      pageSize: 200,
+      enableDelta: false,
+      capabilities: {
+        aggregation: true,
+        applySupported: true,
+      },
+      logApplyTelemetry: false,
+      maxApplyNavigationFanout: 1000,
+    } as ODataConfig),
+    Binding.bind(ODATA_BINDINGS.CSDL_GEN).toClass(CsdlGenerator).inScope(BindingScope.SINGLETON),
+    Binding.bind(ODATA_BINDINGS.ENTITY_SET_REGISTRY)
+      .toClass(EntitySetRegistry)
+      .inScope(BindingScope.SINGLETON),
+    Binding.bind(ODATA_BINDINGS.APPLY_EXECUTOR_REGISTRY)
+      .toDynamicValue(() => {
+        const registry = new ODataApplyExecutorRegistry();
+        registry.register(new PostgresApplyExecutor());
+        registry.register(new MySqlApplyExecutor());
+        return registry;
+      })
+      .inScope(BindingScope.SINGLETON),
+    createMiddlewareBinding(OdataPathRewriterProvider, {
+      key: 'middleware.odataPathRewriter',
+    }),
+    Binding.bind(RestBindings.SequenceActions.REJECT)
+      .toProvider(ODataErrorProvider)
+      .inScope(BindingScope.SINGLETON),
+  ];
 
-    controllers = [ODataMetadataController, ODataBatchController, ODataServiceDocumentController];
-    booters = [ODataBooter];
+  controllers = [ODataMetadataController, ODataBatchController, ODataServiceDocumentController];
+  booters = [ODataBooter];
 }

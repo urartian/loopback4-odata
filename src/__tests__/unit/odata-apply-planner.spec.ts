@@ -1,21 +1,21 @@
 /// <reference path="../../types/testing.globals.d.ts" />
 
-import {strict as assert} from 'assert';
-import {expect} from '@loopback/testlab';
-import {buildApplyExecutionPlan} from '../../services/odata-apply-planner.service';
-import {parseApplyPipeline} from '../../services/odata-query-parser.service';
-import {Product} from '../../../examples/basic-app';
+import { strict as assert } from 'assert';
+import { expect } from '@loopback/testlab';
+import { buildApplyExecutionPlan } from '../../services/odata-apply-planner.service';
+import { parseApplyPipeline } from '../../services/odata-query-parser.service';
+import { Product } from '../../../examples/basic-app';
 
 describe('OData $apply planner', () => {
   it('pushes down filter() expressions when possible', () => {
     const pipeline = parseApplyPipeline(
-      "filter(price gt 100)/groupby((category), aggregate(price with sum as TotalPrice))",
+      'filter(price gt 100)/groupby((category), aggregate(price with sum as TotalPrice))',
     );
 
     const plan = buildApplyExecutionPlan(pipeline);
 
     assert(plan.pushdownWhere);
-    assert.deepStrictEqual(plan.pushdownWhere, {price: {gt: 100}});
+    assert.deepStrictEqual(plan.pushdownWhere, { price: { gt: 100 } });
     assert.equal(plan.preAggregationFilters.length, 0);
     assert.equal(plan.stages.length, 1);
     assert.deepStrictEqual(plan.stages[0].spec.groupBy, ['category']);
@@ -44,7 +44,7 @@ describe('OData $apply planner', () => {
     );
 
     assert.throws(
-      () => buildApplyExecutionPlan(pipeline, {strict: true}),
+      () => buildApplyExecutionPlan(pipeline, { strict: true }),
       /filter\(\) transformation/i,
     );
   });
@@ -58,7 +58,7 @@ describe('OData $apply planner', () => {
 
     assert.equal(plan.stages.length, 1);
     assert.deepStrictEqual(plan.stages[0].spec.groupBy, ['category']);
-    assert.deepStrictEqual(plan.stages[0].orderBy, [{field: 'TotalPrice', direction: 'desc'}]);
+    assert.deepStrictEqual(plan.stages[0].orderBy, [{ field: 'TotalPrice', direction: 'desc' }]);
     assert.equal(plan.stages[0].top, 5);
     assert.equal(plan.stages[0].skip, 1);
   });
@@ -121,16 +121,16 @@ describe('OData $apply planner', () => {
       'groupby((orderItems/productId), aggregate(orderItems/quantity with sum as TotalQty))',
     );
 
-    const plan = buildApplyExecutionPlan(pipeline, {modelCtor: Product});
+    const plan = buildApplyExecutionPlan(pipeline, { modelCtor: Product });
 
     expect(plan.stages[0].navigationPaths).to.have.length(2);
-    const paths = plan.stages[0].navigationPaths.map(p => p.originalPath).sort();
+    const paths = plan.stages[0].navigationPaths.map((p) => p.originalPath).sort();
     expect(paths).to.deepEqual(['orderItems/productId', 'orderItems/quantity']);
   });
 
   it('builds plans for concat pipelines with branch stages', () => {
     const pipeline = parseApplyPipeline(
-      "concat(aggregate(quantity with sum as TotalQuantity),groupby((product/name), aggregate(quantity with sum as TotalQuantity))/concat(aggregate($count as UI5__count),top(3)))",
+      'concat(aggregate(quantity with sum as TotalQuantity),groupby((product/name), aggregate(quantity with sum as TotalQuantity))/concat(aggregate($count as UI5__count),top(3)))',
     );
 
     const plan = buildApplyExecutionPlan(pipeline);
@@ -156,10 +156,12 @@ describe('OData $apply planner', () => {
       'groupby((productId), aggregate(quantity mul product/price with sum as TotalRevenue))',
     );
 
-    const plan = buildApplyExecutionPlan(pipeline, {modelCtor: Product});
+    const plan = buildApplyExecutionPlan(pipeline, { modelCtor: Product });
 
     expect(plan.stages).to.have.length(1);
     const [stage] = plan.stages;
-    expect(stage.navigationPaths.some(path => path.originalPath === 'product/price')).to.be.true();
+    expect(
+      stage.navigationPaths.some((path) => path.originalPath === 'product/price'),
+    ).to.be.true();
   });
 });

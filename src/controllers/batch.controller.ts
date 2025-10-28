@@ -1,16 +1,16 @@
-import {Application, CoreBindings, inject} from '@loopback/core';
-import {post, requestBody, Response, RestBindings, HttpErrors, Request} from '@loopback/rest';
-import {HttpHandler} from '@loopback/rest/dist/http-handler';
-import {IncomingMessage, ServerResponse} from 'http';
-import {PassThrough} from 'stream';
-import {IsolationLevel, Transaction} from '@loopback/repository';
-import {ODATA_BINDINGS} from '../keys';
-import {EntitySetRegistry} from '../registry/entityset-registry';
-import {ODATA_ATOMICITY_STATE, ODATA_VERSION} from '../constants';
-import {AtomicityRequestState} from '../types/batch';
-import {parseMultipartBatch} from '../services/multipart-batch.parser';
-import {serializeMultipartBatch} from '../services/multipart-batch.serializer';
-import {Readable} from 'stream';
+import { Application, CoreBindings, inject } from '@loopback/core';
+import { post, requestBody, Response, RestBindings, HttpErrors, Request } from '@loopback/rest';
+import { HttpHandler } from '@loopback/rest/dist/http-handler';
+import { IncomingMessage, ServerResponse } from 'http';
+import { PassThrough } from 'stream';
+import { IsolationLevel, Transaction } from '@loopback/repository';
+import { ODATA_BINDINGS } from '../keys';
+import { EntitySetRegistry } from '../registry/entityset-registry';
+import { ODATA_ATOMICITY_STATE, ODATA_VERSION } from '../constants';
+import { AtomicityRequestState } from '../types/batch';
+import { parseMultipartBatch } from '../services/multipart-batch.parser';
+import { serializeMultipartBatch } from '../services/multipart-batch.serializer';
+import { Readable } from 'stream';
 
 export interface BatchRequest {
   id?: string;
@@ -99,7 +99,7 @@ class AtomicityGroupContext {
     this.rolledBack = true;
     this.settled = true;
     if (errors.length) {
-      const aggregate = new Error(errors.map(e => e.message ?? String(e)).join('; '));
+      const aggregate = new Error(errors.map((e) => e.message ?? String(e)).join('; '));
       (aggregate as any).cause = errors[0];
       throw aggregate;
     }
@@ -132,14 +132,14 @@ export class ODataBatchController {
                   items: {
                     type: 'object',
                     properties: {
-                      id: {type: 'string'},
-                      atomicityGroup: {type: 'string'},
-                      status: {type: 'integer'},
+                      id: { type: 'string' },
+                      atomicityGroup: { type: 'string' },
+                      status: { type: 'integer' },
                       headers: {
                         type: 'object',
-                        additionalProperties: {type: 'string'},
+                        additionalProperties: { type: 'string' },
                       },
-                      body: {type: 'object'},
+                      body: { type: 'object' },
                     },
                     required: ['status'],
                   },
@@ -168,15 +168,15 @@ export class ODataBatchController {
                   type: 'object',
                   required: ['id', 'method', 'url'],
                   properties: {
-                    id: {type: 'string'},
-                    method: {type: 'string'},
-                    url: {type: 'string'},
+                    id: { type: 'string' },
+                    method: { type: 'string' },
+                    url: { type: 'string' },
                     headers: {
                       type: 'object',
-                      additionalProperties: {type: 'string'},
+                      additionalProperties: { type: 'string' },
                     },
                     body: {},
-                    atomicityGroup: {type: 'string'},
+                    atomicityGroup: { type: 'string' },
                   },
                 },
               },
@@ -185,7 +185,7 @@ export class ODataBatchController {
         },
         'multipart/mixed': {
           'x-parser': 'stream',
-          schema: {type: 'object'},
+          schema: { type: 'object' },
         },
       },
     })
@@ -223,10 +223,14 @@ export class ODataBatchController {
     for (const group of grouped) {
       if (group.atomicityGroup) {
         try {
-          const entries = await this.executeAtomicGroup(group.requests, group.atomicityGroup, request);
+          const entries = await this.executeAtomicGroup(
+            group.requests,
+            group.atomicityGroup,
+            request,
+          );
           if (entries?.length) {
             responses.push(
-              ...entries.map(entry => ({
+              ...entries.map((entry) => ({
                 ...entry,
                 atomicityGroup: group.atomicityGroup,
               })),
@@ -252,7 +256,7 @@ export class ODataBatchController {
     response.set('OData-Version', ODATA_VERSION);
 
     if (isMultipart) {
-      const {body, boundary: responseBoundary} = serializeMultipartBatch(responses);
+      const { body, boundary: responseBoundary } = serializeMultipartBatch(responses);
       response.set('Content-Type', `multipart/mixed; boundary=${responseBoundary}`);
       response.set('Content-Length', Buffer.byteLength(body, 'utf-8').toString());
       response.send(body);
@@ -260,21 +264,21 @@ export class ODataBatchController {
     }
 
     response.contentType('application/json');
-    return {responses};
+    return { responses };
   }
 
   private groupByAtomicity(requests: BatchRequest[]) {
-    const result: Array<{atomicityGroup?: string; requests: BatchRequest[]}> = [];
+    const result: Array<{ atomicityGroup?: string; requests: BatchRequest[] }> = [];
     const handled = new Set<string>();
 
     for (const req of requests) {
       if (req.atomicityGroup) {
         if (handled.has(req.atomicityGroup)) continue;
-        const groupRequests = requests.filter(r => r.atomicityGroup === req.atomicityGroup);
+        const groupRequests = requests.filter((r) => r.atomicityGroup === req.atomicityGroup);
         handled.add(req.atomicityGroup);
-        result.push({atomicityGroup: req.atomicityGroup, requests: groupRequests});
+        result.push({ atomicityGroup: req.atomicityGroup, requests: groupRequests });
       } else {
-        result.push({requests: [req]});
+        result.push({ requests: [req] });
       }
     }
 
@@ -303,7 +307,7 @@ export class ODataBatchController {
     const context = await this.createAtomicGroupContext(groupId, requests);
     try {
       const entries = await this.executeGroup(requests, context, parentRequest);
-      const failedIndex = entries.findIndex(entry => entry.status >= 400);
+      const failedIndex = entries.findIndex((entry) => entry.status >= 400);
       if (failedIndex >= 0) {
         await context.rollback();
         // Append synthetic responses for any requests that were not executed due to failure
@@ -312,7 +316,10 @@ export class ODataBatchController {
             entries.push({
               id: req.id,
               status: 424, // Failed Dependency – request aborted due to earlier failure
-              body: this.odataError('FailedDependency', 'Request not executed due to prior failure in changeset.'),
+              body: this.odataError(
+                'FailedDependency',
+                'Request not executed due to prior failure in changeset.',
+              ),
             });
           }
         }
@@ -354,7 +361,9 @@ export class ODataBatchController {
         }
 
         const repository = await this.app.get(def.repositoryBindingKey);
-        const dataSource = (repository as {dataSource?: {beginTransaction?: Function; name?: string}}).dataSource;
+        const dataSource = (
+          repository as { dataSource?: { beginTransaction?: Function; name?: string } }
+        ).dataSource;
         if (!dataSource || typeof dataSource.beginTransaction !== 'function') {
           throw new HttpErrors.NotImplemented(
             `Repository for entity set ${def.name} does not support transactions required for atomicity group ${groupId}.`,
@@ -523,11 +532,26 @@ export class ODataBatchController {
     } as any;
 
     // Provide Express-style response helpers expected by LoopBack internals
-    (res as any).status = (code: number) => { res.statusCode = code; return res; };
-    (res as any).contentType = (type: string) => { res.setHeader('Content-Type', type); return res; };
-    (res as any).type = (type: string) => { res.setHeader('Content-Type', type); return res; };
-    (res as any).set = (field: string, value: string) => { res.setHeader(field, value); return res; };
-    (res as any).header = (field: string, value: string) => { res.setHeader(field, value); return res; };
+    (res as any).status = (code: number) => {
+      res.statusCode = code;
+      return res;
+    };
+    (res as any).contentType = (type: string) => {
+      res.setHeader('Content-Type', type);
+      return res;
+    };
+    (res as any).type = (type: string) => {
+      res.setHeader('Content-Type', type);
+      return res;
+    };
+    (res as any).set = (field: string, value: string) => {
+      res.setHeader(field, value);
+      return res;
+    };
+    (res as any).header = (field: string, value: string) => {
+      res.setHeader(field, value);
+      return res;
+    };
     (res as any).json = (body: unknown) => {
       if (!res.getHeader('Content-Type')) res.setHeader('Content-Type', 'application/json');
       const payload = Buffer.isBuffer(body) ? body : Buffer.from(JSON.stringify(body ?? null));
@@ -535,8 +559,14 @@ export class ODataBatchController {
       return res;
     };
     (res as any).send = (body: unknown) => {
-      if (body === undefined || body === null) { res.end(); return res; }
-      if (Buffer.isBuffer(body)) { res.end(body); return res; }
+      if (body === undefined || body === null) {
+        res.end();
+        return res;
+      }
+      if (Buffer.isBuffer(body)) {
+        res.end(body);
+        return res;
+      }
       if (typeof body === 'object') {
         if (!res.getHeader('Content-Type')) res.setHeader('Content-Type', 'application/json');
         res.end(JSON.stringify(body));
@@ -551,7 +581,9 @@ export class ODataBatchController {
     }
 
     context.applyTo(req);
-    const handlerPromise = this.httpHandler.handleRequest(req as any, res as any).catch(() => undefined);
+    const handlerPromise = this.httpHandler
+      .handleRequest(req as any, res as any)
+      .catch(() => undefined);
 
     // Feed request body to the IncomingMessage stream directly
     if (bodyBuffer.length) {
@@ -562,16 +594,22 @@ export class ODataBatchController {
     try {
       // Add per-request timeout to avoid hangs; wait for finish/close
       const TIMEOUT_MS = 30000;
-      const timeoutPromise = new Promise<never>((_, reject) => setTimeout(() => reject(new Error('Batch sub-request timeout')), TIMEOUT_MS));
+      const timeoutPromise = new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error('Batch sub-request timeout')), TIMEOUT_MS),
+      );
       const result = await Promise.race([finishPromise, timeoutPromise]);
       context.clearFrom(req);
       return result;
     } catch (error) {
       context.clearFrom(req);
-      const status = (error && typeof error === 'object' && 'statusCode' in error
-        ? (error as {statusCode?: number}).statusCode
-        : undefined) ?? 500;
-      const body = this.odataError('BatchExecutionError', (error as Error).message ?? 'Failed to execute request.');
+      const status =
+        (error && typeof error === 'object' && 'statusCode' in error
+          ? (error as { statusCode?: number }).statusCode
+          : undefined) ?? 500;
+      const body = this.odataError(
+        'BatchExecutionError',
+        (error as Error).message ?? 'Failed to execute request.',
+      );
       return {
         id: request.id,
         status,
@@ -580,19 +618,31 @@ export class ODataBatchController {
     }
   }
 
-  private async executeViaFetch(request: BatchRequest, parentRequest?: Request): Promise<BatchResponseEntry> {
-    const parentContentTypeRaw = typeof (parentRequest as any)?.get === 'function'
-      ? ((parentRequest as any).get('content-type') as string | undefined)
-      : ((parentRequest as any)?.headers?.['content-type'] as string | undefined);
+  private async executeViaFetch(
+    request: BatchRequest,
+    parentRequest?: Request,
+  ): Promise<BatchResponseEntry> {
+    const parentContentTypeRaw =
+      typeof (parentRequest as any)?.get === 'function'
+        ? ((parentRequest as any).get('content-type') as string | undefined)
+        : ((parentRequest as any)?.headers?.['content-type'] as string | undefined);
     const parentContentType = parentContentTypeRaw ?? '';
     const allowRelative = /multipart\/mixed/i.test(parentContentType);
     const path = this.sanitizeUrl(request.url, allowRelative);
     if (!path) {
-      return {id: request.id, status: 400, body: this.odataError('InvalidUrl', `Invalid request URL: ${request.url}`)};
+      return {
+        id: request.id,
+        status: 400,
+        body: this.odataError('InvalidUrl', `Invalid request URL: ${request.url}`),
+      };
     }
     const method = request.method?.toUpperCase();
     if (!method) {
-      return {id: request.id, status: 400, body: this.odataError('InvalidMethod', 'Batch request method is required.')};
+      return {
+        id: request.id,
+        status: 400,
+        body: this.odataError('InvalidMethod', 'Batch request method is required.'),
+      };
     }
     try {
       const target = new URL(path, this.serverUrl).toString();
@@ -602,15 +652,28 @@ export class ODataBatchController {
         body = typeof request.body === 'string' ? request.body : JSON.stringify(request.body);
         if (!headers['content-type']) headers['content-type'] = 'application/json';
       }
-      const resp = await fetch(target, {method, headers, body} as any);
+      const resp = await fetch(target, { method, headers, body } as any);
       const text = await resp.text();
       let parsed: unknown;
-      try { parsed = text ? JSON.parse(text) : undefined; } catch { parsed = text; }
+      try {
+        parsed = text ? JSON.parse(text) : undefined;
+      } catch {
+        parsed = text;
+      }
       const outHeaders: Record<string, string> = {};
-      resp.headers.forEach((v, k) => { outHeaders[k] = v; });
-      return {id: request.id, status: resp.status, headers: outHeaders, body: parsed};
+      resp.headers.forEach((v, k) => {
+        outHeaders[k] = v;
+      });
+      return { id: request.id, status: resp.status, headers: outHeaders, body: parsed };
     } catch (err) {
-      return {id: request.id, status: 500, body: this.odataError('BatchExecutionError', (err as Error).message ?? 'Failed to execute request.')};
+      return {
+        id: request.id,
+        status: 500,
+        body: this.odataError(
+          'BatchExecutionError',
+          (err as Error).message ?? 'Failed to execute request.',
+        ),
+      };
     }
   }
 
@@ -644,7 +707,10 @@ export class ODataBatchController {
     return undefined;
   }
 
-  private buildHeadersForRequest(request: BatchRequest, parentRequest?: Request): Record<string, string> {
+  private buildHeadersForRequest(
+    request: BatchRequest,
+    parentRequest?: Request,
+  ): Record<string, string> {
     const merged: Record<string, string> = {};
     const parentHeaders = parentRequest?.headers ?? {};
 
@@ -652,7 +718,10 @@ export class ODataBatchController {
       if (value == null) continue;
       const normalized = key.toLowerCase();
       if (Array.isArray(value)) {
-        merged[normalized] = value.filter(v => v != null).map(v => String(v)).join(',');
+        merged[normalized] = value
+          .filter((v) => v != null)
+          .map((v) => String(v))
+          .join(',');
       } else {
         merged[normalized] = String(value);
       }
@@ -685,7 +754,7 @@ export class ODataBatchController {
 
   private resolveErrorStatus(error: unknown, fallback: number): number {
     if (typeof error === 'object' && error !== null) {
-      const withStatus = error as {statusCode?: number; status?: number};
+      const withStatus = error as { statusCode?: number; status?: number };
       const status = withStatus.statusCode ?? withStatus.status;
       if (typeof status === 'number' && !Number.isNaN(status)) return status;
     }

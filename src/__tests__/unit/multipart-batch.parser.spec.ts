@@ -1,8 +1,8 @@
 /// <reference path="../../types/testing.globals.d.ts" />
 
-import {Readable} from 'stream';
-import {parseMultipartBatch} from '../../services/multipart-batch.parser';
-import {expect} from '@loopback/testlab';
+import { Readable } from 'stream';
+import { parseMultipartBatch } from '../../services/multipart-batch.parser';
+import { expect } from '@loopback/testlab';
 
 describe('multipart batch parser', () => {
   it('parses nested changesets and individual requests', async () => {
@@ -53,8 +53,8 @@ describe('multipart batch parser', () => {
     expect(updateReq.atomicityGroup).to.equal('changeset_456');
     expect(createReq.method).to.equal('POST');
     expect(updateReq.method).to.equal('PATCH');
-    expect(createReq.body).to.deepEqual({name: 'Tablet'});
-    expect(updateReq.body).to.deepEqual({price: 1199});
+    expect(createReq.body).to.deepEqual({ name: 'Tablet' });
+    expect(updateReq.body).to.deepEqual({ price: 1199 });
     expect(listReq.method).to.equal('GET');
     expect(listReq.atomicityGroup).to.be.undefined();
   });

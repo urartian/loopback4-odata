@@ -1,9 +1,9 @@
 import 'reflect-metadata';
-import {Entity, model} from '@loopback/repository';
-import {expect} from '@loopback/testlab';
-import {defineODataCrudController} from '../../controllers/crud-controller-factory';
-import {EntitySetDef} from '../../registry/entityset-registry';
-import {collectControllerSecurityMetadata} from '../../util/security-metadata';
+import { Entity, model } from '@loopback/repository';
+import { expect } from '@loopback/testlab';
+import { defineODataCrudController } from '../../controllers/crud-controller-factory';
+import { EntitySetDef } from '../../registry/entityset-registry';
+import { collectControllerSecurityMetadata } from '../../util/security-metadata';
 
 const AUTH_KEY = 'authentication:metadata';
 const AUTHZ_KEY = 'authorization:metadata';
@@ -17,8 +17,13 @@ describe('Security metadata propagation', () => {
       list() {}
     }
 
-    Reflect.defineMetadata(AUTH_KEY, {strategy: 'jwt'}, WidgetController);
-    Reflect.defineMetadata(AUTHZ_KEY, {scopes: ['widget.read']}, WidgetController.prototype, 'list');
+    Reflect.defineMetadata(AUTH_KEY, { strategy: 'jwt' }, WidgetController);
+    Reflect.defineMetadata(
+      AUTHZ_KEY,
+      { scopes: ['widget.read'] },
+      WidgetController.prototype,
+      'list',
+    );
 
     const securityMetadata = collectControllerSecurityMetadata(WidgetController);
     expect(securityMetadata).to.not.be.undefined();
@@ -32,8 +37,10 @@ describe('Security metadata propagation', () => {
 
     const Generated = defineODataCrudController(def);
 
-    expect(Reflect.getMetadata(AUTH_KEY, Generated)).to.deepEqual({strategy: 'jwt'});
-    expect(Reflect.getMetadata(AUTHZ_KEY, Generated.prototype, 'list')).to.deepEqual({scopes: ['widget.read']});
+    expect(Reflect.getMetadata(AUTH_KEY, Generated)).to.deepEqual({ strategy: 'jwt' });
+    expect(Reflect.getMetadata(AUTHZ_KEY, Generated.prototype, 'list')).to.deepEqual({
+      scopes: ['widget.read'],
+    });
   });
 
   it('maps find metadata from the source controller to the list handler', () => {
@@ -44,7 +51,12 @@ describe('Security metadata propagation', () => {
       find() {}
     }
 
-    Reflect.defineMetadata(AUTHZ_KEY, {scopes: ['gadget.read']}, GadgetController.prototype, 'find');
+    Reflect.defineMetadata(
+      AUTHZ_KEY,
+      { scopes: ['gadget.read'] },
+      GadgetController.prototype,
+      'find',
+    );
 
     const securityMetadata = collectControllerSecurityMetadata(GadgetController);
     expect(securityMetadata?.methodMetadata).to.have.property('find');
@@ -57,7 +69,9 @@ describe('Security metadata propagation', () => {
     };
 
     const Generated = defineODataCrudController(def);
-    expect(Reflect.getMetadata(AUTHZ_KEY, Generated.prototype, 'list')).to.deepEqual({scopes: ['gadget.read']});
+    expect(Reflect.getMetadata(AUTHZ_KEY, Generated.prototype, 'list')).to.deepEqual({
+      scopes: ['gadget.read'],
+    });
   });
 
   it('maps deleteById metadata to the delete handler by default', () => {
@@ -68,7 +82,12 @@ describe('Security metadata propagation', () => {
       deleteById() {}
     }
 
-    Reflect.defineMetadata(AUTHZ_KEY, {scopes: ['thing.delete']}, ThingController.prototype, 'deleteById');
+    Reflect.defineMetadata(
+      AUTHZ_KEY,
+      { scopes: ['thing.delete'] },
+      ThingController.prototype,
+      'deleteById',
+    );
 
     const securityMetadata = collectControllerSecurityMetadata(ThingController);
     expect(securityMetadata?.methodMetadata).to.have.property('deleteById');
@@ -81,7 +100,9 @@ describe('Security metadata propagation', () => {
     };
 
     const Generated = defineODataCrudController(def);
-    expect(Reflect.getMetadata(AUTHZ_KEY, Generated.prototype, 'delete')).to.deepEqual({scopes: ['thing.delete']});
+    expect(Reflect.getMetadata(AUTHZ_KEY, Generated.prototype, 'delete')).to.deepEqual({
+      scopes: ['thing.delete'],
+    });
   });
 
   it('allows overriding derived method aliases', () => {
@@ -92,7 +113,12 @@ describe('Security metadata propagation', () => {
       deleteById() {}
     }
 
-    Reflect.defineMetadata(AUTHZ_KEY, {scopes: ['gizmo.delete']}, GizmoController.prototype, 'deleteById');
+    Reflect.defineMetadata(
+      AUTHZ_KEY,
+      { scopes: ['gizmo.delete'] },
+      GizmoController.prototype,
+      'deleteById',
+    );
 
     const securityMetadata = collectControllerSecurityMetadata(GizmoController);
     expect(securityMetadata?.methodMetadata).to.have.property('deleteById');
@@ -120,8 +146,18 @@ describe('Security metadata propagation', () => {
       deleteById() {}
     }
 
-    Reflect.defineMetadata(AUTHZ_KEY, {scopes: ['order.update']}, OrderController.prototype, 'updateById');
-    Reflect.defineMetadata(AUTHZ_KEY, {scopes: ['order.delete']}, OrderController.prototype, 'deleteById');
+    Reflect.defineMetadata(
+      AUTHZ_KEY,
+      { scopes: ['order.update'] },
+      OrderController.prototype,
+      'updateById',
+    );
+    Reflect.defineMetadata(
+      AUTHZ_KEY,
+      { scopes: ['order.delete'] },
+      OrderController.prototype,
+      'deleteById',
+    );
 
     const securityMetadata = collectControllerSecurityMetadata(OrderController);
     const def: EntitySetDef = {
@@ -132,8 +168,12 @@ describe('Security metadata propagation', () => {
     };
 
     const Generated = defineODataCrudController(def);
-    expect(Reflect.getMetadata(AUTHZ_KEY, Generated.prototype, 'linkNavigationRef')).to.deepEqual({scopes: ['order.update']});
-    expect(Reflect.getMetadata(AUTHZ_KEY, Generated.prototype, 'unlinkNavigationRef')).to.deepEqual({scopes: ['order.delete']});
+    expect(Reflect.getMetadata(AUTHZ_KEY, Generated.prototype, 'linkNavigationRef')).to.deepEqual({
+      scopes: ['order.update'],
+    });
+    expect(Reflect.getMetadata(AUTHZ_KEY, Generated.prototype, 'unlinkNavigationRef')).to.deepEqual(
+      { scopes: ['order.delete'] },
+    );
   });
 
   it('falls back to update metadata for unlink when delete metadata is absent', () => {
@@ -144,7 +184,12 @@ describe('Security metadata propagation', () => {
       updateById() {}
     }
 
-    Reflect.defineMetadata(AUTHZ_KEY, {scopes: ['invoice.write']}, InvoiceController.prototype, 'updateById');
+    Reflect.defineMetadata(
+      AUTHZ_KEY,
+      { scopes: ['invoice.write'] },
+      InvoiceController.prototype,
+      'updateById',
+    );
 
     const securityMetadata = collectControllerSecurityMetadata(InvoiceController);
     const def: EntitySetDef = {
@@ -155,7 +200,11 @@ describe('Security metadata propagation', () => {
     };
 
     const Generated = defineODataCrudController(def);
-    expect(Reflect.getMetadata(AUTHZ_KEY, Generated.prototype, 'linkNavigationRef')).to.deepEqual({scopes: ['invoice.write']});
-    expect(Reflect.getMetadata(AUTHZ_KEY, Generated.prototype, 'unlinkNavigationRef')).to.deepEqual({scopes: ['invoice.write']});
+    expect(Reflect.getMetadata(AUTHZ_KEY, Generated.prototype, 'linkNavigationRef')).to.deepEqual({
+      scopes: ['invoice.write'],
+    });
+    expect(Reflect.getMetadata(AUTHZ_KEY, Generated.prototype, 'unlinkNavigationRef')).to.deepEqual(
+      { scopes: ['invoice.write'] },
+    );
   });
 });

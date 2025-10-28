@@ -1,5 +1,5 @@
-import {Entity, juggler, ModelDefinition} from '@loopback/repository';
-import {EntitySqlMetadata} from '../registry/entityset-registry';
+import { Entity, juggler, ModelDefinition } from '@loopback/repository';
+import { EntitySqlMetadata } from '../registry/entityset-registry';
 
 interface ConnectorWithMetadata {
   table?: (modelName: string) => string | undefined;
@@ -10,12 +10,12 @@ interface ConnectorWithMetadata {
 }
 
 function getModelName(modelCtor: typeof Entity): string | undefined {
-  const metaName = (modelCtor as typeof Entity & {modelName?: string}).modelName;
+  const metaName = (modelCtor as typeof Entity & { modelName?: string }).modelName;
   return metaName ?? modelCtor?.name ?? undefined;
 }
 
 function getModelDefinition(modelCtor: typeof Entity): ModelDefinition | undefined {
-  return (modelCtor as typeof Entity & {definition?: ModelDefinition}).definition;
+  return (modelCtor as typeof Entity & { definition?: ModelDefinition }).definition;
 }
 
 /**
@@ -34,9 +34,7 @@ export function inferSqlMetadata(
 
   let tableName: string | undefined;
   try {
-    tableName = typeof connector.table === 'function'
-      ? connector.table(modelName)
-      : undefined;
+    tableName = typeof connector.table === 'function' ? connector.table(modelName) : undefined;
   } catch {
     tableName = undefined;
   }
@@ -46,9 +44,7 @@ export function inferSqlMetadata(
 
   let schema: string | undefined;
   try {
-    schema = typeof connector.schema === 'function'
-      ? connector.schema(modelName)
-      : undefined;
+    schema = typeof connector.schema === 'function' ? connector.schema(modelName) : undefined;
   } catch {
     schema = undefined;
   }
@@ -58,9 +54,10 @@ export function inferSqlMetadata(
   const properties = definition?.properties ?? {};
   for (const propertyName of Object.keys(properties)) {
     try {
-      const columnName = typeof connector.column === 'function'
-        ? connector.column(modelName, propertyName)
-        : undefined;
+      const columnName =
+        typeof connector.column === 'function'
+          ? connector.column(modelName, propertyName)
+          : undefined;
       if (columnName) {
         columnMap[propertyName] = columnName;
       }

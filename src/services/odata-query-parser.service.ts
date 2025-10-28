@@ -28,8 +28,8 @@ type FunctionExpression = {
 type OperandTransform = 'tolower' | 'toupper';
 
 export type FunctionArg =
-  | {kind: 'field'; name: string; transform?: OperandTransform}
-  | {kind: 'literal'; value: unknown};
+  | { kind: 'field'; name: string; transform?: OperandTransform }
+  | { kind: 'literal'; value: unknown };
 
 interface FieldOperand {
   kind: 'field';
@@ -91,7 +91,7 @@ export interface ApplyAggregateTransformation {
 
 export interface ApplyOrderByTransformation {
   type: 'orderby';
-  items: Array<{field: string; direction: 'asc' | 'desc'}>;
+  items: Array<{ field: string; direction: 'asc' | 'desc' }>;
 }
 
 export interface ApplySkipTransformation {
@@ -119,7 +119,9 @@ function isValidIdentifierSegment(segment: string): boolean {
 }
 
 function isValidPath(path: string): boolean {
-  return path.split('/').every(segment => segment.length > 0 && isValidIdentifierSegment(segment));
+  return path
+    .split('/')
+    .every((segment) => segment.length > 0 && isValidIdentifierSegment(segment));
 }
 
 interface LambdaExpressionNode {
@@ -138,10 +140,15 @@ export interface LambdaExpression {
 }
 
 export type ComputeNode =
-  | {type: 'path'; path: string[]}
-  | {type: 'literal'; value: unknown}
-  | {type: 'binary'; operator: 'add' | 'sub' | 'mul' | 'div' | 'mod'; left: ComputeNode; right: ComputeNode}
-  | {type: 'function'; name: 'tolower' | 'toupper' | 'concat'; args: ComputeNode[]};
+  | { type: 'path'; path: string[] }
+  | { type: 'literal'; value: unknown }
+  | {
+      type: 'binary';
+      operator: 'add' | 'sub' | 'mul' | 'div' | 'mod';
+      left: ComputeNode;
+      right: ComputeNode;
+    }
+  | { type: 'function'; name: 'tolower' | 'toupper' | 'concat'; args: ComputeNode[] };
 
 export interface ComputeExpression {
   alias: string;
@@ -149,16 +156,41 @@ export interface ComputeExpression {
 }
 
 export type ParsedExpression =
-  | {operator: 'comparison'; field: string; comparator: string; value: unknown}
-  | {operator: 'logical'; type: 'and' | 'or'; expressions: ParsedExpression[]}
-  | {operator: 'not'; expr: ParsedExpression}
+  | { operator: 'comparison'; field: string; comparator: string; value: unknown }
+  | { operator: 'logical'; type: 'and' | 'or'; expressions: ParsedExpression[] }
+  | { operator: 'not'; expr: ParsedExpression }
   | FunctionExpression
-  | {operator: 'fncmp'; name: 'round' | 'floor' | 'ceiling' | 'year'; field: string; comparator: string; value: number}
-  | {operator: 'stringfncmp'; name: 'trim' | 'concat'; args: FunctionArg[]; comparator: 'eq' | 'neq'; value: string}
-  | {operator: 'datepart'; part: 'month' | 'day' | 'hour' | 'minute' | 'second'; field: string; comparator: string; value: number}
-  | {operator: 'indexofcmp'; field: string; comparator: string; value: number; needle: string}
-  | {operator: 'substrcmp'; field: string; start: number; length?: number; comparator: 'eq' | 'neq'; literal: string}
-  | {operator: 'lengthcmp'; field: string; comparator: string; value: number}
+  | {
+      operator: 'fncmp';
+      name: 'round' | 'floor' | 'ceiling' | 'year';
+      field: string;
+      comparator: string;
+      value: number;
+    }
+  | {
+      operator: 'stringfncmp';
+      name: 'trim' | 'concat';
+      args: FunctionArg[];
+      comparator: 'eq' | 'neq';
+      value: string;
+    }
+  | {
+      operator: 'datepart';
+      part: 'month' | 'day' | 'hour' | 'minute' | 'second';
+      field: string;
+      comparator: string;
+      value: number;
+    }
+  | { operator: 'indexofcmp'; field: string; comparator: string; value: number; needle: string }
+  | {
+      operator: 'substrcmp';
+      field: string;
+      start: number;
+      length?: number;
+      comparator: 'eq' | 'neq';
+      literal: string;
+    }
+  | { operator: 'lengthcmp'; field: string; comparator: string; value: number }
   | LambdaExpressionNode;
 
 type QueryObject = Record<string, string | string[] | undefined>;
@@ -221,17 +253,16 @@ function tokenize(filter: string): string[] {
 
 function applyTransform(operand: Operand, transform: OperandTransform): Operand {
   if (operand.kind === 'field') {
-    return {...operand, transform};
+    return { ...operand, transform };
   }
 
   if (operand.kind === 'literal' && typeof operand.value === 'string') {
-    const value = transform === 'tolower'
-      ? operand.value.toLowerCase()
-      : operand.value.toUpperCase();
-    return {...operand, value, transform};
+    const value =
+      transform === 'tolower' ? operand.value.toLowerCase() : operand.value.toUpperCase();
+    return { ...operand, value, transform };
   }
 
-  return {...operand, transform};
+  return { ...operand, transform };
 }
 
 function parseOperand(tokens: string[], index: number): [Operand, number] {
@@ -258,23 +289,23 @@ function parseOperand(tokens: string[], index: number): [Operand, number] {
   }
 
   if (token.startsWith("'") && token.endsWith("'")) {
-    return [{kind: 'literal', value: token.slice(1, -1)}, index + 1];
+    return [{ kind: 'literal', value: token.slice(1, -1) }, index + 1];
   }
 
   if (token === 'null') {
-    return [{kind: 'literal', value: null}, index + 1];
+    return [{ kind: 'literal', value: null }, index + 1];
   }
 
   if (token === 'true' || token === 'false') {
-    return [{kind: 'literal', value: token === 'true'}, index + 1];
+    return [{ kind: 'literal', value: token === 'true' }, index + 1];
   }
 
   const numeric = Number(token);
   if (!Number.isNaN(numeric)) {
-    return [{kind: 'literal', value: numeric}, index + 1];
+    return [{ kind: 'literal', value: numeric }, index + 1];
   }
 
-  return [{kind: 'field', name: token}, index + 1];
+  return [{ kind: 'field', name: token }, index + 1];
 }
 
 function operandToFunctionArg(operand: Operand): FunctionArg {
@@ -340,7 +371,21 @@ function parseFunction(tokens: string[], index: number): [FunctionExpression, nu
   ];
 }
 
-function parseStringFunctionComparison(tokens: string[], index: number): [{operator: 'stringfncmp'; name: 'trim' | 'concat'; args: FunctionArg[]; comparator: 'eq' | 'neq'; value: string}, number] | undefined {
+function parseStringFunctionComparison(
+  tokens: string[],
+  index: number,
+):
+  | [
+      {
+        operator: 'stringfncmp';
+        name: 'trim' | 'concat';
+        args: FunctionArg[];
+        comparator: 'eq' | 'neq';
+        value: string;
+      },
+      number,
+    ]
+  | undefined {
   const name = tokens[index]?.toLowerCase();
   if (name !== 'trim' && name !== 'concat') return undefined;
   if (tokens[index + 1] !== '(') {
@@ -397,7 +442,21 @@ function parseStringFunctionComparison(tokens: string[], index: number): [{opera
   ];
 }
 
-function parseDatePartComparison(tokens: string[], index: number): [{operator: 'datepart'; part: 'month' | 'day' | 'hour' | 'minute' | 'second'; field: string; comparator: string; value: number}, number] | undefined {
+function parseDatePartComparison(
+  tokens: string[],
+  index: number,
+):
+  | [
+      {
+        operator: 'datepart';
+        part: 'month' | 'day' | 'hour' | 'minute' | 'second';
+        field: string;
+        comparator: string;
+        value: number;
+      },
+      number,
+    ]
+  | undefined {
   const name = tokens[index]?.toLowerCase();
   const supported: Record<string, 'month' | 'day' | 'hour' | 'minute' | 'second'> = {
     month: 'month',
@@ -442,9 +501,24 @@ function parseDatePartComparison(tokens: string[], index: number): [{operator: '
   ];
 }
 
-function parseFieldFunctionComparison(tokens: string[], index: number): [{operator: 'fncmp'; name: 'round' | 'floor' | 'ceiling' | 'year'; field: string; comparator: string; value: number}, number] | undefined {
+function parseFieldFunctionComparison(
+  tokens: string[],
+  index: number,
+):
+  | [
+      {
+        operator: 'fncmp';
+        name: 'round' | 'floor' | 'ceiling' | 'year';
+        field: string;
+        comparator: string;
+        value: number;
+      },
+      number,
+    ]
+  | undefined {
   const name = tokens[index]?.toLowerCase();
-  if (name !== 'round' && name !== 'floor' && name !== 'ceiling' && name !== 'year') return undefined;
+  if (name !== 'round' && name !== 'floor' && name !== 'ceiling' && name !== 'year')
+    return undefined;
   if (tokens[index + 1] !== '(') {
     throw new Error(`Malformed ${name} invocation. Expected opening parenthesis.`);
   }
@@ -467,36 +541,83 @@ function parseFieldFunctionComparison(tokens: string[], index: number): [{operat
   if (!Number.isFinite(numeric)) {
     throw new Error(`${name} requires a numeric literal comparator value.`);
   }
-  return [{operator: 'fncmp', name: name as any, field: fieldOperand.name, comparator: comparisonOperators[comparator], value: numeric}, afterField + 3];
+  return [
+    {
+      operator: 'fncmp',
+      name: name as any,
+      field: fieldOperand.name,
+      comparator: comparisonOperators[comparator],
+      value: numeric,
+    },
+    afterField + 3,
+  ];
 }
 
-function parseIndexOfComparison(tokens: string[], index: number): [{operator: 'indexofcmp'; field: string; comparator: string; value: number; needle: string}, number] | undefined {
+function parseIndexOfComparison(
+  tokens: string[],
+  index: number,
+):
+  | [
+      { operator: 'indexofcmp'; field: string; comparator: string; value: number; needle: string },
+      number,
+    ]
+  | undefined {
   const name = tokens[index]?.toLowerCase();
   if (name !== 'indexof') return undefined;
-  if (tokens[index + 1] !== '(') throw new Error('Malformed indexof invocation. Expected opening parenthesis.');
+  if (tokens[index + 1] !== '(')
+    throw new Error('Malformed indexof invocation. Expected opening parenthesis.');
   const [fieldOperand, afterField] = parseOperand(tokens, index + 2);
-  if (fieldOperand.kind !== 'field') throw new Error('indexof requires the first argument to be a field.');
+  if (fieldOperand.kind !== 'field')
+    throw new Error('indexof requires the first argument to be a field.');
   if (tokens[afterField] !== ',') throw new Error('indexof requires a search literal.');
   const [litOperand, afterLit] = parseOperand(tokens, afterField + 1);
   if (litOperand.kind !== 'literal' || typeof litOperand.value !== 'string') {
     throw new Error('indexof requires a string literal as second argument.');
   }
-  if (tokens[afterLit] !== ')') throw new Error('Malformed indexof invocation. Expected closing parenthesis.');
+  if (tokens[afterLit] !== ')')
+    throw new Error('Malformed indexof invocation. Expected closing parenthesis.');
   const comparator = tokens[afterLit + 1]?.toLowerCase();
   const valueToken = tokens[afterLit + 2];
   if (!comparator || valueToken == null) throw new Error('Invalid indexof comparison.');
-  if (!(comparator in comparisonOperators)) throw new Error(`Unsupported comparator: ${comparator}`);
+  if (!(comparator in comparisonOperators))
+    throw new Error(`Unsupported comparator: ${comparator}`);
   const numeric = Number(valueToken);
   if (!Number.isFinite(numeric)) throw new Error('indexof comparison requires a numeric value.');
-  return [{operator: 'indexofcmp', field: fieldOperand.name, comparator: comparisonOperators[comparator], value: numeric, needle: String(litOperand.value)}, afterLit + 3];
+  return [
+    {
+      operator: 'indexofcmp',
+      field: fieldOperand.name,
+      comparator: comparisonOperators[comparator],
+      value: numeric,
+      needle: String(litOperand.value),
+    },
+    afterLit + 3,
+  ];
 }
 
-function parseSubstringComparison(tokens: string[], index: number): [{operator: 'substrcmp'; field: string; start: number; length?: number; comparator: 'eq' | 'neq'; literal: string}, number] | undefined {
+function parseSubstringComparison(
+  tokens: string[],
+  index: number,
+):
+  | [
+      {
+        operator: 'substrcmp';
+        field: string;
+        start: number;
+        length?: number;
+        comparator: 'eq' | 'neq';
+        literal: string;
+      },
+      number,
+    ]
+  | undefined {
   const name = tokens[index]?.toLowerCase();
   if (name !== 'substring') return undefined;
-  if (tokens[index + 1] !== '(') throw new Error('Malformed substring invocation. Expected opening parenthesis.');
+  if (tokens[index + 1] !== '(')
+    throw new Error('Malformed substring invocation. Expected opening parenthesis.');
   const [fieldOperand, afterField] = parseOperand(tokens, index + 2);
-  if (fieldOperand.kind !== 'field') throw new Error('substring requires the first argument to be a field.');
+  if (fieldOperand.kind !== 'field')
+    throw new Error('substring requires the first argument to be a field.');
   if (tokens[afterField] !== ',') throw new Error('substring requires a start argument.');
   const [startOperand, afterStart] = parseOperand(tokens, afterField + 1);
   if (startOperand.kind !== 'literal' || typeof startOperand.value !== 'number') {
@@ -512,30 +633,60 @@ function parseSubstringComparison(tokens: string[], index: number): [{operator: 
     length = Number(lenOperand.value);
     afterArgs = afterLen;
   }
-  if (tokens[afterArgs] !== ')') throw new Error('Malformed substring invocation. Expected closing parenthesis.');
+  if (tokens[afterArgs] !== ')')
+    throw new Error('Malformed substring invocation. Expected closing parenthesis.');
   const comparator = tokens[afterArgs + 1]?.toLowerCase();
   const rhs = tokens[afterArgs + 2];
   if (!comparator || rhs == null) throw new Error('Invalid substring comparison.');
-  if (comparator !== 'eq' && comparator !== 'ne') throw new Error(`Unsupported comparator for substring: ${comparator}`);
+  if (comparator !== 'eq' && comparator !== 'ne')
+    throw new Error(`Unsupported comparator for substring: ${comparator}`);
   const literal = parseLiteral(rhs);
-  if (typeof literal !== 'string') throw new Error('substring comparison requires a string literal.');
-  return [{operator: 'substrcmp', field: fieldOperand.name, start: Number(startOperand.value), length, comparator: comparator === 'eq' ? 'eq' : 'neq', literal}, afterArgs + 3];
+  if (typeof literal !== 'string')
+    throw new Error('substring comparison requires a string literal.');
+  return [
+    {
+      operator: 'substrcmp',
+      field: fieldOperand.name,
+      start: Number(startOperand.value),
+      length,
+      comparator: comparator === 'eq' ? 'eq' : 'neq',
+      literal,
+    },
+    afterArgs + 3,
+  ];
 }
 
-function parseLengthComparison(tokens: string[], index: number): [{operator: 'lengthcmp'; field: string; comparator: string; value: number}, number] | undefined {
+function parseLengthComparison(
+  tokens: string[],
+  index: number,
+):
+  | [{ operator: 'lengthcmp'; field: string; comparator: string; value: number }, number]
+  | undefined {
   const name = tokens[index]?.toLowerCase();
   if (name !== 'length') return undefined;
-  if (tokens[index + 1] !== '(') throw new Error('Malformed length invocation. Expected opening parenthesis.');
+  if (tokens[index + 1] !== '(')
+    throw new Error('Malformed length invocation. Expected opening parenthesis.');
   const [fieldOperand, afterField] = parseOperand(tokens, index + 2);
-  if (fieldOperand.kind !== 'field') throw new Error('length requires the first argument to be a field.');
-  if (tokens[afterField] !== ')') throw new Error('Malformed length invocation. Expected closing parenthesis.');
+  if (fieldOperand.kind !== 'field')
+    throw new Error('length requires the first argument to be a field.');
+  if (tokens[afterField] !== ')')
+    throw new Error('Malformed length invocation. Expected closing parenthesis.');
   const comparator = tokens[afterField + 1]?.toLowerCase();
   const valueToken = tokens[afterField + 2];
   if (!comparator || valueToken == null) throw new Error('Invalid length comparison.');
-  if (!(comparator in comparisonOperators)) throw new Error(`Unsupported comparator: ${comparator}`);
+  if (!(comparator in comparisonOperators))
+    throw new Error(`Unsupported comparator: ${comparator}`);
   const numeric = Number(valueToken);
   if (!Number.isFinite(numeric)) throw new Error('length comparison requires a numeric value.');
-  return [{operator: 'lengthcmp', field: fieldOperand.name, comparator: comparisonOperators[comparator], value: numeric}, afterField + 3];
+  return [
+    {
+      operator: 'lengthcmp',
+      field: fieldOperand.name,
+      comparator: comparisonOperators[comparator],
+      value: numeric,
+    },
+    afterField + 3,
+  ];
 }
 
 function parseComparison(tokens: string[], index: number): [ParsedExpression, number] {
@@ -597,12 +748,17 @@ function parseComparison(tokens: string[], index: number): [ParsedExpression, nu
   ];
 }
 
-function tryParseLambda(tokens: string[], index: number): [LambdaExpressionNode, number] | undefined {
+function tryParseLambda(
+  tokens: string[],
+  index: number,
+): [LambdaExpressionNode, number] | undefined {
   const token = tokens[index];
   const match = token?.match(/^([A-Za-z_][A-Za-z0-9_\/]*)\/(any|all)$/i);
   if (!match) return undefined;
   if (tokens[index + 1] !== '(') {
-    throw new Error(`Malformed ${match[2].toLowerCase()} expression. Expected opening parenthesis.`);
+    throw new Error(
+      `Malformed ${match[2].toLowerCase()} expression. Expected opening parenthesis.`,
+    );
   }
 
   let depth = 0;
@@ -693,7 +849,7 @@ function parsePrimary(tokens: string[], index: number): [ParsedExpression, numbe
   const token = tokens[index];
   if (token?.toLowerCase() === 'not') {
     const [expr, nextIndex] = parsePrimary(tokens, index + 1);
-    return [{operator: 'not', expr}, nextIndex];
+    return [{ operator: 'not', expr }, nextIndex];
   }
   if (token === '(') {
     const [expr, nextIndex] = parseExpression(tokens, index + 1);
@@ -749,7 +905,7 @@ function splitLambdaExpression(expr: ParsedExpression): {
   predicate?: ParsedExpression;
 } {
   if (expr.operator === 'lambda') {
-    return {lambda: expr};
+    return { lambda: expr };
   }
 
   if (expr.operator === 'logical') {
@@ -757,7 +913,7 @@ function splitLambdaExpression(expr: ParsedExpression): {
       if (containsLambda(expr)) {
         throw new Error('Lambda expressions combined with OR are not supported yet.');
       }
-      return {predicate: expr};
+      return { predicate: expr };
     }
     let lambda: LambdaExpressionNode | undefined;
     const others: ParsedExpression[] = [];
@@ -783,37 +939,37 @@ function splitLambdaExpression(expr: ParsedExpression): {
         expressions: others,
       };
     }
-    return {lambda, predicate};
+    return { lambda, predicate };
   }
 
   if (expr.operator === 'not' && containsLambda(expr)) {
     throw new Error('Negated lambda expressions are not supported yet.');
   }
 
-  return {predicate: expr};
+  return { predicate: expr };
 }
 
-type IndexOfExpression = Extract<ParsedExpression, {operator: 'indexofcmp'}>;
-type SubstringExpression = Extract<ParsedExpression, {operator: 'substrcmp'}>;
-type LengthExpression = Extract<ParsedExpression, {operator: 'lengthcmp'}>;
+type IndexOfExpression = Extract<ParsedExpression, { operator: 'indexofcmp' }>;
+type SubstringExpression = Extract<ParsedExpression, { operator: 'substrcmp' }>;
+type LengthExpression = Extract<ParsedExpression, { operator: 'lengthcmp' }>;
 
 function negateIndexOfExpression(expr: IndexOfExpression): IndexOfExpression {
-  const {comparator, value} = expr;
+  const { comparator, value } = expr;
   if (comparator === 'eq' && value === -1) {
-    return {...expr, comparator: 'gte', value: 0};
+    return { ...expr, comparator: 'gte', value: 0 };
   }
   if (comparator === 'gte' && value >= 0) {
-    return {...expr, comparator: 'eq', value: -1};
+    return { ...expr, comparator: 'eq', value: -1 };
   }
   if (comparator === 'gt' && value > -1) {
-    return {...expr, comparator: 'eq', value: -1};
+    return { ...expr, comparator: 'eq', value: -1 };
   }
   throw new Error('Unsupported negated indexof comparison.');
 }
 
 function negateSubstringExpression(expr: SubstringExpression): SubstringExpression {
   const inverted = expr.comparator === 'eq' ? 'neq' : 'eq';
-  return {...expr, comparator: inverted as SubstringExpression['comparator']};
+  return { ...expr, comparator: inverted as SubstringExpression['comparator'] };
 }
 
 function negateLengthExpression(expr: LengthExpression): LengthExpression {
@@ -829,7 +985,7 @@ function negateLengthExpression(expr: LengthExpression): LengthExpression {
   if (!comparator) {
     throw new Error('Unsupported negated length comparison.');
   }
-  return {...expr, comparator};
+  return { ...expr, comparator };
 }
 
 function underscorePattern(length: number): string {
@@ -837,7 +993,7 @@ function underscorePattern(length: number): string {
 }
 
 function translateLengthComparison(expr: LengthExpression): Where<AnyObject> {
-  const {field, comparator, value} = expr;
+  const { field, comparator, value } = expr;
   if (!Number.isFinite(value) || value < 0) {
     throw new Error('length comparison requires a non-negative integer value.');
   }
@@ -845,31 +1001,35 @@ function translateLengthComparison(expr: LengthExpression): Where<AnyObject> {
     throw new Error('length comparison requires an integer literal.');
   }
   if (comparator === 'eq') {
-    if (value === 0) return {[field]: ''} as Where<AnyObject>;
-    return {[field]: {like: underscorePattern(value), escape: '\\'}} as Where<AnyObject>;
+    if (value === 0) return { [field]: '' } as Where<AnyObject>;
+    return { [field]: { like: underscorePattern(value), escape: '\\' } } as Where<AnyObject>;
   }
   if (comparator === 'neq') {
-    if (value === 0) return {[field]: {neq: ''}} as Where<AnyObject>;
-    return {[field]: {nlike: underscorePattern(value), escape: '\\'}} as Where<AnyObject>;
+    if (value === 0) return { [field]: { neq: '' } } as Where<AnyObject>;
+    return { [field]: { nlike: underscorePattern(value), escape: '\\' } } as Where<AnyObject>;
   }
   if (comparator === 'gt') {
     if (value === 0) {
-      return {[field]: {neq: ''}} as Where<AnyObject>;
+      return { [field]: { neq: '' } } as Where<AnyObject>;
     }
-    return {[field]: {like: `${underscorePattern(value + 1)}%`, escape: '\\'}} as Where<AnyObject>;
+    return {
+      [field]: { like: `${underscorePattern(value + 1)}%`, escape: '\\' },
+    } as Where<AnyObject>;
   }
   if (comparator === 'gte') {
     if (value <= 0) {
-      return {[field]: {like: '%', escape: '\\'}} as Where<AnyObject>;
+      return { [field]: { like: '%', escape: '\\' } } as Where<AnyObject>;
     }
-    return {[field]: {like: `${underscorePattern(value)}%`, escape: '\\'}} as Where<AnyObject>;
+    return { [field]: { like: `${underscorePattern(value)}%`, escape: '\\' } } as Where<AnyObject>;
   }
   if (comparator === 'lt') {
-    return {[field]: {nlike: `${underscorePattern(value)}%`, escape: '\\'}} as Where<AnyObject>;
+    return { [field]: { nlike: `${underscorePattern(value)}%`, escape: '\\' } } as Where<AnyObject>;
   }
   if (comparator === 'lte') {
-    if (value === 0) return {[field]: ''} as Where<AnyObject>;
-    return {[field]: {nlike: `${underscorePattern(value + 1)}%`, escape: '\\'}} as Where<AnyObject>;
+    if (value === 0) return { [field]: '' } as Where<AnyObject>;
+    return {
+      [field]: { nlike: `${underscorePattern(value + 1)}%`, escape: '\\' },
+    } as Where<AnyObject>;
   }
   throw new Error('Unsupported length comparison.');
 }
@@ -890,24 +1050,31 @@ function buildWhere(expr: ParsedExpression): Where<AnyObject> {
   if (expr.operator === 'not') {
     const inner = expr.expr;
     if (inner.operator === 'comparison') {
-      const inverse: Record<string, string> = {eq: 'neq', neq: 'eq', gt: 'lte', gte: 'lt', lt: 'gte', lte: 'gt'} as any;
+      const inverse: Record<string, string> = {
+        eq: 'neq',
+        neq: 'eq',
+        gt: 'lte',
+        gte: 'lt',
+        lt: 'gte',
+        lte: 'gt',
+      } as any;
       const comparator = inverse[inner.comparator] ?? 'neq';
       if (comparator === 'eq') {
-        return {[inner.field]: inner.value as any};
+        return { [inner.field]: inner.value as any };
       }
-      return {[inner.field]: {[comparator]: inner.value} as AnyObject} as Where<AnyObject>;
+      return { [inner.field]: { [comparator]: inner.value } as AnyObject } as Where<AnyObject>;
     }
     if (inner.operator === 'function') {
-      const clone: FunctionExpression = {...inner, negated: !inner.negated};
+      const clone: FunctionExpression = { ...inner, negated: !inner.negated };
       return buildWhere(clone);
     }
     if (inner.operator === 'logical') {
-      const inverted = inner.expressions.map(e => buildWhere({operator: 'not', expr: e}));
+      const inverted = inner.expressions.map((e) => buildWhere({ operator: 'not', expr: e }));
       const type = inner.type === 'and' ? 'or' : 'and';
-      return {[type]: inverted} as Where<AnyObject>;
+      return { [type]: inverted } as Where<AnyObject>;
     }
     if (inner.operator === 'fncmp') {
-      return {not: buildWhere(inner)} as any;
+      return { not: buildWhere(inner) } as any;
     }
     if (inner.operator === 'indexofcmp') {
       return buildWhere(negateIndexOfExpression(inner));
@@ -926,11 +1093,11 @@ function buildWhere(expr: ParsedExpression): Where<AnyObject> {
     }
   }
   if (expr.operator === 'comparison') {
-    const {field, comparator, value} = expr;
+    const { field, comparator, value } = expr;
     if (comparator === 'eq') {
-      return {[field]: value};
+      return { [field]: value };
     }
-    return {[field]: {[comparator]: value}};
+    return { [field]: { [comparator]: value } };
   }
 
   if (expr.operator === 'function') {
@@ -939,14 +1106,15 @@ function buildWhere(expr: ParsedExpression): Where<AnyObject> {
       throw new Error(`${expr.name} requires a string literal argument.`);
     }
     const escaped = value.replace(/%/g, '\\%').replace(/_/g, '\\_');
-    const pattern = expr.name === 'contains'
-      ? `%${escaped}%`
-      : expr.name === 'startswith'
-        ? `${escaped}%`
-        : `%${escaped}`;
+    const pattern =
+      expr.name === 'contains'
+        ? `%${escaped}%`
+        : expr.name === 'startswith'
+          ? `${escaped}%`
+          : `%${escaped}`;
     const clause: AnyObject = expr.negated
-      ? {nlike: pattern, escape: '\\'}
-      : {like: pattern, escape: '\\'};
+      ? { nlike: pattern, escape: '\\' }
+      : { like: pattern, escape: '\\' };
     if (expr.caseInsensitive) clause.options = 'i';
     return {
       [expr.field]: clause,
@@ -954,27 +1122,26 @@ function buildWhere(expr: ParsedExpression): Where<AnyObject> {
   }
 
   if (expr.operator === 'indexofcmp') {
-    const {field, comparator, value, needle} = expr;
+    const { field, comparator, value, needle } = expr;
     if ((comparator === 'gte' && value >= 0) || (comparator === 'gt' && value > -1)) {
       const lit = needle.replace(/%/g, '\\%').replace(/_/g, '\\_');
-      return {[field]: {like: `%${lit}%`, escape: '\\', options: 'i'}} as Where<AnyObject>;
+      return { [field]: { like: `%${lit}%`, escape: '\\', options: 'i' } } as Where<AnyObject>;
     }
     if (comparator === 'eq' && value === -1) {
       const lit = needle.replace(/%/g, '\\%').replace(/_/g, '\\_');
-      return {[field]: {nlike: `%${lit}%`, escape: '\\', options: 'i'}} as Where<AnyObject>;
+      return { [field]: { nlike: `%${lit}%`, escape: '\\', options: 'i' } } as Where<AnyObject>;
     }
     throw new Error('Unsupported indexof comparison. Supported: ge 0, gt -1, eq -1.');
   }
 
   if (expr.operator === 'substrcmp') {
-    const {field, start, length, comparator, literal} = expr;
+    const { field, start, length, comparator, literal } = expr;
     const lit = literal.replace(/%/g, '\\%').replace(/_/g, '\\_');
     const underscores = '_'.repeat(Math.max(0, start));
     const pattern = length !== undefined ? `${underscores}${lit}%` : `${underscores}${lit}`;
-    const clause: AnyObject = comparator === 'eq'
-      ? {like: pattern, escape: '\\'}
-      : {nlike: pattern, escape: '\\'};
-    return {[field]: clause} as Where<AnyObject>;
+    const clause: AnyObject =
+      comparator === 'eq' ? { like: pattern, escape: '\\' } : { nlike: pattern, escape: '\\' };
+    return { [field]: clause } as Where<AnyObject>;
   }
 
   if (expr.operator === 'lengthcmp') {
@@ -982,7 +1149,7 @@ function buildWhere(expr: ParsedExpression): Where<AnyObject> {
   }
 
   if (expr.operator === 'fncmp') {
-    const {name, field, comparator, value} = expr;
+    const { name, field, comparator, value } = expr;
     if (name === 'year') {
       if (comparator !== 'eq') {
         throw new Error('year() only supports eq comparator');
@@ -990,34 +1157,26 @@ function buildWhere(expr: ParsedExpression): Where<AnyObject> {
       const start = new Date(Date.UTC(value, 0, 1, 0, 0, 0, 0));
       const end = new Date(Date.UTC(value + 1, 0, 1, 0, 0, 0, 0));
       return {
-        and: [
-          {[field]: {gte: start}},
-          {[field]: {lt: end}},
-        ],
+        and: [{ [field]: { gte: start } }, { [field]: { lt: end } }],
       } as Where<AnyObject>;
     }
     if (name === 'floor') {
       if (comparator !== 'eq') throw new Error('floor() only supports eq comparator');
-      return {and: [
-        {[field]: {gte: value}},
-        {[field]: {lt: value + 1}},
-      ]} as Where<AnyObject>;
+      return {
+        and: [{ [field]: { gte: value } }, { [field]: { lt: value + 1 } }],
+      } as Where<AnyObject>;
     }
     if (name === 'ceiling') {
       if (comparator !== 'eq') throw new Error('ceiling() only supports eq comparator');
-      return {and: [
-        {[field]: {gt: value - 1}},
-        {[field]: {le: value}},
-      ]} as Where<AnyObject>;
+      return {
+        and: [{ [field]: { gt: value - 1 } }, { [field]: { le: value } }],
+      } as Where<AnyObject>;
     }
     if (name === 'round') {
       if (comparator !== 'eq') throw new Error('round() only supports eq comparator');
       const lower = value - 0.5;
       const upper = value + 0.5;
-      return {and: [
-        {[field]: {gte: lower}},
-        {[field]: {lt: upper}},
-      ]} as Where<AnyObject>;
+      return { and: [{ [field]: { gte: lower } }, { [field]: { lt: upper } }] } as Where<AnyObject>;
     }
   }
 
@@ -1038,19 +1197,22 @@ function buildWhere(expr: ParsedExpression): Where<AnyObject> {
     if (unsupported.length) {
       throw new UnsupportedFilterError(unsupported);
     }
-    return {[expr.type]: clauses} as Where<AnyObject>;
+    return { [expr.type]: clauses } as Where<AnyObject>;
   }
   throw new Error('Unsupported filter expression');
 }
 
 function parseOrder(order?: string): string[] | undefined {
   if (!order) return undefined;
-  return order.split(',').map(part => {
-    const [field, direction] = part.trim().split(/\s+/);
-    if (!field) return '';
-    const dir = direction?.toUpperCase() === 'DESC' ? 'DESC' : 'ASC';
-    return `${field} ${dir}`.trim();
-  }).filter(Boolean);
+  return order
+    .split(',')
+    .map((part) => {
+      const [field, direction] = part.trim().split(/\s+/);
+      if (!field) return '';
+      const dir = direction?.toUpperCase() === 'DESC' ? 'DESC' : 'ASC';
+      return `${field} ${dir}`.trim();
+    })
+    .filter(Boolean);
 }
 
 function parseCompute(compute: string): ComputeExpression[] {
@@ -1066,12 +1228,12 @@ function parseCompute(compute: string): ComputeExpression[] {
     if (!tokens.length) {
       throw new Error(`Invalid $compute expression: ${trimmed}`);
     }
-    const {expressionTokens, alias} = extractComputeAlias(tokens);
+    const { expressionTokens, alias } = extractComputeAlias(tokens);
     if (!alias) {
       throw new Error('Invalid $compute expression: missing alias.');
     }
     const node = parseComputeExpressionTokens(expressionTokens);
-    results.push({alias, expression: node});
+    results.push({ alias, expression: node });
   }
   if (!results.length) {
     throw new Error('Invalid $compute expression.');
@@ -1079,7 +1241,10 @@ function parseCompute(compute: string): ComputeExpression[] {
   return results;
 }
 
-function extractComputeAlias(tokens: string[]): {expressionTokens: string[]; alias: string | undefined} {
+function extractComputeAlias(tokens: string[]): {
+  expressionTokens: string[];
+  alias: string | undefined;
+} {
   let depth = 0;
   for (let index = 0; index < tokens.length; index++) {
     const token = tokens[index];
@@ -1107,47 +1272,50 @@ function extractComputeAlias(tokens: string[]): {expressionTokens: string[]; ali
       if (!expressionTokens.length) {
         throw new Error('Invalid $compute expression: expression segment is empty.');
       }
-      return {expressionTokens, alias};
+      return { expressionTokens, alias };
     }
   }
-  return {expressionTokens: tokens, alias: undefined};
+  return { expressionTokens: tokens, alias: undefined };
 }
 
 function parseComputeExpressionTokens(tokens: string[]): ComputeNode {
-  const {node, index} = parseComputeAddSub(tokens, 0);
+  const { node, index } = parseComputeAddSub(tokens, 0);
   if (index !== tokens.length) {
     throw new Error(`Invalid $compute expression: unexpected token "${tokens[index]}"`);
   }
   return node;
 }
 
-function parseComputeAddSub(tokens: string[], index: number): {node: ComputeNode; index: number} {
-  let {node, index: current} = parseComputeMulDiv(tokens, index);
+function parseComputeAddSub(tokens: string[], index: number): { node: ComputeNode; index: number } {
+  let { node, index: current } = parseComputeMulDiv(tokens, index);
   while (current < tokens.length) {
     const token = tokens[current].toLowerCase();
     if (token !== 'add' && token !== 'sub') break;
     const operator = token === 'add' ? 'add' : 'sub';
     const rhs = parseComputeMulDiv(tokens, current + 1);
-    node = {type: 'binary', operator, left: node, right: rhs.node};
+    node = { type: 'binary', operator, left: node, right: rhs.node };
     current = rhs.index;
   }
-  return {node, index: current};
+  return { node, index: current };
 }
 
-function parseComputeMulDiv(tokens: string[], index: number): {node: ComputeNode; index: number} {
-  let {node, index: current} = parseComputePrimary(tokens, index);
+function parseComputeMulDiv(tokens: string[], index: number): { node: ComputeNode; index: number } {
+  let { node, index: current } = parseComputePrimary(tokens, index);
   while (current < tokens.length) {
     const token = tokens[current].toLowerCase();
     if (token !== 'mul' && token !== 'div' && token !== 'mod') break;
     const operator = token as 'mul' | 'div' | 'mod';
     const rhs = parseComputePrimary(tokens, current + 1);
-    node = {type: 'binary', operator, left: node, right: rhs.node};
+    node = { type: 'binary', operator, left: node, right: rhs.node };
     current = rhs.index;
   }
-  return {node, index: current};
+  return { node, index: current };
 }
 
-function parseComputePrimary(tokens: string[], index: number): {node: ComputeNode; index: number} {
+function parseComputePrimary(
+  tokens: string[],
+  index: number,
+): { node: ComputeNode; index: number } {
   if (index >= tokens.length) {
     throw new Error('Invalid $compute expression.');
   }
@@ -1158,7 +1326,7 @@ function parseComputePrimary(tokens: string[], index: number): {node: ComputeNod
     if (inner.index >= tokens.length || tokens[inner.index] !== ')') {
       throw new Error('Invalid $compute expression: unmatched parenthesis.');
     }
-    return {node: inner.node, index: inner.index + 1};
+    return { node: inner.node, index: inner.index + 1 };
   }
 
   const lower = token.toLowerCase();
@@ -1191,45 +1359,48 @@ function parseComputePrimary(tokens: string[], index: number): {node: ComputeNod
       }
     }
     return {
-      node: {type: 'function', name: lower as 'tolower' | 'toupper' | 'concat', args},
+      node: { type: 'function', name: lower as 'tolower' | 'toupper' | 'concat', args },
       index: cursor,
     };
   }
 
   if (token.startsWith("'") && token.endsWith("'")) {
     return {
-      node: {type: 'literal', value: unescapeStringLiteral(token)},
+      node: { type: 'literal', value: unescapeStringLiteral(token) },
       index: index + 1,
     };
   }
 
   if (lower === 'null') {
     return {
-      node: {type: 'literal', value: null},
+      node: { type: 'literal', value: null },
       index: index + 1,
     };
   }
 
   if (lower === 'true' || lower === 'false') {
     return {
-      node: {type: 'literal', value: lower === 'true'},
+      node: { type: 'literal', value: lower === 'true' },
       index: index + 1,
     };
   }
 
   if (isNumericToken(token)) {
     return {
-      node: {type: 'literal', value: Number(token)},
+      node: { type: 'literal', value: Number(token) },
       index: index + 1,
     };
   }
 
-  const pathSegments = token.split('/').map(part => part.trim()).filter(Boolean);
+  const pathSegments = token
+    .split('/')
+    .map((part) => part.trim())
+    .filter(Boolean);
   if (!pathSegments.length) {
     throw new Error(`Invalid $compute path: ${token}`);
   }
   return {
-    node: {type: 'path', path: pathSegments},
+    node: { type: 'path', path: pathSegments },
     index: index + 1,
   };
 }
@@ -1248,7 +1419,6 @@ function isNumericToken(token: string): boolean {
   const num = Number(token);
   return !Number.isNaN(num);
 }
-
 
 function parseSelect(select?: string): AnyObject | undefined {
   if (!select) return undefined;
@@ -1364,8 +1534,8 @@ export function parseApplyPipeline(apply: string): ApplyPipeline {
   if (!segments.length) {
     throw new Error('Empty $apply expression.');
   }
-  const transformations = segments.map(segment => parseApplyTransformation(segment.trim()));
-  return {transformations};
+  const transformations = segments.map((segment) => parseApplyTransformation(segment.trim()));
+  return { transformations };
 }
 
 function parseApplyTransformation(segment: string): ApplyTransformation {
@@ -1426,7 +1596,7 @@ function parseApplyFilter(body: string): ApplyFilterTransformation {
   if (next !== tokens.length) {
     throw new Error('Invalid filter() transformation.');
   }
-  return {type: 'filter', expression};
+  return { type: 'filter', expression };
 }
 
 function parseApplyGroupBy(body: string): ApplyGroupByTransformation {
@@ -1442,13 +1612,16 @@ function parseApplyGroupBy(body: string): ApplyGroupByTransformation {
   const remainder = trimmed.substring(groupClose + 1).trim();
 
   const groupFields = groupFieldsExpr
-    ? groupFieldsExpr.split(',').map(p => p.trim()).filter(Boolean)
+    ? groupFieldsExpr
+        .split(',')
+        .map((p) => p.trim())
+        .filter(Boolean)
     : [];
 
   if (!groupFields.length) {
     throw new Error('groupby requires at least one property.');
   }
-  groupFields.forEach(field => {
+  groupFields.forEach((field) => {
     if (!isValidPath(field)) {
       throw new Error(`Unsupported group-by property: ${field}`);
     }
@@ -1468,7 +1641,9 @@ function parseApplyGroupBy(body: string): ApplyGroupByTransformation {
     throw new Error('aggregate(...) must specify at least one aggregation.');
   }
 
-  const aggregates: AggregationExpression[] = aggregateTokens.map(token => parseAggregateExpression(token));
+  const aggregates: AggregationExpression[] = aggregateTokens.map((token) =>
+    parseAggregateExpression(token),
+  );
 
   return {
     type: 'groupby',
@@ -1486,8 +1661,8 @@ function parseApplyAggregate(body: string): ApplyAggregateTransformation {
   if (!aggregateTokens.length) {
     throw new Error('aggregate() requires at least one expression.');
   }
-  const expressions = aggregateTokens.map(token => parseAggregateExpression(token));
-  return {type: 'aggregate', expressions};
+  const expressions = aggregateTokens.map((token) => parseAggregateExpression(token));
+  return { type: 'aggregate', expressions };
 }
 
 function parseApplyOrderBy(body: string): ApplyOrderByTransformation {
@@ -1495,27 +1670,27 @@ function parseApplyOrderBy(body: string): ApplyOrderByTransformation {
   if (!orderStrings?.length) {
     throw new Error('orderby() requires at least one property.');
   }
-  const items = orderStrings.map(item => {
+  const items = orderStrings.map((item) => {
     const [field, directionToken] = item.split(/\s+/);
     const direction = directionToken?.toLowerCase() === 'desc' ? 'desc' : 'asc';
-    return {field, direction: direction as 'asc' | 'desc'};
+    return { field, direction: direction as 'asc' | 'desc' };
   });
-  return {type: 'orderby', items};
+  return { type: 'orderby', items };
 }
 
 function parseApplySkip(body: string): ApplySkipTransformation {
   const count = parseNonNegativeInteger(body, 'skip');
-  return {type: 'skip', count};
+  return { type: 'skip', count };
 }
 
 function parseApplyTop(body: string): ApplyTopTransformation {
   const count = parseNonNegativeInteger(body, 'top');
-  return {type: 'top', count};
+  return { type: 'top', count };
 }
 
 function parseApplyBottom(body: string): ApplyBottomTransformation {
   const count = parseNonNegativeInteger(body, 'bottom');
-  return {type: 'bottom', count};
+  return { type: 'bottom', count };
 }
 
 function parseApplyConcat(body: string): ApplyConcatTransformation {
@@ -1523,7 +1698,7 @@ function parseApplyConcat(body: string): ApplyConcatTransformation {
   if (segments.length < 2) {
     throw new Error('concat() requires at least two pipeline arguments.');
   }
-  const pipelines = segments.map(segment => parseApplyPipeline(segment));
+  const pipelines = segments.map((segment) => parseApplyPipeline(segment));
   return {
     type: 'concat',
     pipelines,
@@ -1692,7 +1867,7 @@ function pipelineHasPaging(pipeline: ApplyPipeline): boolean {
       case 'skip':
         return true;
       case 'concat':
-        if (transformation.pipelines.some(branch => pipelineHasPaging(branch))) {
+        if (transformation.pipelines.some((branch) => pipelineHasPaging(branch))) {
           return true;
         }
         break;
@@ -1703,7 +1878,7 @@ function pipelineHasPaging(pipeline: ApplyPipeline): boolean {
   return false;
 }
 
-function extractPathAndOptions(segment: string): {path: string; options?: string} {
+function extractPathAndOptions(segment: string): { path: string; options?: string } {
   const trimmed = segment.trim();
   let start = -1;
   let depth = 0;
@@ -1745,7 +1920,7 @@ function extractPathAndOptions(segment: string): {path: string; options?: string
           throw new Error('Malformed expand segment: trailing characters after options.');
         }
         const path = trimmed.slice(0, start).trim();
-        return options ? {path, options} : {path};
+        return options ? { path, options } : { path };
       }
       continue;
     }
@@ -1755,16 +1930,16 @@ function extractPathAndOptions(segment: string): {path: string; options?: string
     throw new Error('Malformed expand segment: unmatched parentheses.');
   }
 
-  return {path: trimmed};
+  return { path: trimmed };
 }
 
 function getTargetRelations(definition: unknown): RelationDefinitionMap | undefined {
-  const resolver = (definition as {target?: () => typeof Entity} | undefined)?.target;
+  const resolver = (definition as { target?: () => typeof Entity } | undefined)?.target;
   if (typeof resolver !== 'function') return undefined;
   try {
     const target = resolver();
     const modelDef = (target as typeof Entity | undefined)?.definition as
-      | {relations?: RelationDefinitionMap}
+      | { relations?: RelationDefinitionMap }
       | undefined;
     return modelDef?.relations as RelationDefinitionMap | undefined;
   } catch {
@@ -1779,7 +1954,7 @@ interface NormalizedInclude {
 
 function normalizeInclude(include: InclusionFilter): NormalizedInclude {
   if (typeof include === 'string') {
-    return {relation: include};
+    return { relation: include };
   }
   return {
     relation: include.relation,
@@ -1809,8 +1984,8 @@ function mergeInclusionList(
   existing.forEach(upsert);
   additions.forEach(upsert);
 
-  return Array.from(map.values()).map(item =>
-    item.scope ? {relation: item.relation, scope: item.scope} : {relation: item.relation},
+  return Array.from(map.values()).map((item) =>
+    item.scope ? { relation: item.relation, scope: item.scope } : { relation: item.relation },
   );
 }
 
@@ -1848,7 +2023,10 @@ function ensureFieldsIncludeRelations(
       target.fields = nextFields;
     }
     if (normalized.scope) {
-      ensureFieldsIncludeRelations(normalized.scope, normalized.scope.include as InclusionFilter[] | undefined);
+      ensureFieldsIncludeRelations(
+        normalized.scope,
+        normalized.scope.include as InclusionFilter[] | undefined,
+      );
     }
   }
 }
@@ -1861,7 +2039,7 @@ function mergeScopes(
   const result = target ?? {};
 
   if (incoming.fields) {
-    result.fields = {...(result.fields ?? {}), ...incoming.fields};
+    result.fields = { ...(result.fields ?? {}), ...incoming.fields };
   }
 
   if (incoming.where) {
@@ -1898,7 +2076,7 @@ function mergeScopes(
 function parseExpandOptions(
   options: string,
   relations?: RelationDefinitionMap,
-): {scope?: Filter<AnyObject>; includes?: InclusionFilter[]; levels?: number} {
+): { scope?: Filter<AnyObject>; includes?: InclusionFilter[]; levels?: number } {
   const tokens = splitTopLevel(options, ';');
   let scope: Filter<AnyObject> | undefined;
   let nestedIncludes: InclusionFilter[] | undefined;
@@ -1922,30 +2100,28 @@ function parseExpandOptions(
       case '$select': {
         const fields = parseSelect(rawValue);
         if (fields) {
-          scope = mergeScopes(scope, {fields});
+          scope = mergeScopes(scope, { fields });
         }
         break;
       }
       case '$expand': {
         const includes = parseExpand(rawValue, relations);
         if (includes?.length) {
-          nestedIncludes = nestedIncludes
-            ? mergeInclusionList(nestedIncludes, includes)
-            : includes;
+          nestedIncludes = nestedIncludes ? mergeInclusionList(nestedIncludes, includes) : includes;
         }
         break;
       }
       case '$filter': {
-        const parsed = parseODataQuery({'$filter': rawValue}, {relations});
+        const parsed = parseODataQuery({ $filter: rawValue }, { relations });
         if (parsed.where) {
-          scope = mergeScopes(scope, {where: parsed.where});
+          scope = mergeScopes(scope, { where: parsed.where });
         }
         break;
       }
       case '$orderby': {
         const order = parseOrder(rawValue);
         if (order?.length) {
-          scope = mergeScopes(scope, {order});
+          scope = mergeScopes(scope, { order });
         }
         break;
       }
@@ -1954,7 +2130,7 @@ function parseExpandOptions(
         if (!Number.isFinite(limit)) {
           throw new Error(`Invalid $top value: ${rawValue}`);
         }
-        scope = mergeScopes(scope, {limit});
+        scope = mergeScopes(scope, { limit });
         break;
       }
       case '$skip': {
@@ -1962,7 +2138,7 @@ function parseExpandOptions(
         if (!Number.isFinite(offset)) {
           throw new Error(`Invalid $skip value: ${rawValue}`);
         }
-        scope = mergeScopes(scope, {offset});
+        scope = mergeScopes(scope, { offset });
         break;
       }
       case '$count': {
@@ -1988,7 +2164,7 @@ function parseExpandOptions(
     }
   }
 
-  return {scope, includes: nestedIncludes, levels};
+  return { scope, includes: nestedIncludes, levels };
 }
 
 function buildIncludeFromParts(
@@ -2006,22 +2182,22 @@ function buildIncludeFromParts(
     throw new Error(`Unknown expand relation: ${current}`);
   }
 
-  const include: InclusionFilter = {relation: current};
+  const include: InclusionFilter = { relation: current };
   const nextRelations = getTargetRelations(relationDef);
 
   if (rest.length) {
     const child = buildIncludeFromParts(rest, options, nextRelations);
-    include.scope = mergeScopes(include.scope, {include: [child]});
+    include.scope = mergeScopes(include.scope, { include: [child] });
     return include;
   }
 
   if (options) {
-    const {scope, includes, levels} = parseExpandOptions(options, nextRelations);
+    const { scope, includes, levels } = parseExpandOptions(options, nextRelations);
     if (scope) {
       include.scope = mergeScopes(include.scope, scope);
     }
     if (includes?.length) {
-      include.scope = mergeScopes(include.scope, {include: includes});
+      include.scope = mergeScopes(include.scope, { include: includes });
     }
     if (levels && levels > 1) {
       expandLevels(include, current, levels, nextRelations);
@@ -2033,19 +2209,19 @@ function buildIncludeFromParts(
 
 function cloneScope(scope?: Filter<AnyObject>): Filter<AnyObject> | undefined {
   if (!scope) return undefined;
-  const clone: Filter<AnyObject> = {...scope};
+  const clone: Filter<AnyObject> = { ...scope };
   if (scope.include) {
     const includes = Array.isArray(scope.include) ? scope.include : [scope.include];
-    clone.include = includes.map(entry => cloneInclusion(entry));
+    clone.include = includes.map((entry) => cloneInclusion(entry));
   }
   return clone;
 }
 
 function cloneInclusion(include: InclusionFilter | string): InclusionFilter {
   if (typeof include === 'string') {
-    return {relation: include};
+    return { relation: include };
   }
-  const cloned: InclusionFilter = {relation: include.relation};
+  const cloned: InclusionFilter = { relation: include.relation };
   if (include.scope) {
     const scopeClone = cloneScope(include.scope as Filter<AnyObject>);
     if (scopeClone) {
@@ -2069,7 +2245,7 @@ function expandLevels(
     const relationDef = currentRelations?.[relation];
     if (!relationDef) break;
     const childScope = cloneScope(templateScope);
-    const child: InclusionFilter = childScope ? {relation, scope: childScope} : {relation};
+    const child: InclusionFilter = childScope ? { relation, scope: childScope } : { relation };
     if (typeof parent === 'string') break;
     const scope = (parent.scope ?? {}) as Filter<AnyObject>;
     const existing = scope.include;
@@ -2099,10 +2275,10 @@ function parseExpand(
   const includeMap = new Map<string, NormalizedInclude>();
 
   for (const segment of segments) {
-    const {path, options} = extractPathAndOptions(segment);
+    const { path, options } = extractPathAndOptions(segment);
     const parts = path
       .split('/')
-      .map(part => part.trim())
+      .map((part) => part.trim())
       .filter(Boolean);
 
     if (!parts.length) {
@@ -2123,8 +2299,8 @@ function parseExpand(
   }
 
   return includeMap.size
-    ? Array.from(includeMap.values()).map(item =>
-        item.scope ? {relation: item.relation, scope: item.scope} : {relation: item.relation},
+    ? Array.from(includeMap.values()).map((item) =>
+        item.scope ? { relation: item.relation, scope: item.scope } : { relation: item.relation },
       )
     : undefined;
 }
@@ -2145,10 +2321,24 @@ export interface ParsedODataQuery extends Filter<AnyObject> {
 
 export function parseODataQuery(query: QueryObject, options: ParseOptions = {}): ParsedODataQuery {
   const filter: ParsedODataQuery = {};
-  const {relations} = options;
+  const { relations } = options;
 
   if (options.strict) {
-    const allowed = new Set(['$filter', '$orderby', '$top', '$skip', '$skiptoken', '$deltatoken', '$select', '$expand', '$count', '$search', '$apply', '$format', '$compute']);
+    const allowed = new Set([
+      '$filter',
+      '$orderby',
+      '$top',
+      '$skip',
+      '$skiptoken',
+      '$deltatoken',
+      '$select',
+      '$expand',
+      '$count',
+      '$search',
+      '$apply',
+      '$format',
+      '$compute',
+    ]);
     for (const key of Object.keys(query ?? {})) {
       if (key.startsWith('$') && !allowed.has(key)) {
         throw new Error(`Unsupported query option: ${key}`);
@@ -2161,7 +2351,7 @@ export function parseODataQuery(query: QueryObject, options: ParseOptions = {}):
     const tokens = tokenize(filterExpr);
     if (tokens.length) {
       const [expr] = parseFilter(tokens);
-      const {lambda, predicate} = splitLambdaExpression(expr);
+      const { lambda, predicate } = splitLambdaExpression(expr);
       if (lambda) {
         filter.lambda = {
           type: lambda.lambdaType,
@@ -2223,7 +2413,8 @@ export function parseODataQuery(query: QueryObject, options: ParseOptions = {}):
     ensureFieldsIncludeRelations(filter, include);
   }
 
-  const inlineCount = typeof query['$count'] === 'string' && query['$count'].toLowerCase() === 'true';
+  const inlineCount =
+    typeof query['$count'] === 'string' && query['$count'].toLowerCase() === 'true';
   if (inlineCount) {
     filter.inlineCount = true;
   }

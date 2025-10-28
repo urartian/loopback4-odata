@@ -1,10 +1,10 @@
 /// <reference path="../../types/testing.globals.d.ts" />
 
-import {Client, createRestAppClient, expect} from '@loopback/testlab';
-import {BootMixin} from '@loopback/boot';
-import {RepositoryMixin} from '@loopback/repository';
-import {RestApplication, RestServerConfig} from '@loopback/rest';
-import {inject} from '@loopback/core';
+import { Client, createRestAppClient, expect } from '@loopback/testlab';
+import { BootMixin } from '@loopback/boot';
+import { RepositoryMixin } from '@loopback/repository';
+import { RestApplication, RestServerConfig } from '@loopback/rest';
+import { inject } from '@loopback/core';
 import {
   AnyObject,
   DefaultCrudRepository,
@@ -14,25 +14,32 @@ import {
   property,
   repository,
 } from '@loopback/repository';
-import {ODataComponent, odataController, odataModel, odata, CrudHookContext, CrudOnContext} from '../../index';
+import {
+  ODataComponent,
+  odataController,
+  odataModel,
+  odata,
+  CrudHookContext,
+  CrudOnContext,
+} from '../../index';
 
 class HookTestApp extends BootMixin(RepositoryMixin(RestApplication)) {
   constructor(config: RestServerConfig = {}) {
-    super({rest: config});
+    super({ rest: config });
     this.projectRoot = __dirname;
   }
 }
 
-@odataModel({etag: 'updatedAt'})
+@odataModel({ etag: 'updatedAt' })
 @model()
 class HookItem extends Entity {
-  @property({id: true})
+  @property({ id: true })
   id!: number;
 
-  @property({required: true})
+  @property({ required: true })
   name!: string;
 
-  @property({type: 'date', required: true, defaultFn: 'now'})
+  @property({ type: 'date', required: true, defaultFn: 'now' })
   updatedAt!: Date;
 }
 
@@ -76,7 +83,7 @@ class HookItemController {
   @odata.on('READ', 'collection')
   async overrideList(ctx: CrudOnContext, next: () => Promise<any>) {
     if (ctx.request.get('x-override') !== '1') return next();
-    const items = await (this.repo as any).find({order: ['name DESC']}, ctx.options);
+    const items = await (this.repo as any).find({ order: ['name DESC'] }, ctx.options);
     return ctx.helpers.collection(items);
   }
 }
@@ -86,8 +93,8 @@ describe('OData controller hooks & overrides', () => {
   let client: Client;
 
   beforeEach(async function () {
-    app = new HookTestApp({port: 0, host: '127.0.0.1'});
-    const ds = new juggler.DataSource({name: 'db', connector: 'memory'});
+    app = new HookTestApp({ port: 0, host: '127.0.0.1' });
+    const ds = new juggler.DataSource({ name: 'db', connector: 'memory' });
     app.dataSource(ds, 'db');
     app.repository(HookItemRepository);
     app.component(ODataComponent);
@@ -115,7 +122,7 @@ describe('OData controller hooks & overrides', () => {
     const res = await client
       .post('/odata/HookItems')
       .set('x-use-hooks', '1')
-      .send({name: '  hello  '})
+      .send({ name: '  hello  ' })
       .expect(200);
 
     expect(res.body['@odata.context']).to.match(/HookItems/);
@@ -123,16 +130,13 @@ describe('OData controller hooks & overrides', () => {
   });
 
   it('allows @odata.on to override UPDATE flow', async () => {
-    const created = await client
-      .post('/odata/HookItems')
-      .send({name: 'orig'})
-      .expect(200);
+    const created = await client.post('/odata/HookItems').send({ name: 'orig' }).expect(200);
     const id = created.body.id;
 
     const updated = await client
       .patch(`/odata/HookItems(${id})`)
       .set('x-override', '1')
-      .send({name: 'changed'})
+      .send({ name: 'changed' })
       .expect(200);
 
     expect(updated.body['@odata.context']).to.match(/HookItems\/\$entity/);
@@ -140,32 +144,22 @@ describe('OData controller hooks & overrides', () => {
   });
 
   it('runs @odata.after on READ entity', async () => {
-    const created = await client
-      .post('/odata/HookItems')
-      .send({name: 'after-test'})
-      .expect(200);
+    const created = await client.post('/odata/HookItems').send({ name: 'after-test' }).expect(200);
     const id = created.body.id;
 
-    const res = await client
-      .get(`/odata/HookItems(${id})`)
-      .set('x-use-hooks', '1')
-      .expect(200);
+    const res = await client.get(`/odata/HookItems(${id})`).set('x-use-hooks', '1').expect(200);
 
     expect(res.body.hook).to.equal('after');
   });
 
   it('supports @odata.on override for READ collection', async () => {
-    await client.post('/odata/HookItems').send({name: 'a'}).expect(200);
-    await client.post('/odata/HookItems').send({name: 'b'}).expect(200);
+    await client.post('/odata/HookItems').send({ name: 'a' }).expect(200);
+    await client.post('/odata/HookItems').send({ name: 'b' }).expect(200);
 
-    const res = await client
-      .get('/odata/HookItems')
-      .set('x-override', '1')
-      .expect(200);
+    const res = await client.get('/odata/HookItems').set('x-override', '1').expect(200);
 
     expect(res.body['@odata.context']).to.match(/HookItems$/);
     expect(Array.isArray(res.body.value)).to.be.true();
     expect(res.body.value.length).to.be.greaterThanOrEqual(2);
   });
 });
-

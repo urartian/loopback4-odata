@@ -1,4 +1,4 @@
-import {AnyObject, Fields, PropertyDefinition} from '@loopback/repository';
+import { AnyObject, Fields, PropertyDefinition } from '@loopback/repository';
 
 const HEADER_SPLIT = /\s*,\s*/g;
 
@@ -45,7 +45,10 @@ function weakWrap(content: string): string {
   return `W/"${content}"`;
 }
 
-export function encodeEtagToken(value: unknown, etagProperties?: string | string[]): string | undefined {
+export function encodeEtagToken(
+  value: unknown,
+  etagProperties?: string | string[],
+): string | undefined {
   const props = normalizeEtagProperties(etagProperties);
   if (value === undefined || value === null) return undefined;
 
@@ -70,7 +73,10 @@ export function encodeEtagToken(value: unknown, etagProperties?: string | string
 
 function coerceToPropertyType(value: unknown, property?: PropertyDefinition): unknown {
   if (!property) return value;
-  const target = typeof property.type === 'function' ? property.type.name.toLowerCase() : String(property.type).toLowerCase();
+  const target =
+    typeof property.type === 'function'
+      ? property.type.name.toLowerCase()
+      : String(property.type).toLowerCase();
   switch (target) {
     case 'number':
       return typeof value === 'number' ? value : Number(value);
@@ -113,16 +119,16 @@ export function decodeEtagToken(
   if (!normalized) return undefined;
 
   if (!props || props.length <= 1) {
-    const content = normalized.startsWith('"') && normalized.endsWith('"')
-      ? unescapeEtagValue(normalized.slice(1, -1))
-      : normalized;
+    const content =
+      normalized.startsWith('"') && normalized.endsWith('"')
+        ? unescapeEtagValue(normalized.slice(1, -1))
+        : normalized;
     const propertyName = props?.[0];
     return coerceToPropertyType(content, propertyName ? defs[propertyName] : undefined);
   }
 
-  const inner = normalized.startsWith('"') && normalized.endsWith('"')
-    ? normalized.slice(1, -1)
-    : normalized;
+  const inner =
+    normalized.startsWith('"') && normalized.endsWith('"') ? normalized.slice(1, -1) : normalized;
 
   if (!inner) return undefined;
   const result: Record<string, unknown> = {};
@@ -145,20 +151,20 @@ export function parseIfMatch(header: string | undefined) {
   const trimmed = header.trim();
   if (!trimmed) return undefined;
   if (trimmed === '*') {
-    return {any: true, values: [] as string[]};
+    return { any: true, values: [] as string[] };
   }
   const values = trimmed
     .split(HEADER_SPLIT)
-    .map(token => token.trim())
+    .map((token) => token.trim())
     .filter(Boolean);
-  return {any: false, values};
+  return { any: false, values };
 }
 
 export function parseIfNoneMatch(header: string | undefined) {
   if (!header) return undefined;
   const parsed = parseIfMatch(header);
   if (!parsed) return undefined;
-  if (parsed.any) return {any: true, values: [] as string[]};
+  if (parsed.any) return { any: true, values: [] as string[] };
   return parsed;
 }
 
@@ -173,7 +179,7 @@ function normaliseTagForComparison(value: string): string {
 export function matchesEtag(encoded: string | undefined, expected: string[]): boolean {
   if (!encoded) return false;
   const needle = normaliseTagForComparison(encoded);
-  return expected.some(item => normaliseTagForComparison(item) === needle);
+  return expected.some((item) => normaliseTagForComparison(item) === needle);
 }
 
 export function ensureEtagField(
@@ -186,14 +192,14 @@ export function ensureEtagField(
   if (fields == null) return fields;
 
   if (Array.isArray(fields)) {
-    const missing = props.filter(prop => !fields.includes(prop));
+    const missing = props.filter((prop) => !fields.includes(prop));
     return missing.length ? [...fields, ...missing] : fields;
   }
 
   if (typeof fields === 'object') {
     const map = fields as Record<string, boolean>;
     let updated = false;
-    const next = {...map};
+    const next = { ...map };
     for (const prop of props) {
       if (!next[prop]) {
         next[prop] = true;
@@ -205,16 +211,19 @@ export function ensureEtagField(
 
   if (typeof fields === 'boolean') {
     if (fields) return fields;
-    return props.reduce<Record<string, boolean>>((acc, prop) => ({...acc, [prop]: true}), {});
+    return props.reduce<Record<string, boolean>>((acc, prop) => ({ ...acc, [prop]: true }), {});
   }
 
   return fields;
 }
 
-export function stripEtagProperty(entity: Record<string, unknown>, etagProperty?: string | string[]) {
+export function stripEtagProperty(
+  entity: Record<string, unknown>,
+  etagProperty?: string | string[],
+) {
   const props = normalizeEtagProperties(etagProperty);
   if (!props?.length) return entity;
-  const cloned = {...entity};
+  const cloned = { ...entity };
   for (const prop of props) {
     delete cloned[prop];
   }
@@ -242,10 +251,10 @@ export function decodeIfMatchValues(
   rawValues: string[],
   etagProperties?: string | string[],
   propertyDefs?: PropertyDefinitionMap,
-): {values: unknown[]; invalidComposite: boolean} {
+): { values: unknown[]; invalidComposite: boolean } {
   const props = normalizeEtagProperties(etagProperties);
   if (!props?.length || !rawValues.length) {
-    return {values: [], invalidComposite: false};
+    return { values: [], invalidComposite: false };
   }
 
   const composite = props.length > 1;
@@ -263,7 +272,7 @@ export function decodeIfMatchValues(
     if (composite) {
       const plain = value as Record<string, unknown>;
       const keys = Object.keys(plain);
-      if (!keys.length || !props.every(prop => keys.includes(prop))) {
+      if (!keys.length || !props.every((prop) => keys.includes(prop))) {
         invalidComposite = true;
         continue;
       }
@@ -272,5 +281,5 @@ export function decodeIfMatchValues(
     decoded.push(value);
   }
 
-  return {values: decoded, invalidComposite};
+  return { values: decoded, invalidComposite };
 }
