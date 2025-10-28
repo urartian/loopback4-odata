@@ -28,7 +28,7 @@ export class ODataMetadataController {
     ): Response {
         if (this.cfg?.strict) {
             const accept = (req?.get?.('Accept') ?? req?.headers?.['accept'] ?? '').toString().toLowerCase();
-            if (accept && accept.trim()) {
+            if (accept?.trim()) {
                 const desired = (this.cfg?.csdlFormat ?? 'xml') === 'json' ? 'application/json' : 'application/xml';
                 const ok = accept.includes(desired) || accept.includes('*/*') || /application\s*\/\s*\*/.test(accept);
                 if (!ok) {

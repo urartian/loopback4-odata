@@ -83,7 +83,7 @@ export class ODataApplyExecutorRegistry {
   private readonly ordered: ODataApplyExecutor[] = [];
 
   register(executor: ODataApplyExecutor): void {
-    if (!executor || !executor.id) {
+    if (!executor?.id) {
       throw new Error('Invalid ODataApplyExecutor: missing identifier.');
     }
     if (this.executors.has(executor.id)) {

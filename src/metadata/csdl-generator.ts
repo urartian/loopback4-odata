@@ -1094,7 +1094,7 @@ export class CsdlGenerator {
                         .map(expr => normalizeSearchExpression(expr))
                         .filter((value): value is string => Boolean(value))
                     : undefined;
-                if (normalizedUnsupported && normalizedUnsupported.length) {
+                if (normalizedUnsupported?.length) {
                     recordXml.push('            <PropertyValue Property="UnsupportedExpressions">');
                     recordXml.push('              <Collection>');
                     for (const expr of normalizedUnsupported) {
@@ -1140,7 +1140,7 @@ export class CsdlGenerator {
             }
 
             if (capabilities.aggregation) {
-                const methodsForJson = (capabilities.aggregationMethods && capabilities.aggregationMethods.length
+                const methodsForJson = (capabilities.aggregationMethods?.length
                     ? capabilities.aggregationMethods
                     : ['Sum', 'Average', 'Min', 'Max', 'Count', 'CountDistinct']);
                 const methodsForXml = methodsForJson.map(m => xmlEscape(m));
@@ -1191,7 +1191,7 @@ export class CsdlGenerator {
                 }
             }
             const restrictedEntries = Object.entries(navigationRestrictions)
-                .filter(([name, config]) => relationSet.has(name) && config != null && config.navigable !== undefined);
+                .filter(([name, config]) => relationSet.has(name) && config?.navigable !== undefined);
 
             if (restrictedEntries.length) {
                 const restrictedXml: string[] = [];
@@ -1423,7 +1423,7 @@ export class CsdlGenerator {
         const mode = this.cfg?.searchMode ?? 'annotated';
         if (mode === 'disabled') return [];
         const configured = this.cfg?.searchFields?.[set.name];
-        if (configured && configured.length) {
+        if (configured?.length) {
             return configured.map(field => field?.trim()).filter((field): field is string => Boolean(field));
         }
         if (mode === 'config-only') return [];

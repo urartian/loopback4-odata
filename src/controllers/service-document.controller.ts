@@ -70,7 +70,7 @@ export class ODataServiceDocumentController {
     ): ServiceDocumentPayload {
         if (this.config?.strict) {
             const accept = request.get('Accept') ?? (request.headers?.['accept'] as string | undefined);
-            if (accept && accept.trim()) {
+            if (accept?.trim()) {
                 const lower = accept.toLowerCase();
                 const ok = lower.includes('application/json') || lower.includes('*/*') || /application\s*\/\s*\*/.test(lower);
                 if (!ok) {

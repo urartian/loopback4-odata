@@ -82,7 +82,7 @@ export class PostgresApplyExecutor implements ODataApplyExecutor {
       return undefined;
     }
     const finalStageSpec = stages[stages.length - 1]?.spec;
-    if (!finalStageSpec || !finalStageSpec.aggregates?.length) return undefined;
+    if (!finalStageSpec?.aggregates?.length) return undefined;
 
     const modelDefinition = (entitySet.modelCtor as {definition?: ModelDefinition}).definition;
     if (!modelDefinition) return undefined;
@@ -920,7 +920,7 @@ class NavigationJoinManager {
     }
 
     const resolved = this.navigationMap.get(field) ?? this.tryResolvePath(field);
-    if (!resolved || !resolved.joins.length) {
+    if (!resolved?.joins.length) {
       return undefined;
     }
 

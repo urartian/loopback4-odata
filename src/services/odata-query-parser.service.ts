@@ -1492,7 +1492,7 @@ function parseApplyAggregate(body: string): ApplyAggregateTransformation {
 
 function parseApplyOrderBy(body: string): ApplyOrderByTransformation {
   const orderStrings = parseOrder(body);
-  if (!orderStrings || !orderStrings.length) {
+  if (!orderStrings?.length) {
     throw new Error('orderby() requires at least one property.');
   }
   const items = orderStrings.map(item => {
@@ -1886,7 +1886,7 @@ function mergeScopes(
     result.offset = incoming.offset;
   }
 
-  if (incoming.include && incoming.include.length) {
+  if (incoming.include?.length) {
     const existing = result.include ?? [];
     result.include = mergeInclusionList(existing, incoming.include);
     ensureFieldsIncludeRelations(result, result.include);
@@ -1928,7 +1928,7 @@ function parseExpandOptions(
       }
       case '$expand': {
         const includes = parseExpand(rawValue, relations);
-        if (includes && includes.length) {
+        if (includes?.length) {
           nestedIncludes = nestedIncludes
             ? mergeInclusionList(nestedIncludes, includes)
             : includes;
@@ -1944,7 +1944,7 @@ function parseExpandOptions(
       }
       case '$orderby': {
         const order = parseOrder(rawValue);
-        if (order && order.length) {
+        if (order?.length) {
           scope = mergeScopes(scope, {order});
         }
         break;
@@ -2020,7 +2020,7 @@ function buildIncludeFromParts(
     if (scope) {
       include.scope = mergeScopes(include.scope, scope);
     }
-    if (includes && includes.length) {
+    if (includes?.length) {
       include.scope = mergeScopes(include.scope, {include: includes});
     }
     if (levels && levels > 1) {

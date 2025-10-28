@@ -113,7 +113,7 @@ export function buildApplyExecutionPlan(
       case 'orderby': {
         const planHasResults = stages.length > 0 || concatBranches.length > 0;
         if (currentStage) {
-          if (currentStage.orderBy && currentStage.orderBy.length) {
+          if (currentStage.orderBy?.length) {
             throw new Error('Multiple orderby() transformations are not supported within the same stage.');
           }
           currentStage.orderBy = transformation.items.map(item => ({
@@ -125,7 +125,7 @@ export function buildApplyExecutionPlan(
           if (!allowNonAggregate && !hasPlanResults) {
             throw new Error('orderby() transformation requires a preceding groupby() or aggregate().');
           }
-          if (planOrderBy && planOrderBy.length) {
+          if (planOrderBy?.length) {
             throw new Error('Multiple orderby() transformations are not supported for the same pipeline.');
           }
           planOrderBy = transformation.items.map(item => ({
@@ -195,7 +195,7 @@ export function buildApplyExecutionPlan(
     preAggregationFilters,
     stages,
     ...(concatBranches.length ? {concat: concatBranches} : {}),
-    ...(planOrderBy && planOrderBy.length ? {postOrderBy: planOrderBy} : {}),
+    ...(planOrderBy?.length ? {postOrderBy: planOrderBy} : {}),
     ...(planTop !== undefined ? {postTop: planTop} : {}),
     ...(planSkip !== undefined ? {postSkip: planSkip} : {}),
     ...(planPostFilters.length ? {postFilters: planPostFilters} : {}),
@@ -236,7 +236,7 @@ function mergeWhereClauses(
 
 function planHasAggregation(plan: ApplyExecutionPlan): boolean {
   if (plan.stages.length > 0) return true;
-  if (!plan.concat || !plan.concat.length) return false;
+  if (!plan.concat?.length) return false;
   return plan.concat.some(child => planHasAggregation(child));
 }
 
@@ -274,7 +274,7 @@ function collectNavigationPaths(
 ): ResolvedNavigationPath[] {
   const seen = new Map<string, ResolvedNavigationPath>();
   const collect = (raw?: string) => {
-    if (!raw || !raw.includes('/')) return;
+    if (!raw?.includes('/')) return;
     if (seen.has(raw)) return;
     try {
       const resolved = resolveNavigationPath(modelCtor, raw, {maxDepth});

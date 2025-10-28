@@ -1,5 +1,5 @@
 import { inject } from '@loopback/core';
-import {ReferenceObject} from '@loopback/openapi-v3';
+import { ReferenceObject } from '@loopback/openapi-v3';
 import {
     HttpErrors,
     del,
@@ -54,19 +54,19 @@ import {
     parseIfNoneMatch,
     readEtagValue,
 } from '../util/etag';
-import {encodeDeltaToken, decodeDeltaToken, DeltaTokenPayload, DeltaTokenBucketState} from '../util/delta-token';
+import { encodeDeltaToken, decodeDeltaToken, DeltaTokenPayload, DeltaTokenBucketState } from '../util/delta-token';
 import {
     applyControllerSecurityMetadata,
     mergeMethodAliasMaps,
     MethodAliasMap,
     ControllerSecurityMetadata,
 } from '../util/security-metadata';
-import {CrudHookBundle, CrudHookContext, CrudOnContext, CrudOperation, CrudScope} from '../types/crud-hooks';
+import { CrudHookBundle, CrudHookContext, CrudOnContext, CrudOperation, CrudScope } from '../types/crud-hooks';
 import { ODATA_BINDINGS } from '../keys';
 import { ODataConfig, ODataApplyTelemetryEvent } from '../types';
 import { getODataSearchableProps } from '../decorators/search.decorators';
-import {ensureNavigationTargetKey} from '../util/relation-metadata';
-import {ResolvedNavigationPath} from '../util/navigation-path';
+import { ensureNavigationTargetKey } from '../util/relation-metadata';
+import { ResolvedNavigationPath } from '../util/navigation-path';
 import { ApplyExecutionPlan, ApplyAggregationStage, buildApplyExecutionPlan, collectNavigationPathsForStage } from '../services/odata-apply-planner.service';
 import { ODataApplyExecutorRegistry, ODataApplyExecutorContext } from '../services/odata-apply-executor.registry';
 type CrudEntity = Entity & { [key: string]: unknown };
@@ -245,7 +245,7 @@ export function defineODataCrudController(def: EntitySetDef) {
             }
         }
         if (!ctor) return undefined;
-        const definition = (ctor as {definition?: ModelDefinition}).definition as ModelDefinition | undefined;
+        const definition = (ctor as { definition?: ModelDefinition }).definition as ModelDefinition | undefined;
         return (definition?.relations ?? {}) as RelationDefinitionMap;
     };
 
@@ -366,14 +366,14 @@ export function defineODataCrudController(def: EntitySetDef) {
             return undefined;
         };
         const name = resolveName(type);
-        if (name === 'number') return {type: 'number'};
-        if (name === 'string') return {type: 'string'};
-        if (name === 'boolean') return {type: 'boolean'};
+        if (name === 'number') return { type: 'number' };
+        if (name === 'string') return { type: 'string' };
+        if (name === 'boolean') return { type: 'boolean' };
         if (name === 'date' || name === 'datetime' || type === Date) {
-            return {type: 'string', format: 'date-time'};
+            return { type: 'string', format: 'date-time' };
         }
         if (name === 'buffer') {
-            return {type: 'string', format: 'byte'};
+            return { type: 'string', format: 'byte' };
         }
         if (name === 'array' || type === Array) {
             const itemType = (propDef as AnyObject)?.itemType;
@@ -391,10 +391,10 @@ export function defineODataCrudController(def: EntitySetDef) {
                     itemsSchema = schemaForType(itemType, undefined) ?? ({} as SchemaObject);
                 }
             }
-            return {type: 'array', items: itemsSchema ?? {} as SchemaObject};
+            return { type: 'array', items: itemsSchema ?? {} as SchemaObject };
         }
         if (name === 'object' || type === Object) {
-            return {type: 'object'};
+            return { type: 'object' };
         }
         return undefined;
     };
@@ -418,7 +418,7 @@ export function defineODataCrudController(def: EntitySetDef) {
         }
         if (baseSchema) {
             if (isReferenceSchema(baseSchema)) {
-                return {allOf: [baseSchema]} as SchemaObject;
+                return { allOf: [baseSchema] } as SchemaObject;
             }
             return cloneSchemaObject(baseSchema);
         }
@@ -426,10 +426,10 @@ export function defineODataCrudController(def: EntitySetDef) {
     };
 
     const buildNestedPatchSchema = (ctor: typeof Entity | undefined, depth: number): SchemaObject => {
-        if (!ctor) return {type: 'object', additionalProperties: false};
+        if (!ctor) return { type: 'object', additionalProperties: false };
         const maxDepth = 10;
-        if (depth > maxDepth) return {type: 'object', additionalProperties: false};
-        const def = (ctor as unknown as {definition?: ModelDefinition}).definition as ModelDefinition | undefined;
+        if (depth > maxDepth) return { type: 'object', additionalProperties: false };
+        const def = (ctor as unknown as { definition?: ModelDefinition }).definition as ModelDefinition | undefined;
         const title = `${ctor.name ?? 'Entity'}Patch`;
         const base = getModelSchemaRef(ctor, {
             title,
@@ -554,16 +554,16 @@ export function defineODataCrudController(def: EntitySetDef) {
             const ctor = (entity as AnyObject)?.constructor;
             if (typeof ctor !== 'function') return undefined;
             if ((ctor as unknown) === Object) return undefined;
-            const maybeDefinition = (ctor as unknown as {definition?: ModelDefinition}).definition;
+            const maybeDefinition = (ctor as unknown as { definition?: ModelDefinition }).definition;
             if (maybeDefinition) return ctor as typeof Entity;
-            if ((ctor as unknown as {prototype?: unknown}).prototype instanceof Entity) {
+            if ((ctor as unknown as { prototype?: unknown }).prototype instanceof Entity) {
                 return ctor as typeof Entity;
             }
             return undefined;
         }
 
         getModelDefinition(ctor?: typeof Entity): ModelDefinition | undefined {
-            const targetCtor = (ctor ?? this.entityCtor) as unknown as {definition?: ModelDefinition};
+            const targetCtor = (ctor ?? this.entityCtor) as unknown as { definition?: ModelDefinition };
             return targetCtor?.definition as ModelDefinition | undefined;
         }
 
@@ -683,10 +683,10 @@ export function defineODataCrudController(def: EntitySetDef) {
 
             const temporalKind = this.classifyTemporalProperty(def);
             if (temporalKind === 'datetimeoffset') {
-                return {kind: 'datetimeoffset', edmType: 'Edm.DateTimeOffset', isCollection: false};
+                return { kind: 'datetimeoffset', edmType: 'Edm.DateTimeOffset', isCollection: false };
             }
             if (temporalKind === 'date') {
-                return {kind: 'date', edmType: 'Edm.Date', isCollection: false};
+                return { kind: 'date', edmType: 'Edm.Date', isCollection: false };
             }
 
             const schemaAny = schema ?? {};
@@ -696,13 +696,13 @@ export function defineODataCrudController(def: EntitySetDef) {
             const rawType = typeof def.type === 'string' ? def.type.toLowerCase() : def.type;
 
             if (format === 'time' || format === 'time-of-day' || dataType === 'timeofday' || rawType === 'time') {
-                return {kind: 'timeOfDay', edmType: 'Edm.TimeOfDay', isCollection: false};
+                return { kind: 'timeOfDay', edmType: 'Edm.TimeOfDay', isCollection: false };
             }
             if (format === 'duration' || dataType === 'duration') {
-                return {kind: 'duration', edmType: 'Edm.Duration', isCollection: false};
+                return { kind: 'duration', edmType: 'Edm.Duration', isCollection: false };
             }
             if (format === 'decimal' || dataType === 'decimal' || schemaAny.precision != null || schemaAny.scale != null) {
-                return {kind: 'decimal', edmType: 'Edm.Decimal', isCollection: false};
+                return { kind: 'decimal', edmType: 'Edm.Decimal', isCollection: false };
             }
             const int64Formats = new Set(['int64', 'long']);
             if (
@@ -711,7 +711,7 @@ export function defineODataCrudController(def: EntitySetDef) {
                 rawType === 'bigint' ||
                 rawType === BigInt
             ) {
-                return {kind: 'int64', edmType: 'Edm.Int64', isCollection: false};
+                return { kind: 'int64', edmType: 'Edm.Int64', isCollection: false };
             }
 
             return undefined;
@@ -724,7 +724,7 @@ export function defineODataCrudController(def: EntitySetDef) {
                 let mutated = false;
                 let annotation = false;
                 for (const entry of value) {
-                    const normalized = this.normalizeSingleValue(entry, {kind: plan.kind, edmType: plan.edmType, isCollection: false});
+                    const normalized = this.normalizeSingleValue(entry, { kind: plan.kind, edmType: plan.edmType, isCollection: false });
                     if (normalized) {
                         items.push(normalized.value);
                         if (normalized.value !== entry) mutated = true;
@@ -747,22 +747,22 @@ export function defineODataCrudController(def: EntitySetDef) {
                 case 'datetimeoffset': {
                     const normalized = this.normalizeDateTimeOffsetValue(value);
                     if (normalized === undefined) return undefined;
-                    return normalized === value ? {value} : {value: normalized};
+                    return normalized === value ? { value } : { value: normalized };
                 }
                 case 'date': {
                     const normalized = this.normalizeDateValue(value);
                     if (normalized === undefined) return undefined;
-                    return normalized === value ? {value} : {value: normalized};
+                    return normalized === value ? { value } : { value: normalized };
                 }
                 case 'timeOfDay': {
                     const normalized = this.normalizeTimeOfDayValue(value);
                     if (normalized === undefined) return undefined;
-                    return normalized === value ? {value} : {value: normalized};
+                    return normalized === value ? { value } : { value: normalized };
                 }
                 case 'duration': {
                     const normalized = this.normalizeDurationValue(value);
                     if (normalized === undefined) return undefined;
-                    return normalized === value ? {value} : {value: normalized};
+                    return normalized === value ? { value } : { value: normalized };
                 }
                 case 'int64':
                     return this.normalizeInt64Value(value);
@@ -999,7 +999,7 @@ export function defineODataCrudController(def: EntitySetDef) {
                 str = value.toString();
             }
             if (!str) return undefined;
-            return {value: str, typeAnnotation: 'Edm.Int64'};
+            return { value: str, typeAnnotation: 'Edm.Int64' };
         }
 
         normalizeDecimalValue(value: unknown): NormalizedPropertyValue | undefined {
@@ -1007,12 +1007,12 @@ export function defineODataCrudController(def: EntitySetDef) {
             if (typeof value === 'string') {
                 const normalized = this.normalizeDecimalString(value);
                 if (!normalized) return undefined;
-                return {value: normalized, typeAnnotation: 'Edm.Decimal'};
+                return { value: normalized, typeAnnotation: 'Edm.Decimal' };
             }
             if (typeof value === 'number') {
                 if (!Number.isFinite(value)) return undefined;
                 const plain = this.toPlainString(value);
-                return {value: plain, typeAnnotation: 'Edm.Decimal'};
+                return { value: plain, typeAnnotation: 'Edm.Decimal' };
             }
             return undefined;
         }
@@ -1143,7 +1143,7 @@ export function defineODataCrudController(def: EntitySetDef) {
                 }
                 visited.add(payload);
 
-                const {root, children} = this.normalizeDeepInsertPayload(payload, targetCtor);
+                const { root, children } = this.normalizeDeepInsertPayload(payload, targetCtor);
                 const createdChild = await relationRepository.create(root, options);
 
                 if (children && Object.keys(children).length) {
@@ -1199,11 +1199,11 @@ export function defineODataCrudController(def: EntitySetDef) {
             }
         }
 
-        normalizeDeepInsertPayload(value: AnyObject, targetCtor?: typeof Entity): {root: AnyObject; children?: Record<string, unknown>} {
-            const prepared: AnyObject = {...value};
+        normalizeDeepInsertPayload(value: AnyObject, targetCtor?: typeof Entity): { root: AnyObject; children?: Record<string, unknown> } {
+            const prepared: AnyObject = { ...value };
             const children: Record<string, unknown> = {};
             if (targetCtor) {
-                const definition = (targetCtor as {definition?: ModelDefinition}).definition as ModelDefinition | undefined;
+                const definition = (targetCtor as { definition?: ModelDefinition }).definition as ModelDefinition | undefined;
                 const childRelations = definition?.relations ?? {};
                 for (const relationName of Object.keys(childRelations)) {
                     if (Object.prototype.hasOwnProperty.call(prepared, relationName)) {
@@ -1271,7 +1271,7 @@ export function defineODataCrudController(def: EntitySetDef) {
             if (typeof value !== 'object' || value == null) {
                 throw new HttpErrors.BadRequest('Deep update payloads for related entities must be objects.');
             }
-            return {...(value as AnyObject)};
+            return { ...(value as AnyObject) };
         }
 
         async applyDeepUpdateRelations(
@@ -1287,7 +1287,7 @@ export function defineODataCrudController(def: EntitySetDef) {
             if (depth > maxDepth) {
                 throw new HttpErrors.BadRequest(`Deep update exceeds maximum supported depth of ${maxDepth}.`);
             }
-            const parentDefinition = (parentCtor as {definition?: ModelDefinition}).definition as ModelDefinition | undefined;
+            const parentDefinition = (parentCtor as { definition?: ModelDefinition }).definition as ModelDefinition | undefined;
             const relationDefs = parentDefinition?.relations ?? {};
             for (const [relationName, relationValue] of Object.entries(relations)) {
                 if (relationValue == null) continue;
@@ -1355,7 +1355,7 @@ export function defineODataCrudController(def: EntitySetDef) {
             if (!targetCtor) {
                 throw new HttpErrors.InternalServerError(`Unable to resolve target model for relation ${relationName}.`);
             }
-            const targetDefinition = (targetCtor as {definition?: ModelDefinition}).definition as ModelDefinition | undefined;
+            const targetDefinition = (targetCtor as { definition?: ModelDefinition }).definition as ModelDefinition | undefined;
             const idProps = getIdProperties(targetDefinition);
             if (!idProps.length) {
                 throw new HttpErrors.BadRequest(`Unable to determine identifier for related entity ${targetCtor.name ?? relationName}.`);
@@ -1378,7 +1378,7 @@ export function defineODataCrudController(def: EntitySetDef) {
                 if (rawEntry == null) continue;
                 const entry = this.coercePayloadToObject(rawEntry);
                 const normalized = this.normalizeDeepInsertPayload(entry, targetCtor);
-                const childRoot = {...normalized.root};
+                const childRoot = { ...normalized.root };
                 const idValues = this.extractIdValues(childRoot, idProps);
                 const idKey = this.buildEntityIdKey(idValues, idProps);
 
@@ -1402,7 +1402,7 @@ export function defineODataCrudController(def: EntitySetDef) {
                     continue;
                 }
 
-                const updateData = {...childRoot};
+                const updateData = { ...childRoot };
                 this.removeIdProperties(updateData, idProps);
                 if (Object.keys(updateData).length) {
                     const where = this.buildRelationWhere(idValues, idProps);
@@ -1417,7 +1417,7 @@ export function defineODataCrudController(def: EntitySetDef) {
                     let currentChild = existingMap.get(idKey);
                     if (where) {
                         try {
-                            const refreshed = await targetRepository.findOne({where}, options);
+                            const refreshed = await targetRepository.findOne({ where }, options);
                             currentChild = this.toPlainEntity(refreshed) ?? currentChild ?? childRoot;
                         } catch {
                             currentChild = currentChild ?? childRoot;
@@ -1437,8 +1437,8 @@ export function defineODataCrudController(def: EntitySetDef) {
                     }
                 }
 
+            }
         }
-    }
 
         async persistHasOneDeepUpdate(
             relationName: string,
@@ -1453,14 +1453,14 @@ export function defineODataCrudController(def: EntitySetDef) {
                 throw new HttpErrors.InternalServerError(`Unable to resolve target model for relation ${relationName}.`);
             }
 
-            const targetDefinition = (targetCtor as {definition?: ModelDefinition}).definition as ModelDefinition | undefined;
+            const targetDefinition = (targetCtor as { definition?: ModelDefinition }).definition as ModelDefinition | undefined;
             const idProps = getIdProperties(targetDefinition);
 
             const entry = value == null ? undefined : this.coercePayloadToObject(value as AnyObject);
             if (!entry) return;
 
             const normalized = this.normalizeDeepInsertPayload(entry, targetCtor);
-            const childRoot = {...normalized.root};
+            const childRoot = { ...normalized.root };
 
             const targetRepository = await this.resolveTargetRepository(relationRepository, relationMeta);
 
@@ -1497,7 +1497,7 @@ export function defineODataCrudController(def: EntitySetDef) {
                 return;
             }
 
-            const updateData = {...childRoot};
+            const updateData = { ...childRoot };
             if (idProps.length) {
                 this.removeIdProperties(updateData, idProps);
             }
@@ -1555,7 +1555,7 @@ export function defineODataCrudController(def: EntitySetDef) {
             const relationMeta = this.resolveNavigationRelationMetadata(relationName);
             const keyTo = relationMeta.keyTo as string;
 
-            const {keyExpression} = this.parseODataIdReference(targetUri);
+            const { keyExpression } = this.parseODataIdReference(targetUri);
             const targetKeyLiteral = this.parseKeyLiteral(keyExpression);
 
             const repoWithRelations = this.repository as AnyObject;
@@ -1696,7 +1696,7 @@ export function defineODataCrudController(def: EntitySetDef) {
             return ctx.result as AnyObject | undefined;
         }
 
-        parseODataIdReference(reference: string): {entitySet: string; keyExpression: string} {
+        parseODataIdReference(reference: string): { entitySet: string; keyExpression: string } {
             let path = reference;
             try {
                 const base = `${this.request.protocol}://${this.request.headers.host ?? ''}`;
@@ -1709,7 +1709,7 @@ export function defineODataCrudController(def: EntitySetDef) {
             if (!match) {
                 throw new HttpErrors.BadRequest(`Invalid @odata.id value: ${reference}`);
             }
-            return {entitySet: match[1], keyExpression: match[2]};
+            return { entitySet: match[1], keyExpression: match[2] };
         }
 
         parseKeyLiteral(raw: string): string {
@@ -1783,7 +1783,7 @@ export function defineODataCrudController(def: EntitySetDef) {
 
         extractEntityId(entity: CrudEntity | AnyObject | undefined): unknown {
             if (!entity) return undefined;
-            const repoAny = this.repository as CrudRepo & {entityClass?: typeof Entity};
+            const repoAny = this.repository as CrudRepo & { entityClass?: typeof Entity };
             try {
                 const idFromRepo = repoAny.entityClass?.getIdOf?.(entity as AnyObject);
                 if (idFromRepo != null) return idFromRepo;
@@ -1809,11 +1809,11 @@ export function defineODataCrudController(def: EntitySetDef) {
         executeAggregation(rows: AnyObject[], stage: ApplyAggregationStage): AnyObject[] {
             const spec = stage.spec;
             const navigationGroups = this.groupNavigationPaths(stage.navigationPaths ?? []);
-            const groupMap = new Map<string, {groupValues: Record<string, unknown>; aggregates: Record<string, AggregationAccumulatorState>}>();
+            const groupMap = new Map<string, { groupValues: Record<string, unknown>; aggregates: Record<string, AggregationAccumulatorState> }>();
 
             for (const row of rows) {
                 const variants = this.expandNavigationVariants(row, navigationGroups);
-                const variantList = variants.length ? variants : [{values: {}}];
+                const variantList = variants.length ? variants : [{ values: {} }];
 
                 for (const variant of variantList) {
                     const groupValues: Record<string, unknown> = {};
@@ -1832,7 +1832,7 @@ export function defineODataCrudController(def: EntitySetDef) {
                         for (const aggregate of spec.aggregates) {
                             aggregates[aggregate.alias] = this.createAccumulatorState(aggregate.operator);
                         }
-                        entry = {groupValues, aggregates};
+                        entry = { groupValues, aggregates };
                         groupMap.set(key, entry);
                     }
 
@@ -1844,7 +1844,7 @@ export function defineODataCrudController(def: EntitySetDef) {
             }
 
             const results: AnyObject[] = [];
-            for (const {groupValues, aggregates} of groupMap.values()) {
+            for (const { groupValues, aggregates } of groupMap.values()) {
                 const record: AnyObject = {};
                 for (const [field, value] of Object.entries(groupValues)) {
                     record[field] = value;
@@ -1861,7 +1861,7 @@ export function defineODataCrudController(def: EntitySetDef) {
         evaluateAggregateOperand(
             aggregate: AggregationExpression,
             row: AnyObject,
-            variant: {values: Record<string, unknown>},
+            variant: { values: Record<string, unknown> },
         ): unknown {
             if (aggregate.expression) {
                 return this.evaluateComputeNode(aggregate.expression, row, variant);
@@ -1887,23 +1887,23 @@ export function defineODataCrudController(def: EntitySetDef) {
             return groups;
         }
 
-        expandNavigationVariants(row: AnyObject, groups: Map<string, ResolvedNavigationPath[]>): Array<{values: Record<string, unknown>}> {
+        expandNavigationVariants(row: AnyObject, groups: Map<string, ResolvedNavigationPath[]>): Array<{ values: Record<string, unknown> }> {
             const maxFanout = this.cfg?.maxApplyNavigationFanout ?? 1000;
-            let variants: Array<{values: Record<string, unknown>}> = [{values: {}}];
+            let variants: Array<{ values: Record<string, unknown> }> = [{ values: {} }];
 
             for (const paths of groups.values()) {
                 const primaryPath = paths[0];
                 const targets = this.collectNavigationTargets(row, primaryPath);
                 const safeTargets = targets.length ? targets : [undefined];
-                const next: Array<{values: Record<string, unknown>}> = [];
+                const next: Array<{ values: Record<string, unknown> }> = [];
 
                 for (const variant of variants) {
                     for (const target of safeTargets) {
-                        const values = {...variant.values};
+                        const values = { ...variant.values };
                         for (const path of paths) {
                             values[path.originalPath] = this.resolvePropertyFromTarget(target as AnyObject | undefined, path.propertyPath);
                         }
-                        next.push({values});
+                        next.push({ values });
                         if (next.length > maxFanout) {
                             throw new HttpErrors.BadRequest(`$apply navigation expansion exceeds the configured limit of ${maxFanout} combinations.`);
                         }
@@ -1961,7 +1961,7 @@ export function defineODataCrudController(def: EntitySetDef) {
             return current;
         }
 
-        resolveVariantValue(row: AnyObject, variant: {values: Record<string, unknown>}, path: string): unknown {
+        resolveVariantValue(row: AnyObject, variant: { values: Record<string, unknown> }, path: string): unknown {
             if (variant.values && Object.prototype.hasOwnProperty.call(variant.values, path)) {
                 return variant.values[path];
             }
@@ -2134,7 +2134,7 @@ export function defineODataCrudController(def: EntitySetDef) {
 
         applyPostFiltersPreservingFields(data: AnyObject[], expressions: ParsedExpression[]): AnyObject[] {
             if (!expressions.length) return data;
-            
+
             // For concat operations, we only filter entities that have the relevant field,
             // but preserve entities that don't have the field
             let result = data;
@@ -2221,7 +2221,7 @@ export function defineODataCrudController(def: EntitySetDef) {
 
         planHasConcat(plan: ApplyExecutionPlan | undefined): boolean {
             if (!plan) return false;
-            if (plan.concat && plan.concat.length) return true;
+            if (plan.concat?.length) return true;
             return plan.concat?.some(branch => this.planHasConcat(branch)) ?? false;
         }
 
@@ -2235,7 +2235,7 @@ export function defineODataCrudController(def: EntitySetDef) {
 
         planHasInternalOrder(plan: ApplyExecutionPlan | undefined): boolean {
             if (!plan) return false;
-            if (plan.postOrderBy && plan.postOrderBy.length) return true;
+            if (plan.postOrderBy?.length) return true;
             if (plan.stages.some(stage => (stage.orderBy?.length ?? 0) > 0)) return true;
             return plan.concat?.some(branch => this.planHasInternalOrder(branch)) ?? false;
         }
@@ -2255,10 +2255,10 @@ export function defineODataCrudController(def: EntitySetDef) {
             if ((plan.postOrderBy?.length ?? 0) > 0 || plan.postTop !== undefined || plan.postSkip !== undefined) {
                 return true;
             }
-            if (plan.postFilters && plan.postFilters.length) {
+            if (plan.postFilters?.length) {
                 return true;
             }
-            if (plan.concat && plan.concat.length) {
+            if (plan.concat?.length) {
                 return true;
             }
             return plan.concat?.some(branch => this.planRequiresPostProcessing(branch)) ?? false;
@@ -2339,13 +2339,13 @@ export function defineODataCrudController(def: EntitySetDef) {
                 cursor.value += 1;
             }
 
-            if (plan.concat && plan.concat.length) {
+            if (plan.concat?.length) {
                 const branchResults: AnyObject[] = [];
                 const segments: AnyObject[][] = [];
                 for (const branch of plan.concat) {
                     const branchOutcome = this.executeApplyPlanBranch(branch, working, stageCount, cursor);
                     branchResults.push(...branchOutcome.rows);
-                    if (branchOutcome.branchSegments && branchOutcome.branchSegments.length) {
+                    if (branchOutcome.branchSegments?.length) {
                         segments.push(...branchOutcome.branchSegments);
                     } else {
                         segments.push([...branchOutcome.rows]);
@@ -2356,9 +2356,9 @@ export function defineODataCrudController(def: EntitySetDef) {
                 branchSegments = segments;
             }
 
-            if (plan.postFilters && plan.postFilters.length) {
+            if (plan.postFilters?.length) {
                 const filters = plan.postFilters;
-                if (branchSegments && branchSegments.length) {
+                if (branchSegments?.length) {
                     branchSegments = branchSegments.map(segment =>
                         this.applyPostFiltersPreservingFields(segment, filters),
                     );
@@ -2368,9 +2368,9 @@ export function defineODataCrudController(def: EntitySetDef) {
                 }
             }
 
-            if (plan.postOrderBy && plan.postOrderBy.length) {
+            if (plan.postOrderBy?.length) {
                 const clauses = plan.postOrderBy.map(item => `${item.field} ${item.direction.toUpperCase()}`);
-                if (branchSegments && branchSegments.length) {
+                if (branchSegments?.length) {
                     branchSegments = branchSegments.map(segment => this.orderResults(segment, clauses));
                     working = branchSegments.flat();
                 } else {
@@ -2473,7 +2473,7 @@ export function defineODataCrudController(def: EntitySetDef) {
             if (!executor) return undefined;
 
             const emitReason = (reason: string) => {
-                this.emitApplyTelemetry('pushdown', stageIndex, stageCount || 1, {reason});
+                this.emitApplyTelemetry('pushdown', stageIndex, stageCount || 1, { reason });
             };
 
             if (aggregation.aggregates.some(item => Boolean(item.expression)) || this.planHasComputedAggregates(plan)) {
@@ -2494,16 +2494,16 @@ export function defineODataCrudController(def: EntitySetDef) {
             const cloneStage = (stageToClone: ApplyAggregationStage): ApplyAggregationStage => ({
                 spec: {
                     groupBy: [...stageToClone.spec.groupBy],
-                    aggregates: stageToClone.spec.aggregates.map(expr => ({...expr})),
+                    aggregates: stageToClone.spec.aggregates.map(expr => ({ ...expr })),
                 },
                 postAggregationFilters: stageToClone.postAggregationFilters.map(cloneExpression),
-                orderBy: stageToClone.orderBy ? stageToClone.orderBy.map(item => ({...item})) : undefined,
+                orderBy: stageToClone.orderBy ? stageToClone.orderBy.map(item => ({ ...item })) : undefined,
                 top: stageToClone.top,
                 skip: stageToClone.skip,
                 navigationPaths: stageToClone.navigationPaths
                     ? stageToClone.navigationPaths.map(path => ({
                         ...path,
-                        joins: path.joins.map(join => ({...join})),
+                        joins: path.joins.map(join => ({ ...join })),
                     }))
                     : [],
             });
@@ -2514,17 +2514,17 @@ export function defineODataCrudController(def: EntitySetDef) {
                     ?.map(branch => clonePlan(branch))
                     .filter((branch): branch is ApplyExecutionPlan => Boolean(branch));
                 const clonedOrder =
-                    sourcePlan.postOrderBy?.map(item => ({field: item.field, direction: item.direction})) ?? undefined;
+                    sourcePlan.postOrderBy?.map(item => ({ field: item.field, direction: item.direction })) ?? undefined;
                 const clonedFilters = sourcePlan.postFilters?.map(cloneExpression) ?? undefined;
                 return {
                     pushdownWhere: sourcePlan.pushdownWhere,
                     preAggregationFilters: [...sourcePlan.preAggregationFilters],
                     stages: sourcePlan.stages.map(cloneStage),
-                    ...(clonedConcat && clonedConcat.length ? {concat: clonedConcat} : {}),
-                    ...(clonedOrder && clonedOrder.length ? {postOrderBy: clonedOrder} : {}),
-                    ...(sourcePlan.postTop !== undefined ? {postTop: sourcePlan.postTop} : {}),
-                    ...(sourcePlan.postSkip !== undefined ? {postSkip: sourcePlan.postSkip} : {}),
-                    ...(clonedFilters && clonedFilters.length ? {postFilters: clonedFilters} : {}),
+                    ...(clonedConcat?.length ? { concat: clonedConcat } : {}),
+                    ...(clonedOrder?.length ? { postOrderBy: clonedOrder } : {}),
+                    ...(sourcePlan.postTop !== undefined ? { postTop: sourcePlan.postTop } : {}),
+                    ...(sourcePlan.postSkip !== undefined ? { postSkip: sourcePlan.postSkip } : {}),
+                    ...(clonedFilters?.length ? { postFilters: clonedFilters } : {}),
                 };
             };
 
@@ -2532,7 +2532,7 @@ export function defineODataCrudController(def: EntitySetDef) {
                 if (!aggregation?.aggregates?.length) return undefined;
                 const spec: AggregationSpec = {
                     groupBy: [...aggregation.groupBy],
-                    aggregates: aggregation.aggregates.map(expr => ({...expr})),
+                    aggregates: aggregation.aggregates.map(expr => ({ ...expr })),
                 };
                 let navigationPaths: ReturnType<typeof collectNavigationPathsForStage> = [];
                 try {
@@ -2573,10 +2573,10 @@ export function defineODataCrudController(def: EntitySetDef) {
                 return undefined;
             }
 
-            const effectivePipeline: ApplyPipeline = pipeline ?? {transformations: []};
-            const fetchFilterCopy: Filter<CrudEntity> = {...fetchFilter};
+            const effectivePipeline: ApplyPipeline = pipeline ?? { transformations: [] };
+            const fetchFilterCopy: Filter<CrudEntity> = { ...fetchFilter };
             if (fetchFilter.where) {
-                fetchFilterCopy.where = {...(fetchFilter.where as CrudWhere)} as CrudWhere;
+                fetchFilterCopy.where = { ...(fetchFilter.where as CrudWhere) } as CrudWhere;
             }
             if (Array.isArray(fetchFilter.include)) {
                 fetchFilterCopy.include = [...fetchFilter.include];
@@ -2584,7 +2584,7 @@ export function defineODataCrudController(def: EntitySetDef) {
 
             const executorPaging = paging
                 ? {
-                    order: paging.orderDescriptors.map(item => ({field: item.field, direction: item.direction})),
+                    order: paging.orderDescriptors.map(item => ({ field: item.field, direction: item.direction })),
                     skipToken: paging.skipTokenParts ? [...paging.skipTokenParts] : undefined,
                     pageSize: paging.pageSize,
                     stageTop: paging.stageTop,
@@ -2598,7 +2598,7 @@ export function defineODataCrudController(def: EntitySetDef) {
                 plan: executionPlan,
                 pipeline: effectivePipeline,
                 aggregation,
-                baseFilter: {...baseFilter},
+                baseFilter: { ...baseFilter },
                 fetchFilter: fetchFilterCopy,
                 options,
                 requestedLimit,
@@ -2733,7 +2733,7 @@ export function defineODataCrudController(def: EntitySetDef) {
             return raw;
         }
 
-        evaluateStringFunction(expr: Extract<ParsedExpression, {operator: 'stringfncmp'}>, current: AnyObject, alias: string, root: AnyObject): string | undefined {
+        evaluateStringFunction(expr: Extract<ParsedExpression, { operator: 'stringfncmp' }>, current: AnyObject, alias: string, root: AnyObject): string | undefined {
             switch (expr.name) {
                 case 'trim': {
                     const value = this.resolveFunctionArgValue(expr.args[0], current, alias, root);
@@ -2793,17 +2793,17 @@ export function defineODataCrudController(def: EntitySetDef) {
 
         cloneIncludeEntry(entry: string | InclusionFilter): NormalizedInclusion {
             if (typeof entry === 'string') {
-                return {relation: entry};
+                return { relation: entry };
             }
-            const scope = entry.scope ? {...entry.scope} : undefined;
-            if (scope && scope.include) {
+            const scope = entry.scope ? { ...entry.scope } : undefined;
+            if (scope?.include) {
                 if (Array.isArray(scope.include)) {
                     scope.include = scope.include.map(item => this.cloneIncludeEntry(item));
                 } else {
                     scope.include = [this.cloneIncludeEntry(scope.include)];
                 }
             }
-            return {relation: entry.relation, scope};
+            return { relation: entry.relation, scope };
         }
 
         normalizeIncludeList(include: Filter<CrudEntity>['include']): NormalizedInclusion[] {
@@ -2819,7 +2819,7 @@ export function defineODataCrudController(def: EntitySetDef) {
             if (!current) return;
             let entry = include.find(item => item.relation === current);
             if (!entry) {
-                entry = rest.length ? {relation: current, scope: {include: []}} : {relation: current};
+                entry = rest.length ? { relation: current, scope: { include: [] } } : { relation: current };
                 include.push(entry);
             }
             if (!rest.length) return;
@@ -3043,10 +3043,10 @@ export function defineODataCrudController(def: EntitySetDef) {
             }
         }
 
-        allowedProperties(): {props: Set<string>; relations: Set<string>} {
+        allowedProperties(): { props: Set<string>; relations: Set<string> } {
             const props = new Set<string>(Object.keys(modelDefinition?.properties ?? {}));
             const relations = new Set<string>(Object.keys(modelRelations ?? {}));
-            return {props, relations};
+            return { props, relations };
         }
 
         classifyPrimitiveProperty(definition: PropertyDefinition | undefined): PrimitivePropertyKind | undefined {
@@ -3088,7 +3088,7 @@ export function defineODataCrudController(def: EntitySetDef) {
             return undefined;
         }
 
-        serializePrimitiveValue(value: unknown, kind: PrimitivePropertyKind): {body: string | Buffer; contentType: string} {
+        serializePrimitiveValue(value: unknown, kind: PrimitivePropertyKind): { body: string | Buffer; contentType: string } {
             switch (kind) {
                 case 'string': {
                     return {
@@ -3185,7 +3185,7 @@ export function defineODataCrudController(def: EntitySetDef) {
                 return aliases.includes(fields) ? undefined : fields;
             }
             if (typeof fields === 'object') {
-                const clone: AnyObject = {...(fields as AnyObject)};
+                const clone: AnyObject = { ...(fields as AnyObject) };
                 let removed = false;
                 for (const alias of aliases) {
                     if (Object.prototype.hasOwnProperty.call(clone, alias)) {
@@ -3250,9 +3250,9 @@ export function defineODataCrudController(def: EntitySetDef) {
                     }, {});
                 }
                 if (typeof source === 'string') {
-                    return source ? {[source]: true} : {};
+                    return source ? { [source]: true } : {};
                 }
-                return {...(source as AnyObject)} as Record<string, boolean>;
+                return { ...(source as AnyObject) } as Record<string, boolean>;
             };
             const projection = toObject(fields);
             for (const dep of dependencies) {
@@ -3263,7 +3263,7 @@ export function defineODataCrudController(def: EntitySetDef) {
             return Object.keys(projection).length ? projection as Filter<CrudEntity>['fields'] : fields;
         }
 
-        evaluateComputeNode(node: ComputeNode, current: AnyObject, variant?: {values: Record<string, unknown>}): unknown {
+        evaluateComputeNode(node: ComputeNode, current: AnyObject, variant?: { values: Record<string, unknown> }): unknown {
             switch (node.type) {
                 case 'path': {
                     const joined = node.path.join('/');
@@ -3333,7 +3333,7 @@ export function defineODataCrudController(def: EntitySetDef) {
             return null;
         }
 
-        evaluateComputeFunction(node: Extract<ComputeNode, {type: 'function'}>, current: AnyObject, variant?: {values: Record<string, unknown>}): unknown {
+        evaluateComputeFunction(node: Extract<ComputeNode, { type: 'function' }>, current: AnyObject, variant?: { values: Record<string, unknown> }): unknown {
             const args = node.args.map(arg => this.evaluateComputeNode(arg, current, variant));
             switch (node.name) {
                 case 'tolower': {
@@ -3362,7 +3362,7 @@ export function defineODataCrudController(def: EntitySetDef) {
             if (mode === 'disabled') return [];
             const set = def.name;
             const cfgFields = this.cfg?.searchFields?.[set];
-            if (cfgFields && cfgFields.length) return cfgFields.slice();
+            if (cfgFields?.length) return cfgFields.slice();
             if (mode === 'config-only') return [];
             const annotated = getODataSearchableProps(modelCtor) ?? [];
             if (annotated.length) return annotated.slice();
@@ -3459,7 +3459,7 @@ export function defineODataCrudController(def: EntitySetDef) {
 
             function parseAnd(): SearchAst {
                 const nodes: SearchAst[] = [parseUnary()];
-                for (;;) {
+                for (; ;) {
                     if (match('AND')) {
                         nodes.push(parseUnary());
                         continue;
@@ -3716,18 +3716,18 @@ export function defineODataCrudController(def: EntitySetDef) {
                 const direction = rawDirection?.toUpperCase() === 'DESC' ? 'DESC' : 'ASC';
                 if (seen.has(rawField)) continue;
                 seen.add(rawField);
-                descriptors.push({field: rawField, direction});
+                descriptors.push({ field: rawField, direction });
             }
 
             for (const id of idProperties) {
                 if (!id || seen.has(id)) continue;
                 seen.add(id);
-                descriptors.push({field: id, direction: 'ASC'});
+                descriptors.push({ field: id, direction: 'ASC' });
             }
 
             if (!descriptors.length) {
                 const fallback = idProperties[0] ?? 'id';
-                descriptors.push({field: fallback, direction: 'ASC'});
+                descriptors.push({ field: fallback, direction: 'ASC' });
             }
 
             return descriptors;
@@ -3752,7 +3752,7 @@ export function defineODataCrudController(def: EntitySetDef) {
                 if (!field) return;
                 if (seen.has(field)) return;
                 seen.add(field);
-                descriptors.push({field, direction});
+                descriptors.push({ field, direction });
             };
 
             for (const item of orderItems) {
@@ -3833,7 +3833,7 @@ export function defineODataCrudController(def: EntitySetDef) {
         }
 
         filterRowsAfterSkipToken(rows: AnyObject[], descriptors: OrderDescriptor[], tokenParts: string[] | undefined): AnyObject[] {
-            if (!tokenParts || !tokenParts.length) return rows;
+            if (!tokenParts?.length) return rows;
             const filtered: AnyObject[] = [];
             for (const row of rows) {
                 const cmp = this.compareRowAgainstToken(row, descriptors, tokenParts);
@@ -3887,7 +3887,7 @@ export function defineODataCrudController(def: EntitySetDef) {
         }
 
         buildEqualityClause(field: string, value: unknown): CrudWhere {
-            const clause: AnyObject = value === null ? {[field]: null} : {[field]: value};
+            const clause: AnyObject = value === null ? { [field]: null } : { [field]: value };
             return clause as CrudWhere;
         }
 
@@ -3909,11 +3909,11 @@ export function defineODataCrudController(def: EntitySetDef) {
                 let comparison: CrudWhere | undefined;
                 if (value === null) {
                     if (descriptor.direction === 'DESC') {
-                        comparison = {[descriptor.field]: {neq: null}} as CrudWhere;
+                        comparison = { [descriptor.field]: { neq: null } } as CrudWhere;
                     }
                 } else {
                     const comparator = descriptor.direction === 'DESC' ? 'lt' : 'gt';
-                    comparison = {[descriptor.field]: {[comparator]: value}} as CrudWhere;
+                    comparison = { [descriptor.field]: { [comparator]: value } } as CrudWhere;
                 }
 
                 if (comparison) {
@@ -4029,12 +4029,12 @@ export function defineODataCrudController(def: EntitySetDef) {
             buckets?: DeltaTokenBucketState[],
         ): string {
             if (!rows.length) {
-                return previousToken ?? encodeDeltaToken({entitySet, lastValue: new Date().toISOString(), buckets});
+                return previousToken ?? encodeDeltaToken({ entitySet, lastValue: new Date().toISOString(), buckets });
             }
             const first = rows[0];
             const deltaValue = this.extractFieldValue(first, deltaField);
             if (deltaValue === undefined) {
-                return previousToken ?? encodeDeltaToken({entitySet, lastValue: new Date().toISOString(), buckets});
+                return previousToken ?? encodeDeltaToken({ entitySet, lastValue: new Date().toISOString(), buckets });
             }
             const payload = {
                 entitySet,
@@ -4056,11 +4056,11 @@ export function defineODataCrudController(def: EntitySetDef) {
 
         async computeTombstones(keyValues: Record<string, unknown> | undefined): Promise<AnyObject[]> {
             if (!keyValues || !Object.keys(keyValues).length) return [];
-            const existing = await this.repository.findOne({where: keyValues as CrudWhere});
+            const existing = await this.repository.findOne({ where: keyValues as CrudWhere });
             if (existing) return [];
             return [{
                 ...keyValues,
-                '@removed': {reason: 'deleted'},
+                '@removed': { reason: 'deleted' },
             }];
         }
 
@@ -4078,7 +4078,7 @@ export function defineODataCrudController(def: EntitySetDef) {
                     order.push(`${key} DESC`);
                 }
             }
-            const latest = await this.repository.findOne({where, order}, options);
+            const latest = await this.repository.findOne({ where, order }, options);
             if (!latest) return undefined;
             const plain = this.toPlainEntity(latest) ?? {};
             return this.createDeltaTokenForRows(entitySet, [plain], deltaField, idProps, undefined);
@@ -4091,7 +4091,7 @@ export function defineODataCrudController(def: EntitySetDef) {
                 const key = this.buildBucketKeyFromRow(row, groupKeys);
                 const signature = this.serializeBucketKey(key, groupKeys);
                 const snapshot = this.cloneBucketSnapshot(row);
-                buckets.set(signature, snapshot ? {key, data: snapshot} : {key});
+                buckets.set(signature, snapshot ? { key, data: snapshot } : { key });
             }
             return Array.from(buckets.values());
         }
@@ -4112,7 +4112,7 @@ export function defineODataCrudController(def: EntitySetDef) {
                 if (currentSignatures.has(signature)) continue;
                 const tombstoneBase = entry?.data ? this.clonePlainRecord(entry.data) : {};
                 Object.assign(tombstoneBase, key);
-                tombstoneBase['@removed'] = {reason: 'deleted'};
+                tombstoneBase['@removed'] = { reason: 'deleted' };
                 tombstones.push(tombstoneBase);
             }
             return tombstones;
@@ -4182,12 +4182,12 @@ export function defineODataCrudController(def: EntitySetDef) {
                     const eqField = idProperties[eqIndex];
                     const eqValue = keyValues[eqField];
                     if (eqValue === undefined) return undefined;
-                    parts.push({[eqField]: eqValue} as CrudWhere);
+                    parts.push({ [eqField]: eqValue } as CrudWhere);
                 }
                 const field = idProperties[index];
                 const value = keyValues[field];
                 if (value === undefined) return undefined;
-                parts.push({[field]: {gt: value}} as CrudWhere);
+                parts.push({ [field]: { gt: value } } as CrudWhere);
                 const branch = this.combineWithAnd(parts);
                 if (branch) branches.push(branch);
             }
@@ -4225,12 +4225,12 @@ export function defineODataCrudController(def: EntitySetDef) {
             return this.combineWithOr([greaterClause, combinedEquality]) ?? greaterClause;
         }
 
-        applyServerDrivenPaging(data: AnyObject[], descriptors: OrderDescriptor[], pageSize: number): {items: AnyObject[]; token?: string} {
+        applyServerDrivenPaging(data: AnyObject[], descriptors: OrderDescriptor[], pageSize: number): { items: AnyObject[]; token?: string } {
             if (!pageSize || pageSize <= 0) {
-                return {items: data};
+                return { items: data };
             }
             if (data.length <= pageSize) {
-                return {items: data};
+                return { items: data };
             }
             const items = data.slice(0, pageSize);
             const last = items[items.length - 1];
@@ -4258,7 +4258,7 @@ export function defineODataCrudController(def: EntitySetDef) {
 
         validateFieldsStrict(filter: Filter<CrudEntity>) {
             if (!this.cfg?.strict) return;
-            const {props, relations} = this.allowedProperties();
+            const { props, relations } = this.allowedProperties();
 
             if (filter.fields && typeof filter.fields === 'object' && !Array.isArray(filter.fields)) {
                 for (const key of Object.keys(filter.fields as AnyObject)) {
@@ -4291,9 +4291,9 @@ export function defineODataCrudController(def: EntitySetDef) {
         }
 
         computeIncludeDepth(includes?: InclusionFilter[]): number {
-            if (!includes || !includes.length) return 0;
+            if (!includes?.length) return 0;
             const depthOf = (inc: InclusionFilter): number => {
-                const obj = typeof inc === 'string' ? {relation: inc} : inc;
+                const obj = typeof inc === 'string' ? { relation: inc } : inc;
                 const child = (obj as any)?.scope?.include as InclusionFilter[] | undefined;
                 const childDepth = this.computeIncludeDepth(child);
                 return 1 + childDepth;
@@ -4349,7 +4349,7 @@ export function defineODataCrudController(def: EntitySetDef) {
             if (this.formatOverridden) return;
             if (!this.cfg?.strict) return;
             const accept = this.request.get('Accept') ?? (this.request.headers?.['accept'] as string | undefined);
-            if (!accept || !accept.trim()) return; // no Accept means accept anything
+            if (!accept?.trim()) return; // no Accept means accept anything
             const lower = accept.toLowerCase();
             const ok = lower.includes('application/json') || lower.includes('*/*') || /application\s*\/\s*\*/.test(lower);
             if (!ok) {
@@ -4362,7 +4362,7 @@ export function defineODataCrudController(def: EntitySetDef) {
         ensureJsonContentType() {
             if (!this.cfg?.strict) return;
             const type = this.request.get('Content-Type') ?? (this.request.headers?.['content-type'] as string | undefined);
-            if (!type || !type.trim()) return; // let framework handle missing content-type
+            if (!type?.trim()) return; // let framework handle missing content-type
             const lower = type.toLowerCase();
             const ok = lower.includes('application/json') || lower.endsWith('+json');
             if (!ok) {
@@ -4444,7 +4444,7 @@ export function defineODataCrudController(def: EntitySetDef) {
             }
         }
 
-        hookMatches(op: CrudOperation, scope: CrudScope | undefined, meta: {op: CrudOperation; scope?: CrudScope}): boolean {
+        hookMatches(op: CrudOperation, scope: CrudScope | undefined, meta: { op: CrudOperation; scope?: CrudScope }): boolean {
             if (meta.op !== op) return false;
             if (op !== 'READ') return true;
             if (!meta.scope) return true;
@@ -4455,7 +4455,7 @@ export function defineODataCrudController(def: EntitySetDef) {
             const before = (hooks?.before ?? []).filter(h => this.hookMatches(op, scope, h)).map(h => h.methodName);
             const after = (hooks?.after ?? []).filter(h => this.hookMatches(op, scope, h)).map(h => h.methodName);
             const on = (hooks?.on ?? []).find(h => this.hookMatches(op, scope, h))?.methodName;
-            return {before, after, on};
+            return { before, after, on };
         }
 
         buildHookContext(base: Partial<CrudHookContext>): CrudHookContext {
@@ -4476,7 +4476,7 @@ export function defineODataCrudController(def: EntitySetDef) {
         }
 
         buildOnContext(ctx: CrudHookContext, helpers: CrudOnContext['helpers']): CrudOnContext {
-            return Object.assign({} as CrudOnContext, ctx, {helpers});
+            return Object.assign({} as CrudOnContext, ctx, { helpers });
         }
 
         helpersForEntity(entityContextStr: string) {
@@ -4497,7 +4497,7 @@ export function defineODataCrudController(def: EntitySetDef) {
                     const decorated = self.decoratePlainEntities(values);
                     return {
                         '@odata.context': contextBase,
-                        ...(totalCount !== undefined ? {'@odata.count': totalCount} : {}),
+                        ...(totalCount !== undefined ? { '@odata.count': totalCount } : {}),
                         value: decorated,
                     } as AnyObject;
                 },
@@ -4513,7 +4513,7 @@ export function defineODataCrudController(def: EntitySetDef) {
         }
 
         async runBefore(op: CrudOperation, scope: CrudScope | undefined, ctx: CrudHookContext) {
-            if (!hooks || (!hooks.before?.length)) return;
+            if (!hooks?.before?.length) return;
             const source = await this.resolveSourceController();
             if (!source) return;
             const names = this.getHookMethods(op, scope).before;
@@ -4547,7 +4547,7 @@ export function defineODataCrudController(def: EntitySetDef) {
 
         async runAfter(op: CrudOperation, scope: CrudScope | undefined, ctx: CrudHookContext) {
             if (this.response.headersSent) return; // don't mutate after commit
-            if (!hooks || (!hooks.after?.length)) return;
+            if (!hooks?.after?.length) return;
             const source = await this.resolveSourceController();
             if (!source) return;
             const names = this.getHookMethods(op, scope).after;
@@ -4688,7 +4688,7 @@ export function defineODataCrudController(def: EntitySetDef) {
                 } else if (aggregationSpec) {
                     const fallbackSpec: AggregationSpec = {
                         groupBy: [...aggregationSpec.groupBy],
-                        aggregates: aggregationSpec.aggregates.map(expr => ({...expr})),
+                        aggregates: aggregationSpec.aggregates.map(expr => ({ ...expr })),
                     };
                     const fallbackStage: ApplyAggregationStage = {
                         spec: fallbackSpec,
@@ -4752,7 +4752,7 @@ export function defineODataCrudController(def: EntitySetDef) {
             if (deltaTokenValue && !deltaEnabled) {
                 throw new HttpErrors.BadRequest('$deltatoken is not supported for this entity set.');
             }
-            if (deltaPayload && deltaPayload.entitySet && deltaPayload.entitySet !== setName) {
+            if (deltaPayload?.entitySet && deltaPayload.entitySet !== setName) {
                 throw new HttpErrors.BadRequest('$deltatoken does not match the requested entity set.');
             }
 
@@ -4842,7 +4842,7 @@ export function defineODataCrudController(def: EntitySetDef) {
             }
             if (deltaEnabled && deltaField) {
                 const deduped = orderDescriptors.filter(item => item.field !== deltaField);
-                orderDescriptors = [{field: deltaField, direction: 'DESC'}, ...deduped];
+                orderDescriptors = [{ field: deltaField, direction: 'DESC' }, ...deduped];
                 baseFilter.order = orderDescriptors.map(item => `${item.field} ${item.direction}`);
                 if (baseFilter.fields) {
                     baseFilter.fields = this.ensureOrderProjection(baseFilter.fields, orderDescriptors);
@@ -4861,7 +4861,7 @@ export function defineODataCrudController(def: EntitySetDef) {
 
             const op: CrudOperation = 'READ';
             const scope: CrudScope = 'collection';
-            const ctx = this.buildHookContext({operation: op, scope, filter: baseFilter as any, options: this.repositoryOptions()});
+            const ctx = this.buildHookContext({ operation: op, scope, filter: baseFilter as any, options: this.repositoryOptions() });
             await this.runBefore(op, scope, ctx);
 
             const execDefault = async () => {
@@ -4943,7 +4943,7 @@ export function defineODataCrudController(def: EntitySetDef) {
                     if (!planForFallback && aggregationSpec) {
                         const fallbackSpec: AggregationSpec = {
                             groupBy: [...aggregationSpec.groupBy],
-                            aggregates: aggregationSpec.aggregates.map(expr => ({...expr})),
+                            aggregates: aggregationSpec.aggregates.map(expr => ({ ...expr })),
                         };
                         planForFallback = {
                             pushdownWhere: undefined,
@@ -4993,7 +4993,7 @@ export function defineODataCrudController(def: EntitySetDef) {
                     let paged: AnyObject[];
                     let nextLinkToken: string | undefined;
 
-                    if (planIncludesConcat && branchSegments && branchSegments.length) {
+                    if (planIncludesConcat && branchSegments?.length) {
                         const preservedSegments = branchSegments.slice(0, Math.max(branchSegments.length - 1, 0));
                         const preservedRows = preservedSegments.flat();
                         let detailRows = branchSegments[branchSegments.length - 1] ?? [];
@@ -5210,7 +5210,7 @@ export function defineODataCrudController(def: EntitySetDef) {
 
             const op: CrudOperation = 'READ';
             const scope: CrudScope = 'count';
-            const ctx = this.buildHookContext({operation: op, scope, filter: baseFilter as any, options: this.repositoryOptions()});
+            const ctx = this.buildHookContext({ operation: op, scope, filter: baseFilter as any, options: this.repositoryOptions() });
             await this.runBefore(op, scope, ctx);
 
             const execDefault = async () => {
@@ -5307,7 +5307,7 @@ export function defineODataCrudController(def: EntitySetDef) {
 
             const op: CrudOperation = 'READ';
             const scope: CrudScope = 'entity';
-            const ctx = this.buildHookContext({operation: op, scope, id, filter: baseFilter as any, options: this.repositoryOptions()});
+            const ctx = this.buildHookContext({ operation: op, scope, id, filter: baseFilter as any, options: this.repositoryOptions() });
             await this.runBefore(op, scope, ctx);
 
             const execDefault = async () => {
@@ -5356,12 +5356,12 @@ export function defineODataCrudController(def: EntitySetDef) {
                 '200': {
                     description: `Raw property value for ${setName}`,
                     content: {
-                        'text/plain': {schema: {type: 'string'}},
-                        'application/octet-stream': {schema: {type: 'string', format: 'binary'}},
+                        'text/plain': { schema: { type: 'string' } },
+                        'application/octet-stream': { schema: { type: 'string', format: 'binary' } },
                     },
                 },
-                '204': {description: 'Property is null.'},
-                '304': {description: 'Not Modified'},
+                '204': { description: 'Property is null.' },
+                '304': { description: 'Not Modified' },
             },
         })
         async getPropertyValue(
@@ -5385,7 +5385,7 @@ export function defineODataCrudController(def: EntitySetDef) {
             }
 
             const baseFilter: Filter<CrudEntity> = {
-                fields: {[propertyName]: true},
+                fields: { [propertyName]: true },
             };
             this.ensureEtagField(baseFilter);
 
@@ -5467,7 +5467,7 @@ export function defineODataCrudController(def: EntitySetDef) {
 
             const op: CrudOperation = 'CREATE';
             const scope: CrudScope | undefined = undefined;
-            const ctx = this.buildHookContext({operation: op, scope, payload: payload as AnyObject, options: this.repositoryOptions()});
+            const ctx = this.buildHookContext({ operation: op, scope, payload: payload as AnyObject, options: this.repositoryOptions() });
             await this.runBefore(op, scope, ctx);
 
             const execDefault = async () => {
@@ -5601,14 +5601,14 @@ export function defineODataCrudController(def: EntitySetDef) {
                 const prepared = this.coercePayloadToObject(payload);
                 const normalized = this.normalizeDeepInsertPayload(prepared, modelCtor as typeof Entity);
                 relationPayloads = normalized.children;
-                rootPayload = {...normalized.root};
+                rootPayload = { ...normalized.root };
             } else if (payload && typeof payload === 'object') {
-                rootPayload = {...(payload as AnyObject)};
+                rootPayload = { ...(payload as AnyObject) };
             }
 
             const op: CrudOperation = 'UPDATE';
             const scope: CrudScope | undefined = undefined;
-            const ctx = this.buildHookContext({operation: op, scope, id, payload: rootPayload as AnyObject, options: this.repositoryOptions()});
+            const ctx = this.buildHookContext({ operation: op, scope, id, payload: rootPayload as AnyObject, options: this.repositoryOptions() });
             await this.runBefore(op, scope, ctx);
 
             const execDefault = async () => {
@@ -5692,7 +5692,7 @@ export function defineODataCrudController(def: EntitySetDef) {
 
             const op: CrudOperation = 'DELETE';
             const scope: CrudScope | undefined = undefined;
-            const ctx = this.buildHookContext({operation: op, scope, id, options: this.repositoryOptions()});
+            const ctx = this.buildHookContext({ operation: op, scope, id, options: this.repositoryOptions() });
             await this.runBefore(op, scope, ctx);
 
             const execDefault = async () => {
@@ -5736,9 +5736,9 @@ export function defineODataCrudController(def: EntitySetDef) {
             return transaction ? { transaction } : undefined;
         }
 
-        parsePreferenceHeader(): {returnPreference?: 'minimal' | 'representation'; respondAsync: boolean} {
+        parsePreferenceHeader(): { returnPreference?: 'minimal' | 'representation'; respondAsync: boolean } {
             const header = this.request.get('Prefer') ?? (this.request.headers?.['prefer'] as string | undefined);
-            const result: {returnPreference?: 'minimal' | 'representation'; respondAsync: boolean} = {
+            const result: { returnPreference?: 'minimal' | 'representation'; respondAsync: boolean } = {
                 respondAsync: false,
             };
             if (!header) return result;
