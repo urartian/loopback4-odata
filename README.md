@@ -1,14 +1,14 @@
 # @loopback/odata
 
-An extension for [LoopBack 4](https://loopback.io/doc/en/lb4/) that adds **OData protocol support**.  
+An extension for [LoopBack 4](https://loopback.io/doc/en/lb4/) that adds **OData protocol support**.
 
-- Auto-discovers OData controllers and generates CRUD routes.  
-- Exposes OData-style endpoints (`/Products(1)`) and OpenAPI-compliant ones (`/Products/{id}`).  
-- Provides `$metadata` endpoint.  
-- Simple developer experience with decorators.  
-- Advanced `$apply` support including chained transformations, navigation-path aggregates, and safe in-memory fallbacks when connector pushdown is unavailable.  
+- Auto-discovers OData controllers and generates CRUD routes.
+- Exposes OData-style endpoints (`/Products(1)`) and OpenAPI-compliant ones (`/Products/{id}`).
+- Provides `$metadata` endpoint.
+- Simple developer experience with decorators.
+- Advanced `$apply` support including chained transformations, navigation-path aggregates, and safe in-memory fallbacks when connector pushdown is unavailable.
 
-Currently in **phase 4** — CRUD endpoints are stable and advanced features like `$expand`, `$count`, `$batch`, and Actions/Functions are available. Focus is now on rounding out the filter grammar, improving configurability, enriching the CSDL, and hardening path rewriting.  
+Currently in **phase 4** — CRUD endpoints are stable and advanced features like `$expand`, `$count`, `$batch`, and Actions/Functions are available. Focus is now on rounding out the filter grammar, improving configurability, enriching the CSDL, and hardening path rewriting.
 
 ---
 
@@ -25,11 +25,11 @@ npm install @loopback/odata
 In your application class:
 
 ```ts
-import {ApplicationConfig} from '@loopback/core';
-import {BootMixin} from '@loopback/boot';
-import {RepositoryMixin} from '@loopback/repository';
-import {RestApplication} from '@loopback/rest';
-import {ODataComponent} from '@loopback/odata';
+import { ApplicationConfig } from '@loopback/core';
+import { BootMixin } from '@loopback/boot';
+import { RepositoryMixin } from '@loopback/repository';
+import { RestApplication } from '@loopback/rest';
+import { ODataComponent } from '@loopback/odata';
 
 export class MyAppApplication extends BootMixin(RepositoryMixin(RestApplication)) {
   constructor(options: ApplicationConfig = {}) {
@@ -44,8 +44,8 @@ export class MyAppApplication extends BootMixin(RepositoryMixin(RestApplication)
 2. Define a model
 
 ```ts
-import {Entity, model, property} from '@loopback/repository';
-import {odataModel, odataController} from '@loopback/odata';
+import { Entity, model, property } from '@loopback/repository';
+import { odataModel, odataController } from '@loopback/odata';
 
 @odataModel({
   etag: 'updatedAt',
@@ -56,7 +56,7 @@ import {odataModel, odataController} from '@loopback/odata';
 })
 @model()
 export class Product extends Entity {
-  @property({id: true})
+  @property({ id: true })
   id!: number;
 
   @property()
@@ -65,7 +65,7 @@ export class Product extends Entity {
   @property()
   price!: number;
 
-  @property({type: 'date', defaultFn: 'now'})
+  @property({ type: 'date', defaultFn: 'now' })
   updatedAt!: Date;
 }
 ```
@@ -75,18 +75,15 @@ export class Product extends Entity {
 The component expects a `DefaultCrudRepository` binding for each model decorated with `@odataController`. Provide a datasource and expose the repository via `RepositoryMixin`.
 
 ```ts
-import {inject} from '@loopback/core';
-import {DefaultCrudRepository, juggler} from '@loopback/repository';
+import { inject } from '@loopback/core';
+import { DefaultCrudRepository, juggler } from '@loopback/repository';
 
 const ds = new juggler.DataSource({
   name: 'db',
   connector: 'memory',
 });
 
-export class ProductRepository extends DefaultCrudRepository<
-  Product,
-  typeof Product.prototype.id
-> {
+export class ProductRepository extends DefaultCrudRepository<Product, typeof Product.prototype.id> {
   constructor(@inject('datasources.db') dataSource: juggler.DataSource) {
     super(Product, dataSource);
   }
@@ -114,15 +111,15 @@ That’s it — the extension generates repository-backed CRUD endpoints automat
 The component mirrors LoopBack’s authentication and authorization metadata from your controller onto every generated CRUD endpoint. Decorate your OData controller exactly as you would a regular REST controller and the extension takes care of the rest:
 
 ```ts
-import {authenticate} from '@loopback/authentication';
-import {authorize} from '@loopback/authorization';
+import { authenticate } from '@loopback/authentication';
+import { authorize } from '@loopback/authorization';
 
 @odataController(Product)
 @authenticate('jwt')
-@authorize({scopes: ['product.read']})
+@authorize({ scopes: ['product.read'] })
 export class ProductODataController {
   // Stubbing a method is enough to apply fine-grained metadata.
-  @authorize({scopes: ['product.summary']})
+  @authorize({ scopes: ['product.summary'] })
   async find() {}
 }
 ```
@@ -132,7 +129,7 @@ Generated routes (list, findById, create, update, delete) will enforce the same 
 LoopBack’s built-in methods (`find`, `deleteById`, `updateById`, `replaceById`) are remapped to the OData CRUD handlers automatically. If you expose differently named controller methods, supply custom aliases when registering the entity set so the security metadata still flows through:
 
 ```ts
-import {ODATA_BINDINGS} from '@loopback/odata';
+import { ODATA_BINDINGS } from '@loopback/odata';
 
 const registry = await app.get(ODATA_BINDINGS.ENTITY_SET_REGISTRY);
 registry.register({
@@ -152,10 +149,10 @@ Write metadata from the controller (`update*`, `replace*`, `patch*`, `delete*`) 
 @authenticate('jwt')
 export class OrderODataController {
   // Override default write policy by attaching custom metadata
-  @authorize({allowedRoles: ['order-manager']})
+  @authorize({ allowedRoles: ['order-manager'] })
   async linkNavigationRef() {}
 
-  @authorize({allowedRoles: ['order-manager']})
+  @authorize({ allowedRoles: ['order-manager'] })
   async unlinkNavigationRef() {}
 }
 ```
@@ -175,6 +172,7 @@ For a quick demo, run `npm run dev`; this boots the example app in `examples/bas
 ```bash
 GET /odata/$metadata
 ```
+
 Returns generated EDMX/CSDL describing your registered entity sets.
 
 ##### Collection
@@ -269,15 +267,12 @@ Becomes:
 ```json
 {
   "where": {
-    "and": [
-      {"price": {"gt": 500}},
-      {"name": {"neq": "Monitor"}}
-    ]
+    "and": [{ "price": { "gt": 500 } }, { "name": { "neq": "Monitor" } }]
   },
   "order": ["price DESC"],
   "limit": 5,
   "offset": 10,
-  "fields": {"id": true, "name": true, "price": true}
+  "fields": { "id": true, "name": true, "price": true }
 }
 ```
 
@@ -292,7 +287,7 @@ GET /odata/Products?$filter=contains(name,'Lap')
 ```json
 {
   "where": {
-    "name": {"like": "%Lap%", "escape": "\\"}
+    "name": { "like": "%Lap%", "escape": "\\" }
   }
 }
 ```
@@ -304,7 +299,7 @@ GET /odata/Products?$filter=startswith(code,'PR-')
 ```json
 {
   "where": {
-    "code": {"like": "PR-%", "escape": "\\"}
+    "code": { "like": "PR-%", "escape": "\\" }
   }
 }
 ```
@@ -316,7 +311,7 @@ GET /odata/Products?$filter=endswith(category,'ware')
 ```json
 {
   "where": {
-    "category": {"like": "%ware", "escape": "\\"}
+    "category": { "like": "%ware", "escape": "\\" }
   }
 }
 ```
@@ -331,10 +326,7 @@ The extension validates relation names against the model metadata and produces t
 
 ```json
 {
-  "include": [
-    {"relation": "customer"},
-    {"relation": "items"}
-  ]
+  "include": [{ "relation": "customer" }, { "relation": "items" }]
 }
 ```
 
@@ -369,7 +361,7 @@ GET /odata/Products?$filter=not price gt 100
 ```
 
 ```json
-{"where": {"price": {"lte": 100}}}
+{ "where": { "price": { "lte": 100 } } }
 ```
 
 - Numeric functions: `round`, `floor`, `ceiling`
@@ -379,7 +371,7 @@ GET /odata/Products?$filter=round(price) eq 10
 ```
 
 ```json
-{"where": {"and": [{"price": {"gte": 9.5}}, {"price": {"lt": 10.5}}]}}
+{ "where": { "and": [{ "price": { "gte": 9.5 } }, { "price": { "lt": 10.5 } }] } }
 ```
 
 - Compound keys and alternate key predicates are rewritten transparently:
@@ -451,6 +443,7 @@ GET /odata/Products?$filter=orderItems/any(i: i/unitPrice gt 800) and price gt 1
 ```
 
 The parser keeps the lambda for post-processing while applying the remaining clauses (`price gt 1000`) to the database query. Lambdas currently support a single predicate per `$filter`, combined using `and`, and any/all across multi-segment navigation paths (for example, `orders/items/any(...)`).
+
 ### Searchable Fields
 
 Control which fields participate in `$search`:
@@ -465,7 +458,7 @@ Example:
 @odataModel()
 @model()
 export class Product extends Entity {
-  @property({id: true}) id!: number;
+  @property({ id: true }) id!: number;
   @odataSearchable() @property() name!: string;
   @odataSearchable() @property() sku!: string;
   @property() price!: number;
@@ -474,7 +467,7 @@ export class Product extends Entity {
 // Or centrally via config
 this.bind(ODATA_BINDINGS.CONFIG).to({
   searchMode: 'config-only',
-  searchFields: {Products: ['name', 'sku']},
+  searchFields: { Products: ['name', 'sku'] },
 } as ODataConfig);
 ```
 
@@ -490,9 +483,7 @@ Response:
 {
   "@odata.context": "/odata/$metadata#Products",
   "@odata.count": 12,
-  "value": [
-    {"id": 1, "name": "Laptop", "price": 1299}
-  ]
+  "value": [{ "id": 1, "name": "Laptop", "price": 1299 }]
 }
 ```
 
@@ -530,9 +521,9 @@ Responses preserve request order; operations that share `atomicityGroup` succeed
 ```json
 {
   "responses": [
-    {"id": "1", "status": 200, "body": {"value": [{"id": 1, "name": "Laptop"}]}},
-    {"id": "2", "status": 200, "body": {"value": []}},
-    {"atomicityGroup": "changeset-1", "id": "3", "status": 201, "body": {"value": {"id": 4}}}
+    { "id": "1", "status": 200, "body": { "value": [{ "id": 1, "name": "Laptop" }] } },
+    { "id": "2", "status": 200, "body": { "value": [] } },
+    { "atomicityGroup": "changeset-1", "id": "3", "status": 201, "body": { "value": { "id": 4 } } }
   ]
 }
 ```
@@ -572,8 +563,8 @@ Define custom actions and functions with decorators:
 class ProductController {
   constructor(@repository(ProductRepository) private products: ProductRepository) {}
 
-  @odataAction({binding: 'entity'})
-  async discount(id: number, body: {percent: number}) {
+  @odataAction({ binding: 'entity' })
+  async discount(id: number, body: { percent: number }) {
     const entity = await this.products.findById(id);
     const percent = Number(body?.percent ?? 0);
     await this.products.updateById(id, {
@@ -582,10 +573,10 @@ class ProductController {
     return this.products.findById(id);
   }
 
-  @odataFunction({binding: 'collection'})
-  async premiumProducts(query: {minPrice?: string}) {
+  @odataFunction({ binding: 'collection' })
+  async premiumProducts(query: { minPrice?: string }) {
     const minPrice = Number(query?.minPrice ?? 1_000);
-    return this.products.find({where: {price: {gte: minPrice}}});
+    return this.products.find({ where: { price: { gte: minPrice } } });
   }
 }
 ```
@@ -602,10 +593,11 @@ Declare OData hooks right inside your LB4 controller using `@odata.before`, `@od
 Import from the package root:
 
 ```ts
-import {odata, CrudHookContext, CrudOnContext} from '@loopback/odata';
+import { odata, CrudHookContext, CrudOnContext } from '@loopback/odata';
 ```
 
 Supported operations and scopes:
+
 - Operations: `READ`, `CREATE`, `UPDATE`, `DELETE`, `LINK_NAVIGATION`, `UNLINK_NAVIGATION`
 - Scopes for `READ`: `collection`, `entity`, `count`
 
@@ -653,13 +645,14 @@ export class ProductODataController {
   @odata.on('READ', 'collection')
   async customList(ctx: CrudOnContext, next: () => Promise<any>) {
     if (!ctx.request.query['featured']) return next();
-    const items = await this.products.find({where: {featured: true}}, ctx.options);
+    const items = await this.products.find({ where: { featured: true } }, ctx.options);
     return ctx.helpers.collection(items);
   }
 }
 ```
 
 Notes:
+
 - `before → on → after` is the execution order.
 - `@odata.on` can replace the generated logic by not calling `next()`. Use `ctx.helpers.entity`, `ctx.helpers.collection`, `ctx.helpers.count`, or `ctx.helpers.noContent` to produce OData-correct responses when you override.
 - Hooks receive `CrudHookContext` with `request`, `response`, `repository`, `options` (including active transactions for `$batch`), `payload/filter/id`, and a mutable `state` bag for passing data between phases.
@@ -704,32 +697,32 @@ LoopBack models can advertise computed fields by marking them as non-persistent.
 
 ```ts
 // order.model.ts
-import {Entity, model, property} from '@loopback/repository';
-import {odataModel} from '@loopback/odata';
+import { Entity, model, property } from '@loopback/repository';
+import { odataModel } from '@loopback/odata';
 
-@odataModel({entitySetName: 'Orders'})
+@odataModel({ entitySetName: 'Orders' })
 @model()
 export class Order extends Entity {
-  @property({id: true})
+  @property({ id: true })
   id: string;
 
-  @property({type: 'number', required: true})
+  @property({ type: 'number', required: true })
   amount: number;
 
-  @property({type: 'string', required: true})
+  @property({ type: 'string', required: true })
   currency: string;
 
-  @property({type: 'number', persist: false, jsonSchema: {readOnly: true}})
+  @property({ type: 'number', persist: false, jsonSchema: { readOnly: true } })
   totalWithTax?: number;
 }
 ```
 
 ```ts
 // order.odata-controller.ts
-import {AnyObject, repository} from '@loopback/repository';
-import {odata, CrudHookContext} from '@loopback/odata';
-import {Order} from './order.model';
-import {OrderRepository} from './order.repository';
+import { AnyObject, repository } from '@loopback/repository';
+import { odata, CrudHookContext } from '@loopback/odata';
+import { Order } from './order.model';
+import { OrderRepository } from './order.repository';
 
 const addTotal = (entity: AnyObject) => {
   const rate = entity.currency === 'EUR' ? 0.19 : 0.07;
@@ -756,14 +749,15 @@ export class OrderODataController {
 
   @odata.after('READ', 'collection')
   addVirtualToCollection(ctx: CrudHookContext) {
-    const payload = ctx.result as {value?: AnyObject[]};
+    const payload = ctx.result as { value?: AnyObject[] };
     if (!payload?.value) return;
-    payload.value = payload.value.map(item => addTotal(item));
+    payload.value = payload.value.map((item) => addTotal(item));
   }
 }
 ```
 
 Key points:
+
 - Declare the field on the model with `persist: false` so it is not stored in the datasource but still appears in `$metadata`.
 - Use `@odata.before` hooks to strip the field from incoming payloads.
 - Populate the computed value in an `@odata.after` hook (or `@odata.on` override) before the response is sent.
@@ -803,10 +797,10 @@ If the datasource behind the repositories cannot create transactions (for exampl
 Add an ETag column to your LoopBack model and opt in by passing it to `@odataModel`. The property is typically a timestamp or version counter that you update whenever the record changes.
 
 ```ts
-@odataModel({etag: 'updatedAt'})
+@odataModel({ etag: 'updatedAt' })
 @model()
 export class Product extends Entity {
-  @property({id: true})
+  @property({ id: true })
   id!: number;
 
   @property()
@@ -815,7 +809,7 @@ export class Product extends Entity {
   @property()
   price!: number;
 
-  @property({type: 'date', required: true, defaultFn: 'now'})
+  @property({ type: 'date', required: true, defaultFn: 'now' })
   updatedAt!: Date;
 }
 ```
@@ -879,14 +873,14 @@ String helpers such as `trim`/`concat` and date part functions (`month`, `day`, 
 Customize the OData component via `ODataConfig` bound at `odata.config` (the component registers a default). You can override it in your application before boot:
 
 ```ts
-import {ODATA_BINDINGS} from '@loopback/odata';
-import {ODataConfig} from '@loopback/odata';
+import { ODATA_BINDINGS } from '@loopback/odata';
+import { ODataConfig } from '@loopback/odata';
 
 // inside your app setup
 this.bind(ODATA_BINDINGS.CONFIG).to({
-  basePath: '/api/odata',  // default: '/odata'
-  csdlFormat: 'xml',       // 'xml' | 'json' (default 'xml')
-  namespace: 'Catalog',    // default: 'Default'
+  basePath: '/api/odata', // default: '/odata'
+  csdlFormat: 'xml', // 'xml' | 'json' (default 'xml')
+  namespace: 'Catalog', // default: 'Default'
   entityContainerName: 'CatalogService', // default: 'DefaultContainer'
   namespaceAlias: 'CatalogNS',
   capabilities: {
@@ -894,13 +888,13 @@ this.bind(ODATA_BINDINGS.CONFIG).to({
     countable: true,
     aggregation: true,
   },
-  maxTop: 100,             // server paging cap
-  pageSize: 50,            // server-driven paging size (default: 200)
-  maxSkip: 1000,           // max skip allowed
-  maxExpandDepth: 2,       // max $expand nesting depth
-  enableCount: true,       // enable inline and standalone $count
-  strict: true,            // enable strict validations (default: true)
-  enableDelta: true,       // emit $deltatoken links for incremental syncs
+  maxTop: 100, // server paging cap
+  pageSize: 50, // server-driven paging size (default: 200)
+  maxSkip: 1000, // max skip allowed
+  maxExpandDepth: 2, // max $expand nesting depth
+  enableCount: true, // enable inline and standalone $count
+  strict: true, // enable strict validations (default: true)
+  enableDelta: true, // emit $deltatoken links for incremental syncs
 } as ODataConfig);
 ```
 
@@ -963,6 +957,7 @@ this.bind(ODATA_BINDINGS.CONFIG).to({
     - `maxSearchFields` / `maxSearchTerms`: caps to prevent overly broad queries (exceeding `maxSearchTerms` now returns `400 Bad Request`)
 
 Example: With `{basePath: '/api/odata', maxTop: 100, enableCount: false}`
+
 - Routes mount at `/api/odata/...`.
 - `GET /api/odata/Products?$top=1000` returns at most 100 records.
 - `GET /api/odata/Products?$count=true` → `400 Bad Request` (unsupported option).
@@ -987,8 +982,8 @@ GET /odata/Products
 {
   "@odata.context": "/odata/$metadata#Products",
   "value": [
-    {"id": 1, "name": "Laptop", "price": 1299},
-    {"id": 2, "name": "Phone", "price": 799}
+    { "id": 1, "name": "Laptop", "price": 1299 },
+    { "id": 2, "name": "Phone", "price": 799 }
   ],
   "@odata.nextLink": "/odata/Products?$skiptoken=2"
 }
@@ -1009,7 +1004,7 @@ GET /odata/Products
 ```json
 {
   "@odata.context": "/odata/$metadata#Products",
-  "value": [ {"id":1,"name":"Laptop","updatedAt":"2025-10-17T14:53:52.705Z"} ],
+  "value": [{ "id": 1, "name": "Laptop", "updatedAt": "2025-10-17T14:53:52.705Z" }],
   "@odata.deltaLink": "/odata/Products?$deltatoken=v1:ZXhhbXBsZVRva2Vu"
 }
 ```
@@ -1021,7 +1016,7 @@ Deleted entities show up as tombstones:
 ```json
 {
   "id": 1,
-  "@removed": {"reason": "deleted"}
+  "@removed": { "reason": "deleted" }
 }
 ```
 
@@ -1031,7 +1026,7 @@ For `$apply` pipelines, delta responses include the aggregated buckets that chan
 {
   "name": "Laptop",
   "TotalPrice": 1299,
-  "@removed": {"reason": "deleted"}
+  "@removed": { "reason": "deleted" }
 }
 ```
 
@@ -1111,7 +1106,7 @@ this.bind(ODATA_BINDINGS.CONFIG).to({
   ...current,
   enableApplyPushdown: true,
   logApplyTelemetry: true,
-  onApplyFallback: event => {
+  onApplyFallback: (event) => {
     console.warn('[OData] apply fallback', event);
   },
 });
@@ -1126,7 +1121,7 @@ You can still control the behaviour explicitly:
 - Opt out per model when you want to keep inserts shallow:
 
   ```ts
-  @odataModel({deepInsert: false})
+  @odataModel({ deepInsert: false })
   @model()
   export class Order extends Entity {
     @hasMany(() => OrderItem)
@@ -1137,7 +1132,7 @@ You can still control the behaviour explicitly:
 - Force-enable deep insert for aggregates that do not meet the automatic detection criteria:
 
   ```ts
-  @odataModel({deepInsert: true})
+  @odataModel({ deepInsert: true })
   @model()
   export class DraftOrder extends Entity {
     @hasMany(() => OrderItem)

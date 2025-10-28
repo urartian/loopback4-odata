@@ -1,15 +1,15 @@
 /// <reference path="../../types/testing.globals.d.ts" />
 
-import {Client, createRestAppClient, expect} from '@loopback/testlab';
-import {BindingScope} from '@loopback/core';
-import {AnyObject, juggler} from '@loopback/repository';
+import { Client, createRestAppClient, expect } from '@loopback/testlab';
+import { BindingScope } from '@loopback/core';
+import { AnyObject, juggler } from '@loopback/repository';
 import {
   TestApplication,
   givenODataApplication,
   seedExampleData,
 } from '../fixtures/odata-app.fixture';
-import {ODATA_BINDINGS} from '../../keys';
-import {ODataConfig} from '../../types';
+import { ODATA_BINDINGS } from '../../keys';
+import { ODataConfig } from '../../types';
 import {
   ODataApplyExecutorRegistry,
   ODataApplyExecutor,
@@ -25,11 +25,11 @@ describe('OData component acceptance', () => {
   let client: Client;
   const getProductWithEtag = async (id: number) => {
     const res = await client.get(`/odata/Products(${id})`).expect(200);
-    return {body: res.body, etag: res.headers['etag'] as string};
+    return { body: res.body, etag: res.headers['etag'] as string };
   };
 
   beforeEach(async function () {
-    app = await givenODataApplication({port: 0, host: '127.0.0.1'});
+    app = await givenODataApplication({ port: 0, host: '127.0.0.1' });
     await app.boot();
     await seedExampleData(app);
     try {
@@ -49,7 +49,7 @@ describe('OData component acceptance', () => {
   it('supports multi-segment lambda navigation paths', async () => {
     const res = await client
       .get('/odata/Products')
-      .query({$filter: 'orders/items/any(i: i/quantity gt 2)'})
+      .query({ $filter: 'orders/items/any(i: i/quantity gt 2)' })
       .expect(200);
 
     expect(res.body.value).to.be.Array();
@@ -68,9 +68,7 @@ describe('OData component acceptance', () => {
     expect(res.headers['odata-version']).to.equal('4.0');
     expect(res.body['@odata.context']).to.equal('/odata/$metadata');
     expect(res.body.value).to.be.Array();
-    const productsEntry = res.body.value.find(
-      (item: {name: string}) => item.name === 'Products',
-    );
+    const productsEntry = res.body.value.find((item: { name: string }) => item.name === 'Products');
     expect(productsEntry).to.be.Object();
     expect(productsEntry.kind).to.equal('EntitySet');
     expect(productsEntry.url).to.equal('Products');
@@ -108,7 +106,7 @@ describe('OData component acceptance', () => {
     const firstId = products.body.value[0].id;
     const response = await client
       .post(`/odata/Products(${firstId})/discount`)
-      .send({percent: 10})
+      .send({ percent: 10 })
       .expect(200);
 
     expect(response.body.value.price).to.be.a.Number();
@@ -117,17 +115,17 @@ describe('OData component acceptance', () => {
   it('exposes collection-bound functions with query parameters', async () => {
     const res = await client
       .get('/odata/Products/premiumProducts')
-      .query({minPrice: 1000})
+      .query({ minPrice: 1000 })
       .expect(200);
 
     expect(res.body.value).to.be.Array();
-    expect(res.body.value.every((item: {price: number}) => item.price >= 1000)).to.be.true();
+    expect(res.body.value.every((item: { price: number }) => item.price >= 1000)).to.be.true();
   });
 
   it('supports inline $count with filters', async () => {
     const res = await client
       .get('/odata/Products')
-      .query({$count: 'true', $filter: "contains(name,'o')"})
+      .query({ $count: 'true', $filter: "contains(name,'o')" })
       .expect(200);
 
     expect(res.body['@odata.count']).to.be.a.Number();
@@ -173,7 +171,7 @@ describe('OData component acceptance', () => {
     const res = await client
       .get('/odata/Products')
       .set('Accept', 'text/plain')
-      .query({$format: 'json'})
+      .query({ $format: 'json' })
       .expect(200);
 
     expect(res.headers['content-type']).to.match(/application\/json/i);
@@ -181,10 +179,7 @@ describe('OData component acceptance', () => {
   });
 
   it('rejects unsupported $format values', async () => {
-    await client
-      .get('/odata/Products')
-      .query({$format: 'application/xml'})
-      .expect(406);
+    await client.get('/odata/Products').query({ $format: 'application/xml' }).expect(406);
   });
 
   it('returns @odata.nextLink with $apply pipelines and skiptoken support', async () => {
@@ -194,12 +189,10 @@ describe('OData component acceptance', () => {
       pageSize: 2,
     });
 
-    const pipeline = 'groupby((name),aggregate(price with sum as TotalPrice))/orderby(TotalPrice desc)';
+    const pipeline =
+      'groupby((name),aggregate(price with sum as TotalPrice))/orderby(TotalPrice desc)';
 
-    const first = await client
-      .get('/odata/Products')
-      .query({$apply: pipeline})
-      .expect(200);
+    const first = await client.get('/odata/Products').query({ $apply: pipeline }).expect(200);
 
     expect(first.body.value).to.be.Array();
     expect(first.body.value.length).to.be.lessThanOrEqual(2);
@@ -246,7 +239,7 @@ describe('OData component acceptance', () => {
   it('returns computed aliases for entity lookups', async () => {
     const res = await client
       .get('/odata/OrderItems(1)')
-      .query({$compute: 'quantity mul unitPrice as LineTotal'})
+      .query({ $compute: 'quantity mul unitPrice as LineTotal' })
       .expect(200);
 
     expect(res.body.LineTotal).to.equal(2598);
@@ -265,7 +258,7 @@ describe('OData component acceptance', () => {
   it('supports $levels within $expand options', async () => {
     const res = await client
       .get('/odata/Orders')
-      .query({$expand: 'items($levels=2;$expand=product)'})
+      .query({ $expand: 'items($levels=2;$expand=product)' })
       .expect(200);
 
     expect(res.body.value).to.be.Array();
@@ -281,17 +274,18 @@ describe('OData component acceptance', () => {
       pageSize: 2,
     });
 
-    const pipeline = 'groupby((name),aggregate(price with sum as TotalPrice))/orderby(TotalPrice desc)';
+    const pipeline =
+      'groupby((name),aggregate(price with sum as TotalPrice))/orderby(TotalPrice desc)';
 
     await client
       .get('/odata/Products')
-      .query({$apply: pipeline, $skiptoken: 'invalid-token'})
+      .query({ $apply: pipeline, $skiptoken: 'invalid-token' })
       .expect(400);
   });
 
   it('returns @odata.deltaLink for entity collections', async () => {
     const current = app.getSync(ODATA_BINDINGS.CONFIG) as ODataConfig;
-    Object.assign(current, {enableDelta: true, pageSize: 2});
+    Object.assign(current, { enableDelta: true, pageSize: 2 });
     const registry = app.getSync(ODATA_BINDINGS.ENTITY_SET_REGISTRY);
     const productsDef = registry.findByName('Products');
     if (productsDef) {
@@ -310,7 +304,7 @@ describe('OData component acceptance', () => {
 
   it('emits tombstones when entities are deleted between delta requests', async () => {
     const current = app.getSync(ODATA_BINDINGS.CONFIG) as ODataConfig;
-    Object.assign(current, {enableDelta: true, pageSize: 2});
+    Object.assign(current, { enableDelta: true, pageSize: 2 });
     const registry = app.getSync(ODATA_BINDINGS.ENTITY_SET_REGISTRY);
     const productsDef = registry.findByName('Products');
     if (productsDef) {
@@ -334,7 +328,7 @@ describe('OData component acceptance', () => {
 
   it('$apply pipelines emit delta links', async () => {
     const current = app.getSync(ODATA_BINDINGS.CONFIG) as ODataConfig;
-    Object.assign(current, {enableDelta: true, pageSize: 2});
+    Object.assign(current, { enableDelta: true, pageSize: 2 });
     const registry = app.getSync(ODATA_BINDINGS.ENTITY_SET_REGISTRY);
     const productsDef = registry.findByName('Products');
     if (productsDef) {
@@ -345,19 +339,16 @@ describe('OData component acceptance', () => {
     const pipeline =
       'groupby((name),aggregate(price with sum as TotalPrice))/orderby(TotalPrice desc)';
 
-    const first = await client
-      .get('/odata/Products')
-      .query({$apply: pipeline})
-      .expect(200);
+    const first = await client.get('/odata/Products').query({ $apply: pipeline }).expect(200);
 
     expect(first.body['@odata.deltaLink']).to.be.String();
     const deltaLink = String(first.body['@odata.deltaLink']);
 
-    const {etag} = await getProductWithEtag(1);
+    const { etag } = await getProductWithEtag(1);
     await client
       .patch('/odata/Products(1)')
       .set('If-Match', etag)
-      .send({price: 1400})
+      .send({ price: 1400 })
       .expect(200);
 
     const delta = await client.get(deltaLink).expect(200);
@@ -368,7 +359,7 @@ describe('OData component acceptance', () => {
 
   it('returns aggregated tombstones with snapshot data for $apply delta feeds', async () => {
     const current = app.getSync(ODATA_BINDINGS.CONFIG) as ODataConfig;
-    Object.assign(current, {enableDelta: true, pageSize: 2});
+    Object.assign(current, { enableDelta: true, pageSize: 2 });
     const registry = app.getSync(ODATA_BINDINGS.ENTITY_SET_REGISTRY);
     const productsDef = registry.findByName('Products');
     if (productsDef) {
@@ -379,20 +370,15 @@ describe('OData component acceptance', () => {
     const pipeline =
       'groupby((name),aggregate(price with sum as TotalPrice))/orderby(TotalPrice desc)';
 
-    const initial = await client
-      .get('/odata/Products')
-      .query({$apply: pipeline})
-      .expect(200);
+    const initial = await client.get('/odata/Products').query({ $apply: pipeline }).expect(200);
 
     const deltaLink = String(initial.body['@odata.deltaLink']);
 
-    const {etag} = await getProductWithEtag(1);
+    const { etag } = await getProductWithEtag(1);
     await client.del('/odata/Products(1)').set('If-Match', etag).expect(204);
 
     const delta = await client.get(deltaLink).expect(200);
-    const tombstone = delta.body.value.find(
-      (entry: AnyObject) => entry?.['@removed'],
-    );
+    const tombstone = delta.body.value.find((entry: AnyObject) => entry?.['@removed']);
     expect(tombstone).to.be.Object();
     expect(tombstone.name).to.equal('Laptop');
     expect(tombstone.TotalPrice).to.equal(1299);
@@ -401,7 +387,7 @@ describe('OData component acceptance', () => {
 
   it('rejects $deltatoken when delta support is disabled', async () => {
     const current = app.getSync(ODATA_BINDINGS.CONFIG) as ODataConfig;
-    Object.assign(current, {enableDelta: false});
+    Object.assign(current, { enableDelta: false });
     const registry = app.getSync(ODATA_BINDINGS.ENTITY_SET_REGISTRY);
     const productsDef = registry.findByName('Products');
     if (productsDef) {
@@ -413,7 +399,7 @@ describe('OData component acceptance', () => {
 
   it('rejects $deltatoken together with $apply', async () => {
     const current = app.getSync(ODATA_BINDINGS.CONFIG) as ODataConfig;
-    Object.assign(current, {enableDelta: true});
+    Object.assign(current, { enableDelta: true });
     const registry = app.getSync(ODATA_BINDINGS.ENTITY_SET_REGISTRY);
     const productsDef = registry.findByName('Products');
     if (productsDef) {
@@ -425,7 +411,7 @@ describe('OData component acceptance', () => {
 
     await client
       .get('/odata/Products')
-      .query({$apply: pipeline, $deltatoken: 'v1:Zm9v'})
+      .query({ $apply: pipeline, $deltatoken: 'v1:Zm9v' })
       .expect(400);
   });
 
@@ -446,13 +432,13 @@ describe('OData component acceptance', () => {
             productId: 1,
             quantity: 2,
             unitPrice: 499,
-            notes: [{text: 'bulk discount requested'}],
+            notes: [{ text: 'bulk discount requested' }],
           },
           {
             productId: 2,
             quantity: 1,
             unitPrice: 299,
-            notes: [{text: 'gift wrap'}, {text: 'urgent delivery'}],
+            notes: [{ text: 'gift wrap' }, { text: 'urgent delivery' }],
           },
         ],
       })
@@ -462,7 +448,7 @@ describe('OData component acceptance', () => {
 
     const fetched = await client
       .get(`/odata/Orders(${orderId})`)
-      .query({$expand: 'items($expand=notes)'})
+      .query({ $expand: 'items($expand=notes)' })
       .expect(200);
 
     expect(Array.isArray(fetched.body.items)).to.be.true();
@@ -492,14 +478,16 @@ describe('OData component acceptance', () => {
 
     const details = (res.body?.error?.details ?? []) as AnyObject[];
     const hasTypeError = details.some(
-      (d: AnyObject) => String(d.path ?? '').includes('/items') && (d.code === 'type' || /must be array/i.test(String(d.message ?? ''))),
+      (d: AnyObject) =>
+        String(d.path ?? '').includes('/items') &&
+        (d.code === 'type' || /must be array/i.test(String(d.message ?? ''))),
     );
     expect(hasTypeError).to.be.true();
   });
 
   it('supports deep update for related entities when enabled', async () => {
     const current = app.getSync(ODATA_BINDINGS.CONFIG) as ODataConfig;
-    Object.assign(current, {enableDeepInsert: true, enableDeepUpdate: true});
+    Object.assign(current, { enableDeepInsert: true, enableDeepUpdate: true });
     const registry = app.getSync(ODATA_BINDINGS.ENTITY_SET_REGISTRY);
     const ordersDef = registry.findByName('Orders');
     if (ordersDef) {
@@ -522,7 +510,7 @@ describe('OData component acceptance', () => {
             productId: 1,
             quantity: 1,
             unitPrice: 499,
-            notes: [{text: 'original note'}],
+            notes: [{ text: 'original note' }],
           },
           {
             productId: 2,
@@ -535,7 +523,7 @@ describe('OData component acceptance', () => {
 
     const fetched = await client
       .get(`/odata/Orders(${orderId})`)
-      .query({$expand: 'items($expand=notes)'})
+      .query({ $expand: 'items($expand=notes)' })
       .expect(200);
     const etag = fetched.headers['etag'] as string | undefined;
     const firstItem = fetched.body.items[0];
@@ -544,58 +532,59 @@ describe('OData component acceptance', () => {
 
     // Unlink the second item via navigation $ref endpoint (CAP-style)
     if (secondItem?.id != null) {
-      await client
-        .del(`/odata/Orders(${orderId})/items(${secondItem.id})/$ref`)
-        .expect(204);
+      await client.del(`/odata/Orders(${orderId})/items(${secondItem.id})/$ref`).expect(204);
     }
 
     let patchRequest = client.patch(`/odata/Orders(${orderId})`);
     if (etag) {
       patchRequest = patchRequest.set('If-Match', etag);
     }
-    const patchResponse = await patchRequest
-      .send({
-        total: fetched.body.total + 200,
-        items: [
-          {
-            id: firstItem.id,
-            quantity: firstItem.quantity + 2,
-            notes: [
-              ...(firstNote ? [{id: firstNote.id, text: 'updated note'}] : []),
-              {text: 'additional note'},
-            ],
-          },
-          {
-            productId: 3,
-            quantity: 1,
-            unitPrice: 799,
-            notes: [{text: 'new line note'}],
-          },
-        ],
-      });
+    const patchResponse = await patchRequest.send({
+      total: fetched.body.total + 200,
+      items: [
+        {
+          id: firstItem.id,
+          quantity: firstItem.quantity + 2,
+          notes: [
+            ...(firstNote ? [{ id: firstNote.id, text: 'updated note' }] : []),
+            { text: 'additional note' },
+          ],
+        },
+        {
+          productId: 3,
+          quantity: 1,
+          unitPrice: 799,
+          notes: [{ text: 'new line note' }],
+        },
+      ],
+    });
 
     if (patchResponse.status !== 200) {
       // surface the response for easier debugging when expectations fail
       // eslint-disable-next-line no-console
-      console.error('Deep update patch failed', patchResponse.status, patchResponse.body?.error ?? patchResponse.body);
+      console.error(
+        'Deep update patch failed',
+        patchResponse.status,
+        patchResponse.body?.error ?? patchResponse.body,
+      );
     }
     expect(patchResponse.status).to.equal(200);
 
     const updated = await client
       .get(`/odata/Orders(${orderId})`)
-      .query({$expand: 'items($expand=notes)'})
+      .query({ $expand: 'items($expand=notes)' })
       .expect(200);
 
     expect(updated.body.total).to.equal(fetched.body.total + 200);
     const updatedItems = updated.body.items as AnyObject[];
-    const retained = updatedItems.find(item => item.productId === firstItem.productId);
+    const retained = updatedItems.find((item) => item.productId === firstItem.productId);
     expect(retained).to.be.Object();
     if (!retained) throw new Error('Expected retained line item to be present');
     expect(retained.quantity).to.equal(firstItem.quantity + 2);
     expect(retained.notes.map((n: AnyObject) => n.text)).to.containEql('updated note');
     expect(retained.notes.map((n: AnyObject) => n.text)).to.containEql('additional note');
-    expect(updatedItems.some(item => item.id === secondItem.id)).to.be.false();
-    const added = updatedItems.find(item => item.productId === 3);
+    expect(updatedItems.some((item) => item.id === secondItem.id)).to.be.false();
+    const added = updatedItems.find((item) => item.productId === 3);
     expect(added).to.be.Object();
     if (!added) throw new Error('Expected newly added line item');
     expect(Array.isArray(added.notes)).to.be.true();
@@ -603,20 +592,17 @@ describe('OData component acceptance', () => {
   });
 
   it('rejects deep update when collection navigation payload is not an array', async () => {
-    const newOrder = await client
-      .post('/odata/Orders')
-      .send({total: 0})
-      .expect(200);
+    const newOrder = await client.post('/odata/Orders').send({ total: 0 }).expect(200);
 
     const orderId = newOrder.body.id;
     const createdItem = await client
       .post(`/odata/OrderItems`)
-      .send({orderId, productId: 1, quantity: 1, unitPrice: 199})
+      .send({ orderId, productId: 1, quantity: 1, unitPrice: 199 })
       .expect(200);
 
     const fetched = await client
       .get(`/odata/Orders(${orderId})`)
-      .query({$expand: 'items'})
+      .query({ $expand: 'items' })
       .expect(200);
     const etag = fetched.headers['etag'] as string | undefined;
 
@@ -634,16 +620,15 @@ describe('OData component acceptance', () => {
 
     const details = (response.body?.error?.details ?? []) as AnyObject[];
     const hasTypeError = details.some(
-      (d: AnyObject) => String(d.path ?? '').includes('/items') && (d.code === 'type' || /must be array/i.test(String(d.message ?? ''))),
+      (d: AnyObject) =>
+        String(d.path ?? '').includes('/items') &&
+        (d.code === 'type' || /must be array/i.test(String(d.message ?? ''))),
     );
     expect(hasTypeError).to.be.true();
   });
 
   it('supports navigation $ref linking of existing entities', async () => {
-    const newOrder = await client
-      .post('/odata/Orders')
-      .send({total: 0})
-      .expect(200);
+    const newOrder = await client.post('/odata/Orders').send({ total: 0 }).expect(200);
     const newOrderId = newOrder.body.id;
     expect(newOrderId).to.be.a.Number();
 
@@ -654,36 +639,34 @@ describe('OData component acceptance', () => {
 
     await client
       .post(`/odata/Orders(${newOrderId})/items/$ref`)
-      .send({'@odata.id': `/odata/OrderItems(${existingItem.id})`})
+      .send({ '@odata.id': `/odata/OrderItems(${existingItem.id})` })
       .expect(204);
 
     const verifyList = await client.get('/odata/OrderItems').expect(200);
     expect(
       verifyList.body.value.some(
         (item: AnyObject) => item.id === existingItem.id && item.orderId === newOrderId,
-      )
+      ),
     ).to.be.true();
 
     // restore link for data consistency
     await client
       .post(`/odata/Orders(${originalOrderId})/items/$ref`)
-      .send({'@odata.id': `/odata/OrderItems(${existingItem.id})`})
+      .send({ '@odata.id': `/odata/OrderItems(${existingItem.id})` })
       .expect(204);
   });
 
   it('returns 404 when unlinking a non-existent navigation target', async () => {
     // Create two orders and pick an item from the first
-    const orderA = await client.post('/odata/Orders').send({total: 0}).expect(200);
-    const orderB = await client.post('/odata/Orders').send({total: 0}).expect(200);
+    const orderA = await client.post('/odata/Orders').send({ total: 0 }).expect(200);
+    const orderB = await client.post('/odata/Orders').send({ total: 0 }).expect(200);
     const item = await client
       .post('/odata/OrderItems')
-      .send({orderId: orderA.body.id, productId: 1, quantity: 1, unitPrice: 100})
+      .send({ orderId: orderA.body.id, productId: 1, quantity: 1, unitPrice: 100 })
       .expect(200);
 
     // Attempt to unlink the item from the second order where it is not linked
-    await client
-      .del(`/odata/Orders(${orderB.body.id})/items(${item.body.id})/$ref`)
-      .expect(404);
+    await client.del(`/odata/Orders(${orderB.body.id})/items(${item.body.id})/$ref`).expect(404);
   });
 
   it('returns 404 when deleting a non-existent entity', async () => {
@@ -697,7 +680,7 @@ describe('OData component acceptance', () => {
     await client
       .post('/odata/Orders(1)/items/$ref')
       .set('x-block-link', 'true')
-      .send({'@odata.id': `/odata/OrderItems(${existingItem.id})`})
+      .send({ '@odata.id': `/odata/OrderItems(${existingItem.id})` })
       .expect(409);
   });
 
@@ -708,10 +691,7 @@ describe('OData component acceptance', () => {
   });
 
   it('supports $expand of navigation properties', async () => {
-    const res = await client
-      .get('/odata/Products')
-      .query({$expand: 'orderItems'})
-      .expect(200);
+    const res = await client.get('/odata/Products').query({ $expand: 'orderItems' }).expect(200);
 
     const first = res.body.value[0];
     expect(first.orderItems).to.be.Array();
@@ -720,7 +700,7 @@ describe('OData component acceptance', () => {
   it('supports $expand options with select clauses', async () => {
     const res = await client
       .get('/odata/Products')
-      .query({$expand: 'orders($select=id,total)', $top: '1'})
+      .query({ $expand: 'orders($select=id,total)', $top: '1' })
       .expect(200);
 
     const first = res.body.value[0];
@@ -734,10 +714,7 @@ describe('OData component acceptance', () => {
   });
 
   it('supports $search across string fields', async () => {
-    const res = await client
-      .get('/odata/Products')
-      .query({$search: 'Lap'})
-      .expect(200);
+    const res = await client.get('/odata/Products').query({ $search: 'Lap' }).expect(200);
     expect(res.body.value).to.be.Array();
     const names = res.body.value.map((p: any) => String(p.name || ''));
     expect(names.some((n: string) => /lap/i.test(n))).to.be.true();
@@ -746,7 +723,7 @@ describe('OData component acceptance', () => {
   it('supports boolean operators in $search', async () => {
     const res = await client
       .get('/odata/Products')
-      .query({$search: 'coffee AND grinder'})
+      .query({ $search: 'coffee AND grinder' })
       .expect(200);
 
     expect(res.body.value).to.be.Array();
@@ -758,7 +735,7 @@ describe('OData component acceptance', () => {
   it('supports quoted phrases and NOT operators in $search', async () => {
     const res = await client
       .get('/odata/Products')
-      .query({$search: '"coffee beans" AND NOT decaf'})
+      .query({ $search: '"coffee beans" AND NOT decaf' })
       .expect(200);
 
     expect(res.body.value).to.be.Array();
@@ -802,7 +779,7 @@ describe('OData component acceptance', () => {
       .get('/odata/Orders')
       .query({
         $apply:
-          "filter(total gt 2500)/groupby((total), aggregate(id with count as OrderCount))/orderby(OrderCount desc)/top(1)",
+          'filter(total gt 2500)/groupby((total), aggregate(id with count as OrderCount))/orderby(OrderCount desc)/top(1)',
       })
       .expect(200);
 
@@ -832,12 +809,9 @@ describe('OData component acceptance', () => {
 
   it('supports $apply pipelines that use concat transformations', async () => {
     const pipeline =
-      "concat(aggregate(quantity with sum as TotalQuantity),groupby((product/name), aggregate(quantity with sum as TotalQuantity))/concat(aggregate($count as UI5__count),top(3)))";
+      'concat(aggregate(quantity with sum as TotalQuantity),groupby((product/name), aggregate(quantity with sum as TotalQuantity))/concat(aggregate($count as UI5__count),top(3)))';
 
-    const res = await client
-      .get('/odata/OrderItems')
-      .query({$apply: pipeline})
-      .expect(200);
+    const res = await client.get('/odata/OrderItems').query({ $apply: pipeline }).expect(200);
 
     expect(res.body.value).to.be.Array();
     const rows: AnyObject[] = res.body.value;
@@ -868,12 +842,9 @@ describe('OData component acceptance', () => {
 
   it('supports concat pipelines followed by filter and orderby stages', async () => {
     const pipeline =
-      "concat(aggregate(unitPrice with sum as price),aggregate(unitPrice with sum as price)/concat(aggregate($count as UI5__count),top(5)))/filter(price ge 0)/orderby(price desc)";
+      'concat(aggregate(unitPrice with sum as price),aggregate(unitPrice with sum as price)/concat(aggregate($count as UI5__count),top(5)))/filter(price ge 0)/orderby(price desc)';
 
-    const res = await client
-      .get('/odata/OrderItems')
-      .query({$apply: pipeline})
-      .expect(200);
+    const res = await client.get('/odata/OrderItems').query({ $apply: pipeline }).expect(200);
 
     const rows: AnyObject[] = res.body.value;
     expect(rows).to.be.Array();
@@ -896,7 +867,7 @@ describe('OData component acceptance', () => {
       .get('/odata/Orders')
       .query({
         $apply:
-          "groupby((total), aggregate(id with count as OrderCount))/filter(OrderCount ge 1)/orderby(OrderCount desc)/top(1)",
+          'groupby((total), aggregate(id with count as OrderCount))/filter(OrderCount ge 1)/orderby(OrderCount desc)/top(1)',
       })
       .expect(200);
 
@@ -941,7 +912,7 @@ describe('OData component acceptance', () => {
 
   it('enforces navigation fanout guardrail during fallback execution', async function () {
     if (app.state === 'started') await app.stop();
-    app = await givenODataApplication({port: 0, host: '127.0.0.1'});
+    app = await givenODataApplication({ port: 0, host: '127.0.0.1' });
     const current = app.getSync(ODATA_BINDINGS.CONFIG) as ODataConfig;
     app.bind(ODATA_BINDINGS.CONFIG).to({
       ...current,
@@ -959,14 +930,14 @@ describe('OData component acceptance', () => {
         $apply: 'groupby((id), aggregate(orderItems/quantity with sum as TotalQuantity))',
       })
       .expect(400)
-      .expect(res => {
+      .expect((res) => {
         expect(res.body.error.message).to.match(/navigation expansion exceeds/i);
       });
   });
 
   it('enforces maxApplyResultSize limits during fallback execution', async function () {
     if (app.state === 'started') await app.stop();
-    app = await givenODataApplication({port: 0, host: '127.0.0.1'});
+    app = await givenODataApplication({ port: 0, host: '127.0.0.1' });
     app.bind(ODATA_BINDINGS.CONFIG).to({
       maxApplyResultSize: 1,
       logApplyFallbacks: false,
@@ -991,10 +962,10 @@ describe('OData component acceptance', () => {
 
   it('executes $apply via a registered pushdown executor when available', async function (this: Mocha.Context) {
     if (app.state === 'started') await app.stop();
-    app = await givenODataApplication({port: 0, host: '127.0.0.1'});
+    app = await givenODataApplication({ port: 0, host: '127.0.0.1' });
 
     const fallbackEvents: string[] = [];
-    const sentinel = [{TotalProducts: 999}];
+    const sentinel = [{ TotalProducts: 999 }];
 
     class MemoryApplyExecutor implements ODataApplyExecutor {
       readonly id = 'memory-test';
@@ -1007,7 +978,7 @@ describe('OData component acceptance', () => {
       async execute(ctx: ODataApplyExecutorContext) {
         executedContext = ctx;
         executionCount++;
-        return {rows: sentinel};
+        return { rows: sentinel };
       }
     }
 
@@ -1016,7 +987,7 @@ describe('OData component acceptance', () => {
 
     app.bind(ODATA_BINDINGS.CONFIG).to({
       enableApplyPushdown: true,
-      onApplyFallback: event => fallbackEvents.push(event.event),
+      onApplyFallback: (event) => fallbackEvents.push(event.event),
       capabilities: {
         aggregation: true,
       },
@@ -1048,7 +1019,7 @@ describe('OData component acceptance', () => {
 
     const res = await client
       .get('/odata/Products')
-      .query({$apply: 'aggregate(id with count as TotalProducts)'})
+      .query({ $apply: 'aggregate(id with count as TotalProducts)' })
       .expect(200);
 
     expect(res.body.value).to.deepEqual(sentinel);
@@ -1060,7 +1031,7 @@ describe('OData component acceptance', () => {
   it('supports lambda any filters', async () => {
     const res = await client
       .get('/odata/Products')
-      .query({$filter: 'orderItems/any(i: i/unitPrice gt 800)'})
+      .query({ $filter: 'orderItems/any(i: i/unitPrice gt 800)' })
       .expect(200);
 
     expect(res.body.value).to.be.Array();
@@ -1073,7 +1044,7 @@ describe('OData component acceptance', () => {
   it('supports lambda filters combined with additional predicates', async () => {
     const res = await client
       .get('/odata/Products')
-      .query({$filter: 'orderItems/any(i: i/unitPrice gt 800) and price gt 1000'})
+      .query({ $filter: 'orderItems/any(i: i/unitPrice gt 800) and price gt 1000' })
       .expect(200);
 
     expect(res.body.value).to.be.Array();
@@ -1124,10 +1095,7 @@ describe('OData component acceptance', () => {
   });
 
   it('executes unbound actions with raw responses', async () => {
-    const result = await client
-      .post('/odata/resetInventory')
-      .send({confirm: true})
-      .expect(200);
+    const result = await client.post('/odata/resetInventory').send({ confirm: true }).expect(200);
 
     expect(result.body.status).to.equal('ok');
     expect(result.body.total).to.be.a.Number();
@@ -1138,8 +1106,8 @@ describe('OData component acceptance', () => {
       .post('/odata/$batch')
       .send({
         requests: [
-          {id: 'products', method: 'GET', url: '/odata/Products'},
-          {id: 'count', method: 'GET', url: '/odata/Products/$count'},
+          { id: 'products', method: 'GET', url: '/odata/Products' },
+          { id: 'count', method: 'GET', url: '/odata/Products/$count' },
         ],
       })
       .expect(200);
@@ -1169,14 +1137,14 @@ describe('OData component acceptance', () => {
             method: 'POST',
             url: '/odata/Products',
             atomicityGroup: 'set-1',
-            body: {price: 5},
+            body: { price: 5 },
           },
           {
             id: 'create-2',
             method: 'POST',
             url: '/odata/Products',
             atomicityGroup: 'set-1',
-            body: {name: 'Valid', price: 8},
+            body: { name: 'Valid', price: 8 },
           },
         ],
       })
@@ -1199,7 +1167,7 @@ describe('OData component acceptance', () => {
   it('applies string predicates through REST filter', async () => {
     const res = await client
       .get('/odata/Products')
-      .query({$filter: "contains(name,'Lap')"})
+      .query({ $filter: "contains(name,'Lap')" })
       .expect(200);
 
     expect(res.body.value).to.have.lengthOf(1);
@@ -1209,7 +1177,7 @@ describe('OData component acceptance', () => {
   it('applies orderby/select/top/skip options', async () => {
     const topOne = await client
       .get('/odata/Products')
-      .query({$orderby: 'price desc', $top: '1', $select: 'name,price'})
+      .query({ $orderby: 'price desc', $top: '1', $select: 'name,price' })
       .expect(200);
 
     expect(topOne.body.value).to.have.lengthOf(1);
@@ -1220,7 +1188,7 @@ describe('OData component acceptance', () => {
 
     const second = await client
       .get('/odata/Products')
-      .query({$orderby: 'price asc', $skip: '1', $top: '1'})
+      .query({ $orderby: 'price asc', $skip: '1', $top: '1' })
       .expect(200);
 
     expect(second.body.value).to.have.lengthOf(1);
@@ -1231,7 +1199,7 @@ describe('OData component acceptance', () => {
   it('handles CRUD operations and path rewriting', async () => {
     const created = await client
       .post('/odata/Products')
-      .send({name: 'Camera', price: 450})
+      .send({ name: 'Camera', price: 450 })
       .expect(200);
 
     const createdId = created.body.id;
@@ -1243,7 +1211,7 @@ describe('OData component acceptance', () => {
     const updated = await client
       .patch(`/odata/Products(${createdId})`)
       .set('If-Match', createdEtag)
-      .send({price: 500})
+      .send({ price: 500 })
       .expect(200);
     expect(updated.body.price).to.equal(500);
     const updatedEtag = updated.headers['etag'] as string;
@@ -1254,17 +1222,14 @@ describe('OData component acceptance', () => {
     expect(fetched.body.name).to.equal('Camera');
     expect(fetched.headers['etag']).to.equal(updatedEtag);
 
-    await client
-      .del(`/odata/Products(${createdId})`)
-      .set('If-Match', updatedEtag)
-      .expect(204);
+    await client.del(`/odata/Products(${createdId})`).set('If-Match', updatedEtag).expect(204);
     await client.get(`/odata/Products(${createdId})`).expect(404);
   });
 
   it('requires If-Match and rejects stale tokens when ETags are enabled', async () => {
     const created = await client
       .post('/odata/Products')
-      .send({name: 'Controller', price: 99})
+      .send({ name: 'Controller', price: 99 })
       .expect(200);
 
     const productId = created.body.id;
@@ -1273,21 +1238,15 @@ describe('OData component acceptance', () => {
     const updated = await client
       .patch(`/odata/Products(${productId})`)
       .set('If-Match', originalEtag)
-      .send({price: 129})
+      .send({ price: 129 })
       .expect(200);
 
     const currentEtag = updated.headers['etag'] as string;
 
-    await client
-      .del(`/odata/Products(${productId})`)
-      .set('If-Match', originalEtag)
-      .expect(412);
+    await client.del(`/odata/Products(${productId})`).set('If-Match', originalEtag).expect(412);
 
     // Delete requires current If-Match token in strict mode
-    await client
-      .del(`/odata/Products(${productId})`)
-      .set('If-Match', currentEtag)
-      .expect(204);
+    await client.del(`/odata/Products(${productId})`).set('If-Match', currentEtag).expect(204);
     await client.get(`/odata/Products(${productId})`).expect(404);
   });
 
@@ -1295,7 +1254,7 @@ describe('OData component acceptance', () => {
     const createRes = await client
       .post('/odata/Products')
       .set('Prefer', 'return=minimal')
-      .send({name: 'Speaker', price: 199})
+      .send({ name: 'Speaker', price: 199 })
       .expect(204);
 
     expect(createRes.headers['preference-applied']).to.equal('return=minimal');
@@ -1303,7 +1262,7 @@ describe('OData component acceptance', () => {
 
     const createdList = await client
       .get('/odata/Products')
-      .query({$filter: "name eq 'Speaker'"})
+      .query({ $filter: "name eq 'Speaker'" })
       .expect(200);
     const speaker = createdList.body.value[0];
     const speakerId = speaker?.id;
@@ -1314,7 +1273,7 @@ describe('OData component acceptance', () => {
       .patch(`/odata/Products(${speakerId})`)
       .set('Prefer', 'return=minimal')
       .set('If-Match', speakerEtag)
-      .send({price: 219})
+      .send({ price: 219 })
       .expect(204);
     expect(updateRes.headers['preference-applied']).to.equal('return=minimal');
     expect(updateRes.headers['odata-version']).to.equal('4.0');
@@ -1324,16 +1283,13 @@ describe('OData component acceptance', () => {
 
     const deleteEtag = verify.headers['etag'] as string;
 
-    await client
-      .del(`/odata/Products(${speakerId})`)
-      .set('If-Match', deleteEtag)
-      .expect(204);
+    await client.del(`/odata/Products(${speakerId})`).set('If-Match', deleteEtag).expect(204);
   });
 
   it('returns 412 when If-Match does not match the current entity ETag', async () => {
     const created = await client
       .post('/odata/Products')
-      .send({name: 'Monitor', price: 299})
+      .send({ name: 'Monitor', price: 299 })
       .expect(200);
 
     const createdId = created.body.id;
@@ -1342,7 +1298,7 @@ describe('OData component acceptance', () => {
     const firstUpdate = await client
       .patch(`/odata/Products(${createdId})`)
       .set('If-Match', originalEtag)
-      .send({price: 329})
+      .send({ price: 329 })
       .expect(200);
 
     const nextEtag = firstUpdate.headers['etag'] as string;
@@ -1351,7 +1307,7 @@ describe('OData component acceptance', () => {
     await client
       .patch(`/odata/Products(${createdId})`)
       .set('If-Match', originalEtag)
-      .send({price: 339})
+      .send({ price: 339 })
       .expect(412);
 
     const current = await getProductWithEtag(createdId);
@@ -1360,10 +1316,7 @@ describe('OData component acceptance', () => {
   });
 
   it('returns OData error payloads for invalid filters', async () => {
-    const res = await client
-      .get('/odata/Products')
-      .query({$filter: 'invalid eq'})
-      .expect(400);
+    const res = await client.get('/odata/Products').query({ $filter: 'invalid eq' }).expect(400);
 
     expect(res.headers['odata-version']).to.equal('4.0');
     expect(res.body.error).to.be.Object();
@@ -1375,7 +1328,7 @@ describe('OData component acceptance', () => {
     const res = await client
       .post('/odata/Products')
       .set('Prefer', 'respond-async')
-      .send({name: 'AsyncWidget', price: 5})
+      .send({ name: 'AsyncWidget', price: 5 })
       .expect(501);
 
     expect(res.headers['odata-version']).to.equal('4.0');
@@ -1388,9 +1341,7 @@ describe('OData component acceptance', () => {
     const res = await client
       .post('/odata/$batch')
       .send({
-        requests: [
-          {id: 'bad', method: 'GET', url: 'notaurl'},
-        ],
+        requests: [{ id: 'bad', method: 'GET', url: 'notaurl' }],
       })
       .expect(200);
 
@@ -1407,14 +1358,14 @@ describe('OData component acceptance', () => {
             id: 'c1',
             method: 'POST',
             url: '/odata/Products',
-            body: {name: 'Tablet', price: 599},
+            body: { name: 'Tablet', price: 599 },
             atomicityGroup: 'g1',
           },
           {
             id: 'c2',
             method: 'PATCH',
             url: '/odata/Products(1)',
-            body: {price: 1499},
+            body: { price: 1499 },
             atomicityGroup: 'g1',
           },
         ],
@@ -1479,8 +1430,8 @@ describe('OData component acceptance', () => {
       typeof res.text === 'string' && res.text.length
         ? res.text
         : Buffer.isBuffer(res.body)
-        ? res.body.toString('utf-8')
-        : '';
+          ? res.body.toString('utf-8')
+          : '';
 
     if (multipartPayload) {
       expect(multipartPayload).to.match(/HTTP\/1\.1 200/);

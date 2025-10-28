@@ -1,4 +1,4 @@
-import {Transaction} from '@loopback/repository';
+import { Transaction } from '@loopback/repository';
 
 export interface AtomicityRequestState {
   groupId: string;

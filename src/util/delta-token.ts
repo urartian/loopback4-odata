@@ -82,7 +82,7 @@ function decodeLegacyToken(token: string): DeltaTokenPayload {
         return acc;
       }, {})
     : undefined;
-  return {entitySet, lastValue, keyValues};
+  return { entitySet, lastValue, keyValues };
 }
 
 export function decodeDeltaToken(token: string): DeltaTokenPayload {
@@ -117,7 +117,9 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value);
 }
 
-function cloneRecord(source: Record<string, unknown> | undefined): Record<string, unknown> | undefined {
+function cloneRecord(
+  source: Record<string, unknown> | undefined,
+): Record<string, unknown> | undefined {
   if (!source) return undefined;
   const clone: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(source)) {
@@ -138,10 +140,10 @@ function normalizeBucketStates(raw?: unknown): DeltaTokenBucketState[] | undefin
     const key = isPlainRecord(candidate.key) ? cloneRecord(candidate.key) : undefined;
     const data = isPlainRecord(candidate.data) ? cloneRecord(candidate.data) : undefined;
     if (key) {
-      normalized.push(data ? {key, data} : {key});
+      normalized.push(data ? { key, data } : { key });
       continue;
     }
-    normalized.push({key: cloneRecord(candidate as Record<string, unknown>) ?? {}});
+    normalized.push({ key: cloneRecord(candidate as Record<string, unknown>) ?? {} });
   }
   return normalized.length ? normalized : undefined;
 }

@@ -5,11 +5,6 @@
     "experimentalDecorators": true,
     "emitDecoratorMetadata": true
   },
-  "include": [
-    "src",
-    "src/__tests__",
-    "examples",
-    "src/types"
-  ],
+  "include": ["src", "src/__tests__", "examples", "src/types"],
   "exclude": []
 }

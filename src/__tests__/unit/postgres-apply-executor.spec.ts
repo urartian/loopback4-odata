@@ -1,20 +1,15 @@
 /// <reference path="../../types/testing.globals.d.ts" />
 
-import {expect} from '@loopback/testlab';
+import { expect } from '@loopback/testlab';
+import { AnyObject, Entity, Filter, ModelDefinition, juggler } from '@loopback/repository';
 import {
-  AnyObject,
-  Entity,
-  Filter,
-  ModelDefinition,
-  juggler,
-} from '@loopback/repository';
-import {ApplyAggregationStage, ApplyExecutionPlan} from '../../services/odata-apply-planner.service';
-import {ParsedExpression} from '../../services/odata-query-parser.service';
-import {
-  ODataApplyExecutorContext,
-} from '../../services/odata-apply-executor.registry';
-import {PostgresApplyExecutor} from '../../services/postgres-apply-executor';
-import {EntitySetDef} from '../../registry/entityset-registry';
+  ApplyAggregationStage,
+  ApplyExecutionPlan,
+} from '../../services/odata-apply-planner.service';
+import { ParsedExpression } from '../../services/odata-query-parser.service';
+import { ODataApplyExecutorContext } from '../../services/odata-apply-executor.registry';
+import { PostgresApplyExecutor } from '../../services/postgres-apply-executor';
+import { EntitySetDef } from '../../registry/entityset-registry';
 
 describe('PostgresApplyExecutor (multi-stage)', () => {
   it('pushes down chained stages with filters, ordering, and pagination', async () => {
@@ -26,9 +21,9 @@ describe('PostgresApplyExecutor (multi-stage)', () => {
     (Order as AnyObject).definition = {
       name: 'Order',
       properties: {
-        id: {type: 'number', id: true},
-        total: {type: 'number'},
-        status: {type: 'string'},
+        id: { type: 'number', id: true },
+        total: { type: 'number' },
+        status: { type: 'string' },
       },
     } as unknown as ModelDefinition;
 
@@ -37,15 +32,15 @@ describe('PostgresApplyExecutor (multi-stage)', () => {
     let executedSql = '';
     let executedParams: unknown[] = [];
     const dataSource = {
-      connector: {name: 'postgresql'},
+      connector: { name: 'postgresql' },
       execute: async (sql: string, params: unknown[]) => {
         executedSql = sql;
         executedParams = params;
-        return [{OverallCount: 42}];
+        return [{ OverallCount: 42 }];
       },
     } as unknown as juggler.DataSource;
 
-    const repository = {dataSource} as AnyObject;
+    const repository = { dataSource } as AnyObject;
 
     const stageOneFilter: ParsedExpression = {
       operator: 'comparison',
@@ -63,10 +58,10 @@ describe('PostgresApplyExecutor (multi-stage)', () => {
     const stageOne: ApplyAggregationStage = {
       spec: {
         groupBy: ['total'],
-        aggregates: [{field: 'id', operator: 'count', alias: 'OrderCount'}],
+        aggregates: [{ field: 'id', operator: 'count', alias: 'OrderCount' }],
       },
       postAggregationFilters: [stageOneFilter],
-      orderBy: [{field: 'total', direction: 'desc'}],
+      orderBy: [{ field: 'total', direction: 'desc' }],
       top: 10,
       skip: 5,
       navigationPaths: [],
@@ -75,10 +70,10 @@ describe('PostgresApplyExecutor (multi-stage)', () => {
     const stageTwo: ApplyAggregationStage = {
       spec: {
         groupBy: [],
-        aggregates: [{field: 'OrderCount', operator: 'sum', alias: 'OverallCount'}],
+        aggregates: [{ field: 'OrderCount', operator: 'sum', alias: 'OverallCount' }],
       },
       postAggregationFilters: [stageTwoFilter],
-      orderBy: [{field: 'OverallCount', direction: 'desc'}],
+      orderBy: [{ field: 'OverallCount', direction: 'desc' }],
       top: 1,
       navigationPaths: [],
     };
@@ -90,7 +85,7 @@ describe('PostgresApplyExecutor (multi-stage)', () => {
     };
 
     const fetchFilter: Filter<AnyObject> = {
-      where: {status: 'pending'},
+      where: { status: 'pending' },
     };
 
     const entitySet: EntitySetDef = {
@@ -112,9 +107,9 @@ describe('PostgresApplyExecutor (multi-stage)', () => {
       entitySet,
       repository: repository as any,
       plan,
-      pipeline: {transformations: []},
+      pipeline: { transformations: [] },
       aggregation: stageTwo.spec,
-      baseFilter: {...fetchFilter},
+      baseFilter: { ...fetchFilter },
       fetchFilter,
       options: undefined,
       requestedLimit: undefined,
@@ -126,7 +121,7 @@ describe('PostgresApplyExecutor (multi-stage)', () => {
 
     const result = await executor.execute(context);
     expect(result).to.not.be.undefined();
-    expect(result?.rows).to.deepEqual([{OverallCount: 42}]);
+    expect(result?.rows).to.deepEqual([{ OverallCount: 42 }]);
     expect(result?.appliedOrder).to.be.true();
     expect(result?.appliedPipelinePagination).to.be.true();
     expect(result?.appliedStageFilters).to.be.true();
@@ -141,7 +136,9 @@ describe('PostgresApplyExecutor (multi-stage)', () => {
     expect(executedSql.includes('ORDER BY "total" DESC LIMIT 10 OFFSET 5')).to.be.true();
     expect(executedSql.includes('FROM stage0 AS s1')).to.be.true();
     expect(executedSql.includes('HAVING "OverallCount" > $3')).to.be.true();
-    expect(executedSql.includes('SELECT * FROM stage1 ORDER BY "OverallCount" DESC LIMIT 1')).to.be.true();
+    expect(
+      executedSql.includes('SELECT * FROM stage1 ORDER BY "OverallCount" DESC LIMIT 1'),
+    ).to.be.true();
     expect(executedSql.indexOf('HAVING "OrderCount" > $2')).to.be.lessThan(
       executedSql.indexOf('ORDER BY "total" DESC LIMIT 10 OFFSET 5'),
     );

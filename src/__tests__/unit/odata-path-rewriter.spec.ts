@@ -1,11 +1,11 @@
 /// <reference path="../../types/testing.globals.d.ts" />
 
-import {strict as assert} from 'assert';
-import {odataPathRewriter} from '../../middleware/odata-path-rewriter';
+import { strict as assert } from 'assert';
+import { odataPathRewriter } from '../../middleware/odata-path-rewriter';
 
 function createContext(url: string) {
   return {
-    request: {url},
+    request: { url },
     response: {},
   } as any;
 }
@@ -49,19 +49,13 @@ describe('odataPathRewriter middleware', () => {
   it('rewrites composite keys with string values', async () => {
     const ctx = createContext("/odata/Orders(OrderID=10248,CustomerID='ALFKI')/items");
     await odataPathRewriter(ctx, () => Promise.resolve());
-    assert.equal(
-      ctx.request.url,
-      '/odata/Orders/OrderID%3D10248%2CCustomerID%3DALFKI/items',
-    );
+    assert.equal(ctx.request.url, '/odata/Orders/OrderID%3D10248%2CCustomerID%3DALFKI/items');
   });
 
   it('supports positional composite keys', async () => {
     const ctx = createContext("/odata/Composite(10248,'ALFKI')");
     await odataPathRewriter(ctx, () => Promise.resolve());
-    assert.equal(
-      ctx.request.url,
-      '/odata/Composite/10248%2CALFKI',
-    );
+    assert.equal(ctx.request.url, '/odata/Composite/10248%2CALFKI');
   });
 
   it('handles positional values that contain closing parentheses', async () => {

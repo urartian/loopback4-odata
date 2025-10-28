@@ -1,5 +1,5 @@
-import {BatchResponseEntry} from '../controllers/batch.controller';
-import {STATUS_CODES} from 'http';
+import { BatchResponseEntry } from '../controllers/batch.controller';
+import { STATUS_CODES } from 'http';
 
 interface ResponseGroup {
   type: 'single' | 'changeset';
@@ -26,7 +26,7 @@ export function serializeMultipartBatch(responses: BatchResponseEntry[]): Serial
   }
 
   result += `--${boundary}--\r\n`;
-  return {boundary, body: result};
+  return { boundary, body: result };
 }
 
 function groupResponses(entries: BatchResponseEntry[]): ResponseGroup[] {
@@ -37,10 +37,10 @@ function groupResponses(entries: BatchResponseEntry[]): ResponseGroup[] {
       if (last && last.type === 'changeset' && last.id === entry.atomicityGroup) {
         last.entries.push(entry);
       } else {
-        groups.push({type: 'changeset', id: entry.atomicityGroup, entries: [entry]});
+        groups.push({ type: 'changeset', id: entry.atomicityGroup, entries: [entry] });
       }
     } else {
-      groups.push({type: 'single', entries: [entry]});
+      groups.push({ type: 'single', entries: [entry] });
     }
   }
   return groups;
@@ -96,7 +96,9 @@ function renderHttpResponse(entry: BatchResponseEntry): string {
     headers['content-length'] = Buffer.byteLength(bodyString, 'utf-8').toString();
   }
 
-  const headerLines = Object.entries(headers).map(([key, value]) => `${formatHeaderName(key)}: ${value}`);
+  const headerLines = Object.entries(headers).map(
+    ([key, value]) => `${formatHeaderName(key)}: ${value}`,
+  );
   let response = `HTTP/1.1 ${entry.status} ${reason}`;
   if (headerLines.length) {
     response += '\r\n' + headerLines.join('\r\n');
@@ -120,7 +122,7 @@ function normaliseHeaders(headers: Record<string, string>): Record<string, strin
 function formatHeaderName(name: string): string {
   return name
     .split('-')
-    .map(part => part.charAt(0).toUpperCase() + part.slice(1).toLowerCase())
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1).toLowerCase())
     .join('-');
 }
 

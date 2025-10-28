@@ -1,20 +1,20 @@
 /// <reference path="../../types/testing.globals.d.ts" />
 
-import {Client, createRestAppClient, expect} from '@loopback/testlab';
+import { Client, createRestAppClient, expect } from '@loopback/testlab';
 import {
   TestApplication,
   givenODataApplication,
   seedExampleData,
 } from '../fixtures/odata-app.fixture';
-import {ODATA_BINDINGS} from '../../keys';
-import {ODataConfig} from '../../types';
+import { ODATA_BINDINGS } from '../../keys';
+import { ODataConfig } from '../../types';
 
 describe('OData config plumbing acceptance', () => {
   let app: TestApplication;
   let client: Client;
 
   beforeEach(async function () {
-    app = await givenODataApplication({port: 0, host: '127.0.0.1'});
+    app = await givenODataApplication({ port: 0, host: '127.0.0.1' });
     // Override config before boot to ensure middleware/routes pick it up
     app.bind(ODATA_BINDINGS.CONFIG).to({
       basePath: '/api/odata',
@@ -54,10 +54,7 @@ describe('OData config plumbing acceptance', () => {
   });
 
   it('clamps $top according to maxTop when strict=false', async () => {
-    const res = await client
-      .get('/api/odata/Products')
-      .query({$top: '5'})
-      .expect(200);
+    const res = await client.get('/api/odata/Products').query({ $top: '5' }).expect(200);
     expect(res.body.value).to.be.Array();
     expect(res.body.value.length).to.be.lessThanOrEqual(1);
   });
@@ -65,7 +62,7 @@ describe('OData config plumbing acceptance', () => {
   it('rejects $top above maxTop when strict=true', async function () {
     // Rebind config with strict=true and restart app to test strict behavior
     if (app.state === 'started') await app.stop();
-    app = await givenODataApplication({port: 0, host: '127.0.0.1'});
+    app = await givenODataApplication({ port: 0, host: '127.0.0.1' });
     app.bind(ODATA_BINDINGS.CONFIG).to({
       basePath: '/api/odata',
       maxTop: 1,
@@ -77,24 +74,21 @@ describe('OData config plumbing acceptance', () => {
     await app.start();
     client = createRestAppClient(app);
 
-    const res = await client
-      .get('/api/odata/Products')
-      .query({$top: '5'})
-      .expect(400);
+    const res = await client.get('/api/odata/Products').query({ $top: '5' }).expect(400);
     expect(res.body?.error?.code).to.equal('BadRequest');
   });
 
   it('enforces maxExpandDepth even when strict=false', async () => {
     await client
       .get('/api/odata/Products')
-      .query({$expand: 'orders($expand=items($expand=product))'})
+      .query({ $expand: 'orders($expand=items($expand=product))' })
       .expect(400);
   });
 
   it('clamps $skip to maxSkip when strict=false', async () => {
     const res = await client
       .get('/api/odata/Products')
-      .query({$skip: '10', $orderby: 'id asc'})
+      .query({ $skip: '10', $orderby: 'id asc' })
       .expect(200);
 
     expect(res.body.value).to.be.Array();
@@ -105,7 +99,7 @@ describe('OData config plumbing acceptance', () => {
   it('supports trim() filters when strict=false', async () => {
     const res = await client
       .get('/api/odata/Products')
-      .query({$filter: "trim(name) eq 'Laptop'"})
+      .query({ $filter: "trim(name) eq 'Laptop'" })
       .expect(200);
 
     expect(res.body.value).to.be.Array();
@@ -115,7 +109,7 @@ describe('OData config plumbing acceptance', () => {
   it('supports concat() filters when strict=false', async () => {
     const res = await client
       .get('/api/odata/Products')
-      .query({$filter: "concat(name,'/',price) eq 'Laptop/1299'"})
+      .query({ $filter: "concat(name,'/',price) eq 'Laptop/1299'" })
       .expect(200);
 
     expect(res.body.value).to.be.Array();
@@ -131,7 +125,7 @@ describe('OData config plumbing acceptance', () => {
 
     const res = await client
       .get('/api/odata/Products')
-      .query({$filter: `month(updatedAt) eq ${month}`})
+      .query({ $filter: `month(updatedAt) eq ${month}` })
       .expect(200);
 
     expect(res.body.value).to.be.Array();
@@ -139,10 +133,7 @@ describe('OData config plumbing acceptance', () => {
   });
 
   it('rejects inline $count when disabled', async () => {
-    const res = await client
-      .get('/api/odata/Products')
-      .query({$count: 'true'})
-      .expect(400);
+    const res = await client.get('/api/odata/Products').query({ $count: 'true' }).expect(400);
     expect(res.headers['odata-version']).to.equal('4.0');
     expect(res.body?.error?.code).to.equal('BadRequest');
   });

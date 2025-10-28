@@ -1,22 +1,18 @@
 {
-    "compilerOptions": {
-        "target": "ES2019",
-        "module": "commonjs",
-        "declaration": true,
-        "outDir": "dist",
-        "rootDir": "src",
-        "strict": true,
-        "esModuleInterop": true,
-        "experimentalDecorators": true,
-        "emitDecoratorMetadata": true,
-        "types": ["node"],
-        "lib": ["ES2019"],
-        "skipLibCheck": true
-    },
-    "include": [
-        "src"
-    ],
-    "exclude": [
-        "src/__tests__"
-    ]
+  "compilerOptions": {
+    "target": "ES2019",
+    "module": "commonjs",
+    "declaration": true,
+    "outDir": "dist",
+    "rootDir": "src",
+    "strict": true,
+    "esModuleInterop": true,
+    "experimentalDecorators": true,
+    "emitDecoratorMetadata": true,
+    "types": ["node"],
+    "lib": ["ES2019"],
+    "skipLibCheck": true
+  },
+  "include": ["src"],
+  "exclude": ["src/__tests__"]
 }

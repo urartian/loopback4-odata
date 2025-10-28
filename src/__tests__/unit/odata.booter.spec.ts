@@ -1,6 +1,6 @@
 import 'reflect-metadata';
-import {Application, inject} from '@loopback/core';
-import {RestApplication} from '@loopback/rest';
+import { Application, inject } from '@loopback/core';
+import { RestApplication } from '@loopback/rest';
 import {
   DefaultCrudRepository,
   Entity,
@@ -10,12 +10,12 @@ import {
   property,
   RelationType,
 } from '@loopback/repository';
-import {expect} from '@loopback/testlab';
-import {ODataBooter} from '../../booters/odata.booter';
-import {EntitySetRegistry} from '../../registry/entityset-registry';
-import {odataModel} from '../../decorators/model.decorator';
-import {odataController} from '../../decorators/controller.decorator';
-import {ODataApplyExecutorRegistry} from '../../services/odata-apply-executor.registry';
+import { expect } from '@loopback/testlab';
+import { ODataBooter } from '../../booters/odata.booter';
+import { EntitySetRegistry } from '../../registry/entityset-registry';
+import { odataModel } from '../../decorators/model.decorator';
+import { odataController } from '../../decorators/controller.decorator';
+import { ODataApplyExecutorRegistry } from '../../services/odata-apply-executor.registry';
 
 describe('ODataBooter entity set naming', () => {
   it('uses inflection to pluralize model names by default', () => {
@@ -31,7 +31,7 @@ describe('ODataBooter entity set naming', () => {
   });
 
   it('respects explicit entity set name metadata', () => {
-    @odataModel({entitySetName: 'CustomPeople'})
+    @odataModel({ entitySetName: 'CustomPeople' })
     @model()
     class Citizen extends Entity {}
 
@@ -48,20 +48,17 @@ describe('ODataBooter repository binding resolution', () => {
   it('uses naming conventions to resolve repositories without instantiating them', async () => {
     const RepoApp = RepositoryMixin(Application);
     const app = new RepoApp();
-    app.dataSource(new juggler.DataSource({name: 'db', connector: 'memory'}), 'db');
+    app.dataSource(new juggler.DataSource({ name: 'db', connector: 'memory' }), 'db');
 
     @model()
     class Widget extends Entity {
-      @property({id: true})
+      @property({ id: true })
       id?: number;
     }
 
     let instantiationAttempts = 0;
 
-    class WidgetRepository extends DefaultCrudRepository<
-      Widget,
-      typeof Widget.prototype.id
-    > {
+    class WidgetRepository extends DefaultCrudRepository<Widget, typeof Widget.prototype.id> {
       constructor(@inject('datasources.db') dataSource: juggler.DataSource) {
         instantiationAttempts++;
         super(Widget, dataSource);
@@ -94,13 +91,13 @@ describe('ODataBooter navigation reference routes', () => {
 
     @model()
     class Order extends Entity {
-      @property({id: true})
+      @property({ id: true })
       id!: number;
     }
 
     @model()
     class OrderItem extends Entity {
-      @property({id: true})
+      @property({ id: true })
       id!: number;
 
       @property()

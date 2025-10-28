@@ -1,14 +1,8 @@
-import {BindingScope, injectable} from '@loopback/core';
-import {
-  AnyObject,
-  DefaultCrudRepository,
-  Filter,
-  Options,
-  juggler,
-} from '@loopback/repository';
-import {EntitySetDef} from '../registry/entityset-registry';
-import {ApplyExecutionPlan} from './odata-apply-planner.service';
-import {AggregationSpec, ApplyPipeline} from './odata-query-parser.service';
+import { BindingScope, injectable } from '@loopback/core';
+import { AnyObject, DefaultCrudRepository, Filter, Options, juggler } from '@loopback/repository';
+import { EntitySetDef } from '../registry/entityset-registry';
+import { ApplyExecutionPlan } from './odata-apply-planner.service';
+import { AggregationSpec, ApplyPipeline } from './odata-query-parser.service';
 
 export interface ApplyExecutorTelemetryPayload {
   durationMs?: number;
@@ -72,18 +66,16 @@ export interface ODataApplyExecutor {
    * Execute the $apply pipeline using pushdown semantics. Return `undefined`
    * to signal the caller to fall back to the in-memory implementation.
    */
-  execute(
-    ctx: ODataApplyExecutorContext,
-  ): Promise<ODataApplyExecutorResult | undefined>;
+  execute(ctx: ODataApplyExecutorContext): Promise<ODataApplyExecutorResult | undefined>;
 }
 
-@injectable({scope: BindingScope.SINGLETON})
+@injectable({ scope: BindingScope.SINGLETON })
 export class ODataApplyExecutorRegistry {
   private readonly executors: Map<string, ODataApplyExecutor> = new Map();
   private readonly ordered: ODataApplyExecutor[] = [];
 
   register(executor: ODataApplyExecutor): void {
-    if (!executor || !executor.id) {
+    if (!executor?.id) {
       throw new Error('Invalid ODataApplyExecutor: missing identifier.');
     }
     if (this.executors.has(executor.id)) {

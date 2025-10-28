@@ -28,7 +28,9 @@ function pushMetadata(target: any, key: string, entry: OperationMeta) {
   Reflect.defineMetadata(key, [...existing, entry], target);
 }
 
-export function odataAction(options: ODataOperationOptions & {params?: OperationParameter[]} = {}) {
+export function odataAction(
+  options: ODataOperationOptions & { params?: OperationParameter[] } = {},
+) {
   return (target: object, methodName: string) => {
     pushMetadata(target, ACTION_METADATA_KEY, {
       methodName,
@@ -41,7 +43,9 @@ export function odataAction(options: ODataOperationOptions & {params?: Operation
   };
 }
 
-export function odataFunction(options: ODataOperationOptions & {params?: OperationParameter[]} = {}) {
+export function odataFunction(
+  options: ODataOperationOptions & { params?: OperationParameter[] } = {},
+) {
   return (target: object, methodName: string) => {
     pushMetadata(target, FUNCTION_METADATA_KEY, {
       methodName,
@@ -55,9 +59,15 @@ export function odataFunction(options: ODataOperationOptions & {params?: Operati
 }
 
 export function getODataActions(target: Function): OperationMeta[] {
-  return (Reflect.getMetadata(ACTION_METADATA_KEY, target.prototype) as OperationMeta[] | undefined) ?? [];
+  return (
+    (Reflect.getMetadata(ACTION_METADATA_KEY, target.prototype) as OperationMeta[] | undefined) ??
+    []
+  );
 }
 
 export function getODataFunctions(target: Function): OperationMeta[] {
-  return (Reflect.getMetadata(FUNCTION_METADATA_KEY, target.prototype) as OperationMeta[] | undefined) ?? [];
+  return (
+    (Reflect.getMetadata(FUNCTION_METADATA_KEY, target.prototype) as OperationMeta[] | undefined) ??
+    []
+  );
 }

@@ -1,5 +1,5 @@
-import {AnyObject, Entity, ModelDefinition} from '@loopback/repository';
-import {ensureNavigationTargetKey} from './relation-metadata';
+import { AnyObject, Entity, ModelDefinition } from '@loopback/repository';
+import { ensureNavigationTargetKey } from './relation-metadata';
 
 type RelationMeta = AnyObject & {
   name?: string;
@@ -40,7 +40,7 @@ export class NavigationPathError extends Error {
 export function resolveNavigationPath(
   modelCtor: typeof Entity,
   path: string,
-  options: {maxDepth?: number} = {},
+  options: { maxDepth?: number } = {},
 ): ResolvedNavigationPath {
   const segments = (path ?? '').split('/').filter(Boolean);
   if (!segments.length) {

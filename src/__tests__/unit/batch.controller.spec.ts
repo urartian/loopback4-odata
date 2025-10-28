@@ -1,20 +1,23 @@
 /// <reference path="../../types/testing.globals.d.ts" />
 
-import {strict as assert} from 'assert';
-import {ODataBatchController, BatchResponsePayload} from '../../controllers/batch.controller';
-import {HttpErrors, Response} from '@loopback/rest';
-import {Readable} from 'stream';
+import { strict as assert } from 'assert';
+import { ODataBatchController, BatchResponsePayload } from '../../controllers/batch.controller';
+import { HttpErrors, Response } from '@loopback/rest';
+import { Readable } from 'stream';
 
-type StubResponseMap = Record<string, {status: number; body?: unknown; headers?: Record<string, string>}>;
+type StubResponseMap = Record<
+  string,
+  { status: number; body?: unknown; headers?: Record<string, string> }
+>;
 
 function createController(stubs: StubResponseMap) {
   const controller = new ODataBatchController(
-    {handleRequest: async () => undefined} as any,
+    { handleRequest: async () => undefined } as any,
     'http://localhost',
-    {get: async () => undefined} as any,
-    {findByName: () => undefined} as any,
+    { get: async () => undefined } as any,
+    { findByName: () => undefined } as any,
   );
-  (controller as any).executeSingle = async (request: {id: string}) => {
+  (controller as any).executeSingle = async (request: { id: string }) => {
     const stub = stubs[request.id];
     if (!stub) {
       throw new Error(`Missing stub for request ${request.id}`);
@@ -37,7 +40,7 @@ const responseStub = {
 
 function requestStub(contentType: string): any {
   return {
-    headers: {'content-type': contentType},
+    headers: { 'content-type': contentType },
     get: (header: string) => (header.toLowerCase() === 'content-type' ? contentType : undefined),
   };
 }
@@ -45,15 +48,15 @@ function requestStub(contentType: string): any {
 describe('$batch controller', () => {
   it('returns batched responses in order', async () => {
     const controller = createController({
-      '1': {status: 200, body: {value: [{id: 1}]}},
-      '2': {status: 200, body: {value: []}},
+      '1': { status: 200, body: { value: [{ id: 1 }] } },
+      '2': { status: 200, body: { value: [] } },
     });
 
     const batchResult = (await controller.handleBatch(
       {
         requests: [
-          {id: '1', method: 'GET', url: '/odata/Products'},
-          {id: '2', method: 'GET', url: '/odata/Products/$count'},
+          { id: '1', method: 'GET', url: '/odata/Products' },
+          { id: '2', method: 'GET', url: '/odata/Products/$count' },
         ],
       },
       responseStub,
@@ -65,16 +68,16 @@ describe('$batch controller', () => {
     const second = batchResult.responses[1];
     assert.equal(first.id, '1');
     assert.equal(first.status, 200);
-    assert.deepStrictEqual(first.body, {value: [{id: 1}]});
+    assert.deepStrictEqual(first.body, { value: [{ id: 1 }] });
     assert.equal(second.id, '2');
     assert.equal(second.status, 200);
-    assert.deepStrictEqual(second.body, {value: []});
+    assert.deepStrictEqual(second.body, { value: [] });
   });
 
   it('returns all executed responses up to failing request inside changeset', async () => {
     const controller = createController({
-      a1: {status: 200, body: {value: [{id: 10}]}},
-      a2: {status: 409, body: {error: {code: 'Conflict'}}},
+      a1: { status: 200, body: { value: [{ id: 10 }] } },
+      a2: { status: 409, body: { error: { code: 'Conflict' } } },
     });
     let rollbackCalled = false;
     (controller as any).createAtomicGroupContext = async () => ({
@@ -89,8 +92,8 @@ describe('$batch controller', () => {
     const batchResult = (await controller.handleBatch(
       {
         requests: [
-          {id: 'a1', method: 'POST', url: '/odata/Products', atomicityGroup: 'changeset-1'},
-          {id: 'a2', method: 'POST', url: '/odata/Products', atomicityGroup: 'changeset-1'},
+          { id: 'a1', method: 'POST', url: '/odata/Products', atomicityGroup: 'changeset-1' },
+          { id: 'a2', method: 'POST', url: '/odata/Products', atomicityGroup: 'changeset-1' },
         ],
       },
       responseStub,
@@ -106,24 +109,24 @@ describe('$batch controller', () => {
     assert.equal(second.atomicityGroup, 'changeset-1');
     assert.equal(second.id, 'a2');
     assert.equal(second.status, 409);
-    assert.deepStrictEqual(second.body, {error: {code: 'Conflict'}});
+    assert.deepStrictEqual(second.body, { error: { code: 'Conflict' } });
     assert.equal(rollbackCalled, true);
   });
 
   it('rejects empty request arrays', async () => {
     const controller = createController({});
     await assert.rejects(
-      controller.handleBatch({requests: []}, responseStub, requestStub('application/json')),
+      controller.handleBatch({ requests: [] }, responseStub, requestStub('application/json')),
       (err: unknown) => err instanceof HttpErrors.BadRequest,
     );
   });
 
   it('returns 400 for malformed URLs', async () => {
     const controller = new ODataBatchController(
-      {handleRequest: async () => undefined} as any,
+      { handleRequest: async () => undefined } as any,
       'http://localhost',
-      {get: async () => undefined} as any,
-      {findByName: () => undefined} as any,
+      { get: async () => undefined } as any,
+      { findByName: () => undefined } as any,
     );
 
     const result = await (controller as any).executeSingle({
@@ -138,10 +141,10 @@ describe('$batch controller', () => {
 
   it('returns 400 when method is missing', async () => {
     const controller = new ODataBatchController(
-      {handleRequest: async () => undefined} as any,
+      { handleRequest: async () => undefined } as any,
       'http://localhost',
-      {get: async () => undefined} as any,
-      {findByName: () => undefined} as any,
+      { get: async () => undefined } as any,
+      { findByName: () => undefined } as any,
     );
 
     const result = await (controller as any).executeSingle({
@@ -156,8 +159,8 @@ describe('$batch controller', () => {
 
   it('commits transactional group when all requests succeed', async () => {
     const controller = createController({
-      t1: {status: 200},
-      t2: {status: 200},
+      t1: { status: 200 },
+      t2: { status: 200 },
     });
 
     let commitCalled = false;
@@ -173,8 +176,8 @@ describe('$batch controller', () => {
     const result = (await controller.handleBatch(
       {
         requests: [
-          {id: 't1', method: 'POST', url: '/odata/Products', atomicityGroup: 'group-1'},
-          {id: 't2', method: 'PATCH', url: '/odata/Products(1)', atomicityGroup: 'group-1'},
+          { id: 't1', method: 'POST', url: '/odata/Products', atomicityGroup: 'group-1' },
+          { id: 't2', method: 'PATCH', url: '/odata/Products(1)', atomicityGroup: 'group-1' },
         ],
       },
       responseStub,
@@ -191,8 +194,8 @@ describe('$batch controller', () => {
 
   it('appends 424 Failed Dependency for unexecuted requests after a failure in a changeset', async () => {
     const controller = createController({
-      b1: {status: 200, body: {value: [{id: 1}]}},
-      b2: {status: 409, body: {error: {code: 'Conflict'}}},
+      b1: { status: 200, body: { value: [{ id: 1 }] } },
+      b2: { status: 409, body: { error: { code: 'Conflict' } } },
       // Note: no stub for b3 -> it should not be executed, server should synthesize 424
     });
     let rolledBack = false;
@@ -208,9 +211,9 @@ describe('$batch controller', () => {
     const result = (await controller.handleBatch(
       {
         requests: [
-          {id: 'b1', method: 'POST', url: '/odata/Products', atomicityGroup: 'g2'},
-          {id: 'b2', method: 'POST', url: '/odata/Products', atomicityGroup: 'g2'},
-          {id: 'b3', method: 'POST', url: '/odata/Products', atomicityGroup: 'g2'},
+          { id: 'b1', method: 'POST', url: '/odata/Products', atomicityGroup: 'g2' },
+          { id: 'b2', method: 'POST', url: '/odata/Products', atomicityGroup: 'g2' },
+          { id: 'b3', method: 'POST', url: '/odata/Products', atomicityGroup: 'g2' },
         ],
       },
       responseStub,
@@ -244,17 +247,15 @@ describe('$batch controller', () => {
           : undefined,
     } as any;
     const controller = new ODataBatchController(
-      {handleRequest: async () => undefined} as any,
+      { handleRequest: async () => undefined } as any,
       'http://localhost',
-      {get: async () => ({dataSource: {name: 'db'}})} as any,
+      { get: async () => ({ dataSource: { name: 'db' } }) } as any,
       registry,
     );
 
     const result = (await controller.handleBatch(
       {
-        requests: [
-          {id: 'x', method: 'POST', url: '/odata/Products', atomicityGroup: 'no-tx'},
-        ],
+        requests: [{ id: 'x', method: 'POST', url: '/odata/Products', atomicityGroup: 'no-tx' }],
       },
       responseStub,
       requestStub('application/json'),

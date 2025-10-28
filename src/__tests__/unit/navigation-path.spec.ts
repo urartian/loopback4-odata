@@ -1,9 +1,9 @@
 /// <reference path="../../types/testing.globals.d.ts" />
 
-import {expect} from '@loopback/testlab';
+import { expect } from '@loopback/testlab';
 import 'reflect-metadata';
-import {NavigationPathError, resolveNavigationPath} from '../../util/navigation-path';
-import {OrderItem, Order, Product} from '../../../examples/basic-app';
+import { NavigationPathError, resolveNavigationPath } from '../../util/navigation-path';
+import { OrderItem, Order, Product } from '../../../examples/basic-app';
 
 describe('Navigation path resolver', () => {
   it('resolves belongsTo path on OrderItem', () => {
@@ -37,8 +37,8 @@ describe('Navigation path resolver', () => {
   });
 
   it('throws when path exceeds depth', () => {
-    expect(() => resolveNavigationPath(Product, 'orderItems/order/product', {maxDepth: 2})).to.throw(
-      NavigationPathError,
-    );
+    expect(() =>
+      resolveNavigationPath(Product, 'orderItems/order/product', { maxDepth: 2 }),
+    ).to.throw(NavigationPathError);
   });
 });

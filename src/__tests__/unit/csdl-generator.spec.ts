@@ -1,29 +1,22 @@
 import 'reflect-metadata';
-import {expect} from '@loopback/testlab';
-import {
-  Entity,
-  Model,
-  model,
-  property,
-  hasMany,
-  belongsTo,
-} from '@loopback/repository';
-import {CsdlGenerator} from '../../metadata/csdl-generator';
-import {EntitySetRegistry, EntitySetDef} from '../../registry/entityset-registry';
-import {odataSearchable} from '../../decorators/search.decorators';
+import { expect } from '@loopback/testlab';
+import { Entity, Model, model, property, hasMany, belongsTo } from '@loopback/repository';
+import { CsdlGenerator } from '../../metadata/csdl-generator';
+import { EntitySetRegistry, EntitySetDef } from '../../registry/entityset-registry';
+import { odataSearchable } from '../../decorators/search.decorators';
 
 @model()
 class Dimensions extends Model {
-  @property({type: 'number'})
+  @property({ type: 'number' })
   width!: number;
 
-  @property({type: 'number'})
+  @property({ type: 'number' })
   height!: number;
 }
 
 @model()
 class Gadget extends Entity {
-  @property({id: true, type: 'number'})
+  @property({ id: true, type: 'number' })
   id!: number;
 
   @belongsTo(() => Widget)
@@ -32,39 +25,39 @@ class Gadget extends Entity {
 
 @model()
 class Widget extends Entity {
-  @property({id: true, type: 'number'})
+  @property({ id: true, type: 'number' })
   id!: number;
 
   @odataSearchable()
   @property({
     type: 'string',
     required: true,
-    jsonSchema: {maxLength: 128, unicode: false},
+    jsonSchema: { maxLength: 128, unicode: false },
   })
   name!: string;
 
   @property({
     type: 'number',
-    jsonSchema: {format: 'decimal', precision: 10, scale: 2},
+    jsonSchema: { format: 'decimal', precision: 10, scale: 2 },
   })
   price?: number;
 
-  @property({type: 'string', jsonSchema: {format: 'uuid'}})
+  @property({ type: 'string', jsonSchema: { format: 'uuid' } })
   sku?: string;
 
-  @property({type: 'array', itemType: 'string'})
+  @property({ type: 'array', itemType: 'string' })
   tags?: string[];
 
-  @property({type: () => Dimensions})
+  @property({ type: () => Dimensions })
   dimensions?: Dimensions;
 
-  @property({type: 'date', required: true})
+  @property({ type: 'date', required: true })
   updatedAt!: Date;
 
   @property({
     type: 'string',
     default: 'draft',
-    jsonSchema: {enum: ['draft', 'active', 'discontinued']},
+    jsonSchema: { enum: ['draft', 'active', 'discontinued'] },
   })
   status?: string;
 
@@ -74,7 +67,7 @@ class Widget extends Entity {
 
 @model()
 class AdvancedWidget extends Widget {
-  @property({type: 'string'})
+  @property({ type: 'string' })
   feature?: string;
 }
 
@@ -95,15 +88,12 @@ describe('CsdlGenerator', () => {
         countable: false,
         filterFunctions: ['contains', 'startswith'],
         navigationRestrictions: {
-          gadgets: {navigable: false},
+          gadgets: { navigable: false },
         },
         permissions: [
           {
             scheme: 'OAuth2',
-            scopes: [
-              'widget.read',
-              {scope: 'widget.write', description: 'Modify widgets'},
-            ],
+            scopes: ['widget.read', { scope: 'widget.write', description: 'Modify widgets' }],
           },
         ],
         hasStream: true,
@@ -132,7 +122,7 @@ describe('CsdlGenerator', () => {
           methodName: 'resetInventory',
           binding: 'entity',
           rawResponse: false,
-          parameters: [{name: 'confirm', type: 'Edm.Boolean'}],
+          parameters: [{ name: 'confirm', type: 'Edm.Boolean' }],
         },
       ],
       functions: [
@@ -195,20 +185,32 @@ describe('CsdlGenerator', () => {
       ),
     ).to.be.true();
     expect(xml.includes('<ComplexType Name="Dimensions">')).to.be.true();
-    expect(xml.includes('<Property Name="dimensions" Type="Catalog.Dimensions" Nullable="true"')).to.be.true();
+    expect(
+      xml.includes('<Property Name="dimensions" Type="Catalog.Dimensions" Nullable="true"'),
+    ).to.be.true();
     expect(xml.includes('<EnumType Name="WidgetStatusEnum"')).to.be.true();
     expect(xml.includes('<Member Name="draft" Value="0"')).to.be.true();
     expect(xml.includes('Annotation Term="Org.OData.Core.V1.HasStream" Bool="true"')).to.be.true();
-    expect(xml.includes('Annotation Term="Org.OData.Capabilities.V1.CountRestrictions"')).to.be.true();
-    expect(xml.includes('Annotation Term="Org.OData.Capabilities.V1.FilterFunctions"')).to.be.true();
+    expect(
+      xml.includes('Annotation Term="Org.OData.Capabilities.V1.CountRestrictions"'),
+    ).to.be.true();
+    expect(
+      xml.includes('Annotation Term="Org.OData.Capabilities.V1.FilterFunctions"'),
+    ).to.be.true();
     expect(xml.includes('Annotation Term="Org.OData.Capabilities.V1.Aggregate"')).to.be.true();
-    expect(xml.includes('Annotation Term="Org.OData.Capabilities.V1.NavigationRestrictions"')).to.be.true();
-    expect(xml.includes('Annotation Term="Org.OData.Capabilities.V1.DeepInsertSupport"')).to.be.true();
+    expect(
+      xml.includes('Annotation Term="Org.OData.Capabilities.V1.NavigationRestrictions"'),
+    ).to.be.true();
+    expect(
+      xml.includes('Annotation Term="Org.OData.Capabilities.V1.DeepInsertSupport"'),
+    ).to.be.true();
     expect(
       xml.includes('<NavigationProperty Name="gadgets" Type="Collection(Catalog.Gadget)"'),
     ).to.be.true();
     expect(
-      xml.includes('<NavigationProperty Name="gadgets" Type="Collection(Catalog.Gadget)" Partner="widget">'),
+      xml.includes(
+        '<NavigationProperty Name="gadgets" Type="Collection(Catalog.Gadget)" Partner="widget">',
+      ),
     ).to.be.true();
     expect(
       xml.includes('<ReferentialConstraint Property="widgetId" ReferencedProperty="id" />'),
@@ -219,11 +221,21 @@ describe('CsdlGenerator', () => {
     expect(xml.includes('<Function Name="ping"')).to.be.true();
     expect(xml.includes('Annotation Term="Org.OData.Core.V1.Permissions"')).to.be.true();
     expect(xml.includes('<EntityContainer Name="CatalogService">')).to.be.true();
-    expect(xml.includes('Annotation Term="Org.OData.Capabilities.V1.InsertRestrictions"')).to.be.true();
-    expect(xml.includes('Annotation Term="Org.OData.Capabilities.V1.UpdateRestrictions"')).to.be.true();
-    expect(xml.includes('Annotation Term="Org.OData.Capabilities.V1.DeleteRestrictions"')).to.be.true();
-    expect(xml.includes('Annotation Term="Org.OData.Capabilities.V1.SearchRestrictions"')).to.be.true();
-    expect(xml.includes('<EntityType Name="AdvancedWidget" BaseType="Catalog.Widget">')).to.be.true();
+    expect(
+      xml.includes('Annotation Term="Org.OData.Capabilities.V1.InsertRestrictions"'),
+    ).to.be.true();
+    expect(
+      xml.includes('Annotation Term="Org.OData.Capabilities.V1.UpdateRestrictions"'),
+    ).to.be.true();
+    expect(
+      xml.includes('Annotation Term="Org.OData.Capabilities.V1.DeleteRestrictions"'),
+    ).to.be.true();
+    expect(
+      xml.includes('Annotation Term="Org.OData.Capabilities.V1.SearchRestrictions"'),
+    ).to.be.true();
+    expect(
+      xml.includes('<EntityType Name="AdvancedWidget" BaseType="Catalog.Widget">'),
+    ).to.be.true();
   });
 
   it('produces aligned JSON CSDL', () => {
@@ -251,7 +263,7 @@ describe('CsdlGenerator', () => {
     expect(schema.Widget.status.$Type).to.equal('Catalog.WidgetStatusEnum');
     expect(schema.WidgetStatusEnum.$Kind).to.equal('EnumType');
     expect(schema.WidgetStatusEnum.Members).to.have.length(3);
-    expect(schema.WidgetStatusEnum.Members[0]).to.containEql({Name: 'draft', Value: 0});
+    expect(schema.WidgetStatusEnum.Members[0]).to.containEql({ Name: 'draft', Value: 0 });
     expect(schema.Widget.status.DefaultValue).to.equal('draft');
     expect(schema.Widget.gadgets.$Kind).to.equal('NavigationProperty');
     expect(schema.Widget.gadgets.$Type).to.equal('Collection(Catalog.Gadget)');
@@ -281,23 +293,43 @@ describe('CsdlGenerator', () => {
     expect(container.$Kind).to.equal('EntityContainer');
     expect(container.Widgets.$Type).to.equal('Catalog.Widget');
     expect(container.Widgets.$NavigationPropertyBinding.gadgets).to.equal('Gadgets');
-    expect(container.Widgets['@Org.OData.Core.V1.OptimisticConcurrency'][0].$PropertyPath).to.equal('updatedAt');
-    expect(container.Widgets['@Org.OData.Capabilities.V1.FilterFunctions']).to.deepEqual(['contains', 'startswith']);
-    expect(container.Widgets['@Org.OData.Capabilities.V1.CountRestrictions'].Countable).to.equal(false);
-    expect(container.Widgets['@Org.OData.Capabilities.V1.NavigationRestrictions'].RestrictedProperties[0]).to.containDeep({
+    expect(container.Widgets['@Org.OData.Core.V1.OptimisticConcurrency'][0].$PropertyPath).to.equal(
+      'updatedAt',
+    );
+    expect(container.Widgets['@Org.OData.Capabilities.V1.FilterFunctions']).to.deepEqual([
+      'contains',
+      'startswith',
+    ]);
+    expect(container.Widgets['@Org.OData.Capabilities.V1.CountRestrictions'].Countable).to.equal(
+      false,
+    );
+    expect(
+      container.Widgets['@Org.OData.Capabilities.V1.NavigationRestrictions']
+        .RestrictedProperties[0],
+    ).to.containDeep({
       NavigationProperty: 'gadgets',
       Navigability: 'Org.OData.Capabilities.V1.NavigationType/None',
     });
     expect(container.Widgets['@Org.OData.Core.V1.Permissions'][0].SchemeName).to.equal('OAuth2');
     expect(container.Widgets['@Org.OData.Core.V1.Permissions'][0].Scopes).to.have.length(2);
-    expect(container.Widgets['@Org.OData.Capabilities.V1.Aggregate'].SupportedAggregationMethods).to.deepEqual(['Sum', 'Count']);
-    expect(container.Widgets['@Org.OData.Capabilities.V1.DeepInsertSupport'].Supported).to.equal(true);
-    expect(container.Widgets['@Org.OData.Capabilities.V1.InsertRestrictions'].Insertable).to.equal(false);
-    expect(container.Widgets['@Org.OData.Capabilities.V1.DeleteRestrictions'].RequiresFilter).to.equal(true);
-    expect(container.Widgets['@Org.OData.Capabilities.V1.SearchRestrictions'].Searchable).to.equal(true);
-    expect(container.Widgets['@Org.OData.Capabilities.V1.SearchRestrictions'].UnsupportedExpressions).to.containEql(
-      'Org.OData.Capabilities.V1.SearchExpressions/Not',
+    expect(
+      container.Widgets['@Org.OData.Capabilities.V1.Aggregate'].SupportedAggregationMethods,
+    ).to.deepEqual(['Sum', 'Count']);
+    expect(container.Widgets['@Org.OData.Capabilities.V1.DeepInsertSupport'].Supported).to.equal(
+      true,
     );
+    expect(container.Widgets['@Org.OData.Capabilities.V1.InsertRestrictions'].Insertable).to.equal(
+      false,
+    );
+    expect(
+      container.Widgets['@Org.OData.Capabilities.V1.DeleteRestrictions'].RequiresFilter,
+    ).to.equal(true);
+    expect(container.Widgets['@Org.OData.Capabilities.V1.SearchRestrictions'].Searchable).to.equal(
+      true,
+    );
+    expect(
+      container.Widgets['@Org.OData.Capabilities.V1.SearchRestrictions'].UnsupportedExpressions,
+    ).to.containEql('Org.OData.Capabilities.V1.SearchExpressions/Not');
     expect(container.Gadgets.$Type).to.equal('Catalog.Gadget');
     expect(container.AdvancedWidgets.$Type).to.equal('Catalog.AdvancedWidget');
     expect(container.ping.$Function).to.equal('Catalog.ping');

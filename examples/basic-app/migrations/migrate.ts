@@ -2,19 +2,19 @@ import { ApplicationConfig } from '@loopback/core';
 import { ExampleApp } from '..';
 
 export async function migrate(args: string[] = []) {
-    const app = new ExampleApp();
+  const app = new ExampleApp();
 
-    await app.boot();
-    await app.migrateSchema({
-        existingSchema: 'drop', // or 'drop' | 'create'
-    });
+  await app.boot();
+  await app.migrateSchema({
+    existingSchema: 'drop', // or 'drop' | 'create'
+  });
 
-    // Optional: Seed data after migration
-    // if (args.includes('--seed')) {
-    //     await seedData(app);
-    // }
+  // Optional: Seed data after migration
+  // if (args.includes('--seed')) {
+  //     await seedData(app);
+  // }
 
-    await app.stop();
+  await app.stop();
 }
 
 // async function seedData(app: ExampleApp) {
@@ -24,8 +24,8 @@ export async function migrate(args: string[] = []) {
 // }
 
 if (require.main === module) {
-    migrate(process.argv).catch(err => {
-        console.error('Cannot migrate database schema', err);
-        process.exit(1);
-    });
+  migrate(process.argv).catch((err) => {
+    console.error('Cannot migrate database schema', err);
+    process.exit(1);
+  });
 }

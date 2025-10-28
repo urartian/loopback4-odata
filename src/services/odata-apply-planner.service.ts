@@ -1,4 +1,4 @@
-import {AnyObject, Where, Entity} from '@loopback/repository';
+import { AnyObject, Where, Entity } from '@loopback/repository';
 import {
   ApplyPipeline,
   ApplyTransformation,
@@ -14,12 +14,16 @@ import {
   UnsupportedFilterError,
   buildWhereFromParsedExpression,
 } from './odata-query-parser.service';
-import {ResolvedNavigationPath, resolveNavigationPath, NavigationPathError} from '../util/navigation-path';
+import {
+  ResolvedNavigationPath,
+  resolveNavigationPath,
+  NavigationPathError,
+} from '../util/navigation-path';
 
 export interface ApplyAggregationStage {
   spec: AggregationSpec;
   postAggregationFilters: ParsedExpression[];
-  orderBy?: Array<{field: string; direction: 'asc' | 'desc'}>;
+  orderBy?: Array<{ field: string; direction: 'asc' | 'desc' }>;
   top?: number;
   skip?: number;
   navigationPaths: ResolvedNavigationPath[];
@@ -30,7 +34,7 @@ export interface ApplyExecutionPlan {
   readonly preAggregationFilters: ParsedExpression[];
   readonly stages: ApplyAggregationStage[];
   readonly concat?: ApplyExecutionPlan[];
-  readonly postOrderBy?: Array<{field: string; direction: 'asc' | 'desc'}>;
+  readonly postOrderBy?: Array<{ field: string; direction: 'asc' | 'desc' }>;
   readonly postTop?: number;
   readonly postSkip?: number;
   readonly postFilters?: ParsedExpression[];
@@ -58,7 +62,7 @@ export function buildApplyExecutionPlan(
   const stages: ApplyAggregationStage[] = [];
   const concatBranches: ApplyExecutionPlan[] = [];
   const planPostFilters: ParsedExpression[] = [];
-  let planOrderBy: Array<{field: string; direction: 'asc' | 'desc'}> | undefined;
+  let planOrderBy: Array<{ field: string; direction: 'asc' | 'desc' }> | undefined;
   let planTop: number | undefined;
   let planSkip: number | undefined;
   let currentStage: ApplyAggregationStage | undefined;
@@ -67,7 +71,7 @@ export function buildApplyExecutionPlan(
     const stage: ApplyAggregationStage = {
       spec: {
         groupBy: [...spec.groupBy],
-        aggregates: spec.aggregates.map(expr => ({...expr})),
+        aggregates: spec.aggregates.map((expr) => ({ ...expr })),
       },
       postAggregationFilters: [],
       navigationPaths: [],
@@ -113,22 +117,28 @@ export function buildApplyExecutionPlan(
       case 'orderby': {
         const planHasResults = stages.length > 0 || concatBranches.length > 0;
         if (currentStage) {
-          if (currentStage.orderBy && currentStage.orderBy.length) {
-            throw new Error('Multiple orderby() transformations are not supported within the same stage.');
+          if (currentStage.orderBy?.length) {
+            throw new Error(
+              'Multiple orderby() transformations are not supported within the same stage.',
+            );
           }
-          currentStage.orderBy = transformation.items.map(item => ({
+          currentStage.orderBy = transformation.items.map((item) => ({
             field: item.field,
             direction: item.direction,
           }));
         } else {
           const hasPlanResults = stages.length > 0 || concatBranches.length > 0;
           if (!allowNonAggregate && !hasPlanResults) {
-            throw new Error('orderby() transformation requires a preceding groupby() or aggregate().');
+            throw new Error(
+              'orderby() transformation requires a preceding groupby() or aggregate().',
+            );
           }
-          if (planOrderBy && planOrderBy.length) {
-            throw new Error('Multiple orderby() transformations are not supported for the same pipeline.');
+          if (planOrderBy?.length) {
+            throw new Error(
+              'Multiple orderby() transformations are not supported for the same pipeline.',
+            );
           }
-          planOrderBy = transformation.items.map(item => ({
+          planOrderBy = transformation.items.map((item) => ({
             field: item.field,
             direction: item.direction,
           }));
@@ -175,13 +185,17 @@ export function buildApplyExecutionPlan(
         throw new Error('bottom() transformation is not supported yet.');
       }
       case 'concat': {
-        const branches = transformation.pipelines.map(branch => buildApplyExecutionPlan(branch, options, true));
+        const branches = transformation.pipelines.map((branch) =>
+          buildApplyExecutionPlan(branch, options, true),
+        );
         concatBranches.push(...branches);
         currentStage = undefined;
         break;
       }
       default:
-        throw new Error(`Unsupported $apply transformation: ${(transformation as ApplyTransformation).type}`);
+        throw new Error(
+          `Unsupported $apply transformation: ${(transformation as ApplyTransformation).type}`,
+        );
     }
   });
 
@@ -194,11 +208,11 @@ export function buildApplyExecutionPlan(
     pushdownWhere,
     preAggregationFilters,
     stages,
-    ...(concatBranches.length ? {concat: concatBranches} : {}),
-    ...(planOrderBy && planOrderBy.length ? {postOrderBy: planOrderBy} : {}),
-    ...(planTop !== undefined ? {postTop: planTop} : {}),
-    ...(planSkip !== undefined ? {postSkip: planSkip} : {}),
-    ...(planPostFilters.length ? {postFilters: planPostFilters} : {}),
+    ...(concatBranches.length ? { concat: concatBranches } : {}),
+    ...(planOrderBy?.length ? { postOrderBy: planOrderBy } : {}),
+    ...(planTop !== undefined ? { postTop: planTop } : {}),
+    ...(planSkip !== undefined ? { postSkip: planSkip } : {}),
+    ...(planPostFilters.length ? { postFilters: planPostFilters } : {}),
   };
 
   if (options.modelCtor) {
@@ -231,13 +245,13 @@ function mergeWhereClauses(
   candidate: Where<AnyObject>,
 ): Where<AnyObject> {
   if (!target) return candidate;
-  return {and: [target, candidate]};
+  return { and: [target, candidate] };
 }
 
 function planHasAggregation(plan: ApplyExecutionPlan): boolean {
   if (plan.stages.length > 0) return true;
-  if (!plan.concat || !plan.concat.length) return false;
-  return plan.concat.some(child => planHasAggregation(child));
+  if (!plan.concat?.length) return false;
+  return plan.concat.some((child) => planHasAggregation(child));
 }
 
 function populatePlanNavigationPaths(
@@ -274,10 +288,10 @@ function collectNavigationPaths(
 ): ResolvedNavigationPath[] {
   const seen = new Map<string, ResolvedNavigationPath>();
   const collect = (raw?: string) => {
-    if (!raw || !raw.includes('/')) return;
+    if (!raw?.includes('/')) return;
     if (seen.has(raw)) return;
     try {
-      const resolved = resolveNavigationPath(modelCtor, raw, {maxDepth});
+      const resolved = resolveNavigationPath(modelCtor, raw, { maxDepth });
       seen.set(raw, resolved);
     } catch (err) {
       if (err instanceof NavigationPathError) {
@@ -306,7 +320,10 @@ export function collectNavigationPathsForStage(
   return collectNavigationPaths(modelCtor, spec, maxDepth);
 }
 
-function collectPathsFromComputeNode(node: ComputeNode, visitor: (path: string | undefined) => void) {
+function collectPathsFromComputeNode(
+  node: ComputeNode,
+  visitor: (path: string | undefined) => void,
+) {
   switch (node.type) {
     case 'path': {
       const joined = node.path.join('/');
@@ -318,7 +335,7 @@ function collectPathsFromComputeNode(node: ComputeNode, visitor: (path: string |
       collectPathsFromComputeNode(node.right, visitor);
       break;
     case 'function':
-      node.args.forEach(arg => collectPathsFromComputeNode(arg, visitor));
+      node.args.forEach((arg) => collectPathsFromComputeNode(arg, visitor));
       break;
     case 'literal':
     default:
