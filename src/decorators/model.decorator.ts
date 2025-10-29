@@ -7,6 +7,7 @@ export interface ODataModelOptions {
   deepInsert?: boolean;
   deepUpdate?: boolean;
   applyPushdown?: boolean;
+  documentInOpenApi?: boolean;
   delta?: {
     enabled?: boolean;
     field?: string;

@@ -12,6 +12,7 @@ import {
   Request,
   RestBindings,
   RequestContext,
+  OperationObject,
   SchemaObject,
 } from '@loopback/rest';
 import {
@@ -159,6 +160,19 @@ function getIdProperties(definition: any): string[] {
   return definition?.idProperties?.() ?? ['id'];
 }
 
+type ODataVisibility = 'documented' | 'undocumented';
+
+function withODataSpecMetadata<T extends OperationObject>(
+  spec: T,
+  visibility: ODataVisibility,
+): T {
+  return {
+    ...spec,
+    'x-odata-generated': true,
+    'x-odata-visibility': (spec as Record<string, unknown>)['x-odata-visibility'] ?? visibility,
+  };
+}
+
 /**
  * Factory that creates a dedicated CRUD controller for an entity set.
  */
@@ -195,6 +209,8 @@ export function defineODataCrudController(def: EntitySetDef) {
   }, {});
   const primaryEtagProperty = etagProperties?.[0];
   const optionalProperties = Array.from(new Set([...idProperties, ...(etagProperties ?? [])]));
+  const operationVisibility: ODataVisibility =
+    def.documentInOpenApi === false ? 'undocumented' : 'documented';
 
   const collectionResponseSchema = {
     type: 'object',
@@ -4998,14 +5014,20 @@ export function defineODataCrudController(def: EntitySetDef) {
       }
     }
 
-    @get(`/odata/${setName}`, {
-      responses: {
-        '200': {
-          description: `List ${setName}`,
-          content: { 'application/json': { schema: collectionResponseSchema } },
+    @get(
+      `/odata/${setName}`,
+      withODataSpecMetadata(
+        {
+          responses: {
+            '200': {
+              description: `List ${setName}`,
+              content: { 'application/json': { schema: collectionResponseSchema } },
+            },
+          },
         },
-      },
-    })
+        operationVisibility,
+      ),
+    )
     async list(@filterParam filter?: Filter<CrudEntity>) {
       const preferences = this.parsePreferenceHeader();
       if (preferences.respondAsync) this.throwPreferenceNotSupported('respond-async');
@@ -5674,20 +5696,26 @@ export function defineODataCrudController(def: EntitySetDef) {
       return ctx.result as AnyObject;
     }
 
-    @get(`/odata/${setName}/$count`, {
-      responses: {
-        '200': {
-          description: `Count ${setName}`,
-          content: {
-            'text/plain': {
-              schema: {
-                type: 'string',
+    @get(
+      `/odata/${setName}/$count`,
+      withODataSpecMetadata(
+        {
+          responses: {
+            '200': {
+              description: `Count ${setName}`,
+              content: {
+                'text/plain': {
+                  schema: {
+                    type: 'string',
+                  },
+                },
               },
             },
           },
         },
-      },
-    })
+        operationVisibility,
+      ),
+    )
     async count() {
       const preferences = this.parsePreferenceHeader();
       if (preferences.respondAsync) this.throwPreferenceNotSupported('respond-async');
@@ -5782,14 +5810,20 @@ export function defineODataCrudController(def: EntitySetDef) {
       return ctx.result as string;
     }
 
-    @get(`/odata/${setName}/{id}`, {
-      responses: {
-        '200': {
-          description: `${setName} entity by id`,
-          content: { 'application/json': { schema: entityResponseSchema } },
+    @get(
+      `/odata/${setName}/{id}`,
+      withODataSpecMetadata(
+        {
+          responses: {
+            '200': {
+              description: `${setName} entity by id`,
+              content: { 'application/json': { schema: entityResponseSchema } },
+            },
+          },
         },
-      },
-    })
+        operationVisibility,
+      ),
+    )
     async findById(
       @idParam id: unknown,
       @filterExcludingWhereParam filter?: FilterExcludingWhere<CrudEntity>,
@@ -5900,19 +5934,27 @@ export function defineODataCrudController(def: EntitySetDef) {
       return ctx.result as AnyObject | undefined;
     }
 
-    @get(`/odata/${setName}/{id}/{property}/$value`, {
-      responses: {
-        '200': {
-          description: `Raw property value for ${setName}`,
-          content: {
-            'text/plain': { schema: { type: 'string' } },
-            'application/octet-stream': { schema: { type: 'string', format: 'binary' } },
+    @get(
+      `/odata/${setName}/{id}/{property}/$value`,
+      withODataSpecMetadata(
+        {
+          responses: {
+            '200': {
+              description: `Raw property value for ${setName}`,
+              content: {
+                'text/plain': { schema: { type: 'string' } },
+                'application/octet-stream': {
+                  schema: { type: 'string', format: 'binary' },
+                },
+              },
+            },
+            '204': { description: 'Property is null.' },
+            '304': { description: 'Not Modified' },
           },
         },
-        '204': { description: 'Property is null.' },
-        '304': { description: 'Not Modified' },
-      },
-    })
+        operationVisibility,
+      ),
+    )
     async getPropertyValue(@idParam id: unknown, @param.path.string('property') property: string) {
       const propertyName = property;
       if (!propertyName) {
@@ -5986,14 +6028,20 @@ export function defineODataCrudController(def: EntitySetDef) {
       return ctx.result as unknown;
     }
 
-    @post(`/odata/${setName}`, {
-      responses: {
-        '200': {
-          description: `Create ${setName} entity`,
-          content: { 'application/json': { schema: entityResponseSchema } },
+    @post(
+      `/odata/${setName}`,
+      withODataSpecMetadata(
+        {
+          responses: {
+            '200': {
+              description: `Create ${setName} entity`,
+              content: { 'application/json': { schema: entityResponseSchema } },
+            },
+          },
         },
-      },
-    })
+        operationVisibility,
+      ),
+    )
     async create(
       @requestBody({
         content: {
@@ -6132,14 +6180,20 @@ export function defineODataCrudController(def: EntitySetDef) {
       return ctx.result as AnyObject | undefined;
     }
 
-    @patch(`/odata/${setName}/{id}`, {
-      responses: {
-        '200': {
-          description: `Update ${setName} entity`,
-          content: { 'application/json': { schema: entityResponseSchema } },
+    @patch(
+      `/odata/${setName}/{id}`,
+      withODataSpecMetadata(
+        {
+          responses: {
+            '200': {
+              description: `Update ${setName} entity`,
+              content: { 'application/json': { schema: entityResponseSchema } },
+            },
+          },
         },
-      },
-    })
+        operationVisibility,
+      ),
+    )
     async update(
       @idParam id: unknown,
       @requestBody({
@@ -6257,13 +6311,19 @@ export function defineODataCrudController(def: EntitySetDef) {
       return ctx.result as AnyObject | undefined;
     }
 
-    @del(`/odata/${setName}/{id}`, {
-      responses: {
-        '204': {
-          description: `Delete ${setName} entity`,
+    @del(
+      `/odata/${setName}/{id}`,
+      withODataSpecMetadata(
+        {
+          responses: {
+            '204': {
+              description: `Delete ${setName} entity`,
+            },
+          },
         },
-      },
-    })
+        operationVisibility,
+      ),
+    )
     async delete(@idParam id: unknown): Promise<void> {
       const preferences = this.parsePreferenceHeader();
       if (preferences.respondAsync) this.throwPreferenceNotSupported('respond-async');

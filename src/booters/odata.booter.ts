@@ -2,6 +2,7 @@ import {
   Application,
   Binding,
   CoreBindings,
+  MetadataInspector,
   inject,
   injectable,
   ValueOrPromise,
@@ -27,6 +28,7 @@ import {
   AnyObject,
   Entity,
   ModelDefinition,
+  MODEL_KEY,
   juggler,
   RelationDefinitionMap,
 } from '@loopback/repository';
@@ -129,6 +131,33 @@ export class ODataBooter implements Booter {
     );
   }
 
+  private resolveDocumentVisibility(
+    modelCtor: typeof Entity,
+    modelMeta: ODataModelOptions | undefined,
+  ): boolean {
+    if (modelMeta?.documentInOpenApi !== undefined) {
+      return Boolean(modelMeta.documentInOpenApi);
+    }
+    const globalDefault = this.config?.documentInOpenApiDefault ?? 'auto';
+    if (globalDefault === 'auto') {
+      const hasLoopbackModel =
+        MetadataInspector.getClassMetadata(MODEL_KEY, modelCtor) != null;
+      return hasLoopbackModel;
+    }
+    return Boolean(globalDefault);
+  }
+
+  private applyGeneratedRouteMetadata(
+    spec: OperationObject,
+    visibility: 'documented' | 'undocumented',
+  ): OperationObject {
+    return {
+      ...spec,
+      'x-odata-generated': true,
+      'x-odata-visibility': (spec as AnyObject)['x-odata-visibility'] ?? visibility,
+    };
+  }
+
   async load(): Promise<void> {
     const repositoryBindings = this.app.find('repositories.*');
     const repositoryByKey = new Map<string, Readonly<Binding<unknown>>>();
@@ -156,6 +185,7 @@ export class ODataBooter implements Booter {
         inspectedRepositoryBindings,
       );
       const modelMeta = getODataModelMeta(modelCtor);
+      const documentInOpenApi = this.resolveDocumentVisibility(modelCtor, modelMeta);
 
       if (!repoBinding) {
         throw new Error(
@@ -225,6 +255,7 @@ export class ODataBooter implements Booter {
         deepUpdate: Boolean(deepUpdate),
         deltaEnabled,
         deltaField,
+        documentInOpenApi,
       });
 
       await this.configureApplyPushdown(def, repoBinding, modelMeta, modelCtor);
@@ -397,13 +428,14 @@ export class ODataBooter implements Booter {
     const basePath = `/odata/${def.name}`;
     def.actions = actions;
     def.functions = functions;
+    const visibility = def.documentInOpenApi === false ? 'undocumented' : 'documented';
 
     for (const action of actions) {
-      app.route(this.buildOperationRoute(action, controllerCtor, basePath, 'post'));
+      app.route(this.buildOperationRoute(action, controllerCtor, basePath, 'post', visibility));
     }
 
     for (const fn of functions) {
-      app.route(this.buildOperationRoute(fn, controllerCtor, basePath, 'get'));
+      app.route(this.buildOperationRoute(fn, controllerCtor, basePath, 'get', visibility));
     }
   }
 
@@ -419,6 +451,7 @@ export class ODataBooter implements Booter {
     const basePath = `/odata/${def.name}`;
     const bindingKey = `controllers.${controllerCtor.name}`;
     const app = this.app as RestApplication;
+    const visibility = def.documentInOpenApi === false ? 'undocumented' : 'documented';
 
     for (const [relationName, relationMeta] of Object.entries(relations)) {
       const relationType = relationMeta?.type ?? relationMeta?.relationType;
@@ -428,33 +461,36 @@ export class ODataBooter implements Booter {
 
       const linkVerb = relationMeta.targetsMany ? 'post' : 'put';
       const linkPath = `${basePath}/{id}/${relationName}/$ref`;
-      const linkSpec: OperationObject = {
-        responses: {
-          '204': { description: 'Reference successfully set.' },
-        },
-        requestBody: {
-          required: true,
-          content: {
-            'application/json': {
-              schema: {
-                type: 'object',
-                required: ['@odata.id'],
-                properties: {
-                  '@odata.id': { type: 'string' },
+      const linkSpec: OperationObject = this.applyGeneratedRouteMetadata(
+        {
+          responses: {
+            '204': { description: 'Reference successfully set.' },
+          },
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  required: ['@odata.id'],
+                  properties: {
+                    '@odata.id': { type: 'string' },
+                  },
                 },
               },
             },
           },
+          parameters: [
+            {
+              name: 'id',
+              in: 'path',
+              required: true,
+              schema: { type: 'string' },
+            },
+          ],
         },
-        parameters: [
-          {
-            name: 'id',
-            in: 'path',
-            required: true,
-            schema: { type: 'string' },
-          },
-        ],
-      };
+        visibility,
+      );
 
       const linkHandler: OperationHandler = async (ctx: RequestContext, ...params: unknown[]) => {
         const body = params[0] as Record<string, unknown> | undefined;
@@ -473,17 +509,20 @@ export class ODataBooter implements Booter {
       const deletePath = relationMeta.targetsMany
         ? `${basePath}/{id}/${relationName}/{targetKey}/$ref`
         : `${basePath}/{id}/${relationName}/$ref`;
-      const deleteSpec: OperationObject = {
-        responses: {
-          '204': { description: 'Reference removed.' },
+      const deleteSpec: OperationObject = this.applyGeneratedRouteMetadata(
+        {
+          responses: {
+            '204': { description: 'Reference removed.' },
+          },
+          parameters: relationMeta.targetsMany
+            ? [
+                { name: 'id', in: 'path', required: true, schema: { type: 'string' } },
+                { name: 'targetKey', in: 'path', required: true, schema: { type: 'string' } },
+              ]
+            : [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
         },
-        parameters: relationMeta.targetsMany
-          ? [
-              { name: 'id', in: 'path', required: true, schema: { type: 'string' } },
-              { name: 'targetKey', in: 'path', required: true, schema: { type: 'string' } },
-            ]
-          : [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
-      };
+        visibility,
+      );
 
       const deleteHandler: OperationHandler = async (ctx: RequestContext, ...params: unknown[]) => {
         const id = params[0];
@@ -508,12 +547,13 @@ export class ODataBooter implements Booter {
     controllerCtor: Function,
     basePath: string,
     verb: 'get' | 'post',
+    visibility: 'documented' | 'undocumented',
   ): RouteEntry {
     let path = basePath;
     if (op.binding === 'entity') path += '/{id}';
     path += `/${op.name}`;
 
-    const spec: OperationObject = {
+    let spec: OperationObject = {
       parameters:
         op.binding === 'entity'
           ? [{ name: 'id', in: 'path' as const, required: true, schema: { type: 'string' } }]
@@ -531,6 +571,7 @@ export class ODataBooter implements Booter {
         '200': { description: `${op.name} result` },
       },
     };
+    spec = this.applyGeneratedRouteMetadata(spec, visibility);
 
     const setSegment = op.binding === 'unbound' ? undefined : (basePath.split('/').pop() ?? '');
     const bindingKey = `controllers.${controllerCtor.name}`;

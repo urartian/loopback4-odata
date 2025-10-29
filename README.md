@@ -857,6 +857,7 @@ Run `npm test` to compile the TypeScript specs and execute the unit suite. Accep
 - [x] Derived LoopBack models surface `$BaseType` so inheritance is reflected in the generated CSDL
 - [x] Deep insert support for `hasOne`/`hasMany` relations (opt-in per entity set, multi-level traversal)
 - [x] Navigation `$ref` endpoints for `hasOne`/`hasMany` relations (link/unlink existing entities)
+- [x] OpenAPI visibility controls via per-model `documentInOpenApi` flags and global policies (`documentInOpenApiDefault`, `removeUndocumentedFromSpec`)
 
 Queries can now combine boolean operators and phrases:
 
@@ -921,6 +922,8 @@ this.bind(ODATA_BINDINGS.CONFIG).to({
 - `maxSkip`: Maximum allowed `$skip`. When strict mode is disabled, requests above the cap are clamped; with strict mode enabled they return `400 Bad Request`.
 - `pageSize`: Default number of records per page for server-driven paging. The service always returns at most this many entities and emits an `@odata.nextLink` with a human-readable `$skiptoken` so clients can resume the feed.
 - `enableDelta`: When `true`, collection responses include `@odata.deltaLink` so clients can poll only the rows that changed since the last snapshot.
+- `documentInOpenApiDefault`: Controls whether generated OData routes appear in the published OpenAPI spec. The default `'auto'` policy documents entity sets that are also decorated with LoopBack's `@model()` and hides OData-only models. Set to `true` to publish every generated controller or `false` to hide everything unless a model opts in via `@odataModel({documentInOpenApi: true})`.
+- `removeUndocumentedFromSpec`: When `true` (default), routes tagged with `x-visibility: 'undocumented'` are removed before `/openapi.json` is served. Set to `false` to keep them in the document; the spec enhancer retags them as `x-visibility: 'internal'` so tooling can filter them out.
 - `maxApplyResultSize`: Maximum number of rows the server will process in-memory when executing `$apply` fallbacks (default: `2000`). Requests that exceed the limit are rejected with `400 Bad Request`.
 - `logApplyFallbacks`: When `true`, logs a warning whenever `$apply` falls back to in-memory execution (default: `false`).
 - `onApplyFallback(event)`: Optional callback invoked whenever `$apply` falls back; receives `{event, entitySet, transformations, rows, limit}` so you can integrate with metrics/telemetry.
@@ -969,6 +972,34 @@ Entity-set specific overrides are available via `EntitySetRegistry.register`:
 - `hasStream`: mark the backing entity type as streaming (`Org.OData.Core.V1.HasStream`).
 
 Both the global `capabilities` defaults and per-set overrides support the new `insertRestrictions`, `updateRestrictions`, `deleteRestrictions`, and `searchRestrictions` keys. Example: `insertRestrictions: {insertable: false, nonInsertableNavigationProperties: ['orders']}` emits `Org.OData.Capabilities.V1.InsertRestrictions`, while `searchRestrictions: {unsupportedExpressions: ['not']}` maps shorthand values (`and`, `or`, `not`, etc.) to the corresponding `Org.OData.Capabilities.V1.SearchExpressions/*` enum members.
+
+### OpenAPI documentation visibility
+
+Generated OData routes now annotate each operation with `x-odata-generated` and a `x-visibility` hint so you can decide which controllers appear in `/openapi.json`.
+
+- With the default `documentInOpenApiDefault: 'auto'`, models that also use LoopBack's `@model()` decorator remain visible while controllers decorated only with `@odataModel()` are hidden.
+- Opt in explicitly with `@odataModel({documentInOpenApi: true})`, or suppress documentation with `@odataModel({documentInOpenApi: false})` even when `@model()` is present.
+- Override the global policy by binding `documentInOpenApiDefault` to `true` (publish every generated controller) or `false` (hide everything until a model opts in).
+
+Hidden routes keep their metadata for internal tooling: when `removeUndocumentedFromSpec` is `true` they are stripped from `/openapi.json`; when `false` they stay in the document but are retagged with `x-visibility: 'internal'`.
+
+```ts
+@odataModel({documentInOpenApi: true})
+class CustomerDraft extends Entity {/* ... */}
+
+@odataModel({documentInOpenApi: false})
+@model()
+class AuditLog extends Entity {/* ... */}
+
+const current = this.getSync(ODATA_BINDINGS.CONFIG) as ODataConfig;
+this.bind(ODATA_BINDINGS.CONFIG).to({
+  ...current,
+  documentInOpenApiDefault: 'auto',
+  removeUndocumentedFromSpec: true,
+});
+```
+
+Inspect the processed spec via `await app.restServer.getApiSpec()` or by requesting `/openapi.json` to confirm which routes are published.
 
 ### Server-driven Paging & `$skiptoken`
 
@@ -1338,6 +1369,12 @@ All three requests execute atomically. If any fails, the entire changeset is rol
 ## Contributing
 
 Contributions are welcome! Please open an issue or PR on GitHub.
+
+Before sending a pull request:
+
+- `npm run lint` to verify ESLint rules.
+- `npm run lint:fix` or `npm run format` to apply the project formatting presets.
+- `npm test` to run the unit and acceptance suites.
 
 ## License
 

@@ -13,3 +13,4 @@ export * from './services/odata-apply-executor.registry';
 export * from './services/postgres-apply-executor';
 export * from './util/navigation-path';
 export * from './controllers/service-document.controller';
+export * from './spec/odata-visibility.spec-enhancer';

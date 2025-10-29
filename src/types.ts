@@ -31,6 +31,9 @@ export interface ODataConfig {
   enableApplyPushdown?: boolean; // opt-in for datastore-backed $apply execution
   pageSize?: number; // default page size for server-driven paging
   enableDelta?: boolean; // opt-in for delta link emission
+  // OpenAPI visibility
+  documentInOpenApiDefault?: boolean | 'auto'; // default 'auto'
+  removeUndocumentedFromSpec?: boolean; // default true
 }
 
 export interface ODataNavigationRestriction {

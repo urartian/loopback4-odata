@@ -36,6 +36,7 @@ export interface EntitySetDef<T extends Entity = Entity> {
   deltaEnabled?: boolean;
   deltaField?: string;
   deltaToken?: DeltaTokenPayload;
+  documentInOpenApi?: boolean;
 }
 
 @injectable({ scope: BindingScope.SINGLETON })
@@ -74,6 +75,9 @@ export class EntitySetRegistry {
     }
     if (!def.deltaField && existing?.deltaField) {
       next.deltaField = existing.deltaField;
+    }
+    if (def.documentInOpenApi === undefined && existing?.documentInOpenApi !== undefined) {
+      next.documentInOpenApi = existing.documentInOpenApi;
     }
     this.sets.set(def.modelCtor, next);
     return next as EntitySetDef<T>;
