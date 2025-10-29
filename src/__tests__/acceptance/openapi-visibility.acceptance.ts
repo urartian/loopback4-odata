@@ -3,7 +3,6 @@ import { Constructor, inject } from '@loopback/core';
 import {
   DefaultCrudRepository,
   Entity,
-  buildModelDefinition,
   juggler,
   model,
   property,
@@ -55,9 +54,6 @@ class SuppressedEntity extends Entity {
   @property({ type: 'string' })
   name?: string;
 }
-
-buildModelDefinition(InternalEntity as typeof Entity & { definition?: unknown });
-buildModelDefinition(OptInEntity as typeof Entity & { definition?: unknown });
 
 class InternalEntityRepository extends DefaultCrudRepository<
   InternalEntity,

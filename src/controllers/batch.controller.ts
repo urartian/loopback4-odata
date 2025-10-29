@@ -11,6 +11,45 @@ import { AtomicityRequestState } from '../types/batch';
 import { parseMultipartBatch } from '../services/multipart-batch.parser';
 import { serializeMultipartBatch } from '../services/multipart-batch.serializer';
 import { Readable } from 'stream';
+import { markUndocumentedOperation } from '../util/openapi';
+
+const BATCH_OPERATION_SPEC = markUndocumentedOperation({
+  responses: {
+    '200': {
+      description: 'Execute multiple OData operations',
+      content: {
+        'application/json': {
+          schema: {
+            type: 'object',
+            properties: {
+              responses: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  properties: {
+                    id: { type: 'string' },
+                    atomicityGroup: { type: 'string' },
+                    status: { type: 'integer' },
+                    headers: {
+                      type: 'object',
+                      additionalProperties: { type: 'string' },
+                    },
+                    body: { type: 'object' },
+                  },
+                  required: ['status'],
+                },
+              },
+            },
+            required: ['responses'],
+          },
+        },
+      },
+    },
+    '400': {
+      description: 'Invalid batch payload',
+    },
+  },
+});
 
 export interface BatchRequest {
   id?: string;
@@ -118,43 +157,7 @@ export class ODataBatchController {
     private readonly registry: EntitySetRegistry,
   ) {}
 
-  @post('/odata/$batch', {
-    responses: {
-      '200': {
-        description: 'Execute multiple OData operations',
-        content: {
-          'application/json': {
-            schema: {
-              type: 'object',
-              properties: {
-                responses: {
-                  type: 'array',
-                  items: {
-                    type: 'object',
-                    properties: {
-                      id: { type: 'string' },
-                      atomicityGroup: { type: 'string' },
-                      status: { type: 'integer' },
-                      headers: {
-                        type: 'object',
-                        additionalProperties: { type: 'string' },
-                      },
-                      body: { type: 'object' },
-                    },
-                    required: ['status'],
-                  },
-                },
-              },
-              required: ['responses'],
-            },
-          },
-        },
-      },
-      '400': {
-        description: 'Invalid batch payload',
-      },
-    },
-  })
+  @post('/odata/$batch', BATCH_OPERATION_SPEC)
   async handleBatch(
     @requestBody({
       content: {

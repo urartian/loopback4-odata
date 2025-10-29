@@ -29,6 +29,7 @@ import {
   Entity,
   ModelDefinition,
   MODEL_KEY,
+  buildModelDefinition,
   juggler,
   RelationDefinitionMap,
 } from '@loopback/repository';
@@ -147,6 +148,15 @@ export class ODataBooter implements Booter {
     return Boolean(globalDefault);
   }
 
+  private ensureModelDefinition(modelCtor: typeof Entity): ModelDefinition | undefined {
+    let modelDefinition = (modelCtor as typeof Entity).definition as ModelDefinition | undefined;
+    if (modelDefinition) return modelDefinition;
+
+    buildModelDefinition(modelCtor as typeof Entity & { definition?: ModelDefinition | undefined });
+    modelDefinition = (modelCtor as typeof Entity).definition as ModelDefinition | undefined;
+    return modelDefinition;
+  }
+
   private applyGeneratedRouteMetadata(
     spec: OperationObject,
     visibility: 'documented' | 'undocumented',
@@ -196,9 +206,7 @@ export class ODataBooter implements Booter {
       }
 
       const securityMetadata = collectControllerSecurityMetadata(ctor);
-      const modelDefinition = (modelCtor as typeof Entity).definition as
-        | ModelDefinition
-        | undefined;
+      const modelDefinition = this.ensureModelDefinition(modelCtor);
       const hooks = getODataHooks(ctor);
 
       // Validate @odata.on uniqueness per (op, scope)

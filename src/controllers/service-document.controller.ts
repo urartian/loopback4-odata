@@ -4,6 +4,38 @@ import { ODATA_BINDINGS } from '../keys';
 import { EntitySetRegistry } from '../registry/entityset-registry';
 import { ODataConfig } from '../types';
 import { ODATA_VERSION } from '../constants';
+import { markUndocumentedOperation } from '../util/openapi';
+
+const SERVICE_DOCUMENT_OPERATION_SPEC = markUndocumentedOperation({
+  responses: {
+    '200': {
+      description: 'OData service document',
+      content: {
+        'application/json': {
+          schema: {
+            type: 'object',
+            required: ['@odata.context', 'value'],
+            properties: {
+              '@odata.context': { type: 'string' },
+              value: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  required: ['name', 'kind', 'url'],
+                  properties: {
+                    name: { type: 'string' },
+                    kind: { type: 'string' },
+                    url: { type: 'string' },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+  },
+});
 
 interface ServiceDocumentEntry {
   name: string;
@@ -34,36 +66,7 @@ export class ODataServiceDocumentController {
     private readonly config: ODataConfig,
   ) {}
 
-  @get('/odata', {
-    responses: {
-      '200': {
-        description: 'OData service document',
-        content: {
-          'application/json': {
-            schema: {
-              type: 'object',
-              required: ['@odata.context', 'value'],
-              properties: {
-                '@odata.context': { type: 'string' },
-                value: {
-                  type: 'array',
-                  items: {
-                    type: 'object',
-                    required: ['name', 'kind', 'url'],
-                    properties: {
-                      name: { type: 'string' },
-                      kind: { type: 'string' },
-                      url: { type: 'string' },
-                    },
-                  },
-                },
-              },
-            },
-          },
-        },
-      },
-    },
-  })
+  @get('/odata', SERVICE_DOCUMENT_OPERATION_SPEC)
   getServiceDocument(
     @inject(RestBindings.Http.RESPONSE) response: Response,
     @inject(RestBindings.Http.REQUEST) request: Request,
