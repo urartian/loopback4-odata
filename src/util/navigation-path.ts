@@ -1,4 +1,4 @@
-import { AnyObject, Entity, ModelDefinition } from '@loopback/repository';
+import { AnyObject, Entity, ModelDefinition, buildModelDefinition } from '@loopback/repository';
 import { ensureNavigationTargetKey } from './relation-metadata';
 
 type RelationMeta = AnyObject & {
@@ -114,7 +114,12 @@ function getRelationMeta(modelCtor: typeof Entity, name: string): RelationMeta |
 }
 
 function getModelDefinition(modelCtor: typeof Entity): ModelDefinition | undefined {
-  return (modelCtor as AnyObject).definition as ModelDefinition | undefined;
+  let definition = (modelCtor as AnyObject).definition as ModelDefinition | undefined;
+  if (definition) return definition;
+
+  buildModelDefinition(modelCtor as typeof Entity & { definition?: ModelDefinition | undefined });
+  definition = (modelCtor as AnyObject).definition as ModelDefinition | undefined;
+  return definition;
 }
 
 function normalizeRelationType(meta: RelationMeta): SupportedRelationType | undefined {

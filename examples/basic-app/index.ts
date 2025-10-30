@@ -93,12 +93,12 @@ export class ExampleApp extends BootMixin(RepositoryMixin(RestApplication)) {
       enableApplyPushdown: enablePushdown,
       logApplyFallbacks: true, // optional so you see the warning
       ...(logTelemetry ? { logApplyTelemetry: true } : {}),
+      documentInOpenApiDefault: false,
     });
   }
 }
 
 @odataModel({ etag: 'updatedAt' })
-@model()
 export class Product extends Entity {
   @property({
     type: 'number',
@@ -126,7 +126,6 @@ export class Product extends Entity {
 }
 
 @odataModel({ deepInsert: true, deepUpdate: true })
-@model()
 export class Order extends Entity {
   @property({
     type: 'number',
@@ -147,8 +146,7 @@ export class Order extends Entity {
   products?: Product[];
 }
 
-@odataModel()
-@model()
+@odataModel({ documentInOpenApi: true })
 export class OrderItem extends Entity {
   @property({
     type: 'number',
@@ -299,7 +297,7 @@ export class OrderItemRepository extends DefaultCrudRepository<
 
 @odataController(Product)
 class ProductODataController {
-  constructor(@repository(ProductRepository) private readonly products: ProductRepository) {}
+  constructor(@repository(ProductRepository) private readonly products: ProductRepository) { }
 
   @odataAction({
     binding: 'entity',
@@ -327,10 +325,10 @@ class ProductODataController {
 }
 
 @odataController(Order)
-class OrderODataController {}
+class OrderODataController { }
 
 @odataController(OrderItem)
-class OrderItemODataController {}
+class OrderItemODataController { }
 
 export async function main() {
   const app = new ExampleApp();

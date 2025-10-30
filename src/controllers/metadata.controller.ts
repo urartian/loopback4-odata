@@ -3,7 +3,19 @@ import { inject } from '@loopback/core';
 import { ODATA_BINDINGS } from '../keys';
 import { CsdlGenerator } from '../metadata/csdl-generator';
 import { ODataConfig } from '../types';
-import { ODATA_VERSION } from '../constants';
+import { markUndocumentedOperation } from '../util/openapi';
+
+const METADATA_OPERATION_SPEC = markUndocumentedOperation({
+  responses: {
+    '200': {
+      description: 'OData service metadata',
+      content: {
+        'application/xml': { schema: { type: 'string' } },
+        'application/json': { schema: { type: 'string' } },
+      },
+    },
+  },
+});
 
 export class ODataMetadataController {
   constructor(
@@ -11,17 +23,7 @@ export class ODataMetadataController {
     @inject(ODATA_BINDINGS.CONFIG) private cfg: ODataConfig,
   ) {}
 
-  @get('/odata/$metadata', {
-    responses: {
-      '200': {
-        description: 'OData service metadata',
-        content: {
-          'application/xml': { schema: { type: 'string' } },
-          'application/json': { schema: { type: 'string' } },
-        },
-      },
-    },
-  })
+  @get('/odata/$metadata', METADATA_OPERATION_SPEC)
   getMetadata(
     @inject(RestBindings.Http.RESPONSE) res: Response,
     @inject(RestBindings.Http.REQUEST) req: any,

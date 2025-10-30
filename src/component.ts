@@ -1,4 +1,4 @@
-import { Component, Binding, BindingScope } from '@loopback/core';
+import { Component, Binding, BindingScope, createBindingFromClass } from '@loopback/core';
 import { RestBindings, createMiddlewareBinding } from '@loopback/rest';
 import { ODataConfig } from './types';
 import { ODATA_BINDINGS } from './keys';
@@ -13,6 +13,7 @@ import { ODataErrorProvider } from './providers/odata-error.provider';
 import { ODataApplyExecutorRegistry } from './services/odata-apply-executor.registry';
 import { PostgresApplyExecutor } from './services/postgres-apply-executor';
 import { MySqlApplyExecutor } from './services/mysql-apply-executor';
+import { ODataVisibilitySpecEnhancer } from './spec/odata-visibility.spec-enhancer';
 
 export class ODataComponent implements Component {
   bindings = [
@@ -33,6 +34,8 @@ export class ODataComponent implements Component {
       },
       logApplyTelemetry: false,
       maxApplyNavigationFanout: 1000,
+      documentInOpenApiDefault: 'auto',
+      removeUndocumentedFromSpec: true,
     } as ODataConfig),
     Binding.bind(ODATA_BINDINGS.CSDL_GEN).toClass(CsdlGenerator).inScope(BindingScope.SINGLETON),
     Binding.bind(ODATA_BINDINGS.ENTITY_SET_REGISTRY)
@@ -52,6 +55,7 @@ export class ODataComponent implements Component {
     Binding.bind(RestBindings.SequenceActions.REJECT)
       .toProvider(ODataErrorProvider)
       .inScope(BindingScope.SINGLETON),
+    createBindingFromClass(ODataVisibilitySpecEnhancer),
   ];
 
   controllers = [ODataMetadataController, ODataBatchController, ODataServiceDocumentController];
