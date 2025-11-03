@@ -1,3 +1,10 @@
+import {
+  DeltaTokenSecurityOptions,
+  TokenVerificationError,
+  signDeltaToken,
+  verifyDeltaToken,
+} from './token-signing';
+
 export interface DeltaTokenBucketState {
   key: Record<string, unknown>;
   data?: Record<string, unknown>;
@@ -8,6 +15,7 @@ export interface DeltaTokenPayload {
   lastValue: string;
   keyValues?: Record<string, unknown>;
   buckets?: DeltaTokenBucketState[];
+  issuedAt?: string;
 }
 
 const LEGACY_PREFIX = 'v1:';
@@ -60,9 +68,18 @@ function decodeKeyValuesObject(raw?: Record<string, unknown>): Record<string, un
   return result;
 }
 
-export function encodeDeltaToken(payload: DeltaTokenPayload): string {
-  const encoded = Buffer.from(JSON.stringify(payload), 'utf8').toString('base64');
-  return `${JSON_PREFIX}${encoded}`;
+export function encodeDeltaToken(
+  payload: DeltaTokenPayload,
+  options: DeltaTokenSecurityOptions,
+): string {
+  const encodedPayload: DeltaTokenPayload = {
+    entitySet: payload.entitySet,
+    lastValue: payload.lastValue,
+    keyValues: encodeKeyValues(payload.keyValues),
+    buckets: payload.buckets ? payload.buckets.map(cloneBucketState) : undefined,
+    issuedAt: payload.issuedAt ?? new Date().toISOString(),
+  };
+  return signDeltaToken(encodedPayload, options);
 }
 
 function decodeLegacyToken(token: string): DeltaTokenPayload {
@@ -85,32 +102,52 @@ function decodeLegacyToken(token: string): DeltaTokenPayload {
   return { entitySet, lastValue, keyValues };
 }
 
-export function decodeDeltaToken(token: string): DeltaTokenPayload {
+function decodeJsonToken(token: string): DeltaTokenPayload {
+  const raw = Buffer.from(token.slice(JSON_PREFIX.length), 'base64').toString('utf8');
+  const parsed = JSON.parse(raw) as {
+    entitySet: string;
+    lastValue: string;
+    keyValues?: Record<string, unknown>;
+    buckets?: unknown;
+    issuedAt?: string;
+  };
+  if (!parsed?.entitySet || !parsed?.lastValue) {
+    throw new Error('Invalid delta token payload.');
+  }
+  return {
+    entitySet: parsed.entitySet,
+    lastValue: parsed.lastValue,
+    keyValues: decodeKeyValuesObject(parsed.keyValues),
+    buckets: normalizeBucketStates(parsed.buckets),
+    issuedAt: parsed.issuedAt,
+  };
+}
+
+export function decodeDeltaToken(
+  token: string,
+  options: DeltaTokenSecurityOptions,
+): DeltaTokenPayload {
   if (!token) {
-    throw new Error('Invalid delta token format.');
+    throw new TokenVerificationError('Invalid delta token format.', 'invalid');
   }
   if (token.startsWith(JSON_PREFIX)) {
-    const raw = Buffer.from(token.slice(JSON_PREFIX.length), 'base64').toString('utf8');
-    const parsed = JSON.parse(raw) as {
-      entitySet: string;
-      lastValue: string;
-      keyValues?: Record<string, unknown>;
-      buckets?: unknown;
-    };
-    if (!parsed?.entitySet || !parsed?.lastValue) {
-      throw new Error('Invalid delta token payload.');
-    }
-    return {
-      entitySet: parsed.entitySet,
-      lastValue: parsed.lastValue,
-      keyValues: decodeKeyValuesObject(parsed.keyValues),
-      buckets: normalizeBucketStates(parsed.buckets),
-    };
+    return decodeJsonToken(token);
   }
   if (token.startsWith(LEGACY_PREFIX)) {
     return decodeLegacyToken(token);
   }
-  throw new Error('Unsupported delta token format.');
+  const payload = verifyDeltaToken<DeltaTokenPayload>(
+    token,
+    options,
+    options.allowLegacyUnsigned ? decodeLegacyToken : undefined,
+  );
+  return {
+    entitySet: payload.entitySet,
+    lastValue: payload.lastValue,
+    keyValues: decodeKeyValuesObject(payload.keyValues),
+    buckets: normalizeBucketStates(payload.buckets),
+    issuedAt: payload.issuedAt,
+  };
 }
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
@@ -126,6 +163,13 @@ function cloneRecord(
     clone[key] = value;
   }
   return clone;
+}
+
+function cloneBucketState(entry: DeltaTokenBucketState): DeltaTokenBucketState {
+  return {
+    key: cloneRecord(entry.key) ?? {},
+    data: cloneRecord(entry.data),
+  };
 }
 
 function normalizeBucketStates(raw?: unknown): DeltaTokenBucketState[] | undefined {

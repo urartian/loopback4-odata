@@ -190,8 +190,8 @@ export class MySqlApplyExecutor implements ODataApplyExecutor {
       return undefined;
     }
     if (
-      paging?.skipToken &&
-      (!orderDescriptors.length || paging.skipToken.length !== orderDescriptors.length)
+      paging?.skipTokenValues &&
+      (!orderDescriptors.length || paging.skipTokenValues.length !== orderDescriptors.length)
     ) {
       return undefined;
     }
@@ -205,8 +205,12 @@ export class MySqlApplyExecutor implements ODataApplyExecutor {
         finalStage.finalLimitClause = `LIMIT ${limitValue}`;
       }
     }
-    if (paging?.skipToken && orderDescriptors.length) {
-      const predicate = this.buildSkipTokenPredicate(orderDescriptors, paging.skipToken, params);
+    if (paging?.skipTokenValues && orderDescriptors.length) {
+      const predicate = this.buildSkipTokenPredicate(
+        orderDescriptors,
+        paging.skipTokenValues,
+        params,
+      );
       if (!predicate) return undefined;
       finalStage.finalWhereClause = finalStage.finalWhereClause
         ? `(${finalStage.finalWhereClause}) AND (${predicate})`
@@ -237,14 +241,14 @@ export class MySqlApplyExecutor implements ODataApplyExecutor {
     const finalStageHasOrder = Boolean(stages[stages.length - 1]?.orderBy?.length);
 
     let processedRows = rows;
-    let nextSkipToken: string | undefined;
+    let nextSkipTokenValues: string[] | undefined;
     if (paging?.pageSize && paging.pageSize > 0 && orderDescriptors.length) {
       const effectiveSize = Math.min(paging.pageSize, rows.length);
       const hasMore = rows.length > paging.pageSize;
       processedRows = rows.slice(0, effectiveSize);
       if (hasMore && processedRows.length) {
         const lastRow = processedRows[processedRows.length - 1];
-        nextSkipToken = this.createSkipToken(lastRow, orderDescriptors);
+        nextSkipTokenValues = this.createSkipTokenValues(lastRow, orderDescriptors);
       }
     }
 
@@ -254,7 +258,7 @@ export class MySqlApplyExecutor implements ODataApplyExecutor {
       appliedPipelinePagination: hasStagePagination ? stagePaginationApplied : undefined,
       appliedStageFilters: hasStageFilters ? stageFiltersApplied : undefined,
       appliedExternalPagination: paging?.pageSize && orderDescriptors.length ? true : undefined,
-      nextSkipToken,
+      nextSkipTokenValues,
     };
   }
 
@@ -476,18 +480,18 @@ export class MySqlApplyExecutor implements ODataApplyExecutor {
     return branches.join(' OR ');
   }
 
-  private createSkipToken(
+  private createSkipTokenValues(
     row: AnyObject | undefined,
     descriptors: ApplyOrderDescriptor[],
-  ): string | undefined {
+  ): string[] | undefined {
     if (!row || !descriptors.length) return undefined;
-    const parts: string[] = [];
+    const values: string[] = [];
     for (const descriptor of descriptors) {
       const value = this.extractTokenValue(row, descriptor.field);
       if (value === undefined) return undefined;
-      parts.push(encodeURIComponent(this.stringifyTokenValue(value)));
+      values.push(this.stringifyTokenValue(value));
     }
-    return parts.join(',');
+    return values;
   }
 
   private getOrInferSqlMetadata(

@@ -1,12 +1,6 @@
 import { Client, createRestAppClient, expect } from '@loopback/testlab';
 import { Constructor, inject } from '@loopback/core';
-import {
-  DefaultCrudRepository,
-  Entity,
-  juggler,
-  model,
-  property,
-} from '@loopback/repository';
+import { DefaultCrudRepository, Entity, juggler, model, property } from '@loopback/repository';
 import { ODataComponent, odataController, odataModel } from '../../';
 import { TestApplication } from '../fixtures/odata-app.fixture';
 import { ODATA_BINDINGS } from '../../keys';
@@ -106,7 +100,10 @@ class SuppressedEntityController {}
 type EntityKey = 'internal' | 'published' | 'optIn' | 'suppressed';
 type CrudRepositoryCtor = new (dataSource: juggler.DataSource) => DefaultCrudRepository<any, any>;
 
-const ENTITY_SETUPS: Record<EntityKey, { repository: CrudRepositoryCtor; controller: Constructor<unknown> }> = {
+const ENTITY_SETUPS: Record<
+  EntityKey,
+  { repository: CrudRepositoryCtor; controller: Constructor<unknown> }
+> = {
   internal: { repository: InternalEntityRepository, controller: InternalEntityController },
   published: { repository: PublishedEntityRepository, controller: PublishedEntityController },
   optIn: { repository: OptInEntityRepository, controller: OptInEntityController },
@@ -205,9 +202,7 @@ describe('OData OpenAPI visibility', () => {
         expect(Object.keys(rawPaths)).to.containEql('/odata/InternalEntities');
         const registry = (await app.get(ODATA_BINDINGS.ENTITY_SET_REGISTRY)) as any;
         expect(
-          registry
-            .list()
-            .map((def: any) => `${def.name}:${def.documentInOpenApi}`),
+          registry.list().map((def: any) => `${def.name}:${def.documentInOpenApi}`),
         ).to.containEql('InternalEntities:false');
         const paths = spec.paths ?? {};
         const published = paths['/odata/PublishedEntities'] as Record<string, any> | undefined;

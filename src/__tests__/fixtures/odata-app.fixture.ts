@@ -29,6 +29,8 @@ import {
   CrudHookContext,
   odataSearchable,
 } from '../../index';
+import { ODATA_BINDINGS } from '../../keys';
+import { ODataConfig } from '../../types';
 
 const MEMORY_DS_CONFIG = {
   name: 'db',
@@ -339,6 +341,11 @@ export async function givenODataApplication(
   app.repository(OrderRepository);
   app.repository(OrderItemNoteRepository);
   app.component(ODataComponent);
+  const currentConfig = app.getSync(ODATA_BINDINGS.CONFIG) as ODataConfig;
+  app.bind(ODATA_BINDINGS.CONFIG).to({
+    ...currentConfig,
+    tokenSecret: 'test-secret',
+  });
   app.controller(ProductODataController);
   app.controller(OrderODataController);
   app.controller(OrderItemODataController);

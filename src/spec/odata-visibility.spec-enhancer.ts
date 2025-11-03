@@ -3,10 +3,11 @@ import { asSpecEnhancer, OASEnhancer, OpenApiSpec } from '@loopback/openapi-v3';
 import { ODataConfig } from '../types';
 import { ODATA_BINDINGS } from '../keys';
 
-const HTTP_METHODS: Array<'get' | 'put' | 'post' | 'delete' | 'options' | 'head' | 'patch' | 'trace'> =
-  ['get', 'put', 'post', 'delete', 'options', 'head', 'patch', 'trace'];
+const HTTP_METHODS: Array<
+  'get' | 'put' | 'post' | 'delete' | 'options' | 'head' | 'patch' | 'trace'
+> = ['get', 'put', 'post', 'delete', 'options', 'head', 'patch', 'trace'];
 
-@injectable(asSpecEnhancer, {scope: BindingScope.SINGLETON})
+@injectable(asSpecEnhancer, { scope: BindingScope.SINGLETON })
 export class ODataVisibilitySpecEnhancer implements OASEnhancer {
   name = 'odata-visibility';
 
