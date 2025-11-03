@@ -801,6 +801,8 @@ Content-Type: application/json
 
 If the datasource behind the repositories cannot create transactions (for example, the in-memory connector), the OData component returns `501 Not Implemented` with a `BatchExecutionError` explaining that the changeset could not be guaranteed. Use a transactional connector or omit `atomicityGroup` to execute requests independently.
 
+The `$batch` parser enforces guardrails derived from `config.batch`: payload size (`maxPayloadBytes`, default 16 MB), total operations (`maxOperations`, default 100), operations per changeset (`maxChangesetOperations`, default 50), nesting depth (`maxDepth`, default 2 levels), and per-part payload size (`maxPartBodyBytes`, default 4 MB). Requests that exceed these limits short-circuit with `413 Payload Too Large` (for size breaches) or `400 Bad Request` (for operation limits), and the controller logs a structured warning so you can correlate rejections with client traffic. Tune the limits to match your back-end capacity—anything outside the allowed envelope is rejected before the atomic handlers run.
+
 ## Optimistic Concurrency (ETags)
 
 Add an ETag column to your LoopBack model and opt in by passing it to `@odataModel`. The property is typically a timestamp or version counter that you update whenever the record changes.
@@ -906,6 +908,12 @@ this.bind(ODATA_BINDINGS.CONFIG).to({
   enableCount: true, // enable inline and standalone $count
   strict: true, // enable strict validations (default: true)
   enableDelta: true, // emit $deltatoken links for incremental syncs
+  batch: {
+    maxPayloadBytes: 16 * 1024 * 1024, // total request size limit
+    maxOperations: 100, // total requests allowed per batch
+    maxChangesetOperations: 50, // per-changeset limit
+    maxPartBodyBytes: 4 * 1024 * 1024, // individual part payload limit
+  },
 } as ODataConfig);
 ```
 
@@ -938,6 +946,7 @@ Spreading the current config ensures sensitive settings such as `tokenSecret` re
 - `skipTokenTtl`: Lifetime (in seconds) for issued `$skiptoken` links. Defaults to `900` (15 minutes). Expired tokens return `400 Invalid $skiptoken`.
 - `deltaTokenTtl`: Optional lifetime (seconds) for `$deltatoken` links. When omitted, delta tokens remain valid until you rotate the secret or prune their backing store.
 - `allowLegacyUnsignedTokens`: Set to `true` only while migrating from the unsigned (v1/v2) token format. New deployments should leave this `false` to reject tampered tokens outright.
+- `batch`: Guardrails for `$batch` requests. Provide `maxPayloadBytes` (default `16 MB`), `maxOperations` (100 operations), `maxChangesetOperations` (50 per changeset), `maxPartBodyBytes` (4 MB), and `maxDepth` (2 levels) to cap payload size, total operations, and changeset nesting.
 - `documentInOpenApiDefault`: Controls whether generated OData routes appear in the published OpenAPI spec. The default `'auto'` policy documents entity sets that are also decorated with LoopBack's `@model()` and hides OData-only models. Set to `true` to publish every generated controller or `false` to hide everything unless a model opts in via `@odataModel({documentInOpenApi: true})`.
 - `removeUndocumentedFromSpec`: When `true` (default), routes tagged with `x-visibility: 'undocumented'` are removed before `/openapi.json` is served. Set to `false` to keep them in the document; the spec enhancer retags them as `x-visibility: 'internal'` so tooling can filter them out.
 - `maxApplyResultSize`: Maximum number of rows the server will process in-memory when executing `$apply` fallbacks (default: `2000`). Requests that exceed the limit are rejected with `400 Bad Request`.

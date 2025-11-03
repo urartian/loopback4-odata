@@ -1424,6 +1424,72 @@ describe('OData component acceptance', () => {
     expect(failure.body?.error?.code).to.equal('BatchExecutionError');
   });
 
+  it('rejects $batch requests that exceed maxOperations', async () => {
+    const current = app.getSync(ODATA_BINDINGS.CONFIG) as ODataConfig;
+    const original = {
+      ...current,
+      batch: { ...(current.batch ?? {}) },
+    } satisfies ODataConfig;
+    app.bind(ODATA_BINDINGS.CONFIG).to({
+      ...original,
+      batch: {
+        ...(original.batch ?? {}),
+        maxOperations: 1,
+      },
+    });
+
+    await client
+      .post('/odata/$batch')
+      .set('Content-Type', 'application/json')
+      .send({
+        requests: [
+          { id: '1', method: 'GET', url: '/odata/Products' },
+          { id: '2', method: 'GET', url: '/odata/Orders' },
+        ],
+      })
+      .expect(400);
+
+    app.bind(ODATA_BINDINGS.CONFIG).to(original);
+  });
+
+  it('rejects multipart $batch requests that exceed part size limit', async () => {
+    const current = app.getSync(ODATA_BINDINGS.CONFIG) as ODataConfig;
+    const original = {
+      ...current,
+      batch: { ...(current.batch ?? {}) },
+    } satisfies ODataConfig;
+    app.bind(ODATA_BINDINGS.CONFIG).to({
+      ...original,
+      batch: {
+        ...(original.batch ?? {}),
+        maxPartBodyBytes: 64,
+      },
+    });
+
+    const batchBoundary = 'batch_part_limit';
+    const payload = [
+      `--${batchBoundary}`,
+      'Content-Type: application/http',
+      'Content-Transfer-Encoding: binary',
+      '',
+      'POST /odata/Products HTTP/1.1',
+      'Content-Type: application/json',
+      '',
+      `{"name":"${'X'.repeat(200)}"}`,
+      '',
+      `--${batchBoundary}--`,
+      '',
+    ].join('\r\n');
+
+    await client
+      .post('/odata/$batch')
+      .set('Content-Type', `multipart/mixed; boundary=${batchBoundary}`)
+      .send(payload)
+      .expect(413);
+
+    app.bind(ODATA_BINDINGS.CONFIG).to(original);
+  });
+
   it('accepts multipart/mixed batch requests', async () => {
     const batchBoundary = 'batch_123';
     const changesetBoundary = 'changeset_abc';

@@ -58,4 +58,87 @@ describe('multipart batch parser', () => {
     expect(listReq.method).to.equal('GET');
     expect(listReq.atomicityGroup).to.be.undefined();
   });
+
+  it('enforces maxOperations limit', async () => {
+    const batchBoundary = 'batch_limit';
+    const body = [
+      `--${batchBoundary}`,
+      'Content-Type: application/http',
+      'Content-Transfer-Encoding: binary',
+      '',
+      'GET /odata/Products HTTP/1.1',
+      '',
+      '',
+      `--${batchBoundary}`,
+      'Content-Type: application/http',
+      'Content-Transfer-Encoding: binary',
+      '',
+      'GET /odata/Orders HTTP/1.1',
+      '',
+      '',
+      `--${batchBoundary}--`,
+      '',
+    ].join('\r\n');
+    const stream = Readable.from(body);
+    await expect(
+      parseMultipartBatch(stream, batchBoundary, {
+        limits: { maxOperations: 1 },
+      }),
+    ).to.be.rejectedWith(/operation limit/i);
+  });
+
+  it('enforces maxPartBodyBytes limit', async () => {
+    const batchBoundary = 'batch_payload';
+    const largeBody = 'POST /odata/Products HTTP/1.1\r\n\r\n' + 'x'.repeat(256);
+    const body = [
+      `--${batchBoundary}`,
+      'Content-Type: application/http',
+      'Content-Transfer-Encoding: binary',
+      '',
+      largeBody,
+      '',
+      `--${batchBoundary}--`,
+      '',
+    ].join('\r\n');
+    const stream = Readable.from(body);
+    await expect(
+      parseMultipartBatch(stream, batchBoundary, {
+        limits: { maxPartBodyBytes: 128 },
+      }),
+    ).to.be.rejectedWith(/part exceeds the configured size limit/i);
+  });
+
+  it('invokes onLimitViolation callback when limits are exceeded', async () => {
+    const batchBoundary = 'batch_notify';
+    const body = [
+      `--${batchBoundary}`,
+      'Content-Type: application/http',
+      'Content-Transfer-Encoding: binary',
+      '',
+      'GET /odata/Products HTTP/1.1',
+      '',
+      '',
+      `--${batchBoundary}`,
+      'Content-Type: application/http',
+      'Content-Transfer-Encoding: binary',
+      '',
+      'GET /odata/Orders HTTP/1.1',
+      '',
+      '',
+      `--${batchBoundary}--`,
+      '',
+    ].join('\r\n');
+    const stream = Readable.from(body);
+    let reported: string | undefined;
+    await expect(
+      parseMultipartBatch(stream, batchBoundary, {
+        limits: { maxOperations: 1 },
+        onLimitViolation: (reason) => {
+          reported = reason;
+        },
+      }),
+    ).to.be.rejectedWith(/operation limit/i);
+    expect(reported).to.be.String();
+    expect(reported).to.match(/exceeds maxOperations/);
+  });
 });

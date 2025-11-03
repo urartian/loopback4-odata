@@ -39,6 +39,13 @@ export class ODataComponent implements Component {
       skipTokenTtl: 900,
       deltaTokenTtl: 604800,
       allowLegacyUnsignedTokens: false,
+      batch: {
+        maxPayloadBytes: 16 * 1024 * 1024,
+        maxOperations: 100,
+        maxChangesetOperations: 50,
+        maxDepth: 2,
+        maxPartBodyBytes: 4 * 1024 * 1024,
+      },
     } as ODataConfig),
     Binding.bind(ODATA_BINDINGS.CSDL_GEN).toClass(CsdlGenerator).inScope(BindingScope.SINGLETON),
     Binding.bind(ODATA_BINDINGS.ENTITY_SET_REGISTRY)
