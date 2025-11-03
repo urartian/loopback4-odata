@@ -18,7 +18,7 @@ export interface ApplyOrderDescriptor {
 
 export interface ApplyPagingOptions {
   order: ApplyOrderDescriptor[];
-  skipToken?: string[];
+  skipTokenValues?: string[];
   pageSize?: number;
   stageTop?: number;
   stageSkip?: number;
@@ -47,7 +47,7 @@ export interface ODataApplyExecutorResult {
   appliedPipelinePagination?: boolean;
   appliedExternalPagination?: boolean;
   appliedStageFilters?: boolean;
-  nextSkipToken?: string;
+  nextSkipTokenValues?: string[];
 }
 
 export interface ODataApplyExecutor {

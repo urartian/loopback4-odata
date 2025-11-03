@@ -167,6 +167,27 @@ describe('OData component acceptance', () => {
     await client.get('/odata/Products?$skiptoken=invalid-token').expect(400);
   });
 
+  it('rejects tampered $skiptoken payloads', async () => {
+    const current = app.getSync(ODATA_BINDINGS.CONFIG) as ODataConfig;
+    app.bind(ODATA_BINDINGS.CONFIG).to({
+      ...current,
+      pageSize: 2,
+    });
+
+    const first = await client.get('/odata/Products').expect(200);
+    const nextLink = String(first.body['@odata.nextLink']);
+    const nextUrl = new URL(nextLink, 'http://localhost');
+    const original = nextUrl.searchParams.get('$skiptoken');
+    expect(original).to.be.String();
+    if (!original) {
+      throw new Error('Expected $skiptoken in next link.');
+    }
+    const tampered = original.charAt(0) === 'A' ? `B${original.slice(1)}` : `A${original.slice(1)}`;
+    nextUrl.searchParams.set('$skiptoken', tampered);
+
+    await client.get(`${nextUrl.pathname}?${nextUrl.searchParams.toString()}`).expect(400);
+  });
+
   it('honors $format=json even when Accept header excludes JSON', async () => {
     const res = await client
       .get('/odata/Products')
@@ -383,6 +404,30 @@ describe('OData component acceptance', () => {
     expect(tombstone.name).to.equal('Laptop');
     expect(tombstone.TotalPrice).to.equal(1299);
     expect(tombstone['@removed']?.reason).to.equal('deleted');
+  });
+
+  it('rejects tampered $deltatoken payloads', async () => {
+    const current = app.getSync(ODATA_BINDINGS.CONFIG) as ODataConfig;
+    Object.assign(current, { enableDelta: true, pageSize: 2 });
+    const registry = app.getSync(ODATA_BINDINGS.ENTITY_SET_REGISTRY);
+    const productsDef = registry.findByName('Products');
+    if (productsDef) {
+      productsDef.deltaEnabled = true;
+      productsDef.deltaField = productsDef.deltaField ?? 'updatedAt';
+    }
+
+    const first = await client.get('/odata/Products').expect(200);
+    const deltaLink = String(first.body['@odata.deltaLink']);
+    const deltaUrl = new URL(deltaLink, 'http://localhost');
+    const original = deltaUrl.searchParams.get('$deltatoken');
+    expect(original).to.be.String();
+    if (!original) {
+      throw new Error('Expected $deltatoken in delta link.');
+    }
+    const tampered = original.charAt(0) === 'A' ? `B${original.slice(1)}` : `A${original.slice(1)}`;
+    deltaUrl.searchParams.set('$deltatoken', tampered);
+
+    await client.get(`${deltaUrl.pathname}?${deltaUrl.searchParams.toString()}`).expect(400);
   });
 
   it('rejects $deltatoken when delta support is disabled', async () => {

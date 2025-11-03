@@ -1,4 +1,4 @@
-import {OperationObject} from '@loopback/openapi-v3';
+import { OperationObject } from '@loopback/openapi-v3';
 
 export type ODataVisibility = 'documented' | 'undocumented';
 

@@ -141,8 +141,7 @@ export class ODataBooter implements Booter {
     }
     const globalDefault = this.config?.documentInOpenApiDefault ?? 'auto';
     if (globalDefault === 'auto') {
-      const hasLoopbackModel =
-        MetadataInspector.getClassMetadata(MODEL_KEY, modelCtor) != null;
+      const hasLoopbackModel = MetadataInspector.getClassMetadata(MODEL_KEY, modelCtor) != null;
       return hasLoopbackModel;
     }
     return Boolean(globalDefault);

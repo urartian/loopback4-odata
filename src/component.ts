@@ -36,6 +36,9 @@ export class ODataComponent implements Component {
       maxApplyNavigationFanout: 1000,
       documentInOpenApiDefault: 'auto',
       removeUndocumentedFromSpec: true,
+      skipTokenTtl: 900,
+      deltaTokenTtl: 604800,
+      allowLegacyUnsignedTokens: false,
     } as ODataConfig),
     Binding.bind(ODATA_BINDINGS.CSDL_GEN).toClass(CsdlGenerator).inScope(BindingScope.SINGLETON),
     Binding.bind(ODATA_BINDINGS.ENTITY_SET_REGISTRY)

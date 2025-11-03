@@ -89,6 +89,14 @@ import {
   ODataApplyExecutorRegistry,
   ODataApplyExecutorContext,
 } from '../services/odata-apply-executor.registry';
+import {
+  signSkipToken,
+  verifySkipToken,
+  TokenVerificationError,
+  TokenSecurityOptions,
+  DeltaTokenSecurityOptions,
+  stableStringify,
+} from '../util/token-signing';
 type CrudEntity = Entity & { [key: string]: unknown };
 type CrudRepo = DefaultCrudRepository<CrudEntity, unknown>;
 type NormalizedInclusion = Exclude<InclusionFilter, string>;
@@ -162,10 +170,7 @@ function getIdProperties(definition: any): string[] {
 
 type ODataVisibility = 'documented' | 'undocumented';
 
-function withODataSpecMetadata<T extends OperationObject>(
-  spec: T,
-  visibility: ODataVisibility,
-): T {
+function withODataSpecMetadata<T extends OperationObject>(spec: T, visibility: ODataVisibility): T {
   return {
     ...spec,
     'x-odata-generated': true,
@@ -2857,7 +2862,7 @@ export function defineODataCrudController(def: EntitySetDef) {
               field: item.field,
               direction: item.direction,
             })),
-            skipToken: paging.skipTokenParts ? [...paging.skipTokenParts] : undefined,
+            skipTokenValues: paging.skipTokenParts ? [...paging.skipTokenParts] : undefined,
             pageSize: paging.pageSize,
             stageTop: paging.stageTop,
             stageSkip: paging.stageSkip,
@@ -2950,10 +2955,11 @@ export function defineODataCrudController(def: EntitySetDef) {
           ordered = this.orderResults(working, fallbackOrder);
         }
 
-        let nextLinkToken = execResult.nextSkipToken;
+        const descriptorList = paging?.orderDescriptors ?? [];
+        let nextLinkValues = execResult.nextSkipTokenValues;
+        let nextLinkToken: string | undefined;
 
         if (execResult.appliedExternalPagination !== true) {
-          const descriptorList = paging?.orderDescriptors ?? [];
           if (descriptorList.length) {
             const descriptorOrder = descriptorList.map((item) => `${item.field} ${item.direction}`);
             ordered = this.orderResults(ordered, descriptorOrder);
@@ -2966,13 +2972,17 @@ export function defineODataCrudController(def: EntitySetDef) {
             const pagination = this.applyServerDrivenPaging(ordered, descriptorList, pageSize);
             ordered = pagination.items;
             nextLinkToken = pagination.token;
+            nextLinkValues = undefined;
           } else {
             ordered = this.sliceResults(ordered, requestedOffset, requestedLimit);
           }
+        } else if (!nextLinkToken && nextLinkValues?.length) {
+          nextLinkToken = this.signSkipTokenValues(nextLinkValues, descriptorList) ?? undefined;
         }
 
         if (postFilterExpr) {
           nextLinkToken = undefined;
+          nextLinkValues = undefined;
         }
 
         this.ensureODataHeaders();
@@ -4122,6 +4132,92 @@ export function defineODataCrudController(def: EntitySetDef) {
       return Math.min(normalized, base);
     }
 
+    normalizeTtlSeconds(value: number | undefined, fallback: number): number {
+      if (Number.isFinite(value) && value && value > 0) {
+        return Math.floor(Number(value));
+      }
+      return fallback;
+    }
+
+    requireTokenSecret(purpose: 'skip' | 'delta'): string {
+      const secret = this.cfg?.tokenSecret;
+      if (secret) return secret;
+      const hint = purpose === 'skip' ? '$skiptoken' : '$deltatoken';
+      throw new HttpErrors.InternalServerError(
+        `ODataConfig.tokenSecret must be configured to issue ${hint} values.`,
+      );
+    }
+
+    buildSkipTokenOptions(): TokenSecurityOptions {
+      return {
+        secret: this.requireTokenSecret('skip'),
+        ttlSeconds: this.normalizeTtlSeconds(this.cfg?.skipTokenTtl, 900),
+        allowLegacyUnsigned: this.cfg?.allowLegacyUnsignedTokens === true,
+      };
+    }
+
+    buildDeltaTokenOptions(): DeltaTokenSecurityOptions {
+      const ttlSeconds =
+        this.cfg?.deltaTokenTtl && this.cfg.deltaTokenTtl > 0
+          ? Math.floor(Number(this.cfg.deltaTokenTtl))
+          : undefined;
+      return {
+        secret: this.requireTokenSecret('delta'),
+        ttlSeconds,
+        allowLegacyUnsigned: this.cfg?.allowLegacyUnsignedTokens === true,
+      };
+    }
+
+    buildSkipTokenDescriptorKey(descriptors: OrderDescriptor[]): string {
+      return descriptors.map((item) => `${item.field}:${item.direction}`).join('|');
+    }
+
+    canonicalizeQueryValue(value: unknown): string {
+      if (value === null || value === undefined) return '';
+      if (typeof value === 'string') return value;
+      if (Array.isArray(value)) {
+        return `[${value.map((entry) => this.canonicalizeQueryValue(entry)).join(',')}]`;
+      }
+      if (typeof value === 'object') return stableStringify(value);
+      return String(value);
+    }
+
+    buildSkipTokenContext(): string {
+      const method = (this.request.method ?? 'GET').toUpperCase();
+      const path = this.request.path ?? '';
+      const params: Array<[string, string]> = [];
+      const query = this.request.query ?? {};
+      for (const [key, paramValue] of Object.entries(query)) {
+        if (key === '$skiptoken') continue;
+        if (Array.isArray(paramValue)) {
+          for (const entry of paramValue) {
+            params.push([key, this.canonicalizeQueryValue(entry)]);
+          }
+          continue;
+        }
+        params.push([key, this.canonicalizeQueryValue(paramValue)]);
+      }
+      params.sort((a, b) => {
+        if (a[0] === b[0]) return a[1].localeCompare(b[1]);
+        return a[0].localeCompare(b[0]);
+      });
+      const serialized = params
+        .map(([key, value]) => `${encodeURIComponent(key)}=${encodeURIComponent(value)}`)
+        .join('&');
+      return `${method}:${path}?${serialized}`;
+    }
+
+    signSkipTokenValues(values: string[], descriptors: OrderDescriptor[]): string | undefined {
+      if (!descriptors.length || !values.length) return undefined;
+      if (values.length !== descriptors.length) {
+        throw new HttpErrors.InternalServerError('Failed to serialize $skiptoken values.');
+      }
+      const descriptorKey = this.buildSkipTokenDescriptorKey(descriptors);
+      const context = this.buildSkipTokenContext();
+      const options = this.buildSkipTokenOptions();
+      return signSkipToken({ descriptor: descriptorKey, context, values }, options);
+    }
+
     buildApplyOrderDescriptors(
       stage: ApplyAggregationStage | undefined,
       fallbackSpec: AggregationSpec,
@@ -4161,16 +4257,26 @@ export function defineODataCrudController(def: EntitySetDef) {
       return descriptors;
     }
 
-    parseApplySkipToken(token: string | undefined, expectedLength: number): string[] | undefined {
+    parseApplySkipToken(
+      token: string | undefined,
+      descriptors: OrderDescriptor[],
+    ): string[] | undefined {
       if (!token) return undefined;
-      const parts = token.split(',');
-      if (!parts.length) {
-        throw new HttpErrors.BadRequest('Invalid $skiptoken value.');
+      const descriptorKey = this.buildSkipTokenDescriptorKey(descriptors);
+      const context = this.buildSkipTokenContext();
+      const options = this.buildSkipTokenOptions();
+      try {
+        const decoded = verifySkipToken(token, descriptorKey, context, options);
+        if (decoded.values.length !== descriptors.length) {
+          throw new HttpErrors.BadRequest('Invalid $skiptoken value.');
+        }
+        return decoded.values.map((value) => value ?? '');
+      } catch (error) {
+        if (error instanceof TokenVerificationError) {
+          throw new HttpErrors.BadRequest('Invalid $skiptoken value.');
+        }
+        throw error;
       }
-      if (parts.length !== expectedLength) {
-        throw new HttpErrors.BadRequest('Invalid $skiptoken value.');
-      }
-      return parts.map((part) => decodeURIComponent(part));
     }
 
     coerceTokenValue(raw: string, sample: unknown): unknown {
@@ -4243,14 +4349,25 @@ export function defineODataCrudController(def: EntitySetDef) {
       if (!token) {
         throw new HttpErrors.BadRequest('Empty $skiptoken is not allowed.');
       }
-      const segments = token.split(',');
-      if (segments.length !== descriptors.length) {
+      const descriptorKey = this.buildSkipTokenDescriptorKey(descriptors);
+      const context = this.buildSkipTokenContext();
+      const options = this.buildSkipTokenOptions();
+      let values: string[];
+      try {
+        const decoded = verifySkipToken(token, descriptorKey, context, options);
+        values = decoded.values;
+      } catch (error) {
+        if (error instanceof TokenVerificationError) {
+          throw new HttpErrors.BadRequest('Invalid $skiptoken value.');
+        }
+        throw error;
+      }
+      if (values.length !== descriptors.length) {
         throw new HttpErrors.BadRequest('Invalid $skiptoken value.');
       }
-      return descriptors.map((descriptor, index) => {
-        const raw = decodeURIComponent(segments[index] ?? '');
-        return this.coerceSkipTokenValue(descriptor.field, raw, definition);
-      });
+      return descriptors.map((descriptor, index) =>
+        this.coerceSkipTokenValue(descriptor.field, values[index] ?? '', definition),
+      );
     }
 
     coerceSkipTokenValue(
@@ -4370,10 +4487,9 @@ export function defineODataCrudController(def: EntitySetDef) {
       for (const descriptor of descriptors) {
         const value = this.extractFieldValue(record, descriptor.field);
         if (value === undefined) return undefined;
-        const encoded = encodeURIComponent(this.stringifySkipTokenValue(value));
-        parts.push(encoded);
+        parts.push(this.stringifySkipTokenValue(value));
       }
-      return parts.join(',');
+      return this.signSkipTokenValues(parts, descriptors);
     }
 
     extractFieldValue(record: AnyObject | undefined, field: string): unknown {
@@ -4449,7 +4565,10 @@ export function defineODataCrudController(def: EntitySetDef) {
       if (!rows.length) {
         return (
           previousToken ??
-          encodeDeltaToken({ entitySet, lastValue: new Date().toISOString(), buckets })
+          encodeDeltaToken(
+            { entitySet, lastValue: new Date().toISOString(), buckets },
+            this.buildDeltaTokenOptions(),
+          )
         );
       }
       const first = rows[0];
@@ -4457,7 +4576,10 @@ export function defineODataCrudController(def: EntitySetDef) {
       if (deltaValue === undefined) {
         return (
           previousToken ??
-          encodeDeltaToken({ entitySet, lastValue: new Date().toISOString(), buckets })
+          encodeDeltaToken(
+            { entitySet, lastValue: new Date().toISOString(), buckets },
+            this.buildDeltaTokenOptions(),
+          )
         );
       }
       const payload = {
@@ -4475,7 +4597,7 @@ export function defineODataCrudController(def: EntitySetDef) {
       if (Object.keys(keyValues).length) {
         payload.keyValues = keyValues;
       }
-      return encodeDeltaToken(payload);
+      return encodeDeltaToken(payload, this.buildDeltaTokenOptions());
     }
 
     async computeTombstones(keyValues: Record<string, unknown> | undefined): Promise<AnyObject[]> {
@@ -5210,8 +5332,11 @@ export function defineODataCrudController(def: EntitySetDef) {
       let deltaPayload: DeltaTokenPayload | undefined;
       if (deltaTokenValue) {
         try {
-          deltaPayload = decodeDeltaToken(deltaTokenValue);
-        } catch {
+          deltaPayload = decodeDeltaToken(deltaTokenValue, this.buildDeltaTokenOptions());
+        } catch (error) {
+          if (error instanceof TokenVerificationError) {
+            throw new HttpErrors.BadRequest('Invalid $deltatoken value.');
+          }
           throw new HttpErrors.BadRequest('Invalid $deltatoken value.');
         }
       }
@@ -5378,10 +5503,7 @@ export function defineODataCrudController(def: EntitySetDef) {
           if (!applyOrderDescriptors.length) {
             throw new HttpErrors.BadRequest('Unable to derive ordering for $apply pagination.');
           }
-          const applyTokenParts = this.parseApplySkipToken(
-            skipTokenValue,
-            applyOrderDescriptors.length,
-          );
+          const applyTokenParts = this.parseApplySkipToken(skipTokenValue, applyOrderDescriptors);
           let applyPageSize = this.resolvePageSize(originalTop);
           if (finalStage?.top != null) {
             applyPageSize = Math.min(applyPageSize, finalStage.top);

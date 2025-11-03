@@ -29,17 +29,24 @@ import { ApplicationConfig } from '@loopback/core';
 import { BootMixin } from '@loopback/boot';
 import { RepositoryMixin } from '@loopback/repository';
 import { RestApplication } from '@loopback/rest';
-import { ODataComponent } from '@loopback/odata';
+import { ODataComponent, ODATA_BINDINGS, ODataConfig } from '@loopback/odata';
 
 export class MyAppApplication extends BootMixin(RepositoryMixin(RestApplication)) {
   constructor(options: ApplicationConfig = {}) {
     super(options);
 
     this.component(ODataComponent); // enable OData support
+    const current = this.getSync(ODATA_BINDINGS.CONFIG) as ODataConfig;
+    this.bind(ODATA_BINDINGS.CONFIG).to({
+      ...current,
+      tokenSecret: process.env.ODATA_TOKEN_SECRET ?? 'change-me',
+    });
     // Register datasources and repositories once they are defined (see Step 3).
   }
 }
 ```
+
+> **Production tip:** `tokenSecret` must be a strong, per-environment value. Rotate it the same way you would rotate signing keys; changing the secret invalidates existing `$skiptoken` / `$deltatoken` links.
 
 2. Define a model
 
@@ -166,6 +173,8 @@ npm start
 ```
 
 For a quick demo, run `npm run dev`; this boots the example app in `examples/basic-app`, with an in-memory datasource pre-seeded with sample products and orders so you can experiment with the query options immediately.
+
+> The example binds `tokenSecret` from `process.env.ODATA_TOKEN_SECRET` and falls back to a development default. Set a unique value before exposing the sample app over a shared network.
 
 ##### Metadata
 
@@ -884,6 +893,7 @@ this.bind(ODATA_BINDINGS.CONFIG).to({
   namespace: 'Catalog', // default: 'Default'
   entityContainerName: 'CatalogService', // default: 'DefaultContainer'
   namespaceAlias: 'CatalogNS',
+  tokenSecret: process.env.ODATA_TOKEN_SECRET!, // required for signed paging/delta tokens
   capabilities: {
     filterFunctions: ['contains', 'startswith', 'endswith'],
     countable: true,
@@ -917,11 +927,17 @@ this.bind(ODATA_BINDINGS.CONFIG).to({
 } satisfies ODataConfig);
 ```
 
+Spreading the current config ensures sensitive settings such as `tokenSecret` remain intact unless you explicitly replace them.
+
 - `basePath`: Externally visible service root. All OData routes are served under this path (via middleware rewrite) while internal routes remain at `/odata`. Response metadata (`@odata.context`) uses this value.
 - `maxTop`: Caps `$top` for collection reads. The server may return fewer results than requested per OData v4. In strict mode, requests with `$top` above the cap return 400; otherwise the value is clamped to the maximum.
 - `maxSkip`: Maximum allowed `$skip`. When strict mode is disabled, requests above the cap are clamped; with strict mode enabled they return `400 Bad Request`.
-- `pageSize`: Default number of records per page for server-driven paging. The service always returns at most this many entities and emits an `@odata.nextLink` with a human-readable `$skiptoken` so clients can resume the feed.
+- `pageSize`: Default number of records per page for server-driven paging. The service always returns at most this many entities and emits an `@odata.nextLink` with a signed `$skiptoken` so clients can resume the feed.
 - `enableDelta`: When `true`, collection responses include `@odata.deltaLink` so clients can poll only the rows that changed since the last snapshot.
+- `tokenSecret`: Required secret used to sign `$skiptoken` / `$deltatoken` payloads. Requests fail with `500` until a non-empty secret is configured. Inject it via environment variables or a vault-backed binding.
+- `skipTokenTtl`: Lifetime (in seconds) for issued `$skiptoken` links. Defaults to `900` (15 minutes). Expired tokens return `400 Invalid $skiptoken`.
+- `deltaTokenTtl`: Optional lifetime (seconds) for `$deltatoken` links. When omitted, delta tokens remain valid until you rotate the secret or prune their backing store.
+- `allowLegacyUnsignedTokens`: Set to `true` only while migrating from the unsigned (v1/v2) token format. New deployments should leave this `false` to reject tampered tokens outright.
 - `documentInOpenApiDefault`: Controls whether generated OData routes appear in the published OpenAPI spec. The default `'auto'` policy documents entity sets that are also decorated with LoopBack's `@model()` and hides OData-only models. Set to `true` to publish every generated controller or `false` to hide everything unless a model opts in via `@odataModel({documentInOpenApi: true})`.
 - `removeUndocumentedFromSpec`: When `true` (default), routes tagged with `x-visibility: 'undocumented'` are removed before `/openapi.json` is served. Set to `false` to keep them in the document; the spec enhancer retags them as `x-visibility: 'internal'` so tooling can filter them out.
 - `maxApplyResultSize`: Maximum number of rows the server will process in-memory when executing `$apply` fallbacks (default: `2000`). Requests that exceed the limit are rejected with `400 Bad Request`.
@@ -984,12 +1000,16 @@ Generated OData routes now annotate each operation with `x-odata-generated` and 
 Hidden routes keep their metadata for internal tooling: when `removeUndocumentedFromSpec` is `true` they are stripped from `/openapi.json`; when `false` they stay in the document but are retagged with `x-visibility: 'internal'`.
 
 ```ts
-@odataModel({documentInOpenApi: true})
-class CustomerDraft extends Entity {/* ... */}
+@odataModel({ documentInOpenApi: true })
+class CustomerDraft extends Entity {
+  /* ... */
+}
 
-@odataModel({documentInOpenApi: false})
+@odataModel({ documentInOpenApi: false })
 @model()
-class AuditLog extends Entity {/* ... */}
+class AuditLog extends Entity {
+  /* ... */
+}
 
 const current = this.getSync(ODATA_BINDINGS.CONFIG) as ODataConfig;
 this.bind(ODATA_BINDINGS.CONFIG).to({
@@ -1003,7 +1023,7 @@ Inspect the processed spec via `await app.restServer.getApiSpec()` or by request
 
 ### Server-driven Paging & `$skiptoken`
 
-Collection reads now default to server-driven paging. The component takes the smaller of the requested `$top` and the configured `pageSize` (default `200`), returns that many entities, and emits an `@odata.nextLink` that includes a human-readable `$skiptoken`. Tokens are a comma-separated list of URL-escaped ordering values (for example, `"12,2024-10-15T12%3A00%3A00.000Z"`). Clients simply follow the `nextLink` to resume the feed.
+Collection reads now default to server-driven paging. The component takes the smaller of the requested `$top` and the configured `pageSize` (default `200`), returns that many entities, and emits an `@odata.nextLink` that includes a signed `$skiptoken`. Tokens carry the ordering values plus an HMAC signature bound to the current request shape, so tampering or replaying the token outside its context is rejected with `400 Invalid $skiptoken`. Configure `tokenSecret` before boot; without it the component refuses to issue tokens.
 
 ```http
 GET /odata/Products
@@ -1016,17 +1036,17 @@ GET /odata/Products
     { "id": 1, "name": "Laptop", "price": 1299 },
     { "id": 2, "name": "Phone", "price": 799 }
   ],
-  "@odata.nextLink": "/odata/Products?$skiptoken=2"
+  "@odata.nextLink": "/odata/Products?$skiptoken=v3:eyJ2Ijoi...\""
 }
 ```
 
-The controller enforces deterministic ordering automatically by appending the entity key to any client-supplied `$orderby`. When a request arrives with `$skiptoken`, the backend composes a lexicographic filter so the database (or in-memory fallback) resumes exactly where the previous page stopped. Traditional `$skip` offsets are rejected when server-driven paging is active—stick with `$skiptoken`. The same mechanism now applies to `$apply` pipelines, so aggregated feeds page the same way as raw collections.
+The controller enforces deterministic ordering automatically by appending the entity key to any client-supplied `$orderby`. When a request arrives with `$skiptoken`, the backend verifies the signature, checks the TTL (`skipTokenTtl`, 15 minutes by default), and then composes a lexicographic filter so the database (or in-memory fallback) resumes exactly where the previous page stopped. Traditional `$skip` offsets are rejected when server-driven paging is active—stick with `$skiptoken`. The same mechanism now applies to `$apply` pipelines, so aggregated feeds page the same way as raw collections.
 
 If you need a different page size, override `pageSize` at startup or per test using the configuration examples above.
 
 ### Delta Links
 
-When `enableDelta` is `true`, the first page of a collection includes an `@odata.deltaLink`. Clients can store that URL and call it later to retrieve only the entities that changed since the last sync. The implementation relies on each entity set having a stable change stamp (the first configured ETag property, or the field supplied via `@odataModel({delta: {field: ...}})` / `EntitySetDef.deltaField`).
+When `enableDelta` is `true`, the first page of a collection includes an `@odata.deltaLink`. Clients can store that URL and call it later to retrieve only the entities that changed since the last sync. The implementation relies on each entity set having a stable change stamp (the first configured ETag property, or the field supplied via `@odataModel({delta: {field: ...}})` / `EntitySetDef.deltaField`). Delta links are signed with the same `tokenSecret`; tampering or using an expired token (see `deltaTokenTtl`) returns `400 Invalid $deltatoken`.
 
 ```http
 GET /odata/Products
@@ -1036,7 +1056,7 @@ GET /odata/Products
 {
   "@odata.context": "/odata/$metadata#Products",
   "value": [{ "id": 1, "name": "Laptop", "updatedAt": "2025-10-17T14:53:52.705Z" }],
-  "@odata.deltaLink": "/odata/Products?$deltatoken=v1:ZXhhbXBsZVRva2Vu"
+  "@odata.deltaLink": "/odata/Products?$deltatoken=v3:eyJ2Ijoi...\""
 }
 ```
 
@@ -1051,7 +1071,7 @@ Deleted entities show up as tombstones:
 }
 ```
 
-For `$apply` pipelines, delta responses include the aggregated buckets that changed as well as `@removed` entries for buckets that disappeared since the previous sync. Tombstones now carry the last known aggregate snapshot, so clients continue to see the bucket keys **and** the previously computed measures:
+For `$apply` pipelines, delta responses include the aggregated buckets that changed as well as `@removed` entries for buckets that disappeared since the previous sync. Tombstones carry the last known aggregate snapshot, so clients continue to see the bucket keys **and** the previously computed measures:
 
 ```json
 {
@@ -1060,6 +1080,8 @@ For `$apply` pipelines, delta responses include the aggregated buckets that chan
   "@removed": { "reason": "deleted" }
 }
 ```
+
+> **Upgrading from unsigned tokens?** Set `allowLegacyUnsignedTokens: true` temporarily so existing `$skiptoken` / `$deltatoken` links issued by earlier versions continue to work. New tokens are always emitted in the signed `v3:` format; once clients have refreshed their cursors you should disable the flag again.
 
 ### Advanced `$apply` Examples
 

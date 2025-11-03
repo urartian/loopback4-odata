@@ -16,14 +16,16 @@ describe('OData config plumbing acceptance', () => {
   beforeEach(async function () {
     app = await givenODataApplication({ port: 0, host: '127.0.0.1' });
     // Override config before boot to ensure middleware/routes pick it up
+    const baseConfig = app.getSync(ODATA_BINDINGS.CONFIG) as ODataConfig;
     app.bind(ODATA_BINDINGS.CONFIG).to({
+      ...baseConfig,
       basePath: '/api/odata',
       maxTop: 1,
       maxSkip: 2,
       maxExpandDepth: 2,
       enableCount: false,
       strict: false,
-    } as ODataConfig);
+    });
 
     await app.boot();
     await seedExampleData(app);
@@ -63,12 +65,14 @@ describe('OData config plumbing acceptance', () => {
     // Rebind config with strict=true and restart app to test strict behavior
     if (app.state === 'started') await app.stop();
     app = await givenODataApplication({ port: 0, host: '127.0.0.1' });
+    const baseConfig = app.getSync(ODATA_BINDINGS.CONFIG) as ODataConfig;
     app.bind(ODATA_BINDINGS.CONFIG).to({
+      ...baseConfig,
       basePath: '/api/odata',
       maxTop: 1,
       enableCount: false,
       strict: true,
-    } as ODataConfig);
+    });
     await app.boot();
     await seedExampleData(app);
     await app.start();

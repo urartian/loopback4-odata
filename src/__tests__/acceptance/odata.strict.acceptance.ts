@@ -15,10 +15,12 @@ describe('OData strict mode acceptance', () => {
 
   beforeEach(async function () {
     app = await givenODataApplication({ port: 0, host: '127.0.0.1' });
+    const baseConfig = app.getSync(ODATA_BINDINGS.CONFIG) as ODataConfig;
     app.bind(ODATA_BINDINGS.CONFIG).to({
+      ...baseConfig,
       basePath: '/odata',
       strict: true,
-    } as ODataConfig);
+    });
     await app.boot();
     await seedExampleData(app);
     try {
@@ -71,9 +73,13 @@ describe('OData strict mode acceptance', () => {
   it('rejects $expand deeper than maxExpandDepth', async function () {
     if (app.state === 'started') await app.stop();
     app = await givenODataApplication({ port: 0, host: '127.0.0.1' });
-    app
-      .bind(ODATA_BINDINGS.CONFIG)
-      .to({ basePath: '/odata', strict: true, maxExpandDepth: 2 } as ODataConfig);
+    const baseConfig = app.getSync(ODATA_BINDINGS.CONFIG) as ODataConfig;
+    app.bind(ODATA_BINDINGS.CONFIG).to({
+      ...baseConfig,
+      basePath: '/odata',
+      strict: true,
+      maxExpandDepth: 2,
+    });
     await app.boot();
     await seedExampleData(app);
     await app.start();
@@ -89,9 +95,13 @@ describe('OData strict mode acceptance', () => {
   it('rejects $skip greater than maxSkip', async function () {
     if (app.state === 'started') await app.stop();
     app = await givenODataApplication({ port: 0, host: '127.0.0.1' });
-    app
-      .bind(ODATA_BINDINGS.CONFIG)
-      .to({ basePath: '/odata', strict: true, maxSkip: 5 } as ODataConfig);
+    const baseConfig = app.getSync(ODATA_BINDINGS.CONFIG) as ODataConfig;
+    app.bind(ODATA_BINDINGS.CONFIG).to({
+      ...baseConfig,
+      basePath: '/odata',
+      strict: true,
+      maxSkip: 5,
+    });
     await app.boot();
     await seedExampleData(app);
     await app.start();

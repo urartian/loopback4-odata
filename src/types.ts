@@ -34,6 +34,11 @@ export interface ODataConfig {
   // OpenAPI visibility
   documentInOpenApiDefault?: boolean | 'auto'; // default 'auto'
   removeUndocumentedFromSpec?: boolean; // default true
+  // Token security
+  tokenSecret?: string; // required for signed skip/delta tokens
+  skipTokenTtl?: number; // seconds before a $skiptoken expires (default 900)
+  deltaTokenTtl?: number; // seconds before a $deltatoken expires (optional)
+  allowLegacyUnsignedTokens?: boolean; // allow decoding legacy unsinged tokens (default false)
 }
 
 export interface ODataNavigationRestriction {
