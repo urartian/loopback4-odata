@@ -3,6 +3,7 @@ import { Entity, model, property } from '@loopback/repository';
 import { expect } from '@loopback/testlab';
 import { defineODataCrudController } from '../../controllers/crud-controller-factory';
 import { EntitySetDef } from '../../registry/entityset-registry';
+import { ODataLogger } from '../../keys';
 
 describe('CRUD controller response normalization', () => {
   @model()
@@ -47,6 +48,14 @@ describe('CRUD controller response normalization', () => {
 
   const Controller = defineODataCrudController(def);
 
+  const noopLogger: ODataLogger = {
+    trace: () => undefined,
+    debug: () => undefined,
+    info: () => undefined,
+    warn: () => undefined,
+    error: () => undefined,
+  };
+
   const createController = () =>
     new Controller(
       {} as any,
@@ -61,6 +70,7 @@ describe('CRUD controller response normalization', () => {
       {} as any,
       {} as any,
       {} as any,
+      noopLogger,
     );
 
   it('normalizes DateTimeOffset strings in decorated entities', () => {

@@ -914,6 +914,16 @@ this.bind(ODATA_BINDINGS.CONFIG).to({
     maxChangesetOperations: 50, // per-changeset limit
     maxPartBodyBytes: 4 * 1024 * 1024, // individual part payload limit
   },
+  onLog(entry) {
+    myTelemetryClient.trackEvent({
+      name: 'odata-log',
+      properties: {
+        level: entry.level,
+        message: entry.message,
+        ...entry.context,
+      },
+    });
+  },
 } as ODataConfig);
 ```
 
@@ -947,6 +957,7 @@ Spreading the current config ensures sensitive settings such as `tokenSecret` re
 - `deltaTokenTtl`: Optional lifetime (seconds) for `$deltatoken` links. When omitted, delta tokens remain valid until you rotate the secret or prune their backing store.
 - `allowLegacyUnsignedTokens`: Set to `true` only while migrating from the unsigned (v1/v2) token format. New deployments should leave this `false` to reject tampered tokens outright.
 - `batch`: Guardrails for `$batch` requests. Provide `maxPayloadBytes` (default `16 MB`), `maxOperations` (100 operations), `maxChangesetOperations` (50 per changeset), `maxPartBodyBytes` (4 MB), and `maxDepth` (2 levels) to cap payload size, total operations, and changeset nesting.
+- `onLog(entry)`: Optional hook invoked for every log entry emitted by the OData component (`entry` includes `level`, `message`, `context`, and optional `error`). Use it to forward structured telemetry into your existing logging/monitoring pipeline. If you bind your own logger to `ODATA_BINDINGS.LOGGER` the hook still fires after the logger handles the entry.
 - `documentInOpenApiDefault`: Controls whether generated OData routes appear in the published OpenAPI spec. The default `'auto'` policy documents entity sets that are also decorated with LoopBack's `@model()` and hides OData-only models. Set to `true` to publish every generated controller or `false` to hide everything unless a model opts in via `@odataModel({documentInOpenApi: true})`.
 - `removeUndocumentedFromSpec`: When `true` (default), routes tagged with `x-visibility: 'undocumented'` are removed before `/openapi.json` is served. Set to `false` to keep them in the document; the spec enhancer retags them as `x-visibility: 'internal'` so tooling can filter them out.
 - `maxApplyResultSize`: Maximum number of rows the server will process in-memory when executing `$apply` fallbacks (default: `2000`). Requests that exceed the limit are rejected with `400 Bad Request`.

@@ -1,5 +1,5 @@
 import { BindingKey } from '@loopback/core';
-import { ODataConfig } from './types';
+import { ODataConfig, ODataLogEntry } from './types';
 import { CsdlGenerator } from './metadata/csdl-generator';
 import { EntitySetRegistry } from './registry/entityset-registry';
 import { ODataApplyExecutorRegistry } from './services/odata-apply-executor.registry';
@@ -9,4 +9,37 @@ export const ODATA_BINDINGS = {
   CSDL_GEN: BindingKey.create<CsdlGenerator>('odata.csdl'),
   ENTITY_SET_REGISTRY: BindingKey.create<EntitySetRegistry>('odata.registry.entitysets'),
   APPLY_EXECUTOR_REGISTRY: BindingKey.create<ODataApplyExecutorRegistry>('odata.apply.executors'),
+  LOGGER: BindingKey.create<ODataLogger>('odata.logger'),
 };
+
+export interface ODataLogger {
+  trace(message: string, context?: Record<string, unknown>): void;
+  debug(message: string, context?: Record<string, unknown>): void;
+  info(message: string, context?: Record<string, unknown>): void;
+  warn(message: string, context?: Record<string, unknown>): void;
+  error(message: string, context?: Record<string, unknown>, error?: Error): void;
+}
+
+export function createLogEntry(logger: ODataLogger, entry: ODataLogEntry): void {
+  const { level, message, context, error } = entry;
+  switch (level) {
+    case 'trace':
+      logger.trace(message, context);
+      break;
+    case 'debug':
+      logger.debug(message, context);
+      break;
+    case 'info':
+      logger.info(message, context);
+      break;
+    case 'warn':
+      logger.warn(message, context);
+      break;
+    case 'error':
+      logger.error(message, context, error);
+      break;
+    default:
+      logger.info(message, context);
+      break;
+  }
+}

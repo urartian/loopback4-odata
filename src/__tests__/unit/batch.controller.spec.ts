@@ -5,6 +5,7 @@ import { ODataBatchController, BatchResponsePayload } from '../../controllers/ba
 import { ODataConfig } from '../../types';
 import { HttpErrors, Response } from '@loopback/rest';
 import { Readable } from 'stream';
+import { ODataLogger } from '../../keys';
 
 type StubResponseMap = Record<
   string,
@@ -22,12 +23,21 @@ const defaultConfig: ODataConfig = {
   },
 };
 
+const noopLogger: ODataLogger = {
+  trace: () => undefined,
+  debug: () => undefined,
+  info: () => undefined,
+  warn: () => undefined,
+  error: () => undefined,
+};
+
 function createController(stubs: StubResponseMap) {
   const controller = new ODataBatchController(
     { handleRequest: async () => undefined } as any,
     'http://localhost',
     { get: async () => undefined } as any,
     { findByName: () => undefined } as any,
+    noopLogger,
     defaultConfig,
   );
   (controller as any).executeSingle = async (request: { id: string }) => {
@@ -140,6 +150,7 @@ describe('$batch controller', () => {
       'http://localhost',
       { get: async () => undefined } as any,
       { findByName: () => undefined } as any,
+      noopLogger,
       defaultConfig,
     );
 
@@ -159,6 +170,7 @@ describe('$batch controller', () => {
       'http://localhost',
       { get: async () => undefined } as any,
       { findByName: () => undefined } as any,
+      noopLogger,
       defaultConfig,
     );
 
@@ -266,6 +278,7 @@ describe('$batch controller', () => {
       'http://localhost',
       { get: async () => ({ dataSource: { name: 'db' } }) } as any,
       registry,
+      noopLogger,
       defaultConfig,
     );
 
