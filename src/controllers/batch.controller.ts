@@ -12,6 +12,7 @@ import { parseMultipartBatch } from '../services/multipart-batch.parser';
 import { serializeMultipartBatch } from '../services/multipart-batch.serializer';
 import { Readable } from 'stream';
 import { markUndocumentedOperation } from '../util/openapi';
+import { ODataBatchConfig, ODataConfig } from '../types';
 
 const BATCH_OPERATION_SPEC = markUndocumentedOperation({
   responses: {
@@ -74,6 +75,14 @@ export interface BatchResponseEntry {
 
 export interface BatchResponsePayload {
   responses: BatchResponseEntry[];
+}
+
+interface NormalizedBatchLimits {
+  maxPayloadBytes?: number;
+  maxOperations?: number;
+  maxChangesetOperations?: number;
+  maxDepth?: number;
+  maxPartBodyBytes?: number;
 }
 
 class AtomicityGroupContext {
@@ -155,6 +164,8 @@ export class ODataBatchController {
     private readonly app: Application,
     @inject(ODATA_BINDINGS.ENTITY_SET_REGISTRY)
     private readonly registry: EntitySetRegistry,
+    @inject(ODATA_BINDINGS.CONFIG)
+    private readonly cfg: ODataConfig,
   ) {}
 
   @post('/odata/$batch', BATCH_OPERATION_SPEC)
@@ -198,6 +209,8 @@ export class ODataBatchController {
   ): Promise<BatchResponsePayload | void> {
     const contentType = request.get('content-type') ?? request.headers['content-type'] ?? '';
     const isMultipart = /multipart\/mixed/i.test(contentType ?? '');
+    const limits = this.getBatchLimits();
+    this.enforceDeclaredSizeLimit(request, limits);
     let requests: BatchRequest[];
 
     if (isMultipart) {
@@ -206,7 +219,10 @@ export class ODataBatchController {
         throw new HttpErrors.BadRequest('Multipart batch request must specify a boundary.');
       }
       const stream = isReadable(payload) ? (payload as Readable) : (request as unknown as Readable);
-      const parsed = await parseMultipartBatch(stream, boundary);
+      const parsed = await parseMultipartBatch(stream, boundary, {
+        limits,
+        onLimitViolation: (reason) => this.warn(reason),
+      });
       requests = parsed.requests as BatchRequest[];
       if (!requests.length) {
         throw new HttpErrors.BadRequest('Batch payload must contain at least one request.');
@@ -217,11 +233,29 @@ export class ODataBatchController {
       if (!Array.isArray(jsonRequests) || !jsonRequests.length) {
         throw new HttpErrors.BadRequest('Batch payload must contain at least one request.');
       }
+      this.enforceOperationLimit(jsonRequests.length, limits);
+      this.enforceJsonPayloadSize(jsonPayload, limits);
       requests = jsonRequests;
     }
 
+    this.enforceOperationLimit(requests.length, limits);
+
     const grouped = this.groupByAtomicity(requests);
     const responses: BatchResponseEntry[] = [];
+
+    const maxChangesetOps = limits.maxChangesetOperations;
+    if (maxChangesetOps && maxChangesetOps > 0) {
+      for (const group of grouped) {
+        if (group.atomicityGroup && group.requests.length > maxChangesetOps) {
+          this.warn(
+            `Rejected $batch changeset ${group.atomicityGroup}: ${group.requests.length} operations exceed maxChangesetOperations=${maxChangesetOps}.`,
+          );
+          throw new HttpErrors.BadRequest(
+            'Changeset exceeds the configured operation limit for $batch requests.',
+          );
+        }
+      }
+    }
 
     for (const group of grouped) {
       if (group.atomicityGroup) {
@@ -268,6 +302,66 @@ export class ODataBatchController {
 
     response.contentType('application/json');
     return { responses };
+  }
+
+  private getBatchLimits(): NormalizedBatchLimits {
+    const cfgBatch = (this.cfg?.batch ?? {}) as ODataBatchConfig;
+    return {
+      maxPayloadBytes: cfgBatch.maxPayloadBytes ?? 16 * 1024 * 1024,
+      maxOperations: cfgBatch.maxOperations ?? 100,
+      maxChangesetOperations: cfgBatch.maxChangesetOperations ?? 50,
+      maxDepth: cfgBatch.maxDepth ?? 2,
+      maxPartBodyBytes: cfgBatch.maxPartBodyBytes ?? 4 * 1024 * 1024,
+    };
+  }
+
+  private enforceDeclaredSizeLimit(request: Request, limits: NormalizedBatchLimits) {
+    if (!limits.maxPayloadBytes) return;
+    const header = request.headers['content-length'];
+    if (!header) return;
+    const declared = Number(header);
+    if (Number.isFinite(declared) && declared > limits.maxPayloadBytes) {
+      this.warn(
+        `Rejected $batch request: Content-Length ${declared} bytes exceeds maxPayloadBytes=${limits.maxPayloadBytes}.`,
+      );
+      throw new HttpErrors.PayloadTooLarge('Batch payload exceeds the configured size limit.');
+    }
+  }
+
+  private enforceJsonPayloadSize(payload: BatchPayload, limits: NormalizedBatchLimits) {
+    if (!limits.maxPayloadBytes) return;
+    try {
+      const approxBytes = Buffer.byteLength(JSON.stringify(payload ?? {}), 'utf-8');
+      if (approxBytes > limits.maxPayloadBytes) {
+        this.warn(
+          `Rejected JSON $batch request: ${approxBytes} bytes exceeds maxPayloadBytes=${limits.maxPayloadBytes}.`,
+        );
+        throw new HttpErrors.PayloadTooLarge('Batch payload exceeds the configured size limit.');
+      }
+    } catch (error) {
+      this.warn(`Failed to evaluate JSON batch payload size: ${(error as Error).message ?? error}`);
+    }
+  }
+
+  private enforceOperationLimit(count: number, limits: NormalizedBatchLimits) {
+    const maxOperations = limits.maxOperations;
+    if (!maxOperations || maxOperations <= 0) return;
+    if (count > maxOperations) {
+      this.warn(
+        `Rejected $batch request: ${count} operations exceeds maxOperations=${maxOperations}.`,
+      );
+      throw new HttpErrors.BadRequest('Batch payload exceeds the configured operation limit.');
+    }
+  }
+
+  private warn(message: string) {
+    const logger = (this.app as any)?.logger;
+    const formatted = `[OData batch] ${message}`;
+    if (logger?.warn) {
+      logger.warn(formatted);
+    } else {
+      console.warn(formatted);
+    }
   }
 
   private groupByAtomicity(requests: BatchRequest[]) {

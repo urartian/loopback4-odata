@@ -39,6 +39,7 @@ export interface ODataConfig {
   skipTokenTtl?: number; // seconds before a $skiptoken expires (default 900)
   deltaTokenTtl?: number; // seconds before a $deltatoken expires (optional)
   allowLegacyUnsignedTokens?: boolean; // allow decoding legacy unsinged tokens (default false)
+  batch?: ODataBatchConfig;
 }
 
 export interface ODataNavigationRestriction {
@@ -136,4 +137,12 @@ export interface ODataApplyTelemetryEvent {
   joinCount?: number;
   reason?: string;
   navigationPaths?: string[];
+}
+
+export interface ODataBatchConfig {
+  maxPayloadBytes?: number; // total bytes allowed in a single $batch request
+  maxOperations?: number; // total operations (requests) allowed per batch
+  maxChangesetOperations?: number; // max operations inside a single changeset
+  maxDepth?: number; // maximum multipart nesting depth
+  maxPartBodyBytes?: number; // maximum body size for an individual part
 }

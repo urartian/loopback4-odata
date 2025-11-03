@@ -2,6 +2,7 @@
 
 import { strict as assert } from 'assert';
 import { ODataBatchController, BatchResponsePayload } from '../../controllers/batch.controller';
+import { ODataConfig } from '../../types';
 import { HttpErrors, Response } from '@loopback/rest';
 import { Readable } from 'stream';
 
@@ -10,12 +11,24 @@ type StubResponseMap = Record<
   { status: number; body?: unknown; headers?: Record<string, string> }
 >;
 
+const defaultConfig: ODataConfig = {
+  tokenSecret: 'test-secret',
+  batch: {
+    maxPayloadBytes: 1024 * 1024,
+    maxOperations: 100,
+    maxChangesetOperations: 100,
+    maxDepth: 3,
+    maxPartBodyBytes: 512 * 1024,
+  },
+};
+
 function createController(stubs: StubResponseMap) {
   const controller = new ODataBatchController(
     { handleRequest: async () => undefined } as any,
     'http://localhost',
     { get: async () => undefined } as any,
     { findByName: () => undefined } as any,
+    defaultConfig,
   );
   (controller as any).executeSingle = async (request: { id: string }) => {
     const stub = stubs[request.id];
@@ -127,6 +140,7 @@ describe('$batch controller', () => {
       'http://localhost',
       { get: async () => undefined } as any,
       { findByName: () => undefined } as any,
+      defaultConfig,
     );
 
     const result = await (controller as any).executeSingle({
@@ -145,6 +159,7 @@ describe('$batch controller', () => {
       'http://localhost',
       { get: async () => undefined } as any,
       { findByName: () => undefined } as any,
+      defaultConfig,
     );
 
     const result = await (controller as any).executeSingle({
@@ -251,6 +266,7 @@ describe('$batch controller', () => {
       'http://localhost',
       { get: async () => ({ dataSource: { name: 'db' } }) } as any,
       registry,
+      defaultConfig,
     );
 
     const result = (await controller.handleBatch(

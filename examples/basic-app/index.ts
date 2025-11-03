@@ -89,6 +89,15 @@ export class ExampleApp extends BootMixin(RepositoryMixin(RestApplication)) {
     const enablePushdown = process.env.ENABLE_APPLY_PUSHDOWN === 'true';
     const logTelemetry = process.env.LOG_APPLY_TELEMETRY === 'true';
     const tokenSecret = process.env.ODATA_TOKEN_SECRET ?? 'dev-example-secret';
+    const maxOps = Number(process.env.BATCH_MAX_OPERATIONS ?? '');
+    const maxPartBytes = Number(process.env.BATCH_MAX_PART_BYTES ?? '');
+    const batchConfig: ODataConfig['batch'] = {
+      ...(current.batch ?? {}),
+      ...(Number.isFinite(maxOps) && maxOps > 0 ? { maxOperations: maxOps } : {}),
+      ...(Number.isFinite(maxPartBytes) && maxPartBytes > 0
+        ? { maxPartBodyBytes: maxPartBytes }
+        : {}),
+    };
     this.bind(ODATA_BINDINGS.CONFIG).to({
       ...current,
       enableApplyPushdown: enablePushdown,
@@ -96,6 +105,7 @@ export class ExampleApp extends BootMixin(RepositoryMixin(RestApplication)) {
       ...(logTelemetry ? { logApplyTelemetry: true } : {}),
       tokenSecret,
       documentInOpenApiDefault: false,
+      ...(batchConfig ? { batch: batchConfig } : {}),
     });
   }
 }
@@ -299,7 +309,7 @@ export class OrderItemRepository extends DefaultCrudRepository<
 
 @odataController(Product)
 class ProductODataController {
-  constructor(@repository(ProductRepository) private readonly products: ProductRepository) {}
+  constructor(@repository(ProductRepository) private readonly products: ProductRepository) { }
 
   @odataAction({
     binding: 'entity',
@@ -327,10 +337,10 @@ class ProductODataController {
 }
 
 @odataController(Order)
-class OrderODataController {}
+class OrderODataController { }
 
 @odataController(OrderItem)
-class OrderItemODataController {}
+class OrderItemODataController { }
 
 export async function main() {
   const app = new ExampleApp();
