@@ -23,7 +23,7 @@ import { EntitySetDef, EntitySetRegistry } from '../registry/entityset-registry'
 import { getODataControllerModel } from '../decorators/controller.decorator';
 import { defineODataCrudController } from '../controllers/crud-controller-factory';
 import { getODataModelMeta, ODataModelOptions } from '../decorators/model.decorator';
-import { ODATA_BINDINGS } from '../keys';
+import { ODATA_BINDINGS, ODataLogger } from '../keys';
 import {
   AnyObject,
   Entity,
@@ -56,6 +56,8 @@ export class ODataBooter implements Booter {
     @inject(ODATA_BINDINGS.CONFIG) private readonly config: ODataConfig,
     @inject(ODATA_BINDINGS.APPLY_EXECUTOR_REGISTRY)
     private readonly executorRegistry: ODataApplyExecutorRegistry,
+    @inject(ODATA_BINDINGS.LOGGER)
+    private readonly logger: ODataLogger,
   ) {}
 
   private identifyCompositionRelations(
@@ -125,11 +127,11 @@ export class ODataBooter implements Booter {
     if (deepUpdateEnabled) return;
     if (!compositionInfo.hasCompositionalRelation) return;
     if (!compositionInfo.missingDeepUpdate.length) return;
-    console.warn(
-      `[OData] Entity set ${setName} (${modelCtor.name}) has required navigation ` +
-        `relations (${compositionInfo.missingDeepUpdate.join(', ')}) but deepUpdate is disabled. ` +
-        `Enable it via @odataModel({deepUpdate: true}) or acknowledge with deepUpdate: false.`,
-    );
+    this.logger.warn('Entity set has required navigation relations but deepUpdate is disabled.', {
+      entitySet: setName,
+      model: modelCtor.name,
+      relations: compositionInfo.missingDeepUpdate,
+    });
   }
 
   private resolveDocumentVisibility(
@@ -245,9 +247,9 @@ export class ODataBooter implements Booter {
       const deltaField = modelDeltaMeta?.field ?? etagProperties?.[0];
       if (deltaEnabled && !deltaField) {
         deltaEnabled = false;
-        console.warn(
-          `[OData] Delta requested for ${setName} but no change tracking field was configured.`,
-        );
+        this.logger.warn('Delta change tracking requested but no field configured.', {
+          entitySet: setName,
+        });
       }
       const def = this.registry.register({
         name: setName,
@@ -350,9 +352,10 @@ export class ODataBooter implements Booter {
     def.applyExecutorId = undefined;
     if (preference) {
       const datasourceName = (dataSource as AnyObject)?.name ?? '[unknown]';
-      console.warn(
-        `[OData] apply pushdown requested for entity set ${def.name} but no compatible executor was found for datasource ${datasourceName}. Falling back to in-memory execution.`,
-      );
+      this.logger.warn('Apply pushdown requested but no compatible executor found; falling back.', {
+        entitySet: def.name,
+        datasource: datasourceName,
+      });
     }
   }
 

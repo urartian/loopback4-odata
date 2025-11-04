@@ -40,6 +40,7 @@ export interface ODataConfig {
   deltaTokenTtl?: number; // seconds before a $deltatoken expires (optional)
   allowLegacyUnsignedTokens?: boolean; // allow decoding legacy unsinged tokens (default false)
   batch?: ODataBatchConfig;
+  onLog?: (entry: ODataLogEntry) => void;
 }
 
 export interface ODataNavigationRestriction {
@@ -137,6 +138,13 @@ export interface ODataApplyTelemetryEvent {
   joinCount?: number;
   reason?: string;
   navigationPaths?: string[];
+}
+
+export interface ODataLogEntry {
+  level: 'trace' | 'debug' | 'info' | 'warn' | 'error';
+  message: string;
+  context?: Record<string, unknown>;
+  error?: Error;
 }
 
 export interface ODataBatchConfig {

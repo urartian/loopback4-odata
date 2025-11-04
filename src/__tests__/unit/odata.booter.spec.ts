@@ -16,6 +16,7 @@ import { EntitySetRegistry } from '../../registry/entityset-registry';
 import { odataModel } from '../../decorators/model.decorator';
 import { odataController } from '../../decorators/controller.decorator';
 import { ODataApplyExecutorRegistry } from '../../services/odata-apply-executor.registry';
+import { ODataLogger } from '../../keys';
 
 describe('ODataBooter entity set naming', () => {
   it('uses inflection to pluralize model names by default', () => {
@@ -24,7 +25,13 @@ describe('ODataBooter entity set naming', () => {
 
     const app = new Application();
     const registry = new EntitySetRegistry();
-    const booter = new ODataBooter(app, registry, {} as any, new ODataApplyExecutorRegistry());
+    const booter = new ODataBooter(
+      app,
+      registry,
+      {} as any,
+      new ODataApplyExecutorRegistry(),
+      noopLogger,
+    );
 
     const setName = (booter as any).getEntitySetName(Person);
     expect(setName).to.equal('People');
@@ -37,7 +44,13 @@ describe('ODataBooter entity set naming', () => {
 
     const app = new Application();
     const registry = new EntitySetRegistry();
-    const booter = new ODataBooter(app, registry, {} as any, new ODataApplyExecutorRegistry());
+    const booter = new ODataBooter(
+      app,
+      registry,
+      {} as any,
+      new ODataApplyExecutorRegistry(),
+      noopLogger,
+    );
 
     const setName = (booter as any).getEntitySetName(Citizen);
     expect(setName).to.equal('CustomPeople');
@@ -73,7 +86,13 @@ describe('ODataBooter repository binding resolution', () => {
     app.controller(WidgetODataController);
 
     const registry = new EntitySetRegistry();
-    const booter = new ODataBooter(app, registry, {} as any, new ODataApplyExecutorRegistry());
+    const booter = new ODataBooter(
+      app,
+      registry,
+      {} as any,
+      new ODataApplyExecutorRegistry(),
+      noopLogger,
+    );
 
     await booter.load();
 
@@ -87,7 +106,13 @@ describe('ODataBooter navigation reference routes', () => {
   it('registers $ref routes when the foreign key can be inferred', async () => {
     const app = new RestApplication();
     const registry = new EntitySetRegistry();
-    const booter = new ODataBooter(app, registry, {} as any, new ODataApplyExecutorRegistry());
+    const booter = new ODataBooter(
+      app,
+      registry,
+      {} as any,
+      new ODataApplyExecutorRegistry(),
+      noopLogger,
+    );
 
     @model()
     class Order extends Entity {
@@ -134,3 +159,10 @@ describe('ODataBooter navigation reference routes', () => {
     expect(spec.paths?.['/odata/Orders/{id}/items/{targetKey}/$ref']).to.be.Object();
   });
 });
+const noopLogger: ODataLogger = {
+  trace: () => undefined,
+  debug: () => undefined,
+  info: () => undefined,
+  warn: () => undefined,
+  error: () => undefined,
+};

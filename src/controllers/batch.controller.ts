@@ -4,7 +4,7 @@ import { HttpHandler } from '@loopback/rest/dist/http-handler';
 import { IncomingMessage, ServerResponse } from 'http';
 import { PassThrough } from 'stream';
 import { IsolationLevel, Transaction } from '@loopback/repository';
-import { ODATA_BINDINGS } from '../keys';
+import { ODATA_BINDINGS, ODataLogger } from '../keys';
 import { EntitySetRegistry } from '../registry/entityset-registry';
 import { ODATA_ATOMICITY_STATE, ODATA_VERSION } from '../constants';
 import { AtomicityRequestState } from '../types/batch';
@@ -164,6 +164,8 @@ export class ODataBatchController {
     private readonly app: Application,
     @inject(ODATA_BINDINGS.ENTITY_SET_REGISTRY)
     private readonly registry: EntitySetRegistry,
+    @inject(ODATA_BINDINGS.LOGGER)
+    private readonly logger: ODataLogger,
     @inject(ODATA_BINDINGS.CONFIG)
     private readonly cfg: ODataConfig,
   ) {}
@@ -247,9 +249,11 @@ export class ODataBatchController {
     if (maxChangesetOps && maxChangesetOps > 0) {
       for (const group of grouped) {
         if (group.atomicityGroup && group.requests.length > maxChangesetOps) {
-          this.warn(
-            `Rejected $batch changeset ${group.atomicityGroup}: ${group.requests.length} operations exceed maxChangesetOperations=${maxChangesetOps}.`,
-          );
+          this.warn('Changeset operation limit exceeded.', {
+            group: group.atomicityGroup,
+            operations: group.requests.length,
+            maxChangesetOperations: maxChangesetOps,
+          });
           throw new HttpErrors.BadRequest(
             'Changeset exceeds the configured operation limit for $batch requests.',
           );
@@ -321,9 +325,10 @@ export class ODataBatchController {
     if (!header) return;
     const declared = Number(header);
     if (Number.isFinite(declared) && declared > limits.maxPayloadBytes) {
-      this.warn(
-        `Rejected $batch request: Content-Length ${declared} bytes exceeds maxPayloadBytes=${limits.maxPayloadBytes}.`,
-      );
+      this.warn('Batch payload exceeds configured size limit (declared).', {
+        declaredBytes: declared,
+        maxPayloadBytes: limits.maxPayloadBytes,
+      });
       throw new HttpErrors.PayloadTooLarge('Batch payload exceeds the configured size limit.');
     }
   }
@@ -333,13 +338,16 @@ export class ODataBatchController {
     try {
       const approxBytes = Buffer.byteLength(JSON.stringify(payload ?? {}), 'utf-8');
       if (approxBytes > limits.maxPayloadBytes) {
-        this.warn(
-          `Rejected JSON $batch request: ${approxBytes} bytes exceeds maxPayloadBytes=${limits.maxPayloadBytes}.`,
-        );
+        this.warn('Batch JSON payload exceeds configured size limit.', {
+          computedBytes: approxBytes,
+          maxPayloadBytes: limits.maxPayloadBytes,
+        });
         throw new HttpErrors.PayloadTooLarge('Batch payload exceeds the configured size limit.');
       }
     } catch (error) {
-      this.warn(`Failed to evaluate JSON batch payload size: ${(error as Error).message ?? error}`);
+      this.warn('Failed to evaluate JSON batch payload size.', {
+        error: (error as Error).message ?? error,
+      });
     }
   }
 
@@ -347,21 +355,16 @@ export class ODataBatchController {
     const maxOperations = limits.maxOperations;
     if (!maxOperations || maxOperations <= 0) return;
     if (count > maxOperations) {
-      this.warn(
-        `Rejected $batch request: ${count} operations exceeds maxOperations=${maxOperations}.`,
-      );
+      this.warn('Batch operation limit exceeded.', {
+        operations: count,
+        maxOperations,
+      });
       throw new HttpErrors.BadRequest('Batch payload exceeds the configured operation limit.');
     }
   }
 
-  private warn(message: string) {
-    const logger = (this.app as any)?.logger;
-    const formatted = `[OData batch] ${message}`;
-    if (logger?.warn) {
-      logger.warn(formatted);
-    } else {
-      console.warn(formatted);
-    }
+  private warn(message: string, context?: Record<string, unknown>) {
+    this.logger.warn(message, { scope: 'batch', ...(context ?? {}) });
   }
 
   private groupByAtomicity(requests: BatchRequest[]) {

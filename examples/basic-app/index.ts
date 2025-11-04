@@ -309,7 +309,7 @@ export class OrderItemRepository extends DefaultCrudRepository<
 
 @odataController(Product)
 class ProductODataController {
-  constructor(@repository(ProductRepository) private readonly products: ProductRepository) { }
+  constructor(@repository(ProductRepository) private readonly products: ProductRepository) {}
 
   @odataAction({
     binding: 'entity',
@@ -337,10 +337,10 @@ class ProductODataController {
 }
 
 @odataController(Order)
-class OrderODataController { }
+class OrderODataController {}
 
 @odataController(OrderItem)
-class OrderItemODataController { }
+class OrderItemODataController {}
 
 export async function main() {
   const app = new ExampleApp();

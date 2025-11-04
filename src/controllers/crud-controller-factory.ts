@@ -74,7 +74,7 @@ import {
   CrudOperation,
   CrudScope,
 } from '../types/crud-hooks';
-import { ODATA_BINDINGS } from '../keys';
+import { ODATA_BINDINGS, ODataLogger } from '../keys';
 import { ODataConfig, ODataApplyTelemetryEvent } from '../types';
 import { getODataSearchableProps } from '../decorators/search.decorators';
 import { ensureNavigationTargetKey } from '../util/relation-metadata';
@@ -546,6 +546,8 @@ export function defineODataCrudController(def: EntitySetDef) {
       public readonly cfg: ODataConfig,
       @inject(ODATA_BINDINGS.APPLY_EXECUTOR_REGISTRY)
       public readonly applyExecutors: ODataApplyExecutorRegistry,
+      @inject(ODATA_BINDINGS.LOGGER)
+      public readonly logger: ODataLogger,
     ) {}
 
     etagEnabled(): boolean {
@@ -2672,7 +2674,7 @@ export function defineODataCrudController(def: EntitySetDef) {
       const payload = { event, ...detail };
       this.cfg?.onApplyFallback?.(payload);
       if (this.cfg?.logApplyFallbacks) {
-        console.warn(`[OData] $apply fallback (${event}) ${JSON.stringify(detail)}`);
+        this.logger.warn('$apply fallback', detail);
       }
     }
 
@@ -2697,7 +2699,11 @@ export function defineODataCrudController(def: EntitySetDef) {
         try {
           this.cfg.onApplyTelemetry(event);
         } catch (err) {
-          console.error('[OData] Failed to emit apply telemetry handler:', err);
+          this.logger.error(
+            'Failed to emit apply telemetry handler.',
+            { entitySet: setName },
+            err as Error,
+          );
         }
       }
       if (this.cfg?.logApplyTelemetry) {
@@ -2706,7 +2712,15 @@ export function defineODataCrudController(def: EntitySetDef) {
         if (data.durationMs !== undefined) parts.push(`durationMs=${data.durationMs}`);
         if (data.joinCount !== undefined) parts.push(`joins=${data.joinCount}`);
         if (data.reason) parts.push(`reason=${data.reason}`);
-        console.debug(`[OData] $apply telemetry (${setName}) ${parts.join(' ')}`);
+        this.logger.debug('$apply telemetry', {
+          entitySet: setName,
+          mode,
+          stage: `${stageIndex + 1}/${stageCount}`,
+          rows: data.rows,
+          durationMs: data.durationMs,
+          joinCount: data.joinCount,
+          reason: data.reason,
+        });
       }
     }
 

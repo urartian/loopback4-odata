@@ -14,6 +14,7 @@ import { ODataApplyExecutorRegistry } from './services/odata-apply-executor.regi
 import { PostgresApplyExecutor } from './services/postgres-apply-executor';
 import { MySqlApplyExecutor } from './services/mysql-apply-executor';
 import { ODataVisibilitySpecEnhancer } from './spec/odata-visibility.spec-enhancer';
+import { ODataLoggerProvider } from './providers/odata-logger.provider';
 
 export class ODataComponent implements Component {
   bindings = [
@@ -50,6 +51,9 @@ export class ODataComponent implements Component {
     Binding.bind(ODATA_BINDINGS.CSDL_GEN).toClass(CsdlGenerator).inScope(BindingScope.SINGLETON),
     Binding.bind(ODATA_BINDINGS.ENTITY_SET_REGISTRY)
       .toClass(EntitySetRegistry)
+      .inScope(BindingScope.SINGLETON),
+    Binding.bind(ODATA_BINDINGS.LOGGER)
+      .toProvider(ODataLoggerProvider)
       .inScope(BindingScope.SINGLETON),
     Binding.bind(ODATA_BINDINGS.APPLY_EXECUTOR_REGISTRY)
       .toDynamicValue(() => {
