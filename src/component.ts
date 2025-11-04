@@ -47,6 +47,10 @@ export class ODataComponent implements Component {
         maxDepth: 2,
         maxPartBodyBytes: 4 * 1024 * 1024,
       },
+      pagination: {
+        maxPageSize: 200,
+        maxApplyPageSize: 200,
+      },
     } as ODataConfig),
     Binding.bind(ODATA_BINDINGS.CSDL_GEN).toClass(CsdlGenerator).inScope(BindingScope.SINGLETON),
     Binding.bind(ODATA_BINDINGS.ENTITY_SET_REGISTRY)

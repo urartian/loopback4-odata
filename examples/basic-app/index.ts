@@ -91,6 +91,10 @@ export class ExampleApp extends BootMixin(RepositoryMixin(RestApplication)) {
     const tokenSecret = process.env.ODATA_TOKEN_SECRET ?? 'dev-example-secret';
     const maxOps = Number(process.env.BATCH_MAX_OPERATIONS ?? '');
     const maxPartBytes = Number(process.env.BATCH_MAX_PART_BYTES ?? '');
+    const maxTopLimit = Number(process.env.ODATA_MAX_TOP ?? '');
+    const maxSkipLimit = Number(process.env.ODATA_MAX_SKIP ?? '');
+    const maxPageSizeLimit = Number(process.env.ODATA_MAX_PAGE_SIZE ?? '');
+    const maxApplyPageSizeLimit = Number(process.env.ODATA_MAX_APPLY_PAGE_SIZE ?? '');
     const batchConfig: ODataConfig['batch'] = {
       ...(current.batch ?? {}),
       ...(Number.isFinite(maxOps) && maxOps > 0 ? { maxOperations: maxOps } : {}),
@@ -98,6 +102,23 @@ export class ExampleApp extends BootMixin(RepositoryMixin(RestApplication)) {
         ? { maxPartBodyBytes: maxPartBytes }
         : {}),
     };
+    const paginationConfig: ODataConfig['pagination'] = {
+      ...(current.pagination ?? {}),
+      ...(Number.isFinite(maxTopLimit) && maxTopLimit > 0
+        ? { maxTop: Math.floor(maxTopLimit) }
+        : {}),
+      ...(Number.isFinite(maxSkipLimit) && maxSkipLimit > 0
+        ? { maxSkip: Math.floor(maxSkipLimit) }
+        : {}),
+      ...(Number.isFinite(maxPageSizeLimit) && maxPageSizeLimit > 0
+        ? { maxPageSize: Math.floor(maxPageSizeLimit) }
+        : {}),
+      ...(Number.isFinite(maxApplyPageSizeLimit) && maxApplyPageSizeLimit > 0
+        ? { maxApplyPageSize: Math.floor(maxApplyPageSizeLimit) }
+        : {}),
+    };
+    const hasBatchConfig = Object.keys(batchConfig).length > 0;
+    const hasPaginationConfig = Object.keys(paginationConfig).length > 0;
     this.bind(ODATA_BINDINGS.CONFIG).to({
       ...current,
       enableApplyPushdown: enablePushdown,
@@ -105,7 +126,8 @@ export class ExampleApp extends BootMixin(RepositoryMixin(RestApplication)) {
       ...(logTelemetry ? { logApplyTelemetry: true } : {}),
       tokenSecret,
       documentInOpenApiDefault: false,
-      ...(batchConfig ? { batch: batchConfig } : {}),
+      ...(hasBatchConfig ? { batch: batchConfig } : {}),
+      ...(hasPaginationConfig ? { pagination: paginationConfig } : {}),
     });
   }
 }

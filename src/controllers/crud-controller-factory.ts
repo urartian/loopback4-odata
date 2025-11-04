@@ -2667,6 +2667,52 @@ export function defineODataCrudController(def: EntitySetDef) {
       return current;
     }
 
+    coerceLimit(value: unknown): number | undefined {
+      const num = Number(value);
+      if (Number.isFinite(num) && num > 0) {
+        return Math.floor(num);
+      }
+      return undefined;
+    }
+
+    getPaginationLimits(): {
+      maxTop?: number;
+      maxSkip?: number;
+      maxPageSize?: number;
+      maxApplyPageSize?: number;
+    } {
+      const global = this.cfg?.pagination ?? {};
+      const entityLimits = def.pagination ?? {};
+      const maxPageSize =
+        this.coerceLimit(entityLimits.maxPageSize) ?? this.coerceLimit(global.maxPageSize);
+      const maxApplyPageSize =
+        this.coerceLimit(entityLimits.maxApplyPageSize) ??
+        this.coerceLimit(global.maxApplyPageSize) ??
+        maxPageSize;
+      return {
+        maxTop:
+          this.coerceLimit(entityLimits.maxTop) ??
+          this.coerceLimit(global.maxTop) ??
+          this.coerceLimit(this.cfg?.maxTop),
+        maxSkip:
+          this.coerceLimit(entityLimits.maxSkip) ??
+          this.coerceLimit(global.maxSkip) ??
+          this.coerceLimit(this.cfg?.maxSkip),
+        maxPageSize,
+        maxApplyPageSize,
+      };
+    }
+
+    logPaginationClamp(parameter: string, requested: number, limit: number, context?: string) {
+      this.logger.warn('Pagination parameter clamped to maximum.', {
+        entitySet: setName,
+        parameter,
+        requested,
+        limit,
+        ...(context ? { context } : {}),
+      });
+    }
+
     logApplyFallback(
       event: string,
       detail: { entitySet: string; transformations?: number; rows?: number; limit?: number },
@@ -2707,15 +2753,11 @@ export function defineODataCrudController(def: EntitySetDef) {
         }
       }
       if (this.cfg?.logApplyTelemetry) {
-        const parts = [`mode=${mode}`, `stage=${stageIndex + 1}/${stageCount}`];
-        if (data.rows !== undefined) parts.push(`rows=${data.rows}`);
-        if (data.durationMs !== undefined) parts.push(`durationMs=${data.durationMs}`);
-        if (data.joinCount !== undefined) parts.push(`joins=${data.joinCount}`);
-        if (data.reason) parts.push(`reason=${data.reason}`);
         this.logger.debug('$apply telemetry', {
           entitySet: setName,
           mode,
-          stage: `${stageIndex + 1}/${stageCount}`,
+          stageIndex: stageIndex + 1,
+          stageCount,
           rows: data.rows,
           durationMs: data.durationMs,
           joinCount: data.joinCount,
@@ -2751,6 +2793,8 @@ export function defineODataCrudController(def: EntitySetDef) {
       if (!registry) return undefined;
       const executor = registry.get(def.applyExecutorId);
       if (!executor) return undefined;
+
+      const paginationLimits = this.getPaginationLimits();
 
       const emitReason = (reason: string) => {
         this.emitApplyTelemetry('pushdown', stageIndex, stageCount || 1, { reason });
@@ -2982,7 +3026,12 @@ export function defineODataCrudController(def: EntitySetDef) {
               descriptorList,
               paging?.skipTokenParts,
             );
-            const pageSize = paging?.pageSize ?? this.resolvePageSize(undefined);
+            const pageSize =
+              paging?.pageSize ??
+              this.resolvePageSize(undefined, {
+                maxPageSize: paginationLimits.maxApplyPageSize ?? paginationLimits.maxPageSize,
+                context: '$apply',
+              });
             const pagination = this.applyServerDrivenPaging(ordered, descriptorList, pageSize);
             ordered = pagination.items;
             nextLinkToken = pagination.token;
@@ -4137,13 +4186,31 @@ export function defineODataCrudController(def: EntitySetDef) {
       return descriptors;
     }
 
-    resolvePageSize(requested?: number): number {
+    resolvePageSize(
+      requested?: number,
+      options: { maxPageSize?: number; context?: string } = {},
+    ): number {
+      const limits = this.getPaginationLimits();
+      const maxPageSize = options.maxPageSize ?? limits.maxPageSize;
       const configSize = Number(this.cfg?.pageSize ?? 0);
-      const base = Number.isFinite(configSize) && configSize > 0 ? Math.floor(configSize) : 200;
-      if (!Number.isFinite(requested) || (requested as number) <= 0) return base;
-      const normalized = Math.floor(Number(requested));
-      if (normalized <= 0) return base;
-      return Math.min(normalized, base);
+      let base = Number.isFinite(configSize) && configSize > 0 ? Math.floor(configSize) : 200;
+      if (maxPageSize && base > maxPageSize) {
+        this.logPaginationClamp('pageSize(default)', base, maxPageSize, options.context);
+        base = maxPageSize;
+      }
+      const normalized = Number.isFinite(requested) ? Math.floor(Number(requested)) : undefined;
+      if (!normalized || normalized <= 0) {
+        return base;
+      }
+      if (maxPageSize && normalized > maxPageSize) {
+        this.logPaginationClamp('pageSize', normalized, maxPageSize, options.context);
+        return Math.min(base, maxPageSize);
+      }
+      if (normalized > base) {
+        this.logPaginationClamp('pageSize', normalized, base, options.context);
+        return base;
+      }
+      return normalized;
     }
 
     normalizeTtlSeconds(value: number | undefined, fallback: number): number {
@@ -4882,17 +4949,17 @@ export function defineODataCrudController(def: EntitySetDef) {
       }
     }
 
-    enforceSkipLimit(filter: Filter<CrudEntity>) {
-      const limitRaw = this.cfg?.maxSkip;
-      if (!Number.isFinite(limitRaw as number) || (limitRaw as number) < 0) return;
-      const cap = Number(limitRaw);
+    enforceSkipLimit(filter: Filter<CrudEntity>, limits?: { maxSkip?: number }) {
+      const limitCandidate = this.coerceLimit(limits?.maxSkip ?? this.cfg?.maxSkip);
+      if (limitCandidate === undefined) return;
       const requested = typeof filter.offset === 'number' ? filter.offset : undefined;
       if (requested == null) return;
-      if (this.cfg?.strict && requested > cap) {
-        throw new HttpErrors.BadRequest(`$skip exceeds maximum allowed (${cap}).`);
+      if (this.cfg?.strict && requested > limitCandidate) {
+        throw new HttpErrors.BadRequest(`$skip exceeds maximum allowed (${limitCandidate}).`);
       }
-      if (!this.cfg?.strict && requested > cap) {
-        filter.offset = cap;
+      if (!this.cfg?.strict && requested > limitCandidate) {
+        this.logPaginationClamp('$skip', requested, limitCandidate, 'collection');
+        filter.offset = limitCandidate;
       }
     }
 
@@ -5394,11 +5461,13 @@ export function defineODataCrudController(def: EntitySetDef) {
         this.ensureLambdaInclusion(baseFilter, lambdaExpression);
       }
 
+      const paginationLimits = this.getPaginationLimits();
+
       // Enforce maxTop if configured
-      const maxTop = this.cfg?.maxTop;
-      if (Number.isFinite(maxTop as number) && (maxTop as number) > 0) {
-        const cap = Number(maxTop);
-        const requestedTopRaw = (this.request.query?.['$top'] as string | undefined) ?? undefined;
+      const maxTop = paginationLimits.maxTop;
+      if (typeof maxTop === 'number') {
+        const cap = maxTop;
+        const requestedTopRaw = this.request.query?.['$top'] as string | undefined;
         const requested = requestedTopRaw != null ? Number(requestedTopRaw) : undefined;
         if (this.cfg?.strict && Number.isFinite(requested) && (requested as number) > cap) {
           throw new HttpErrors.BadRequest(
@@ -5407,6 +5476,9 @@ export function defineODataCrudController(def: EntitySetDef) {
         }
         if (!this.cfg?.strict) {
           const current = typeof baseFilter.limit === 'number' ? baseFilter.limit : undefined;
+          if (current != null && current > cap) {
+            this.logPaginationClamp('$top', current, cap, 'collection');
+          }
           baseFilter.limit = current == null ? cap : Math.min(current, cap);
         }
       }
@@ -5414,7 +5486,7 @@ export function defineODataCrudController(def: EntitySetDef) {
       this.ensureEtagField(baseFilter);
       this.ensureAcceptsJson();
       this.validateFieldsStrict(baseFilter);
-      this.enforceSkipLimit(baseFilter);
+      this.enforceSkipLimit(baseFilter, paginationLimits);
 
       const skipApplied = typeof baseFilter.offset === 'number' && baseFilter.offset > 0;
       if (skipApplied && skipTokenValue) {
@@ -5437,7 +5509,12 @@ export function defineODataCrudController(def: EntitySetDef) {
 
       const originalTop = typeof baseFilter.limit === 'number' ? baseFilter.limit : undefined;
       const serverPagingEnabled = !aggregationSpec && !skipApplied;
-      let pageSize = serverPagingEnabled ? this.resolvePageSize(originalTop) : originalTop;
+      let pageSize = serverPagingEnabled
+        ? this.resolvePageSize(originalTop, {
+            maxPageSize: paginationLimits.maxPageSize,
+            context: 'collection',
+          })
+        : originalTop;
       let orderDescriptors: OrderDescriptor[] = [];
       if (serverPagingEnabled) {
         orderDescriptors = this.normalizeOrderDescriptors(
@@ -5453,7 +5530,12 @@ export function defineODataCrudController(def: EntitySetDef) {
             this.combineWithAnd([baseFilter.where as CrudWhere | undefined, skipConstraint]) ??
             skipConstraint;
         }
-        pageSize = pageSize ?? this.resolvePageSize(undefined);
+        pageSize =
+          pageSize ??
+          this.resolvePageSize(undefined, {
+            maxPageSize: paginationLimits.maxPageSize,
+            context: 'collection',
+          });
         baseFilter.limit = (pageSize ?? 0) + 1;
         baseFilter.offset = 0;
       }
@@ -5518,7 +5600,10 @@ export function defineODataCrudController(def: EntitySetDef) {
             throw new HttpErrors.BadRequest('Unable to derive ordering for $apply pagination.');
           }
           const applyTokenParts = this.parseApplySkipToken(skipTokenValue, applyOrderDescriptors);
-          let applyPageSize = this.resolvePageSize(originalTop);
+          let applyPageSize = this.resolvePageSize(originalTop, {
+            maxPageSize: paginationLimits.maxApplyPageSize ?? paginationLimits.maxPageSize,
+            context: '$apply',
+          });
           if (finalStage?.top != null) {
             applyPageSize = Math.min(applyPageSize, finalStage.top);
           }
@@ -5792,7 +5877,12 @@ export function defineODataCrudController(def: EntitySetDef) {
         let nextLinkToken: string | undefined;
         let paged: AnyObject[];
         if (serverPagingEnabled) {
-          const effectivePageSize = pageSize ?? this.resolvePageSize(undefined);
+          const effectivePageSize =
+            pageSize ??
+            this.resolvePageSize(undefined, {
+              maxPageSize: paginationLimits.maxPageSize,
+              context: 'collection',
+            });
           const pagination = this.applyServerDrivenPaging(
             ordered,
             orderDescriptors,

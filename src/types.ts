@@ -31,6 +31,7 @@ export interface ODataConfig {
   enableApplyPushdown?: boolean; // opt-in for datastore-backed $apply execution
   pageSize?: number; // default page size for server-driven paging
   enableDelta?: boolean; // opt-in for delta link emission
+  pagination?: ODataPaginationConfig;
   // OpenAPI visibility
   documentInOpenApiDefault?: boolean | 'auto'; // default 'auto'
   removeUndocumentedFromSpec?: boolean; // default true
@@ -153,4 +154,11 @@ export interface ODataBatchConfig {
   maxChangesetOperations?: number; // max operations inside a single changeset
   maxDepth?: number; // maximum multipart nesting depth
   maxPartBodyBytes?: number; // maximum body size for an individual part
+}
+
+export interface ODataPaginationConfig {
+  maxTop?: number; // maximum client-requested $top
+  maxSkip?: number; // maximum client-requested $skip
+  maxPageSize?: number; // maximum server-driven page size for collections
+  maxApplyPageSize?: number; // maximum server-driven page size for $apply pipelines
 }
