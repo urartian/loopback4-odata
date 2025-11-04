@@ -17,6 +17,7 @@ import { odataModel } from '../../decorators/model.decorator';
 import { odataController } from '../../decorators/controller.decorator';
 import { ODataApplyExecutorRegistry } from '../../services/odata-apply-executor.registry';
 import { ODataLogger } from '../../keys';
+import { odataAction, odataFunction } from '../../decorators/action.function.decorators';
 
 describe('ODataBooter entity set naming', () => {
   it('uses inflection to pluralize model names by default', () => {
@@ -157,6 +158,73 @@ describe('ODataBooter navigation reference routes', () => {
     const spec = await app.restServer.getApiSpec();
     expect(spec.paths?.['/odata/Orders/{id}/items/$ref']).to.be.Object();
     expect(spec.paths?.['/odata/Orders/{id}/items/{targetKey}/$ref']).to.be.Object();
+  });
+});
+
+describe('ODataBooter operation parameter warnings', () => {
+  it('logs a warning when operation parameter metadata is missing', async () => {
+    const warnings: Array<{ message: string; context?: unknown }> = [];
+    const logger: ODataLogger = {
+      ...noopLogger,
+      warn: (message, context) => {
+        warnings.push({ message, context });
+      },
+    };
+
+    const RepoRestApp = RepositoryMixin(RestApplication);
+    const app = new RepoRestApp();
+    app.dataSource(new juggler.DataSource({ name: 'db', connector: 'memory' }), 'db');
+
+    @model()
+    class Account extends Entity {
+      @property({ id: true })
+      id?: number;
+    }
+
+    class AccountRepository extends DefaultCrudRepository<Account, typeof Account.prototype.id> {
+      constructor(@inject('datasources.db') dataSource: juggler.DataSource) {
+        super(Account, dataSource);
+      }
+    }
+
+    @odataController(Account)
+    class AccountController {
+      @odataAction()
+      async login(body: { email: string }) {
+        return body.email;
+      }
+
+      @odataFunction({ params: [] })
+      async status() {
+        return 'ok';
+      }
+    }
+
+    app.repository(AccountRepository);
+    app.controller(AccountController);
+
+    const registry = new EntitySetRegistry();
+    const booter = new ODataBooter(
+      app,
+      registry,
+      {} as any,
+      new ODataApplyExecutorRegistry(),
+      logger,
+    );
+
+    await booter.load();
+
+    expect(warnings).to.have.length(1);
+    expect(warnings[0].message).to.match(
+      /No parameter metadata defined for OData action "login" on AccountController/,
+    );
+    expect(warnings[0].context).to.containEql({
+      controller: 'AccountController',
+      method: 'login',
+      operation: 'login',
+      binding: 'entity',
+      kind: 'Action',
+    });
   });
 });
 const noopLogger: ODataLogger = {

@@ -61,6 +61,8 @@ export class ODataBooter implements Booter {
     private readonly logger: ODataLogger,
   ) {}
 
+  private readonly missingParamsWarnings = new Set<string>();
+
   private identifyCompositionRelations(
     modelCtor: typeof Entity | undefined,
     modelDefinition: ModelDefinition | undefined,
@@ -435,6 +437,9 @@ export class ODataBooter implements Booter {
     const functions = getODataFunctions(controllerCtor);
     if (!actions.length && !functions.length) return;
 
+    this.warnMissingOperationParameters(controllerCtor, actions, 'Action');
+    this.warnMissingOperationParameters(controllerCtor, functions, 'Function');
+
     const app = this.app as RestApplication;
     const basePath = `/odata/${def.name}`;
     def.actions = actions;
@@ -635,6 +640,32 @@ export class ODataBooter implements Booter {
         };
       },
     );
+  }
+
+  private warnMissingOperationParameters(
+    controllerCtor: Function,
+    operations: OperationMeta[],
+    kind: 'Action' | 'Function',
+  ): void {
+    const controllerName = controllerCtor?.name?.trim()?.length
+      ? controllerCtor.name
+      : 'Controller';
+    for (const op of operations) {
+      if (op.parameters !== undefined) continue;
+      const cacheKey = `${controllerName}:${op.methodName}`;
+      if (this.missingParamsWarnings.has(cacheKey)) continue;
+      this.missingParamsWarnings.add(cacheKey);
+      this.logger.warn(
+        `No parameter metadata defined for OData ${kind.toLowerCase()} "${op.name}" on ${controllerName}. Add the "params" option to @odata${kind} to describe its payload.`,
+        {
+          controller: controllerName,
+          method: op.methodName,
+          operation: op.name,
+          binding: op.binding,
+          kind,
+        },
+      );
+    }
   }
 }
 
