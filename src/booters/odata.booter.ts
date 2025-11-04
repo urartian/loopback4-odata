@@ -47,6 +47,7 @@ import { ODataConfig } from '../types';
 import { ensureNavigationTargetKey } from '../util/relation-metadata';
 import { ODataApplyExecutorRegistry } from '../services/odata-apply-executor.registry';
 import { inferSqlMetadata } from '../util/sql-metadata';
+import { ODATA_VERSION } from '../constants';
 
 @injectable({ tags: { booters: 'odata' } })
 export class ODataBooter implements Booter {
@@ -623,6 +624,9 @@ export class ODataBooter implements Booter {
           args.push(ctx.request.query);
         }
         const result = await controller[op.methodName](...args);
+        if (!ctx.response.headersSent && !ctx.response.getHeader('OData-Version')) {
+          ctx.response.set('OData-Version', ODATA_VERSION);
+        }
         if (op.rawResponse) return result;
         const context = setSegment ? `/odata/$metadata#${setSegment}` : '/odata/$metadata';
         return {
