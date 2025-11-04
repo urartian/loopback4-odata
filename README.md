@@ -174,7 +174,7 @@ npm start
 
 For a quick demo, run `npm run dev`; this boots the example app in `examples/basic-app`, with an in-memory datasource pre-seeded with sample products and orders so you can experiment with the query options immediately.
 
-> The example binds `tokenSecret` from `process.env.ODATA_TOKEN_SECRET` and falls back to a development default. Set a unique value before exposing the sample app over a shared network.
+> The example binds `tokenSecret` from `process.env.ODATA_TOKEN_SECRET` and falls back to a development default. Set a unique value before exposing the sample app over a shared network. You can also tweak guardrails at runtime via environment variables such as `BATCH_MAX_OPERATIONS`, `BATCH_MAX_PART_BYTES`, `ODATA_MAX_TOP`, `ODATA_MAX_SKIP`, `ODATA_MAX_PAGE_SIZE`, and `ODATA_MAX_APPLY_PAGE_SIZE`.
 
 ##### Metadata
 
@@ -901,9 +901,13 @@ this.bind(ODATA_BINDINGS.CONFIG).to({
     countable: true,
     aggregation: true,
   },
-  maxTop: 100, // server paging cap
-  pageSize: 50, // server-driven paging size (default: 200)
-  maxSkip: 1000, // max skip allowed
+  pagination: {
+    maxTop: 100, // server paging cap
+    maxSkip: 1000, // max skip allowed
+    maxPageSize: 50, // server-driven paging guardrail
+    maxApplyPageSize: 100, // guardrail for $apply pipelines
+  },
+  pageSize: 50, // default server-driven paging size (default: 200)
   maxExpandDepth: 2, // max $expand nesting depth
   enableCount: true, // enable inline and standalone $count
   strict: true, // enable strict validations (default: true)
@@ -947,10 +951,27 @@ this.bind(ODATA_BINDINGS.CONFIG).to({
 
 Spreading the current config ensures sensitive settings such as `tokenSecret` remain intact unless you explicitly replace them.
 
+Per-entity guardrails can be applied through the registry definition. Entity-level limits override the global pagination block, allowing you to relax or tighten caps on a per-feed basis:
+
+```ts
+const ProductsSet: EntitySetDef<Product> = {
+  name: 'Products',
+  modelCtor: Product,
+  repositoryBindingKey: 'repositories.ProductRepository',
+  pagination: {
+    maxTop: 500,
+    maxPageSize: 250,
+    maxApplyPageSize: 100,
+  },
+};
+```
+
 - `basePath`: Externally visible service root. All OData routes are served under this path (via middleware rewrite) while internal routes remain at `/odata`. Response metadata (`@odata.context`) uses this value.
-- `maxTop`: Caps `$top` for collection reads. The server may return fewer results than requested per OData v4. In strict mode, requests with `$top` above the cap return 400; otherwise the value is clamped to the maximum.
-- `maxSkip`: Maximum allowed `$skip`. When strict mode is disabled, requests above the cap are clamped; with strict mode enabled they return `400 Bad Request`.
-- `pageSize`: Default number of records per page for server-driven paging. The service always returns at most this many entities and emits an `@odata.nextLink` with a signed `$skiptoken` so clients can resume the feed.
+- `pagination.maxTop`: Caps `$top` for collection reads. When `strict=true` requests above the cap return `400 Bad Request`; otherwise the server clamps the value. Legacy `config.maxTop` is still honored but the nested value takes precedence.
+- `pagination.maxSkip`: Maximum allowed `$skip`. Requests above the cap are clamped when `strict=false` and rejected when `strict=true`. Legacy `config.maxSkip` remains available for backward compatibility.
+- `pagination.maxPageSize`: Upper bound for server-driven paging on collection endpoints. The service never emits more than this many entities in a single page even when clients omit `$top`.
+- `pagination.maxApplyPageSize`: Upper bound for server-driven paging when executing `$apply` pipelines. When unset, it falls back to `maxPageSize`.
+- `pageSize`: Default number of records per page for server-driven paging. The service always returns at most this many entities and emits an `@odata.nextLink` with a signed `$skiptoken` so clients can resume the feed. Automatically clamped to the configured pagination guardrails.
 - `enableDelta`: When `true`, collection responses include `@odata.deltaLink` so clients can poll only the rows that changed since the last snapshot.
 - `tokenSecret`: Required secret used to sign `$skiptoken` / `$deltatoken` payloads. Requests fail with `500` until a non-empty secret is configured. Inject it via environment variables or a vault-backed binding.
 - `skipTokenTtl`: Lifetime (in seconds) for issued `$skiptoken` links. Defaults to `900` (15 minutes). Expired tokens return `400 Invalid $skiptoken`.

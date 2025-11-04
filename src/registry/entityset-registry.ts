@@ -37,6 +37,12 @@ export interface EntitySetDef<T extends Entity = Entity> {
   deltaField?: string;
   deltaToken?: DeltaTokenPayload;
   documentInOpenApi?: boolean;
+  pagination?: {
+    maxTop?: number;
+    maxSkip?: number;
+    maxPageSize?: number;
+    maxApplyPageSize?: number;
+  };
 }
 
 @injectable({ scope: BindingScope.SINGLETON })
@@ -78,6 +84,9 @@ export class EntitySetRegistry {
     }
     if (def.documentInOpenApi === undefined && existing?.documentInOpenApi !== undefined) {
       next.documentInOpenApi = existing.documentInOpenApi;
+    }
+    if (def.pagination === undefined && existing?.pagination !== undefined) {
+      next.pagination = existing.pagination;
     }
     this.sets.set(def.modelCtor, next);
     return next as EntitySetDef<T>;

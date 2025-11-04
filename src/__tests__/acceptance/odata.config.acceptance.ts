@@ -7,44 +7,74 @@ import {
   seedExampleData,
 } from '../fixtures/odata-app.fixture';
 import { ODATA_BINDINGS } from '../../keys';
-import { ODataConfig } from '../../types';
+import { ODataConfig, ODataPaginationConfig } from '../../types';
+
+type ConfigOverrides = Omit<Partial<ODataConfig>, 'pagination'> & {
+  pagination?: Partial<ODataPaginationConfig>;
+};
 
 describe('OData config plumbing acceptance', () => {
   let app: TestApplication;
   let client: Client;
 
-  beforeEach(async function () {
-    app = await givenODataApplication({ port: 0, host: '127.0.0.1' });
-    // Override config before boot to ensure middleware/routes pick it up
-    const baseConfig = app.getSync(ODATA_BINDINGS.CONFIG) as ODataConfig;
-    app.bind(ODATA_BINDINGS.CONFIG).to({
-      ...baseConfig,
-      basePath: '/api/odata',
+  const bootAppWithConfig = async (
+    mochaCtx: { skip: () => void },
+    overrides: ConfigOverrides = {},
+  ): Promise<void> => {
+    const freshApp = await givenODataApplication({ port: 0, host: '127.0.0.1' });
+    const baseConfig = freshApp.getSync(ODATA_BINDINGS.CONFIG) as ODataConfig;
+    const { pagination: paginationOverrides, ...restOverrides } = overrides;
+    const mergedPagination: ODataPaginationConfig = {
+      ...(baseConfig.pagination ?? {}),
       maxTop: 1,
       maxSkip: 2,
+      maxPageSize: 2,
+      maxApplyPageSize: 2,
+      ...(paginationOverrides ?? {}),
+    };
+
+    freshApp.bind(ODATA_BINDINGS.CONFIG).to({
+      ...baseConfig,
+      basePath: '/api/odata',
       maxExpandDepth: 2,
       enableCount: false,
       strict: false,
+      pagination: mergedPagination,
+      ...restOverrides,
     });
 
-    await app.boot();
-    await seedExampleData(app);
+    await freshApp.boot();
+    await seedExampleData(freshApp);
     try {
-      await app.start();
-      client = createRestAppClient(app);
+      await freshApp.start();
     } catch (err) {
       const code = (err as NodeJS.ErrnoException).code;
       const message = (err as Error).message ?? '';
+      await freshApp.stop().catch(() => undefined);
       if (code === 'EPERM' || message.includes('not listening')) {
-        this.skip();
+        mochaCtx.skip();
         return;
       }
       throw err;
     }
+
+    app = freshApp;
+    client = createRestAppClient(app);
+  };
+
+  const replaceApp = async (mochaCtx: { skip: () => void }, overrides: ConfigOverrides) => {
+    if (app?.state === 'started') {
+      await app.stop();
+    }
+    await bootAppWithConfig(mochaCtx, overrides);
+  };
+
+  beforeEach(async function (this: any) {
+    await bootAppWithConfig(this);
   });
 
   afterEach(async () => {
-    if (app.state === 'started') {
+    if (app?.state === 'started') {
       await app.stop();
     }
   });
@@ -69,9 +99,12 @@ describe('OData config plumbing acceptance', () => {
     app.bind(ODATA_BINDINGS.CONFIG).to({
       ...baseConfig,
       basePath: '/api/odata',
-      maxTop: 1,
       enableCount: false,
       strict: true,
+      pagination: {
+        ...(baseConfig.pagination ?? {}),
+        maxTop: 1,
+      },
     });
     await app.boot();
     await seedExampleData(app);
@@ -98,6 +131,37 @@ describe('OData config plumbing acceptance', () => {
     expect(res.body.value).to.be.Array();
     expect(res.body.value.length).to.be.greaterThan(0);
     expect(res.body.value[0].name).to.equal('Monitor');
+  });
+
+  it('limits server-driven paging to pagination.maxPageSize', async () => {
+    const res = await client.get('/api/odata/Products').expect(200);
+    expect(res.body.value.length).to.be.lessThanOrEqual(2);
+    expect(res.body['@odata.nextLink']).to.be.a.String();
+  });
+
+  it('limits $apply server-driven paging to pagination.maxApplyPageSize', async function (this: any) {
+    await replaceApp(this, {
+      pagination: { maxApplyPageSize: 1 },
+    });
+    const pipeline =
+      'groupby((name),aggregate(price with sum as TotalPrice))/orderby(TotalPrice desc)';
+    const res = await client.get('/api/odata/Products').query({ $apply: pipeline }).expect(200);
+
+    expect(res.body.value.length).to.be.lessThanOrEqual(1);
+    expect(res.body['@odata.nextLink']).to.be.a.String();
+  });
+
+  it('limits $apply server-driven paging in strict mode', async function (this: any) {
+    await replaceApp(this, {
+      strict: true,
+      pagination: { maxApplyPageSize: 1 },
+    });
+    const pipeline =
+      'groupby((name),aggregate(price with sum as TotalPrice))/orderby(TotalPrice desc)';
+    const res = await client.get('/api/odata/Products').query({ $apply: pipeline }).expect(200);
+
+    expect(res.body.value.length).to.be.lessThanOrEqual(1);
+    expect(res.body['@odata.nextLink']).to.be.a.String();
   });
 
   it('supports trim() filters when strict=false', async () => {
