@@ -8,10 +8,13 @@ import {
 } from '../fixtures/odata-app.fixture';
 import { ODATA_BINDINGS } from '../../keys';
 import { ODataConfig, ODataPaginationConfig } from '../../types';
+import { EntitySetRegistry } from '../../registry/entityset-registry';
+import { Order } from '../fixtures/odata-app.fixture';
 
 type ConfigOverrides = Omit<Partial<ODataConfig>, 'pagination'> & {
   pagination?: Partial<ODataPaginationConfig>;
 };
+type AppConfigurator = (app: TestApplication) => Promise<void> | void;
 
 describe('OData config plumbing acceptance', () => {
   let app: TestApplication;
@@ -20,6 +23,7 @@ describe('OData config plumbing acceptance', () => {
   const bootAppWithConfig = async (
     mochaCtx: { skip: () => void },
     overrides: ConfigOverrides = {},
+    configureApp?: AppConfigurator,
   ): Promise<void> => {
     const freshApp = await givenODataApplication({ port: 0, host: '127.0.0.1' });
     const baseConfig = freshApp.getSync(ODATA_BINDINGS.CONFIG) as ODataConfig;
@@ -43,6 +47,10 @@ describe('OData config plumbing acceptance', () => {
       ...restOverrides,
     });
 
+    if (configureApp) {
+      await configureApp(freshApp);
+    }
+
     await freshApp.boot();
     await seedExampleData(freshApp);
     try {
@@ -62,11 +70,15 @@ describe('OData config plumbing acceptance', () => {
     client = createRestAppClient(app);
   };
 
-  const replaceApp = async (mochaCtx: { skip: () => void }, overrides: ConfigOverrides) => {
+  const replaceApp = async (
+    mochaCtx: { skip: () => void },
+    overrides: ConfigOverrides,
+    configureApp?: AppConfigurator,
+  ) => {
     if (app?.state === 'started') {
       await app.stop();
     }
-    await bootAppWithConfig(mochaCtx, overrides);
+    await bootAppWithConfig(mochaCtx, overrides, configureApp);
   };
 
   beforeEach(async function (this: any) {
@@ -162,6 +174,36 @@ describe('OData config plumbing acceptance', () => {
 
     expect(res.body.value.length).to.be.lessThanOrEqual(1);
     expect(res.body['@odata.nextLink']).to.be.a.String();
+  });
+
+  it('honors entity-level pagination overrides over global defaults', async function (this: any) {
+    await replaceApp(
+      this,
+      {
+        pagination: {
+          maxPageSize: 3,
+        },
+      },
+      async (freshApp) => {
+        const registry = await freshApp.get<EntitySetRegistry>(ODATA_BINDINGS.ENTITY_SET_REGISTRY);
+        registry.register({
+          name: 'Orders',
+          modelCtor: Order,
+          pagination: {
+            maxPageSize: 1,
+          },
+        });
+      },
+    );
+
+    const productsRes = await client.get('/api/odata/Products').expect(200);
+    expect(productsRes.body.value.length).to.be.lessThanOrEqual(3);
+    expect(productsRes.body.value.length).to.be.greaterThan(0);
+    expect(productsRes.body['@odata.nextLink']).to.be.a.String();
+
+    const ordersRes = await client.get('/api/odata/Orders').expect(200);
+    expect(ordersRes.body.value.length).to.be.lessThanOrEqual(1);
+    expect(ordersRes.body['@odata.nextLink']).to.be.a.String();
   });
 
   it('supports trim() filters when strict=false', async () => {

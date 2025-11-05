@@ -188,6 +188,45 @@ describe('OData component acceptance', () => {
     await client.get(`${nextUrl.pathname}?${nextUrl.searchParams.toString()}`).expect(400);
   });
 
+  it('fails when tokenSecret is missing while issuing $skiptoken values', async () => {
+    const current = app.getSync(ODATA_BINDINGS.CONFIG) as ODataConfig;
+    app.bind(ODATA_BINDINGS.CONFIG).to({
+      ...current,
+      tokenSecret: undefined,
+      pageSize: 2,
+    });
+
+    const res = await client.get('/odata/Products').expect(500);
+    expect(res.body?.error?.message).to.match(/tokenSecret must be configured/i);
+
+    app.bind(ODATA_BINDINGS.CONFIG).to({
+      ...current,
+    });
+  });
+
+  it('expires $skiptoken after configured TTL', async function (this: Mocha.Context) {
+    this.timeout(5000);
+    const current = app.getSync(ODATA_BINDINGS.CONFIG) as ODataConfig;
+    app.bind(ODATA_BINDINGS.CONFIG).to({
+      ...current,
+      tokenSecret: 'ttl-secret',
+      pageSize: 1,
+      skipTokenTtl: 1,
+    });
+
+    const first = await client.get('/odata/Products').expect(200);
+    const nextLink = String(first.body['@odata.nextLink']);
+    expect(nextLink).to.match(/(%24|\$)skiptoken=/);
+
+    await new Promise((resolve) => setTimeout(resolve, 1200));
+
+    await client.get(nextLink).expect(400);
+
+    app.bind(ODATA_BINDINGS.CONFIG).to({
+      ...current,
+    });
+  });
+
   it('honors $format=json even when Accept header excludes JSON', async () => {
     const res = await client
       .get('/odata/Products')
