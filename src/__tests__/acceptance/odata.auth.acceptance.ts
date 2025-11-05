@@ -1,0 +1,206 @@
+import 'reflect-metadata';
+
+import { BindingKey, Interceptor, InvocationContext, Next, Provider, inject } from '@loopback/core';
+import { HttpErrors, RestServerConfig, RequestContext } from '@loopback/rest';
+import { Client, createRestAppClient, expect } from '@loopback/testlab';
+
+import {
+  Product,
+  TestApplication,
+  givenODataApplication,
+  seedExampleData,
+} from '../fixtures/odata-app.fixture';
+import { odataController, odataFunction } from '../../index';
+
+const AUTH_METADATA_KEY = 'authentication:metadata';
+const AUTHZ_METADATA_KEY = 'authorization:metadata';
+const TEST_USER_BINDING = BindingKey.create<{ id: string }>('test.user');
+
+interface AuthorizationSpec {
+  scopes?: string[];
+  allowedRoles?: string[];
+}
+
+function authenticate(...strategies: string[]): MethodDecorator & ClassDecorator {
+  return (target: object, propertyKey?: string | symbol) => {
+    const metadata = { strategy: strategies[0], strategies };
+    if (propertyKey) {
+      Reflect.defineMetadata(AUTH_METADATA_KEY, metadata, target, propertyKey);
+    } else {
+      Reflect.defineMetadata(AUTH_METADATA_KEY, metadata, target);
+    }
+  };
+}
+
+function authorize(spec: AuthorizationSpec): MethodDecorator & ClassDecorator {
+  return (target: object, propertyKey?: string | symbol) => {
+    if (propertyKey) {
+      Reflect.defineMetadata(AUTHZ_METADATA_KEY, spec, target, propertyKey);
+    } else {
+      Reflect.defineMetadata(AUTHZ_METADATA_KEY, spec, target);
+    }
+  };
+}
+
+const splitHeaderValues = (value: string | null | undefined): string[] =>
+  (value ?? '')
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean);
+
+class TestAuthEnforcerInterceptor implements Provider<Interceptor> {
+  value(): Interceptor {
+    return async (invocationCtx: InvocationContext, next: Next) => {
+      const methodAuth = Reflect.getMetadata(
+        AUTH_METADATA_KEY,
+        invocationCtx.target,
+        invocationCtx.methodName,
+      );
+      const classAuth = Reflect.getMetadata(AUTH_METADATA_KEY, invocationCtx.targetClass);
+      const authMeta = methodAuth ?? classAuth;
+
+      const methodAuthz = Reflect.getMetadata(
+        AUTHZ_METADATA_KEY,
+        invocationCtx.target,
+        invocationCtx.methodName,
+      ) as AuthorizationSpec | undefined;
+      const classAuthz = Reflect.getMetadata(AUTHZ_METADATA_KEY, invocationCtx.targetClass) as
+        | AuthorizationSpec
+        | undefined;
+      const authzMeta = methodAuthz ?? classAuthz;
+
+      if (!authMeta && !authzMeta) {
+        return next();
+      }
+
+      const requestCtx = invocationCtx.parent as RequestContext;
+      const userId = requestCtx.request.get('x-user');
+      if (!userId) {
+        throw new HttpErrors.Unauthorized('Missing authentication header.');
+      }
+
+      const scopeHeader = splitHeaderValues(requestCtx.request.get('x-user-scopes'));
+      const roleHeader = splitHeaderValues(requestCtx.request.get('x-user-role'));
+
+      if (authzMeta?.scopes?.length) {
+        const missingScopes = authzMeta.scopes.filter((scope) => !scopeHeader.includes(scope));
+        if (missingScopes.length) {
+          throw new HttpErrors.Forbidden(
+            `Missing required scopes: ${missingScopes.sort().join(', ')}`,
+          );
+        }
+      }
+
+      if (authzMeta?.allowedRoles?.length) {
+        const hasRole = roleHeader.some((role) => authzMeta.allowedRoles!.includes(role));
+        if (!hasRole) {
+          throw new HttpErrors.Forbidden('User lacks required role.');
+        }
+      }
+
+      requestCtx.bind(TEST_USER_BINDING).to({ id: userId });
+      return next();
+    };
+  }
+}
+
+@odataController(Product)
+class MethodProtectedOperationsController {
+  @odataFunction({ name: 'methodProtected', binding: 'unbound' })
+  @authenticate('jwt')
+  @authorize({ scopes: ['incident.read'], allowedRoles: ['ADMIN'] })
+  methodProtected(@inject(TEST_USER_BINDING) currentUser?: { id: string } | null) {
+    return { userId: currentUser?.id ?? null };
+  }
+}
+
+@authenticate('jwt')
+@authorize({ scopes: ['incident.manage'], allowedRoles: ['ADMIN'] })
+@odataController(Product)
+class ClassProtectedOperationsController {
+  @odataFunction({ name: 'classProtected', binding: 'unbound' })
+  classProtected(@inject(TEST_USER_BINDING) currentUser?: { id: string } | null) {
+    return { userId: currentUser?.id ?? null };
+  }
+}
+
+describe('OData operations authentication integration', () => {
+  let app: TestApplication;
+  let client: Client;
+
+  async function givenApp(config: RestServerConfig = {}): Promise<void> {
+    app = await givenODataApplication(config);
+    app.interceptor(TestAuthEnforcerInterceptor, { global: true });
+    app.controller(MethodProtectedOperationsController);
+    app.controller(ClassProtectedOperationsController);
+    await app.boot();
+    await seedExampleData(app);
+    await app.start();
+    client = createRestAppClient(app);
+  }
+
+  beforeEach(async function () {
+    try {
+      await givenApp({ port: 0, host: '127.0.0.1' });
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      const message = (err as Error).message ?? '';
+      if (code === 'EPERM' || message.includes('not listening')) {
+        this.skip();
+        return;
+      }
+      throw err;
+    }
+  });
+
+  afterEach(async () => {
+    if (app?.state === 'started') {
+      await app.stop();
+    }
+  });
+
+  it('rejects unauthenticated access to method-level protected function', async () => {
+    await client.get('/odata/methodProtected').expect(401);
+  });
+
+  it('enforces method-level scopes and roles and injects the current user', async () => {
+    const res = await client
+      .get('/odata/methodProtected')
+      .set('x-user', 'alice')
+      .set('x-user-scopes', 'incident.read,incident.write')
+      .set('x-user-role', 'ADMIN')
+      .expect(200);
+
+    expect(res.body.value).to.deepEqual({ userId: 'alice' });
+    expect(res.body['@odata.context']).to.equal('/odata/$metadata');
+  });
+
+  it('returns 403 when method-level scopes are missing', async () => {
+    await client
+      .get('/odata/methodProtected')
+      .set('x-user', 'alice')
+      .set('x-user-role', 'ADMIN')
+      .expect(403);
+  });
+
+  it('rejects class-level protected function for users without roles', async () => {
+    await client
+      .get('/odata/classProtected')
+      .set('x-user', 'bob')
+      .set('x-user-scopes', 'incident.manage')
+      .set('x-user-role', 'USER')
+      .expect(403);
+  });
+
+  it('allows class-level protected function when user meets requirements', async () => {
+    const res = await client
+      .get('/odata/classProtected')
+      .set('x-user', 'bob')
+      .set('x-user-scopes', 'incident.manage')
+      .set('x-user-role', 'ADMIN')
+      .expect(200);
+
+    expect(res.body.value).to.deepEqual({ userId: 'bob' });
+    expect(res.body['@odata.context']).to.equal('/odata/$metadata');
+  });
+});

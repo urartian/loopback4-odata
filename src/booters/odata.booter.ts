@@ -6,6 +6,7 @@ import {
   inject,
   injectable,
   ValueOrPromise,
+  invokeMethod,
   invokeMethodWithInterceptors,
 } from '@loopback/core';
 import { Booter } from '@loopback/boot';
@@ -18,6 +19,7 @@ import {
   RouteEntry,
   RouteSource,
   HttpErrors,
+  ControllerRoute,
 } from '@loopback/rest';
 import { EntitySetDef, EntitySetRegistry } from '../registry/entityset-registry';
 import { getODataControllerModel } from '../decorators/controller.decorator';
@@ -589,56 +591,27 @@ export class ODataBooter implements Booter {
     };
     spec = this.applyGeneratedRouteMetadata(spec, visibility);
 
-    const setSegment = op.binding === 'unbound' ? undefined : (basePath.split('/').pop() ?? '');
+    const controllerName =
+      (controllerCtor?.name?.trim()?.length ?? 0) ? controllerCtor.name : 'Controller';
     const bindingKey = `controllers.${controllerCtor.name}`;
     const routePath = op.binding === 'unbound' ? `/odata/${op.name}` : path;
+    const decoratedSpec: OperationObject = {
+      ...spec,
+      'x-controller-name': spec['x-controller-name'] ?? controllerName,
+      'x-operation-name': spec['x-operation-name'] ?? op.methodName,
+      tags: spec.tags ?? [controllerName],
+    };
+
+    const setSegment = op.binding === 'unbound' ? undefined : (basePath.split('/').pop() ?? '');
 
     return new ODataOperationRoute(
       verb,
       routePath,
-      spec,
-      async (ctx: RequestContext, ...params: unknown[]) => {
-        const controller = (await ctx.get(bindingKey as any)) as any;
-        const args: unknown[] = [];
-        if (op.binding === 'entity') {
-          const routeParams = ctx.request.params as Record<string, unknown> | undefined;
-          let id = routeParams?.id;
-
-          if (id == null && params.length) {
-            const candidate = params[0];
-            if (
-              typeof candidate === 'string' ||
-              typeof candidate === 'number' ||
-              typeof candidate === 'boolean'
-            ) {
-              id = candidate;
-            }
-          }
-          if (id == null) {
-            const segments = ctx.request.path.split('/').filter(Boolean);
-            id = segments.length >= 4 ? segments[segments.length - 2] : undefined;
-          }
-          if (id == null) {
-            throw new HttpErrors.BadRequest(`Missing entity key for ${op.name}.`);
-          }
-          args.push(id);
-        }
-        if (verb === 'post') {
-          args.push(ctx.request.body);
-        } else {
-          args.push(ctx.request.query);
-        }
-        const result = await controller[op.methodName](...args);
-        if (!ctx.response.headersSent && !ctx.response.getHeader('OData-Version')) {
-          ctx.response.set('OData-Version', ODATA_VERSION);
-        }
-        if (op.rawResponse) return result;
-        const context = setSegment ? `/odata/$metadata#${setSegment}` : '/odata/$metadata';
-        return {
-          '@odata.context': context,
-          value: result,
-        };
-      },
+      decoratedSpec,
+      controllerCtor,
+      bindingKey,
+      op,
+      setSegment,
     );
   }
 
@@ -671,19 +644,96 @@ export class ODataBooter implements Booter {
 
 type OperationHandler = (ctx: RequestContext, ...params: unknown[]) => ValueOrPromise<unknown>;
 
-class ODataOperationRoute extends Route {
-  constructor(verb: string, path: string, spec: OperationObject, handler: OperationHandler) {
-    super(verb, path, spec, handler);
+class ODataOperationRoute extends ControllerRoute<object> {
+  private readonly operation: OperationMeta;
+  private readonly setSegment?: string;
+  private readonly httpVerb: 'get' | 'post';
+  private readonly controllerBindingKey: string;
+
+  constructor(
+    verb: 'get' | 'post',
+    path: string,
+    spec: OperationObject,
+    controllerCtor: Function,
+    controllerBindingKey: string,
+    operation: OperationMeta,
+    setSegment?: string,
+  ) {
+    super(
+      verb,
+      path,
+      spec,
+      controllerCtor as ControllerClass<object>,
+      async (ctx) => ctx.get(controllerBindingKey as any),
+      operation.methodName,
+    );
+    this.operation = operation;
+    this.setSegment = setSegment;
+    this.httpVerb = verb;
+    this.controllerBindingKey = controllerBindingKey;
   }
 
   async invokeHandler(requestContext: RequestContext, args: unknown[]): Promise<unknown> {
-    return invokeMethodWithInterceptors(
+    let controller: any;
+    try {
+      controller = await requestContext.get(CoreBindings.CONTROLLER_CURRENT);
+    } catch (error) {
+      if ((error as any)?.code !== 'KEY_NOT_FOUND') throw error;
+      controller = await requestContext.get(this.controllerBindingKey as any);
+    }
+
+    const invocationArgs: unknown[] = [];
+    if (this.operation.binding === 'entity') {
+      const routeParams = requestContext.request.params as Record<string, unknown> | undefined;
+      let id = routeParams?.id;
+
+      if (id == null && args.length) {
+        const candidate = args[0];
+        if (
+          typeof candidate === 'string' ||
+          typeof candidate === 'number' ||
+          typeof candidate === 'boolean'
+        ) {
+          id = candidate;
+        }
+      }
+      if (id == null) {
+        const segments = requestContext.request.path.split('/').filter(Boolean);
+        id = segments.length >= 4 ? segments[segments.length - 2] : undefined;
+      }
+      if (id == null) {
+        throw new HttpErrors.BadRequest(`Missing entity key for ${this.operation.name}.`);
+      }
+      invocationArgs.push(id);
+    }
+
+    if (this.httpVerb === 'post') {
+      invocationArgs.push(requestContext.request.body);
+    } else {
+      invocationArgs.push(requestContext.request.query);
+    }
+
+    const result = await invokeMethod(
+      controller,
+      this.operation.methodName,
       requestContext,
-      this,
-      '_handler',
-      [requestContext, ...args],
-      { source: new RouteSource(this) },
+      invocationArgs,
+      {
+        source: new RouteSource(this),
+      },
     );
+    if (
+      !requestContext.response.headersSent &&
+      !requestContext.response.getHeader('OData-Version')
+    ) {
+      requestContext.response.set('OData-Version', ODATA_VERSION);
+    }
+    if (this.operation.rawResponse) return result;
+    const context = this.setSegment ? `/odata/$metadata#${this.setSegment}` : '/odata/$metadata';
+    return {
+      '@odata.context': context,
+      value: result,
+    };
   }
 }
 
