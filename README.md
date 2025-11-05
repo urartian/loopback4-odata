@@ -460,6 +460,7 @@ Control which fields participate in `$search`:
 - Decorate properties with `@odataSearchable()` in your model.
 - Or configure per–entity set in `ODataConfig.searchFields`.
 - Default : `$search` is opt-in and uses only annotated fields. If no searchable fields are configured, strict mode returns `400 Bad Request`.
+- Guardrails: cap inputs with `maxSearchTerms` (requests above the cap return `400 Bad Request`) and trim the evaluated field list with `maxSearchFields` so only the first N configured properties participate.
 
 Example:
 
