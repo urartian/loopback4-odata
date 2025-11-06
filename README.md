@@ -164,6 +164,8 @@ export class OrderODataController {
 }
 ```
 
+Navigation reference routes run through the generated CRUD controller, so the same LoopBack authentication and authorization interceptors execute before links are created or removed. Stub methods with `@authenticate` / `@authorize` metadata (or aliases from the writable methods) are enough to secure the `$ref` endpoints without any additional plumbing.
+
 ## Endpoints (Phase 3)
 
 Start your app and test:
