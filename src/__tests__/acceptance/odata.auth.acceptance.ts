@@ -5,6 +5,7 @@ import { HttpErrors, RestServerConfig, RequestContext } from '@loopback/rest';
 import { Client, createRestAppClient, expect } from '@loopback/testlab';
 
 import {
+  Order,
   Product,
   TestApplication,
   givenODataApplication,
@@ -124,6 +125,17 @@ class ClassProtectedOperationsController {
   }
 }
 
+@odataController(Order)
+class OrderSecurityMetadataController {
+  @authenticate('jwt')
+  @authorize({ allowedRoles: ['order-manager'] })
+  updateById() {}
+
+  @authenticate('jwt')
+  @authorize({ allowedRoles: ['order-manager'] })
+  deleteById() {}
+}
+
 describe('OData operations authentication integration', () => {
   let app: TestApplication;
   let client: Client;
@@ -133,6 +145,7 @@ describe('OData operations authentication integration', () => {
     app.interceptor(TestAuthEnforcerInterceptor, { global: true });
     app.controller(MethodProtectedOperationsController);
     app.controller(ClassProtectedOperationsController);
+    app.controller(OrderSecurityMetadataController);
     await app.boot();
     await seedExampleData(app);
     await app.start();
@@ -202,5 +215,62 @@ describe('OData operations authentication integration', () => {
 
     expect(res.body.value).to.deepEqual({ userId: 'bob' });
     expect(res.body['@odata.context']).to.equal('/odata/$metadata');
+  });
+
+  describe('navigation reference endpoints', () => {
+    const orderId = 1;
+    const existingItemId = 1;
+    const movableItemId = 5;
+    const linkUrl = `/odata/Orders/${orderId}/items/$ref`;
+
+    it('rejects unauthenticated navigation link requests', async () => {
+      await client
+        .post(linkUrl)
+        .send({ '@odata.id': `/odata/OrderItems(${movableItemId})` })
+        .expect(401);
+    });
+
+    it('rejects navigation link requests for users without the required role', async () => {
+      await client
+        .post(linkUrl)
+        .set('x-user', 'mallory')
+        .set('x-user-role', 'analyst')
+        .send({ '@odata.id': `/odata/OrderItems(${movableItemId})` })
+        .expect(403);
+    });
+
+    it('rejects navigation unlink requests without proper authentication or authorization', async () => {
+      const unlinkUrl = `/odata/Orders/${orderId}/items/${existingItemId}/$ref`;
+
+      await client.delete(unlinkUrl).expect(401);
+
+      await client
+        .delete(unlinkUrl)
+        .set('x-user', 'mallory')
+        .set('x-user-role', 'analyst')
+        .expect(403);
+    });
+
+    it('allows authorized users to link and unlink navigation references', async () => {
+      await client
+        .post(linkUrl)
+        .set('x-user', 'alice')
+        .set('x-user-role', 'order-manager')
+        .send({ '@odata.id': `/odata/OrderItems(${movableItemId})` })
+        .expect(204);
+
+      const linked = await client.get(`/odata/OrderItems(${movableItemId})`).expect(200);
+      expect(linked.body).to.have.property('orderId', orderId);
+
+      const unlinkUrl = `/odata/Orders/${orderId}/items/${movableItemId}/$ref`;
+      await client
+        .delete(unlinkUrl)
+        .set('x-user', 'alice')
+        .set('x-user-role', 'order-manager')
+        .expect(204);
+
+      const afterUnlink = await client.get(`/odata/OrderItems(${movableItemId})`).expect(200);
+      expect(afterUnlink.body).to.have.property('orderId', null);
+    });
   });
 });

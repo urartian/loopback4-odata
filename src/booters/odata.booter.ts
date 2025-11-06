@@ -5,9 +5,7 @@ import {
   MetadataInspector,
   inject,
   injectable,
-  ValueOrPromise,
   invokeMethod,
-  invokeMethodWithInterceptors,
 } from '@loopback/core';
 import { Booter } from '@loopback/boot';
 import {
@@ -15,7 +13,6 @@ import {
   RestApplication,
   RequestContext,
   OperationObject,
-  Route,
   RouteEntry,
   RouteSource,
   HttpErrors,
@@ -510,19 +507,18 @@ export class ODataBooter implements Booter {
         visibility,
       );
 
-      const linkHandler: OperationHandler = async (ctx: RequestContext, ...params: unknown[]) => {
-        const body = params[0] as Record<string, unknown> | undefined;
-        const id = params[1];
-        const controller = (await ctx.get(bindingKey as any)) as AnyObject;
-        await controller.linkNavigationRef(
+      app.route(
+        new ODataNavigationRefRoute(
+          linkVerb,
+          linkPath,
+          linkSpec,
+          controllerCtor,
+          bindingKey,
+          'link',
           relationName,
-          id,
-          body?.['@odata.id'] as string | undefined,
-        );
-        if (!ctx.response.headersSent) ctx.response.status(204).end();
-      };
-
-      app.route(new ODataRefRoute(linkVerb, linkPath, linkSpec, linkHandler));
+          Boolean(relationMeta.targetsMany),
+        ),
+      );
 
       const deletePath = relationMeta.targetsMany
         ? `${basePath}/{id}/${relationName}/{targetKey}/$ref`
@@ -542,21 +538,18 @@ export class ODataBooter implements Booter {
         visibility,
       );
 
-      const deleteHandler: OperationHandler = async (ctx: RequestContext, ...params: unknown[]) => {
-        const id = params[0];
-        const targetKeyParam = relationMeta.targetsMany
-          ? (params[1] as string | undefined)
-          : undefined;
-        const controller = (await ctx.get(bindingKey as any)) as AnyObject;
-        await controller.unlinkNavigationRef(
+      app.route(
+        new ODataNavigationRefRoute(
+          'delete',
+          deletePath,
+          deleteSpec,
+          controllerCtor,
+          bindingKey,
+          'unlink',
           relationName,
-          id,
-          relationMeta.targetsMany ? targetKeyParam : undefined,
-        );
-        if (!ctx.response.headersSent) ctx.response.status(204).end();
-      };
-
-      app.route(new ODataRefRoute('delete', deletePath, deleteSpec, deleteHandler));
+          Boolean(relationMeta.targetsMany),
+        ),
+      );
     }
   }
 
@@ -641,8 +634,6 @@ export class ODataBooter implements Booter {
     }
   }
 }
-
-type OperationHandler = (ctx: RequestContext, ...params: unknown[]) => ValueOrPromise<unknown>;
 
 class ODataOperationRoute extends ControllerRoute<object> {
   private readonly operation: OperationMeta;
@@ -737,18 +728,118 @@ class ODataOperationRoute extends ControllerRoute<object> {
   }
 }
 
-class ODataRefRoute extends Route {
-  constructor(verb: string, path: string, spec: OperationObject, handler: OperationHandler) {
-    super(verb, path, spec, handler);
+class ODataNavigationRefRoute extends ControllerRoute<object> {
+  private readonly controllerBindingKey: string;
+  private readonly relationName: string;
+  private readonly operation: 'link' | 'unlink';
+  private readonly targetsMany: boolean;
+
+  constructor(
+    verb: 'post' | 'put' | 'delete',
+    path: string,
+    spec: OperationObject,
+    controllerCtor: Function,
+    controllerBindingKey: string,
+    operation: 'link' | 'unlink',
+    relationName: string,
+    targetsMany: boolean,
+  ) {
+    super(
+      verb,
+      path,
+      spec,
+      controllerCtor as ControllerClass<object>,
+      async (ctx) => ctx.get(controllerBindingKey as any),
+      operation === 'link' ? 'linkNavigationRef' : 'unlinkNavigationRef',
+    );
+    this.controllerBindingKey = controllerBindingKey;
+    this.relationName = relationName;
+    this.operation = operation;
+    this.targetsMany = targetsMany;
   }
 
   async invokeHandler(requestContext: RequestContext, args: unknown[]): Promise<unknown> {
-    return invokeMethodWithInterceptors(
-      requestContext,
-      this,
-      '_handler',
-      [requestContext, ...args],
-      { source: new RouteSource(this) },
-    );
+    let controller: AnyObject;
+    try {
+      controller = (await requestContext.get(CoreBindings.CONTROLLER_CURRENT)) as AnyObject;
+    } catch (error) {
+      if ((error as AnyObject)?.code !== 'KEY_NOT_FOUND') throw error;
+      controller = (await requestContext.get(this.controllerBindingKey as any)) as AnyObject;
+    }
+
+    const methodName = this.operation === 'link' ? 'linkNavigationRef' : 'unlinkNavigationRef';
+    const invocationArgs: unknown[] = [
+      this.relationName,
+      this.resolveParentId(requestContext, args),
+    ];
+
+    if (this.operation === 'link') {
+      invocationArgs.push(this.extractTargetUri(requestContext));
+    } else {
+      invocationArgs.push(this.targetsMany ? this.extractTargetKey(requestContext) : undefined);
+    }
+
+    const result = await invokeMethod(controller, methodName, requestContext, invocationArgs, {
+      source: new RouteSource(this),
+    });
+
+    if (!requestContext.response.headersSent) {
+      if (!requestContext.response.getHeader('OData-Version')) {
+        requestContext.response.set('OData-Version', ODATA_VERSION);
+      }
+      requestContext.response.status(204).end();
+    }
+
+    return result;
+  }
+
+  private resolveParentId(requestContext: RequestContext, args: unknown[]): unknown {
+    const params = requestContext.request.params as Record<string, unknown> | undefined;
+    if (params?.id != null) return params.id;
+
+    for (const arg of args) {
+      if (arg == null) continue;
+      const type = typeof arg;
+      if (type === 'string' || type === 'number' || type === 'boolean') {
+        return arg;
+      }
+    }
+
+    const segments = requestContext.request.path.split('/').filter(Boolean);
+    const relationIndex = segments.lastIndexOf(this.relationName);
+    if (relationIndex > 0) {
+      return segments[relationIndex - 1];
+    }
+
+    throw new HttpErrors.BadRequest('Missing entity key for navigation reference.');
+  }
+
+  private extractTargetUri(requestContext: RequestContext): string | undefined {
+    const body = requestContext.request.body;
+    if (body && typeof body === 'object') {
+      const value = (body as Record<string, unknown>)['@odata.id'];
+      if (value == null || typeof value === 'string') {
+        return value as string | undefined;
+      }
+    }
+    return undefined;
+  }
+
+  private extractTargetKey(requestContext: RequestContext): string | undefined {
+    const params = requestContext.request.params as Record<string, unknown> | undefined;
+    const paramValue = params?.targetKey;
+    if (paramValue == null || typeof paramValue === 'string') {
+      if (paramValue !== undefined) return paramValue as string | undefined;
+    }
+
+    const segments = requestContext.request.path.split('/').filter(Boolean);
+    const relationIndex = segments.lastIndexOf(this.relationName);
+    if (relationIndex >= 0 && relationIndex + 1 < segments.length) {
+      const candidate = segments[relationIndex + 1];
+      if (candidate && candidate !== '$ref') {
+        return candidate;
+      }
+    }
+    return undefined;
   }
 }
