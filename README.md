@@ -969,6 +969,8 @@ const ProductsSet: EntitySetDef<Product> = {
 };
 ```
 
+> **Validation:** Guardrail values must be positive integers. Invalid settings (for example, `pagination.maxPageSize: 0` or `skipTokenTtl: -5`) cause startup to fail fast so configuration issues surface immediately.
+
 - `basePath`: Externally visible service root. All OData routes are served under this path (via middleware rewrite) while internal routes remain at `/odata`. Response metadata (`@odata.context`) uses this value.
 - `pagination.maxTop`: Caps `$top` for collection reads. When `strict=true` requests above the cap return `400 Bad Request`; otherwise the server clamps the value. Legacy `config.maxTop` is still honored but the nested value takes precedence.
 - `pagination.maxSkip`: Maximum allowed `$skip`. Requests above the cap are clamped when `strict=false` and rejected when `strict=true`. Legacy `config.maxSkip` remains available for backward compatibility.

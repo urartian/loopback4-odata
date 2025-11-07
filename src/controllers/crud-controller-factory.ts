@@ -97,6 +97,7 @@ import {
   DeltaTokenSecurityOptions,
   stableStringify,
 } from '../util/token-signing';
+import { ensureConfigValidated } from '../util/config-validation';
 type CrudEntity = Entity & { [key: string]: unknown };
 type CrudRepo = DefaultCrudRepository<CrudEntity, unknown>;
 type NormalizedInclusion = Exclude<InclusionFilter, string>;
@@ -548,7 +549,9 @@ export function defineODataCrudController(def: EntitySetDef) {
       public readonly applyExecutors: ODataApplyExecutorRegistry,
       @inject(ODATA_BINDINGS.LOGGER)
       public readonly logger: ODataLogger,
-    ) {}
+    ) {
+      ensureConfigValidated(this.cfg);
+    }
 
     etagEnabled(): boolean {
       return Boolean(etagProperties?.length);

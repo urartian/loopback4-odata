@@ -15,6 +15,7 @@ import { PostgresApplyExecutor } from './services/postgres-apply-executor';
 import { MySqlApplyExecutor } from './services/mysql-apply-executor';
 import { ODataVisibilitySpecEnhancer } from './spec/odata-visibility.spec-enhancer';
 import { ODataLoggerProvider } from './providers/odata-logger.provider';
+import { ODataConfigValidatorObserver } from './observers/odata-config.validator';
 
 export class ODataComponent implements Component {
   bindings = [
@@ -74,6 +75,7 @@ export class ODataComponent implements Component {
       .toProvider(ODataErrorProvider)
       .inScope(BindingScope.SINGLETON),
     createBindingFromClass(ODataVisibilitySpecEnhancer),
+    createBindingFromClass(ODataConfigValidatorObserver),
   ];
 
   controllers = [ODataMetadataController, ODataBatchController, ODataServiceDocumentController];

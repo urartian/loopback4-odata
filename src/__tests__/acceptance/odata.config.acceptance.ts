@@ -260,4 +260,21 @@ describe('OData config plumbing acceptance', () => {
     const res = await client.get(`/api/odata/Products(${id})`).expect(200);
     expect(res.body.id).to.equal(id);
   });
+
+  it('rejects invalid pagination guardrails at startup', async function () {
+    if (app?.state === 'started') {
+      await app.stop();
+    }
+    app = await givenODataApplication({ port: 0, host: '127.0.0.1' });
+    const baseConfig = app.getSync(ODATA_BINDINGS.CONFIG) as ODataConfig;
+    app.bind(ODATA_BINDINGS.CONFIG).to({
+      ...baseConfig,
+      pagination: {
+        ...(baseConfig.pagination ?? {}),
+        maxPageSize: 0,
+      },
+    });
+    await app.boot();
+    await expect(app.start()).to.be.rejectedWith(/ODataConfig\.pagination\.maxPageSize/);
+  });
 });
