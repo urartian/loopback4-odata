@@ -19,6 +19,7 @@ export interface ODataConfig {
   logApplyTelemetry?: boolean;
   onApplyTelemetry?: (event: ODataApplyTelemetryEvent) => void;
   maxApplyNavigationFanout?: number;
+  onDeltaTokenInvalid?: (event: ODataDeltaTokenInvalidEvent) => void;
   // Search configuration
   searchMode?: 'annotated' | 'config-only' | 'all' | 'disabled';
   searchFields?: Record<string, string[]>; // per entity set
@@ -139,6 +140,18 @@ export interface ODataApplyTelemetryEvent {
   joinCount?: number;
   reason?: string;
   navigationPaths?: string[];
+}
+
+export type ODataDeltaTokenInvalidCode =
+  | 'delta-not-supported'
+  | 'entity-mismatch'
+  | 'expired'
+  | 'invalid';
+
+export interface ODataDeltaTokenInvalidEvent {
+  event: 'delta-token-invalid';
+  code: ODataDeltaTokenInvalidCode;
+  entitySet: string;
 }
 
 export interface ODataLogEntry {

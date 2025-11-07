@@ -5,6 +5,7 @@ import { OperationMeta } from '../decorators/action.function.decorators';
 import type { CrudHookBundle } from '../types/crud-hooks';
 import { ControllerSecurityMetadata, MethodAliasMap } from '../util/security-metadata';
 import { ODataCapabilitiesConfig } from '../types';
+import { validatePaginationLimits } from '../util/config-validation';
 
 export interface EntitySqlMetadata {
   tableName?: string;
@@ -88,6 +89,7 @@ export class EntitySetRegistry {
     if (def.pagination === undefined && existing?.pagination !== undefined) {
       next.pagination = existing.pagination;
     }
+    validatePaginationLimits(`EntitySet "${next.name}".pagination`, next.pagination);
     this.sets.set(def.modelCtor, next);
     return next as EntitySetDef<T>;
   }

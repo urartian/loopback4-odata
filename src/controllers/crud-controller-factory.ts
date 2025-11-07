@@ -97,6 +97,8 @@ import {
   DeltaTokenSecurityOptions,
   stableStringify,
 } from '../util/token-signing';
+import { validateDeltaToken, DeltaTokenValidationResult } from '../util/delta-token-validation';
+import { ensureConfigValidated } from '../util/config-validation';
 type CrudEntity = Entity & { [key: string]: unknown };
 type CrudRepo = DefaultCrudRepository<CrudEntity, unknown>;
 type NormalizedInclusion = Exclude<InclusionFilter, string>;
@@ -548,7 +550,9 @@ export function defineODataCrudController(def: EntitySetDef) {
       public readonly applyExecutors: ODataApplyExecutorRegistry,
       @inject(ODATA_BINDINGS.LOGGER)
       public readonly logger: ODataLogger,
-    ) {}
+    ) {
+      ensureConfigValidated(this.cfg);
+    }
 
     etagEnabled(): boolean {
       return Boolean(etagProperties?.length);
@@ -2722,6 +2726,15 @@ export function defineODataCrudController(def: EntitySetDef) {
       if (this.cfg?.logApplyFallbacks) {
         this.logger.warn('$apply fallback', detail);
       }
+    }
+
+    throwDeltaValidationError(
+      result: Exclude<DeltaTokenValidationResult, { ok: true; payload?: DeltaTokenPayload }>,
+    ): never {
+      if (result.code === 'expired') {
+        throw new HttpErrors.Gone(result.message);
+      }
+      throw new HttpErrors.BadRequest(result.message);
     }
 
     emitApplyTelemetry(
@@ -5411,16 +5424,6 @@ export function defineODataCrudController(def: EntitySetDef) {
       }
 
       let deltaPayload: DeltaTokenPayload | undefined;
-      if (deltaTokenValue) {
-        try {
-          deltaPayload = decodeDeltaToken(deltaTokenValue, this.buildDeltaTokenOptions());
-        } catch (error) {
-          if (error instanceof TokenVerificationError) {
-            throw new HttpErrors.BadRequest('Invalid $deltatoken value.');
-          }
-          throw new HttpErrors.BadRequest('Invalid $deltatoken value.');
-        }
-      }
 
       let deltaPreference = def.deltaEnabled;
       if (deltaPreference === undefined) {
@@ -5431,11 +5434,19 @@ export function defineODataCrudController(def: EntitySetDef) {
       if (deltaEnabled && !deltaField) {
         deltaEnabled = false;
       }
-      if (deltaTokenValue && !deltaEnabled) {
-        throw new HttpErrors.BadRequest('$deltatoken is not supported for this entity set.');
-      }
-      if (deltaPayload?.entitySet && deltaPayload.entitySet !== setName) {
-        throw new HttpErrors.BadRequest('$deltatoken does not match the requested entity set.');
+      if (deltaTokenValue) {
+        const validation = validateDeltaToken({
+          deltaEnabled,
+          entitySet: setName,
+          logger: this.logger,
+          onTelemetry: this.cfg?.onDeltaTokenInvalid,
+          decode: () => decodeDeltaToken(deltaTokenValue!, this.buildDeltaTokenOptions()),
+        });
+        if (!validation.ok) {
+          this.throwDeltaValidationError(validation);
+        } else {
+          deltaPayload = validation.payload;
+        }
       }
 
       if (aggregationSpec) {

@@ -1,6 +1,7 @@
 import { Middleware, MiddlewareContext } from '@loopback/rest';
 
 const KEY_PREFIX_REGEX = /^(?:[A-Za-z_][A-Za-z0-9_.]*)'/;
+export const MAX_KEY_EXPRESSION_LENGTH = 4096;
 
 export const odataPathRewriter: Middleware = (ctx: MiddlewareContext, next) => {
   const originalUrl = ctx.request.url ?? '';
@@ -95,6 +96,7 @@ function extractKeySegment(path: string, openIndex: number): KeySegmentParseResu
   }
 
   let i = openIndex + 1;
+  const start = i;
   let inString = false;
 
   while (i < path.length) {
@@ -110,10 +112,16 @@ function extractKeySegment(path: string, openIndex: number): KeySegmentParseResu
         inString = true;
       }
     } else if (!inString && ch === ')') {
+      if (i - start > MAX_KEY_EXPRESSION_LENGTH) {
+        return undefined;
+      }
       return {
         keyExpression: path.slice(openIndex + 1, i),
         closeIndex: i,
       };
+    }
+    if (!inString && i - start > MAX_KEY_EXPRESSION_LENGTH) {
+      return undefined;
     }
     i++;
   }

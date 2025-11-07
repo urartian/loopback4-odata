@@ -1,7 +1,7 @@
 /// <reference path="../../types/testing.globals.d.ts" />
 
 import { strict as assert } from 'assert';
-import { odataPathRewriter } from '../../middleware/odata-path-rewriter';
+import { odataPathRewriter, MAX_KEY_EXPRESSION_LENGTH } from '../../middleware/odata-path-rewriter';
 
 function createContext(url: string) {
   return {
@@ -62,6 +62,31 @@ describe('odataPathRewriter middleware', () => {
     const ctx = createContext("/odata/Legacy(10248,'Line)1')");
     await odataPathRewriter(ctx, () => Promise.resolve());
     assert.equal(ctx.request.url, '/odata/Legacy/10248%2CLine)1');
+  });
+
+  it('handles nested parentheses inside quoted keys', async () => {
+    const ctx = createContext("/odata/Foos(Key='A(()B)')");
+    await odataPathRewriter(ctx, () => Promise.resolve());
+    assert.equal(ctx.request.url, '/odata/Foos/Key%3DA(()B)');
+  });
+
+  it('rewrites literals containing encoded slashes and equals', async () => {
+    const ctx = createContext("/odata/Products(Name='A%2FB%3D42')");
+    await odataPathRewriter(ctx, () => Promise.resolve());
+    assert.equal(ctx.request.url, '/odata/Products/Name%3DA%2FB%3D42');
+  });
+
+  it('leaves malformed segments without closing parenthesis untouched', async () => {
+    const ctx = createContext('/odata/Products(42');
+    await odataPathRewriter(ctx, () => Promise.resolve());
+    assert.equal(ctx.request.url, '/odata/Products(42');
+  });
+
+  it('skips rewriting when key expression exceeds length limits', async () => {
+    const longLiteral = 'a'.repeat(MAX_KEY_EXPRESSION_LENGTH + 10);
+    const ctx = createContext(`/odata/Large('${longLiteral}')`);
+    await odataPathRewriter(ctx, () => Promise.resolve());
+    assert.equal(ctx.request.url, `/odata/Large('${longLiteral}')`);
   });
 
   it('preserves segments without key predicates', async () => {

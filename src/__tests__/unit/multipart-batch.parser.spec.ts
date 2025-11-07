@@ -141,4 +141,95 @@ describe('multipart batch parser', () => {
     expect(reported).to.be.String();
     expect(reported).to.match(/exceeds maxOperations/);
   });
+
+  it('stops reading when maxPayloadBytes is exceeded mid-stream', async () => {
+    const boundary = 'batch_stream_limit';
+    const body = buildBatchBody({ boundary, partCount: 2 });
+    const stream = new ChunkedReadable(body, 8);
+    await expect(
+      parseMultipartBatch(stream, boundary, {
+        limits: { maxPayloadBytes: body.length - 10 },
+      }),
+    ).to.be.rejectedWith(/payload exceeds the configured size limit/i);
+  });
+
+  it('stops reading part once maxPartBodyBytes is exceeded', async () => {
+    const boundary = 'batch_part_limit';
+    const body = buildBatchBody({
+      boundary,
+      parts: [
+        {
+          headers: {
+            'Content-Type': 'application/http',
+            'Content-Transfer-Encoding': 'binary',
+          },
+          body: 'POST /odata/Products HTTP/1.1\r\n\r\n' + 'X'.repeat(512),
+        },
+      ],
+    });
+    const stream = new ChunkedReadable(body, 32);
+    await expect(
+      parseMultipartBatch(stream, boundary, {
+        limits: { maxPartBodyBytes: 256 },
+      }),
+    ).to.be.rejectedWith(/part exceeds the configured size limit/i);
+  });
 });
+
+function buildBatchBody({
+  boundary,
+  partCount = 0,
+  parts,
+}: {
+  boundary: string;
+  partCount?: number;
+  parts?: Array<{ headers?: Record<string, string>; body: string }>;
+}): Buffer {
+  const resolvedParts =
+    parts ??
+    Array.from({ length: partCount }).map(() => ({
+      headers: {
+        'Content-Type': 'application/http',
+        'Content-Transfer-Encoding': 'binary',
+      },
+      body: 'GET /odata/Products HTTP/1.1',
+    }));
+  const segments: string[] = [];
+  for (const part of resolvedParts) {
+    segments.push(`--${boundary}`);
+    const headers = part.headers ?? {
+      'Content-Type': 'application/http',
+      'Content-Transfer-Encoding': 'binary',
+    };
+    for (const [name, value] of Object.entries(headers)) {
+      segments.push(`${name}: ${value}`);
+    }
+    segments.push('');
+    segments.push(part.body);
+    segments.push('');
+  }
+  segments.push(`--${boundary}--`);
+  segments.push('');
+  return Buffer.from(segments.join('\r\n'));
+}
+
+class ChunkedReadable extends Readable {
+  private offset = 0;
+
+  constructor(
+    private readonly payload: Buffer,
+    private readonly chunkSize: number,
+  ) {
+    super();
+  }
+
+  _read() {
+    if (this.offset >= this.payload.length) {
+      this.push(null);
+      return;
+    }
+    const chunk = this.payload.slice(this.offset, this.offset + this.chunkSize);
+    this.offset += chunk.length;
+    this.push(chunk);
+  }
+}
