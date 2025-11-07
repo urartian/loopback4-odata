@@ -38,9 +38,20 @@ export async function parseMultipartBatch(
   options: MultipartParserOptions = {},
 ): Promise<ParsedBatch> {
   const context = new ParserContext(options.limits ?? {}, options.onLimitViolation);
+  const limitedStream = Readable.from(enforcePayloadLimit(stream, context));
   const parser = new StreamingBatchParser(boundary, context, 0);
-  const requests = await parser.parse(stream);
+  const requests = await parser.parse(limitedStream);
   return { requests };
+}
+
+async function* enforcePayloadLimit(stream: Readable, context: ParserContext) {
+  let total = 0;
+  for await (const chunk of stream) {
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    total += buffer.length;
+    context.checkTotalBytes(total);
+    yield buffer;
+  }
 }
 
 class ParserContext {
@@ -119,7 +130,6 @@ class StreamingBatchParser {
   private state: 'headers' | 'body' = 'headers';
   private currentHeaders: Record<string, string> | undefined;
   private ended = false;
-  private totalBytes = 0;
   private readonly requests: ParsedBatchRequest[] = [];
 
   constructor(
@@ -135,10 +145,6 @@ class StreamingBatchParser {
   async parse(stream: Readable): Promise<ParsedBatchRequest[]> {
     for await (const chunk of stream) {
       const bufferChunk = this.toBuffer(chunk);
-      if (this.depth === 0) {
-        this.totalBytes += bufferChunk.length;
-        this.context.checkTotalBytes(this.totalBytes);
-      }
       this.buffer = this.buffer.length
         ? Buffer.concat([this.buffer, bufferChunk])
         : Buffer.from(bufferChunk);
