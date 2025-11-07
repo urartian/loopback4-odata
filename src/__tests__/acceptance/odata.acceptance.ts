@@ -10,6 +10,7 @@ import {
 } from '../fixtures/odata-app.fixture';
 import { ODATA_BINDINGS } from '../../keys';
 import { ODataConfig } from '../../types';
+import { EntitySetRegistry } from '../../registry/entityset-registry';
 import {
   ODataApplyExecutorRegistry,
   ODataApplyExecutor,
@@ -23,15 +24,10 @@ if (typeof process.setMaxListeners === 'function') {
 describe('OData component acceptance', () => {
   let app: TestApplication;
   let client: Client;
-  const getProductWithEtag = async (id: number) => {
-    const res = await client.get(`/odata/Products(${id})`).expect(200);
-    return { body: res.body, etag: res.headers['etag'] as string };
-  };
 
-  beforeEach(async function () {
-    app = await givenODataApplication({ port: 0, host: '127.0.0.1' });
-    await app.boot();
-    await seedExampleData(app);
+  type SkipContext = { skip: () => void };
+
+  const startOrSkip = async (mochaCtx: SkipContext) => {
     try {
       await app.start();
       client = createRestAppClient(app);
@@ -39,11 +35,51 @@ describe('OData component acceptance', () => {
       const code = (err as NodeJS.ErrnoException).code;
       const message = (err as Error).message ?? '';
       if (code === 'EPERM' || message.includes('not listening')) {
-        this.skip();
+        mochaCtx.skip();
         return;
       }
       throw err;
     }
+  };
+
+  const rebuildApp = async (
+    mochaCtx: SkipContext,
+    overrides: Partial<ODataConfig> = {},
+    configure?: (instance: TestApplication) => Promise<void> | void,
+  ) => {
+    if (app?.state === 'started') {
+      await app.stop();
+    }
+    app = await givenODataApplication({ port: 0, host: '127.0.0.1' });
+    const baseConfig = app.getSync(ODATA_BINDINGS.CONFIG) as ODataConfig;
+    app.bind(ODATA_BINDINGS.CONFIG).to({
+      ...baseConfig,
+      ...overrides,
+    });
+    if (configure) {
+      await configure(app);
+    }
+    await app.boot();
+    await seedExampleData(app);
+    await startOrSkip(mochaCtx);
+  };
+
+  const enableProductsDelta = async (target: TestApplication) => {
+    const registry = await target.get<EntitySetRegistry>(ODATA_BINDINGS.ENTITY_SET_REGISTRY);
+    const def = registry.findByName('Products');
+    if (def) {
+      def.deltaEnabled = true;
+      def.deltaField = def.deltaField ?? 'updatedAt';
+    }
+  };
+
+  const getProductWithEtag = async (id: number) => {
+    const res = await client.get(`/odata/Products(${id})`).expect(200);
+    return { body: res.body, etag: res.headers['etag'] as string };
+  };
+
+  beforeEach(async function () {
+    await rebuildApp(this as SkipContext);
   });
 
   it('supports multi-segment lambda navigation paths', async () => {
@@ -467,6 +503,58 @@ describe('OData component acceptance', () => {
     deltaUrl.searchParams.set('$deltatoken', tampered);
 
     await client.get(`${deltaUrl.pathname}?${deltaUrl.searchParams.toString()}`).expect(400);
+  });
+
+  it('returns 410 Gone when $deltatoken expires', async function (this: Mocha.Context) {
+    this.timeout(6000);
+    const events: Array<{ code: string; entitySet: string }> = [];
+    await rebuildApp(
+      this as SkipContext,
+      { enableDelta: true, deltaTokenTtl: 1, onDeltaTokenInvalid: (event) => events.push(event) },
+      async (instance) => {
+        await enableProductsDelta(instance);
+      },
+    );
+
+    const first = await client.get('/odata/Products').expect(200);
+    const deltaLink = String(first.body['@odata.deltaLink']);
+    expect(deltaLink).to.be.String();
+
+    await new Promise((resolve) => setTimeout(resolve, 1200));
+    const expired = await client.get(deltaLink).expect(410);
+    expect(expired.body?.error?.message).to.match(/expired/i);
+    expect(
+      events.some((event) => event.code === 'expired' && event.entitySet === 'Products'),
+    ).to.be.true();
+  });
+
+  it('rejects stale $deltatoken after tokenSecret rotation and emits telemetry', async function (this: Mocha.Context) {
+    this.timeout(6000);
+    const events: Array<{ code: string; entitySet: string }> = [];
+    const capture = (event: { code: string; entitySet: string }) => events.push(event);
+
+    await rebuildApp(
+      this as SkipContext,
+      { enableDelta: true, onDeltaTokenInvalid: capture },
+      async (instance) => {
+        await enableProductsDelta(instance);
+      },
+    );
+    const first = await client.get('/odata/Products').expect(200);
+    const deltaLink = String(first.body['@odata.deltaLink']);
+
+    await rebuildApp(
+      this as SkipContext,
+      { enableDelta: true, tokenSecret: 'rotated-secret', onDeltaTokenInvalid: capture },
+      async (instance) => {
+        await enableProductsDelta(instance);
+      },
+    );
+    const res = await client.get(deltaLink).expect(400);
+    expect(res.body?.error?.message).to.match(/Invalid \$deltatoken value/i);
+    expect(
+      events.some((event) => event.code === 'invalid' && event.entitySet === 'Products'),
+    ).to.be.true();
   });
 
   it('rejects $deltatoken when delta support is disabled', async () => {

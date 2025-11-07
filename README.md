@@ -988,6 +988,7 @@ const ProductsSet: EntitySetDef<Product> = {
 - `allowLegacyUnsignedTokens`: Set to `true` only while migrating from the unsigned (v1/v2) token format. New deployments should leave this `false` to reject tampered tokens outright.
 - `batch`: Guardrails for `$batch` requests. Provide `maxPayloadBytes` (default `16 MB`), `maxOperations` (100 operations), `maxChangesetOperations` (50 per changeset), `maxPartBodyBytes` (4 MB), and `maxDepth` (2 levels) to cap payload size, total operations, and changeset nesting.
 - `$batch` limits are enforced while parsing the stream: once the cumulative payload or a single part exceeds the configured budget the server aborts immediately with `413 Payload Too Large`.
+- `onDeltaTokenInvalid(event)`: Optional callback fired whenever a client supplies an expired, tampered, or mismatched `$deltatoken`. Useful for alerting/telemetry when secrets rotate.
 - `onLog(entry)`: Optional hook invoked for every log entry emitted by the OData component (`entry` includes `level`, `message`, `context`, and optional `error`). Use it to forward structured telemetry into your existing logging/monitoring pipeline. If you bind your own logger to `ODATA_BINDINGS.LOGGER` the hook still fires after the logger handles the entry.
 - `documentInOpenApiDefault`: Controls whether generated OData routes appear in the published OpenAPI spec. The default `'auto'` policy documents entity sets that are also decorated with LoopBack's `@model()` and hides OData-only models. Set to `true` to publish every generated controller or `false` to hide everything unless a model opts in via `@odataModel({documentInOpenApi: true})`.
 - `removeUndocumentedFromSpec`: When `true` (default), routes tagged with `x-visibility: 'undocumented'` are removed before `/openapi.json` is served. Set to `false` to keep them in the document; the spec enhancer retags them as `x-visibility: 'internal'` so tooling can filter them out.
@@ -1112,6 +1113,9 @@ GET /odata/Products
 ```
 
 Following the delta link returns only the new or updated rows (and can be combined with regular paging via `@odata.nextLink`). The same flow works for `$apply` pipelines: the engine reruns the pipeline over the rows that changed since the last token and returns the affected aggregates.
+
+> **Token rotation & TTL**  
+> Delta links are signed with `tokenSecret`. When a link expires (`deltaTokenTtl`) or you rotate the secret, the server returns `410 Gone` and emits an `onDeltaTokenInvalid` event (with `code` such as `expired`, `invalid`, or `entity-mismatch`). Clients should treat `410` as a cue to fetch a fresh snapshot.
 
 Deleted entities show up as tombstones:
 
