@@ -16,6 +16,7 @@ import { MySqlApplyExecutor } from './services/mysql-apply-executor';
 import { ODataVisibilitySpecEnhancer } from './spec/odata-visibility.spec-enhancer';
 import { ODataLoggerProvider } from './providers/odata-logger.provider';
 import { ODataConfigValidatorObserver } from './observers/odata-config.validator';
+import { TenantThrottlerProvider } from './providers/tenant-throttler.provider';
 
 export class ODataComponent implements Component {
   bindings = [
@@ -59,6 +60,9 @@ export class ODataComponent implements Component {
       .inScope(BindingScope.SINGLETON),
     Binding.bind(ODATA_BINDINGS.LOGGER)
       .toProvider(ODataLoggerProvider)
+      .inScope(BindingScope.SINGLETON),
+    Binding.bind(ODATA_BINDINGS.THROTTLER)
+      .toProvider(TenantThrottlerProvider)
       .inScope(BindingScope.SINGLETON),
     Binding.bind(ODATA_BINDINGS.APPLY_EXECUTOR_REGISTRY)
       .toDynamicValue(() => {
