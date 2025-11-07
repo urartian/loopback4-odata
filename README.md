@@ -483,6 +483,10 @@ this.bind(ODATA_BINDINGS.CONFIG).to({
 } as ODataConfig);
 ```
 
+### Key normalization
+
+Incoming URLs are normalized by a path-rewriter middleware so `/odata/Products(42)` becomes `/odata/Products/42` before routing. Key expressions are parsed strictly, escaped (including quotes and GUID prefixes), and capped at 4 KB; malformed or oversized segments are left untouched, which means the request proceeds with the original path and the framework responds with the usual 404/400.
+
 Enable inline counts by passing `$count=true` alongside other query options:
 
 ```http

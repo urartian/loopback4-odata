@@ -46,11 +46,7 @@ export function validatePaginationLimits(label: string, pagination?: ODataPagina
   assignPositive(target, 'maxApplyPageSize', label);
 }
 
-function assignPositive(
-  target: AnyObject,
-  key: string,
-  parentLabel = 'ODataConfig',
-): void {
+function assignPositive(target: AnyObject, key: string, parentLabel = 'ODataConfig'): void {
   if (!(key in target)) return;
   const value = target[key];
   const normalized = normalizePositiveNumber(value, `${parentLabel}.${String(key)}`);
