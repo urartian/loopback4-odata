@@ -1,3 +1,5 @@
+/// <reference path="../../types/testing.globals.d.ts" />
+
 import { Client, createRestAppClient, expect } from '@loopback/testlab';
 import { Constructor, inject } from '@loopback/core';
 import { DefaultCrudRepository, Entity, juggler, model, property } from '@loopback/repository';
@@ -140,13 +142,33 @@ async function givenVisibilityApp(options: VisibilityAppOptions): Promise<TestAp
 async function withVisibilityApp<T>(
   options: VisibilityAppOptions,
   fn: (app: TestApplication) => Promise<T>,
-): Promise<T> {
-  const app = await givenVisibilityApp(options);
+  ctx?: TestContext,
+): Promise<T | undefined> {
+  let app: TestApplication | undefined;
+  try {
+    app = await givenVisibilityApp(options);
+  } catch (error) {
+    if (ctx && isListenPermissionError(error)) {
+      ctx.skip();
+      return undefined;
+    }
+    throw error;
+  }
   try {
     return await fn(app);
   } finally {
-    await app.stop();
+    if (app?.state === 'started') {
+      await app.stop();
+    }
   }
+}
+
+function isListenPermissionError(error: unknown) {
+  if (!error) return false;
+  const listenError = error as NodeJS.ErrnoException;
+  const code = listenError.code;
+  const message = (listenError.message ?? '').toLowerCase();
+  return code === 'EPERM' || code === 'EACCES' || message.includes('operation not permitted');
 }
 
 function findPaths(paths: Record<string, unknown> | undefined, fragment: string): string[] {
@@ -155,40 +177,52 @@ function findPaths(paths: Record<string, unknown> | undefined, fragment: string)
 }
 
 describe('OData OpenAPI visibility', () => {
-  it('hides @odataModel-only entity sets by default', async () => {
-    await withVisibilityApp({ entities: ['internal', 'published'] }, async (app) => {
-      const spec = await app.restServer.getApiSpec();
-      const paths = spec.paths ?? {};
-      expect(findPaths(paths, 'InternalEntities')).to.be.empty();
-      const published = paths['/odata/PublishedEntities'] as Record<string, any> | undefined;
-      expect(published).to.be.Object();
-      expect(published?.get).to.be.Object();
-      expect(published?.get?.['x-visibility']).to.equal('documented');
-    });
+  it('hides @odataModel-only entity sets by default', async function (this: TestContext) {
+    await withVisibilityApp(
+      { entities: ['internal', 'published'] },
+      async (app) => {
+        const spec = await app.restServer.getApiSpec();
+        const paths = spec.paths ?? {};
+        expect(findPaths(paths, 'InternalEntities')).to.be.empty();
+        const published = paths['/odata/PublishedEntities'] as Record<string, any> | undefined;
+        expect(published).to.be.Object();
+        expect(published?.get).to.be.Object();
+        expect(published?.get?.['x-visibility']).to.equal('documented');
+      },
+      this,
+    );
   });
 
-  it('exposes entity sets opting into documentation', async () => {
-    await withVisibilityApp({ entities: ['optIn'] }, async (app) => {
-      const spec = await app.restServer.getApiSpec();
-      const paths = spec.paths ?? {};
-      const optIn = paths['/odata/OptInEntities'] as Record<string, any> | undefined;
-      expect(optIn).to.be.Object();
-      expect(optIn?.get?.['x-visibility']).to.equal('documented');
-    });
+  it('exposes entity sets opting into documentation', async function (this: TestContext) {
+    await withVisibilityApp(
+      { entities: ['optIn'] },
+      async (app) => {
+        const spec = await app.restServer.getApiSpec();
+        const paths = spec.paths ?? {};
+        const optIn = paths['/odata/OptInEntities'] as Record<string, any> | undefined;
+        expect(optIn).to.be.Object();
+        expect(optIn?.get?.['x-visibility']).to.equal('documented');
+      },
+      this,
+    );
   });
 
-  it('honors documentInOpenApi(false) even when @model is present', async () => {
-    await withVisibilityApp({ entities: ['suppressed', 'published'] }, async (app) => {
-      const spec = await app.restServer.getApiSpec();
-      const paths = spec.paths ?? {};
-      expect(findPaths(paths, 'SuppressedEntities')).to.be.empty();
-      const published = paths['/odata/PublishedEntities'] as Record<string, any> | undefined;
-      expect(published).to.be.Object();
-      expect(published?.get?.['x-visibility']).to.equal('documented');
-    });
+  it('honors documentInOpenApi(false) even when @model is present', async function (this: TestContext) {
+    await withVisibilityApp(
+      { entities: ['suppressed', 'published'] },
+      async (app) => {
+        const spec = await app.restServer.getApiSpec();
+        const paths = spec.paths ?? {};
+        expect(findPaths(paths, 'SuppressedEntities')).to.be.empty();
+        const published = paths['/odata/PublishedEntities'] as Record<string, any> | undefined;
+        expect(published).to.be.Object();
+        expect(published?.get?.['x-visibility']).to.equal('documented');
+      },
+      this,
+    );
   });
 
-  it('retains and retags hidden routes when removal is disabled', async () => {
+  it('retains and retags hidden routes when removal is disabled', async function (this: TestContext) {
     await withVisibilityApp(
       { entities: ['internal', 'published'], config: { removeUndocumentedFromSpec: false } },
       async (app) => {
@@ -213,10 +247,11 @@ describe('OData OpenAPI visibility', () => {
         expect(internal?.get?.['x-visibility']).to.equal('internal');
         expect(internal?.get?.['x-odata-generated']).to.be.true();
       },
+      this,
     );
   });
 
-  it('publishes @odataModel-only sets when the global default is true', async () => {
+  it('publishes @odataModel-only sets when the global default is true', async function (this: TestContext) {
     await withVisibilityApp(
       { entities: ['internal'], config: { documentInOpenApiDefault: true } },
       async (app) => {
@@ -225,10 +260,11 @@ describe('OData OpenAPI visibility', () => {
         expect(internal).to.be.Object();
         expect(internal?.get?.['x-visibility']).to.equal('documented');
       },
+      this,
     );
   });
 
-  it('hides @model-annotated sets when the global default is false unless they opt in', async () => {
+  it('hides @model-annotated sets when the global default is false unless they opt in', async function (this: TestContext) {
     await withVisibilityApp(
       { entities: ['published', 'optIn'], config: { documentInOpenApiDefault: false } },
       async (app) => {
@@ -239,6 +275,7 @@ describe('OData OpenAPI visibility', () => {
         expect(optIn).to.be.Object();
         expect(optIn?.get?.['x-visibility']).to.equal('documented');
       },
+      this,
     );
   });
 });

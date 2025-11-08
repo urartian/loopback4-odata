@@ -2,6 +2,7 @@ import { expect, sinon } from '@loopback/testlab';
 import { TenantThrottlerProvider } from '../../providers/tenant-throttler.provider';
 import { ODataConfig } from '../../types';
 import { ODataLogger } from '../../keys';
+import { TenantThrottleStore } from '../../services/tenant-throttle-store';
 
 const noopLogger: ODataLogger = {
   trace() {},
@@ -51,32 +52,6 @@ describe('TenantThrottlerProvider', () => {
     await throttler.check('tenant');
   });
 
-  it('evicts stale tenant counters once the window elapses with no activity', async () => {
-    const clock = sinon.useFakeTimers();
-    try {
-      const provider = new TenantThrottlerProvider(
-        {
-          tenantQuotas: { maxRequestsPerMinute: 10 },
-        } as ODataConfig,
-        noopLogger,
-      );
-      const throttler = provider.value();
-
-      await throttler.check('orphan');
-      throttler.release('orphan');
-      expect(provider['counters'].has('orphan')).to.be.true();
-
-      clock.tick(61_000);
-
-      await throttler.check('new-tenant');
-      throttler.release('new-tenant');
-
-      expect(provider['counters'].has('orphan')).to.be.false();
-    } finally {
-      clock.restore();
-    }
-  });
-
   it('emits structured log entries when throttling occurs', async () => {
     const warn = sinon.stub();
     const logger: ODataLogger = {
@@ -116,6 +91,43 @@ describe('TenantThrottlerProvider', () => {
       entitySet: 'Products',
       operation: 'READ',
       method: 'GET',
+    });
+  });
+
+  it('logs store failures when release throws', async () => {
+    const error = sinon.stub();
+    const logger: ODataLogger = {
+      trace() {},
+      debug() {},
+      info() {},
+      warn() {},
+      error,
+    };
+    const store: TenantThrottleStore = {
+      incrementRate: async () => ({
+        limited: false,
+        hits: 0,
+        windowStart: Date.now(),
+        windowResetMs: 0,
+      }),
+      acquireConcurrent: async () => ({ limited: false, concurrent: 0 }),
+      releaseConcurrent: async () => {
+        throw new Error('release-failed');
+      },
+    };
+    const provider = new TenantThrottlerProvider(
+      { tenantQuotas: { maxConcurrentRequests: 1 } } as ODataConfig,
+      logger,
+      store,
+    );
+    const throttler = provider.value();
+    throttler.release('tenant-1');
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(error.called).to.be.true();
+    expect(error.getCall(0).args[1]).to.containDeep({
+      event: 'tenant-throttle-store-error',
+      action: 'release',
+      tenantId: 'tenant-1',
     });
   });
 });

@@ -1035,6 +1035,21 @@ onLog(entry) {
 }
 ```
 
+The default throttling backend keeps counters in-memory inside each process. If you run multiple application instances and need a cluster-wide quota, bind a shared store such as the provided Redis adapter:
+
+```ts
+import Redis from 'ioredis';
+import { BindingScope } from '@loopback/core';
+import { ODATA_BINDINGS, RedisTenantThrottleStore } from '@loopback/odata';
+
+app
+  .bind(ODATA_BINDINGS.THROTTLE_STORE)
+  .toDynamicValue(() => new RedisTenantThrottleStore(new Redis(process.env.REDIS_URL)))
+  .inScope(BindingScope.SINGLETON);
+```
+
+Any custom store only needs to implement the `TenantThrottleStore` interface (also exported) so you can plug in your preferred database or cache.
+
 - `maxApplyResultSize`: Maximum number of rows the server will process in-memory when executing `$apply` fallbacks (default: `2000`). Requests that exceed the limit are rejected with `400 Bad Request`.
 - `logApplyFallbacks`: When `true`, logs a warning whenever `$apply` falls back to in-memory execution (default: `false`).
 - `onApplyFallback(event)`: Optional callback invoked whenever `$apply` falls back; receives `{event, entitySet, transformations, rows, limit}` so you can integrate with metrics/telemetry.

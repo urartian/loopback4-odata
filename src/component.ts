@@ -17,6 +17,7 @@ import { ODataVisibilitySpecEnhancer } from './spec/odata-visibility.spec-enhanc
 import { ODataLoggerProvider } from './providers/odata-logger.provider';
 import { ODataConfigValidatorObserver } from './observers/odata-config.validator';
 import { TenantThrottlerProvider } from './providers/tenant-throttler.provider';
+import { InMemoryTenantThrottleStore } from './services/tenant-throttle-store';
 
 export class ODataComponent implements Component {
   bindings = [
@@ -60,6 +61,9 @@ export class ODataComponent implements Component {
       .inScope(BindingScope.SINGLETON),
     Binding.bind(ODATA_BINDINGS.LOGGER)
       .toProvider(ODataLoggerProvider)
+      .inScope(BindingScope.SINGLETON),
+    Binding.bind(ODATA_BINDINGS.THROTTLE_STORE)
+      .toClass(InMemoryTenantThrottleStore)
       .inScope(BindingScope.SINGLETON),
     Binding.bind(ODATA_BINDINGS.THROTTLER)
       .toProvider(TenantThrottlerProvider)
