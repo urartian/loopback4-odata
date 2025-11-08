@@ -3,6 +3,7 @@ import { ODataConfig, ODataLogEntry, ODataTenantThrottleContext } from './types'
 import { CsdlGenerator } from './metadata/csdl-generator';
 import { EntitySetRegistry } from './registry/entityset-registry';
 import { ODataApplyExecutorRegistry } from './services/odata-apply-executor.registry';
+import { TenantThrottleStore } from './services/tenant-throttle-store';
 
 export const ODATA_BINDINGS = {
   CONFIG: BindingKey.create<ODataConfig>('odata.config'),
@@ -11,6 +12,7 @@ export const ODATA_BINDINGS = {
   APPLY_EXECUTOR_REGISTRY: BindingKey.create<ODataApplyExecutorRegistry>('odata.apply.executors'),
   LOGGER: BindingKey.create<ODataLogger>('odata.logger'),
   THROTTLER: BindingKey.create<ODataTenantThrottler>('odata.tenantThrottler'),
+  THROTTLE_STORE: BindingKey.create<TenantThrottleStore>('odata.tenantThrottler.store'),
 };
 
 export interface ODataLogger {
