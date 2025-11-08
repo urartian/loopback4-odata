@@ -1799,7 +1799,7 @@ export function defineODataCrudController(def: EntitySetDef) {
       ctx.navigationRelationRepository = relationRepo;
       ctx.navigationTargetRepository = targetRepo;
 
-      await this.enforceTenantLimit();
+      await this.enforceTenantLimit(op);
       await this.runBefore(op, undefined, ctx);
 
       const execDefault = async () => {
@@ -1870,7 +1870,7 @@ export function defineODataCrudController(def: EntitySetDef) {
         ctx.navigationTargetId = targetId;
       }
 
-      await this.enforceTenantLimit();
+      await this.enforceTenantLimit(op);
       await this.runBefore(op, undefined, ctx);
 
       const execDefault = async () => {
@@ -5150,7 +5150,7 @@ export function defineODataCrudController(def: EntitySetDef) {
       } as CrudHookContext;
     }
 
-    async enforceTenantLimit() {
+    async enforceTenantLimit(operation?: CrudOperation, scope?: CrudScope) {
       if (!this.throttler) return;
       if (this._throttleApplied) return;
       const resolver = this.cfg?.tenantResolver;
@@ -5172,7 +5172,19 @@ export function defineODataCrudController(def: EntitySetDef) {
       this.response.once('finish', release);
       this.response.once('close', release);
       try {
-        await this.throttler.check(tenantId);
+        const requestId =
+          this.request.get('x-request-id') ??
+          (this.request.headers?.['x-request-id'] as string | undefined) ??
+          ((this.request as AnyObject).id as string | undefined);
+        const rawUrl = (this.request as AnyObject).originalUrl ?? this.request.url;
+        await this.throttler.check(tenantId, {
+          entitySet: setName,
+          operation,
+          scope,
+          method: this.request.method,
+          url: rawUrl,
+          requestId,
+        });
         this._throttleApplied = true;
       } catch (error) {
         release();
@@ -5642,7 +5654,7 @@ export function defineODataCrudController(def: EntitySetDef) {
         filter: baseFilter as any,
         options: this.repositoryOptions(),
       });
-      await this.enforceTenantLimit();
+      await this.enforceTenantLimit(op, scope);
       await this.runBefore(op, scope, ctx);
 
       const execDefault = async () => {
@@ -6064,7 +6076,7 @@ export function defineODataCrudController(def: EntitySetDef) {
         filter: baseFilter as any,
         options: this.repositoryOptions(),
       });
-      await this.enforceTenantLimit();
+      await this.enforceTenantLimit(op, scope);
       await this.runBefore(op, scope, ctx);
 
       const execDefault = async () => {
@@ -6176,7 +6188,7 @@ export function defineODataCrudController(def: EntitySetDef) {
         filter: baseFilter as any,
         options: this.repositoryOptions(),
       });
-      await this.enforceTenantLimit();
+      await this.enforceTenantLimit(op, scope);
       await this.runBefore(op, scope, ctx);
 
       const execDefault = async () => {
@@ -6275,7 +6287,7 @@ export function defineODataCrudController(def: EntitySetDef) {
         filter: baseFilter as any,
         options: this.repositoryOptions(),
       });
-      await this.enforceTenantLimit();
+      await this.enforceTenantLimit(op, scope);
       await this.runBefore(op, scope, ctx);
 
       const execDefault = async () => {
@@ -6356,7 +6368,7 @@ export function defineODataCrudController(def: EntitySetDef) {
         payload: payload as AnyObject,
         options: this.repositoryOptions(),
       });
-      await this.enforceTenantLimit();
+      await this.enforceTenantLimit(op);
       await this.runBefore(op, scope, ctx);
 
       const execDefault = async () => {
@@ -6519,7 +6531,7 @@ export function defineODataCrudController(def: EntitySetDef) {
         payload: rootPayload as AnyObject,
         options: this.repositoryOptions(),
       });
-      await this.enforceTenantLimit();
+      await this.enforceTenantLimit(op);
       await this.runBefore(op, scope, ctx);
 
       const execDefault = async () => {
@@ -6625,7 +6637,7 @@ export function defineODataCrudController(def: EntitySetDef) {
         id,
         options: this.repositoryOptions(),
       });
-      await this.enforceTenantLimit();
+      await this.enforceTenantLimit(op);
       await this.runBefore(op, scope, ctx);
 
       const execDefault = async () => {

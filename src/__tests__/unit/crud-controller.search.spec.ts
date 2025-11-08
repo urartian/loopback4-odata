@@ -51,7 +51,7 @@ describe('CRUD controller $search guardrails', () => {
       {} as any,
       noopLogger,
       {
-        check: async () => undefined,
+        check: async (_tenant?: string) => undefined,
         release: () => undefined,
       } as ODataTenantThrottler,
     );

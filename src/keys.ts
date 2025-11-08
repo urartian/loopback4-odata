@@ -1,5 +1,5 @@
 import { BindingKey } from '@loopback/core';
-import { ODataConfig, ODataLogEntry } from './types';
+import { ODataConfig, ODataLogEntry, ODataTenantThrottleContext } from './types';
 import { CsdlGenerator } from './metadata/csdl-generator';
 import { EntitySetRegistry } from './registry/entityset-registry';
 import { ODataApplyExecutorRegistry } from './services/odata-apply-executor.registry';
@@ -46,6 +46,6 @@ export function createLogEntry(logger: ODataLogger, entry: ODataLogEntry): void 
 }
 
 export interface ODataTenantThrottler {
-  check(tenant: string): Promise<void>;
+  check(tenant: string, context?: ODataTenantThrottleContext): Promise<void>;
   release(tenant: string): void;
 }
