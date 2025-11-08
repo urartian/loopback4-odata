@@ -3,7 +3,7 @@ import { Entity, model, property } from '@loopback/repository';
 import { expect } from '@loopback/testlab';
 import { defineODataCrudController } from '../../controllers/crud-controller-factory';
 import { EntitySetDef } from '../../registry/entityset-registry';
-import { ODataLogger } from '../../keys';
+import { ODataLogger, ODataTenantThrottler } from '../../keys';
 import { ODataConfig, ODataPaginationConfig } from '../../types';
 
 describe('CRUD controller pagination config', () => {
@@ -65,6 +65,10 @@ describe('CRUD controller pagination config', () => {
       cfg,
       {} as any,
       noopLogger,
+      {
+        check: async () => undefined,
+        release: () => undefined,
+      } as ODataTenantThrottler,
     );
   };
 

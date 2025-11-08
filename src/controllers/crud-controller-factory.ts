@@ -74,7 +74,7 @@ import {
   CrudOperation,
   CrudScope,
 } from '../types/crud-hooks';
-import { ODATA_BINDINGS, ODataLogger } from '../keys';
+import { ODATA_BINDINGS, ODataLogger, ODataTenantThrottler } from '../keys';
 import { ODataConfig, ODataApplyTelemetryEvent } from '../types';
 import { getODataSearchableProps } from '../decorators/search.decorators';
 import { ensureNavigationTargetKey } from '../util/relation-metadata';
@@ -534,6 +534,7 @@ export function defineODataCrudController(def: EntitySetDef) {
   class ODataCrudController {
     formatOverridden = false;
     readonly entityCtor = modelCtor as typeof Entity;
+    _throttleApplied = false;
 
     constructor(
       @inject(repoBindingKey)
@@ -550,6 +551,8 @@ export function defineODataCrudController(def: EntitySetDef) {
       public readonly applyExecutors: ODataApplyExecutorRegistry,
       @inject(ODATA_BINDINGS.LOGGER)
       public readonly logger: ODataLogger,
+      @inject(ODATA_BINDINGS.THROTTLER)
+      public readonly throttler: ODataTenantThrottler,
     ) {
       ensureConfigValidated(this.cfg);
     }
@@ -1796,6 +1799,7 @@ export function defineODataCrudController(def: EntitySetDef) {
       ctx.navigationRelationRepository = relationRepo;
       ctx.navigationTargetRepository = targetRepo;
 
+      await this.enforceTenantLimit();
       await this.runBefore(op, undefined, ctx);
 
       const execDefault = async () => {
@@ -1866,6 +1870,7 @@ export function defineODataCrudController(def: EntitySetDef) {
         ctx.navigationTargetId = targetId;
       }
 
+      await this.enforceTenantLimit();
       await this.runBefore(op, undefined, ctx);
 
       const execDefault = async () => {
@@ -5145,6 +5150,47 @@ export function defineODataCrudController(def: EntitySetDef) {
       } as CrudHookContext;
     }
 
+    async enforceTenantLimit() {
+      if (!this.throttler) return;
+      if (this._throttleApplied) return;
+      const resolver = this.cfg?.tenantResolver;
+      let tenantId = 'default';
+      if (resolver) {
+        try {
+          tenantId = resolver(this.request) ?? 'default';
+        } catch {
+          tenantId = 'default';
+        }
+      }
+      let released = false;
+      const release = () => {
+        if (released) return;
+        released = true;
+        this.throttler?.release(tenantId);
+        this._throttleApplied = false;
+      };
+      this.response.once('finish', release);
+      this.response.once('close', release);
+      try {
+        await this.throttler.check(tenantId);
+        this._throttleApplied = true;
+      } catch (error) {
+        release();
+        const message = (error as Error).message;
+        if (message === 'tenant-rate-limit-exceeded') {
+          throw new HttpErrors.TooManyRequests(
+            'Tenant request rate exceeded. Retry after a short delay.',
+          );
+        }
+        if (message === 'tenant-concurrent-limit-exceeded') {
+          throw new HttpErrors.TooManyRequests(
+            'Tenant concurrent request limit exceeded. Retry after a short delay.',
+          );
+        }
+        throw error;
+      }
+    }
+
     buildOnContext(ctx: CrudHookContext, helpers: CrudOnContext['helpers']): CrudOnContext {
       return Object.assign({} as CrudOnContext, ctx, { helpers });
     }
@@ -5596,6 +5642,7 @@ export function defineODataCrudController(def: EntitySetDef) {
         filter: baseFilter as any,
         options: this.repositoryOptions(),
       });
+      await this.enforceTenantLimit();
       await this.runBefore(op, scope, ctx);
 
       const execDefault = async () => {
@@ -6017,6 +6064,7 @@ export function defineODataCrudController(def: EntitySetDef) {
         filter: baseFilter as any,
         options: this.repositoryOptions(),
       });
+      await this.enforceTenantLimit();
       await this.runBefore(op, scope, ctx);
 
       const execDefault = async () => {
@@ -6128,6 +6176,7 @@ export function defineODataCrudController(def: EntitySetDef) {
         filter: baseFilter as any,
         options: this.repositoryOptions(),
       });
+      await this.enforceTenantLimit();
       await this.runBefore(op, scope, ctx);
 
       const execDefault = async () => {
@@ -6226,6 +6275,7 @@ export function defineODataCrudController(def: EntitySetDef) {
         filter: baseFilter as any,
         options: this.repositoryOptions(),
       });
+      await this.enforceTenantLimit();
       await this.runBefore(op, scope, ctx);
 
       const execDefault = async () => {
@@ -6306,6 +6356,7 @@ export function defineODataCrudController(def: EntitySetDef) {
         payload: payload as AnyObject,
         options: this.repositoryOptions(),
       });
+      await this.enforceTenantLimit();
       await this.runBefore(op, scope, ctx);
 
       const execDefault = async () => {
@@ -6468,6 +6519,7 @@ export function defineODataCrudController(def: EntitySetDef) {
         payload: rootPayload as AnyObject,
         options: this.repositoryOptions(),
       });
+      await this.enforceTenantLimit();
       await this.runBefore(op, scope, ctx);
 
       const execDefault = async () => {
@@ -6573,6 +6625,7 @@ export function defineODataCrudController(def: EntitySetDef) {
         id,
         options: this.repositoryOptions(),
       });
+      await this.enforceTenantLimit();
       await this.runBefore(op, scope, ctx);
 
       const execDefault = async () => {

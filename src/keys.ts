@@ -10,6 +10,7 @@ export const ODATA_BINDINGS = {
   ENTITY_SET_REGISTRY: BindingKey.create<EntitySetRegistry>('odata.registry.entitysets'),
   APPLY_EXECUTOR_REGISTRY: BindingKey.create<ODataApplyExecutorRegistry>('odata.apply.executors'),
   LOGGER: BindingKey.create<ODataLogger>('odata.logger'),
+  THROTTLER: BindingKey.create<ODataTenantThrottler>('odata.tenantThrottler'),
 };
 
 export interface ODataLogger {
@@ -42,4 +43,9 @@ export function createLogEntry(logger: ODataLogger, entry: ODataLogEntry): void 
       logger.info(message, context);
       break;
   }
+}
+
+export interface ODataTenantThrottler {
+  check(tenant: string): Promise<void>;
+  release(tenant: string): void;
 }

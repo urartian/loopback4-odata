@@ -3,7 +3,7 @@ import { Entity, model, property } from '@loopback/repository';
 import { expect } from '@loopback/testlab';
 import { defineODataCrudController } from '../../controllers/crud-controller-factory';
 import { EntitySetDef } from '../../registry/entityset-registry';
-import { ODataLogger } from '../../keys';
+import { ODataLogger, ODataTenantThrottler } from '../../keys';
 
 describe('CRUD controller response normalization', () => {
   @model()
@@ -71,6 +71,10 @@ describe('CRUD controller response normalization', () => {
       {} as any,
       {} as any,
       noopLogger,
+      {
+        check: async () => undefined,
+        release: () => undefined,
+      } as ODataTenantThrottler,
     );
 
   it('normalizes DateTimeOffset strings in decorated entities', () => {

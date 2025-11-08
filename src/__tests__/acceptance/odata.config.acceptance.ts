@@ -277,4 +277,108 @@ describe('OData config plumbing acceptance', () => {
     await app.boot();
     await expect(app.start()).to.be.rejectedWith(/ODataConfig\.pagination\.maxPageSize/);
   });
+
+  it('enforces tenant quotas when tenantResolver is configured', async function (this: any) {
+    await replaceApp(this, {
+      tenantResolver: (req) => req.get('x-tenant-id') ?? 'default',
+      tenantQuotas: { maxRequestsPerMinute: 1 },
+    });
+
+    await client.get('/api/odata/Products').set('x-tenant-id', 'alpha').expect(200);
+    await client.get('/api/odata/Products').set('x-tenant-id', 'alpha').expect(429);
+    await client.get('/api/odata/Products').set('x-tenant-id', 'beta').expect(200);
+  });
+
+  it('enforces tenant quotas on entity write operations', async function (this: any) {
+    await replaceApp(this, {
+      tenantResolver: (req) => req.get('x-tenant-id') ?? 'default',
+      tenantQuotas: {
+        maxRequestsPerMinute: 10,
+        overrides: {
+          writer: { maxRequestsPerMinute: 1 },
+        },
+      },
+    });
+
+    await client
+      .post('/api/odata/Products')
+      .set('x-tenant-id', 'writer')
+      .send({ name: 'Rate Limited Gadget', price: 123 })
+      .expect(200);
+
+    await client
+      .post('/api/odata/Products')
+      .set('x-tenant-id', 'writer')
+      .send({ name: 'Second Gadget', price: 456 })
+      .expect(429);
+
+    await client
+      .post('/api/odata/Products')
+      .set('x-tenant-id', 'writer-premium')
+      .send({ name: 'Premium Gadget', price: 789 })
+      .expect(200);
+  });
+
+  it('enforces tenant quotas on delete operations', async function (this: any) {
+    await replaceApp(this, {
+      tenantResolver: (req) => req.get('x-tenant-id') ?? 'default',
+      tenantQuotas: {
+        maxRequestsPerMinute: 10,
+        overrides: {
+          deleter: { maxRequestsPerMinute: 1 },
+        },
+      },
+    });
+
+    const created = await client
+      .post('/api/odata/Products')
+      .send({ name: 'Disposable Product', price: 9 })
+      .expect(200);
+
+    const productId = created.body.id;
+    expect(productId).to.be.a.Number();
+
+    await client.del(`/api/odata/Products(${productId})`).set('x-tenant-id', 'deleter').expect(204);
+    await client.del(`/api/odata/Products(${productId})`).set('x-tenant-id', 'deleter').expect(429);
+  });
+
+  it('enforces tenant quotas on navigation $ref operations', async function (this: any) {
+    await replaceApp(this, {
+      tenantResolver: (req) => req.get('x-tenant-id') ?? 'default',
+      tenantQuotas: {
+        maxRequestsPerMinute: 10,
+        overrides: {
+          'nav-tenant': { maxRequestsPerMinute: 1 },
+        },
+      },
+    });
+
+    const newOrder = await client.post('/api/odata/Orders').send({ total: 0 }).expect(200);
+    const newOrderId = newOrder.body.id;
+    expect(newOrderId).to.be.a.Number();
+
+    const orderItemsRes = await client.get('/api/odata/OrderItems').expect(200);
+    const existingItem = orderItemsRes.body.value[0];
+    expect(existingItem).to.be.Object();
+    const originalOrderId = existingItem.orderId;
+
+    const linkPayload = { '@odata.id': `/api/odata/OrderItems(${existingItem.id})` };
+
+    await client
+      .post(`/api/odata/Orders(${newOrderId})/items/$ref`)
+      .set('x-tenant-id', 'nav-tenant')
+      .send(linkPayload)
+      .expect(204);
+
+    await client
+      .post(`/api/odata/Orders(${newOrderId})/items/$ref`)
+      .set('x-tenant-id', 'nav-tenant')
+      .send(linkPayload)
+      .expect(429);
+
+    await client
+      .post(`/api/odata/Orders(${originalOrderId})/items/$ref`)
+      .send(linkPayload)
+      .expect(204);
+  });
 });

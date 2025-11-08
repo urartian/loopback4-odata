@@ -20,6 +20,8 @@ export interface ODataConfig {
   onApplyTelemetry?: (event: ODataApplyTelemetryEvent) => void;
   maxApplyNavigationFanout?: number;
   onDeltaTokenInvalid?: (event: ODataDeltaTokenInvalidEvent) => void;
+  tenantResolver?: (request: import('@loopback/rest').Request) => string | undefined;
+  tenantQuotas?: ODataTenantQuotaConfig;
   // Search configuration
   searchMode?: 'annotated' | 'config-only' | 'all' | 'disabled';
   searchFields?: Record<string, string[]>; // per entity set
@@ -152,6 +154,12 @@ export interface ODataDeltaTokenInvalidEvent {
   event: 'delta-token-invalid';
   code: ODataDeltaTokenInvalidCode;
   entitySet: string;
+}
+
+export interface ODataTenantQuotaConfig {
+  maxRequestsPerMinute?: number;
+  maxConcurrentRequests?: number;
+  overrides?: Record<string, { maxRequestsPerMinute?: number; maxConcurrentRequests?: number }>;
 }
 
 export interface ODataLogEntry {

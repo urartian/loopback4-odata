@@ -989,9 +989,39 @@ const ProductsSet: EntitySetDef<Product> = {
 - `batch`: Guardrails for `$batch` requests. Provide `maxPayloadBytes` (default `16 MB`), `maxOperations` (100 operations), `maxChangesetOperations` (50 per changeset), `maxPartBodyBytes` (4 MB), and `maxDepth` (2 levels) to cap payload size, total operations, and changeset nesting.
 - `$batch` limits are enforced while parsing the stream: once the cumulative payload or a single part exceeds the configured budget the server aborts immediately with `413 Payload Too Large`.
 - `onDeltaTokenInvalid(event)`: Optional callback fired whenever a client supplies an expired, tampered, or mismatched `$deltatoken`. Useful for alerting/telemetry when secrets rotate.
+- `tenantResolver(request)`: Function that extracts a tenant/customer identifier from an incoming request (for example `req.user?.tenantId` or `req.get('x-tenant-id')`). When combined with `tenantQuotas`, the server enforces per-tenant throttling.
+- `tenantQuotas`: `{ maxRequestsPerMinute?: number; maxConcurrentRequests?: number; overrides?: Record<string, { maxRequestsPerMinute?: number; maxConcurrentRequests?: number }> }`. Leave undefined to disable throttling or specify per-tenant overrides to grant premium customers higher limits.
 - `onLog(entry)`: Optional hook invoked for every log entry emitted by the OData component (`entry` includes `level`, `message`, `context`, and optional `error`). Use it to forward structured telemetry into your existing logging/monitoring pipeline. If you bind your own logger to `ODATA_BINDINGS.LOGGER` the hook still fires after the logger handles the entry.
 - `documentInOpenApiDefault`: Controls whether generated OData routes appear in the published OpenAPI spec. The default `'auto'` policy documents entity sets that are also decorated with LoopBack's `@model()` and hides OData-only models. Set to `true` to publish every generated controller or `false` to hide everything unless a model opts in via `@odataModel({documentInOpenApi: true})`.
 - `removeUndocumentedFromSpec`: When `true` (default), routes tagged with `x-visibility: 'undocumented'` are removed before `/openapi.json` is served. Set to `false` to keep them in the document; the spec enhancer retags them as `x-visibility: 'internal'` so tooling can filter them out.
+
+#### Tenant throttling example
+
+```ts
+import { ODATA_BINDINGS } from '@loopback/odata';
+
+app.bind(ODATA_BINDINGS.CONFIG).to({
+  ...baseConfig,
+  tenantResolver: (req) => req.headers['x-tenant-id'] as string | undefined,
+  tenantQuotas: {
+    maxRequestsPerMinute: 120,
+    maxConcurrentRequests: 5,
+    overrides: {
+      premium: { // 'premium' is just a plain object key, it represents whatever tenant identifier your tenantResolver returns.
+        maxRequestsPerMinute: 600,
+        maxConcurrentRequests: 20,
+      },
+    },
+  },
+});
+```
+
+With the snippet above every OData controller automatically throttles requests per tenant:
+
+- If a header is missing, traffic goes through the default bucket (`'default'`).
+- Premium tenants inherit the global limits unless an override is specified.
+- All operations (reads, writes, deletes, `$ref`) participate, and concurrency slots are released when the response finishes.
+- Keys inside `tenantQuotas.overrides` must match the string returned by your `tenantResolver`, so you can define arbitrary tiers such as `sandbox`, `enterprise`, or a specific tenant id like `tenant-42`.
 - `maxApplyResultSize`: Maximum number of rows the server will process in-memory when executing `$apply` fallbacks (default: `2000`). Requests that exceed the limit are rejected with `400 Bad Request`.
 - `logApplyFallbacks`: When `true`, logs a warning whenever `$apply` falls back to in-memory execution (default: `false`).
 - `onApplyFallback(event)`: Optional callback invoked whenever `$apply` falls back; receives `{event, entitySet, transformations, rows, limit}` so you can integrate with metrics/telemetry.

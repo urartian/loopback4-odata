@@ -4,7 +4,7 @@ import { expect } from '@loopback/testlab';
 import { HttpErrors } from '@loopback/rest';
 import { defineODataCrudController } from '../../controllers/crud-controller-factory';
 import { EntitySetDef } from '../../registry/entityset-registry';
-import { ODataLogger } from '../../keys';
+import { ODataLogger, ODataTenantThrottler } from '../../keys';
 import { ODataConfig } from '../../types';
 
 describe('CRUD controller $search guardrails', () => {
@@ -50,6 +50,10 @@ describe('CRUD controller $search guardrails', () => {
       cfg,
       {} as any,
       noopLogger,
+      {
+        check: async () => undefined,
+        release: () => undefined,
+      } as ODataTenantThrottler,
     );
   };
 
