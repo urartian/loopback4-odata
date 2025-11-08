@@ -2,6 +2,7 @@ import 'reflect-metadata';
 import { Application, inject } from '@loopback/core';
 import { RestApplication } from '@loopback/rest';
 import {
+  AnyObject,
   DefaultCrudRepository,
   Entity,
   RepositoryMixin,
@@ -100,6 +101,176 @@ describe('ODataBooter repository binding resolution', () => {
     expect(instantiationAttempts).to.equal(0);
     const def = registry.get(Widget);
     expect(def?.repositoryBindingKey).to.equal('repositories.WidgetRepository');
+  });
+
+  it('infers datasource binding from static dataSourceName metadata', async () => {
+    const RepoApp = RepositoryMixin(Application);
+    const app = new RepoApp();
+    app.dataSource(new juggler.DataSource({ name: 'db', connector: 'memory' }), 'db');
+
+    @model()
+    class Sensor extends Entity {
+      @property({ id: true })
+      id?: number;
+    }
+
+    class SensorRepository extends DefaultCrudRepository<Sensor, typeof Sensor.prototype.id> {
+      static dataSourceName = 'db';
+      constructor(dataSource: juggler.DataSource) {
+        super(Sensor, dataSource);
+      }
+    }
+
+    app.repository(SensorRepository);
+
+    const registry = new EntitySetRegistry();
+    const booter = new ODataBooter(
+      app,
+      registry,
+      {} as any,
+      new ODataApplyExecutorRegistry(),
+      noopLogger,
+    );
+
+    const repoBinding = app.getBinding('repositories.SensorRepository');
+    const selector = (booter as any).resolveRepositoryDataSourceBindingKey(repoBinding);
+    expect(selector).to.equal('datasources.db');
+  });
+});
+
+describe('ODataBooter transaction capability detection', () => {
+  it('detects transactional datasources without instantiating repositories', async () => {
+    const RepoApp = RepositoryMixin(Application);
+    const app = new RepoApp();
+    const txDataSource = new juggler.DataSource({ name: 'tx', connector: 'memory' }) as AnyObject;
+    let beginCalls = 0;
+    txDataSource.beginTransaction = async () => {
+      beginCalls++;
+      return {
+        commit: async () => undefined,
+        rollback: async () => undefined,
+      };
+    };
+    app.dataSource(txDataSource as juggler.DataSource, 'tx');
+
+    @model()
+    class Device extends Entity {
+      @property({ id: true })
+      id?: number;
+    }
+
+    let instantiations = 0;
+    class DeviceRepository extends DefaultCrudRepository<Device, typeof Device.prototype.id> {
+      constructor(@inject('datasources.tx') dataSource: juggler.DataSource) {
+        instantiations++;
+        super(Device, dataSource);
+        throw new Error('Repository should not be instantiated during capability detection.');
+      }
+    }
+
+    @odataController(Device)
+    class DeviceController {}
+
+    app.repository(DeviceRepository);
+    app.controller(DeviceController);
+
+    const registry = new EntitySetRegistry();
+    const booter = new ODataBooter(
+      app,
+      registry,
+      {} as any,
+      new ODataApplyExecutorRegistry(),
+      noopLogger,
+    );
+
+    await booter.load();
+
+    expect(instantiations).to.equal(0);
+    expect(beginCalls).to.equal(1);
+    const def = registry.get(Device);
+    expect(def?.supportsTransactions).to.equal(true);
+  });
+
+  it('marks datasources without beginTransaction as non-transactional', async () => {
+    const RepoApp = RepositoryMixin(Application);
+    const app = new RepoApp();
+    const ds = new juggler.DataSource({ name: 'mem', connector: 'memory' }) as AnyObject;
+    delete ds.beginTransaction;
+    app.dataSource(ds as juggler.DataSource, 'mem');
+
+    @model()
+    class LogEntry extends Entity {
+      @property({ id: true })
+      id?: number;
+    }
+
+    class LogRepository extends DefaultCrudRepository<LogEntry, typeof LogEntry.prototype.id> {
+      constructor(@inject('datasources.mem') dataSource: juggler.DataSource) {
+        super(LogEntry, dataSource);
+      }
+    }
+
+    @odataController(LogEntry)
+    class LogController {}
+
+    app.repository(LogRepository);
+    app.controller(LogController);
+
+    const registry = new EntitySetRegistry();
+    const booter = new ODataBooter(
+      app,
+      registry,
+      {} as any,
+      new ODataApplyExecutorRegistry(),
+      noopLogger,
+    );
+
+    await booter.load();
+
+    const def = registry.get(LogEntry);
+    expect(def?.supportsTransactions).to.equal(false);
+  });
+
+  it('marks datasources whose beginTransaction rejects as non-transactional', async () => {
+    const RepoApp = RepositoryMixin(Application);
+    const app = new RepoApp();
+    const flaky = new juggler.DataSource({ name: 'flaky', connector: 'memory' }) as AnyObject;
+    flaky.beginTransaction = async () => {
+      throw new Error('Transactions not supported');
+    };
+    app.dataSource(flaky as juggler.DataSource, 'flaky');
+
+    @model()
+    class AuditLog extends Entity {
+      @property({ id: true })
+      id?: number;
+    }
+
+    class AuditRepository extends DefaultCrudRepository<AuditLog, typeof AuditLog.prototype.id> {
+      constructor(@inject('datasources.flaky') dataSource: juggler.DataSource) {
+        super(AuditLog, dataSource);
+      }
+    }
+
+    @odataController(AuditLog)
+    class AuditController {}
+
+    app.repository(AuditRepository);
+    app.controller(AuditController);
+
+    const registry = new EntitySetRegistry();
+    const booter = new ODataBooter(
+      app,
+      registry,
+      {} as any,
+      new ODataApplyExecutorRegistry(),
+      noopLogger,
+    );
+
+    await booter.load();
+
+    const def = registry.get(AuditLog);
+    expect(def?.supportsTransactions).to.equal(false);
   });
 });
 

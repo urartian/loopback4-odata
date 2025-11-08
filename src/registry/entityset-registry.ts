@@ -19,6 +19,8 @@ export interface EntitySetDef<T extends Entity = Entity> {
   controllerCtor?: Function; // generated controller
   repositoryBindingKey?: string; // app.binding key for the repository
   repositoryCtor?: Function; // repository class constructor
+  supportsTransactions?: boolean;
+  transactionCapabilityLocked?: boolean;
   actions?: OperationMeta[];
   functions?: OperationMeta[];
   etagProperties?: string[];
@@ -85,6 +87,18 @@ export class EntitySetRegistry {
     }
     if (def.documentInOpenApi === undefined && existing?.documentInOpenApi !== undefined) {
       next.documentInOpenApi = existing.documentInOpenApi;
+    }
+    if (def.supportsTransactions === undefined && existing?.supportsTransactions !== undefined) {
+      next.supportsTransactions = existing.supportsTransactions;
+    }
+    if (
+      def.transactionCapabilityLocked === undefined &&
+      existing?.transactionCapabilityLocked !== undefined
+    ) {
+      next.transactionCapabilityLocked = existing.transactionCapabilityLocked;
+    }
+    if (next.supportsTransactions === false && next.transactionCapabilityLocked === undefined) {
+      next.transactionCapabilityLocked = true;
     }
     if (def.pagination === undefined && existing?.pagination !== undefined) {
       next.pagination = existing.pagination;

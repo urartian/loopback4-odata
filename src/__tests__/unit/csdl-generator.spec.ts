@@ -84,6 +84,7 @@ describe('CsdlGenerator', () => {
       etagProperties: ['updatedAt'],
       hasStream: true,
       deepInsert: true,
+      supportsTransactions: true,
       capabilities: {
         countable: false,
         filterFunctions: ['contains', 'startswith'],
@@ -146,6 +147,7 @@ describe('CsdlGenerator', () => {
     registry.register({
       name: 'Gadgets',
       modelCtor: Gadget,
+      supportsTransactions: false,
     });
 
     registry.register({
@@ -233,6 +235,18 @@ describe('CsdlGenerator', () => {
     expect(
       xml.includes('Annotation Term="Org.OData.Capabilities.V1.SearchRestrictions"'),
     ).to.be.true();
+    expect(xml.includes('Annotation Term="Org.OData.Capabilities.V1.BatchSupported"')).to.be.true();
+    expect(xml.includes('PropertyValue Property="ChangeSetsSupported" Bool="false"')).to.be.true();
+    expect(
+      xml.includes(
+        'Annotation Term="LoopBack.V1.BatchCapabilities.ChangeSetsSupported" Bool="true"',
+      ),
+    ).to.be.true();
+    expect(
+      xml.includes(
+        'Annotation Term="LoopBack.V1.BatchCapabilities.ChangeSetsSupported" Bool="false"',
+      ),
+    ).to.be.true();
     expect(
       xml.includes('<EntityType Name="AdvancedWidget" BaseType="Catalog.Widget">'),
     ).to.be.true();
@@ -318,6 +332,12 @@ describe('CsdlGenerator', () => {
     expect(container.Widgets['@Org.OData.Capabilities.V1.DeepInsertSupport'].Supported).to.equal(
       true,
     );
+    expect(container['@Org.OData.Capabilities.V1.BatchSupported']).to.containDeep({
+      Supported: true,
+      ChangeSetsSupported: false,
+    });
+    expect(container.Widgets['@LoopBack.V1.BatchCapabilities.ChangeSetsSupported']).to.equal(true);
+    expect(container.Gadgets['@LoopBack.V1.BatchCapabilities.ChangeSetsSupported']).to.equal(false);
     expect(container.Widgets['@Org.OData.Capabilities.V1.InsertRestrictions'].Insertable).to.equal(
       false,
     );

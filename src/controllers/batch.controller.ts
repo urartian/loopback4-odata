@@ -3,9 +3,9 @@ import { post, requestBody, Response, RestBindings, HttpErrors, Request } from '
 import { HttpHandler } from '@loopback/rest/dist/http-handler';
 import { IncomingMessage, ServerResponse } from 'http';
 import { PassThrough } from 'stream';
-import { IsolationLevel, Transaction } from '@loopback/repository';
+import { IsolationLevel, Transaction, juggler } from '@loopback/repository';
 import { ODATA_BINDINGS, ODataLogger } from '../keys';
-import { EntitySetRegistry } from '../registry/entityset-registry';
+import { EntitySetDef, EntitySetRegistry } from '../registry/entityset-registry';
 import { ODATA_ATOMICITY_STATE, ODATA_VERSION } from '../constants';
 import { AtomicityRequestState } from '../types/batch';
 import { parseMultipartBatch } from '../services/multipart-batch.parser';
@@ -13,6 +13,10 @@ import { serializeMultipartBatch } from '../services/multipart-batch.serializer'
 import { Readable } from 'stream';
 import { markUndocumentedOperation } from '../util/openapi';
 import { ODataBatchConfig, ODataConfig } from '../types';
+import {
+  dataSourceSupportsTransactions,
+  probeDataSourceTransactionalCapability,
+} from '../util/datasource-transactions';
 
 const BATCH_OPERATION_SPEC = markUndocumentedOperation({
   responses: {
@@ -84,6 +88,8 @@ interface NormalizedBatchLimits {
   maxDepth?: number;
   maxPartBodyBytes?: number;
 }
+
+const NON_TRANSACTIONAL_WARNINGS = new WeakSet<EntitySetDef>();
 
 class AtomicityGroupContext {
   private readonly requestState: AtomicityRequestState;
@@ -367,6 +373,74 @@ export class ODataBatchController {
     this.logger.warn(message, { scope: 'batch', ...(context ?? {}) });
   }
 
+  private async ensureTransactionalSupport(def: EntitySetDef, groupId: string): Promise<void> {
+    if (def.supportsTransactions !== false) return;
+    if (def.transactionCapabilityLocked === false) {
+      const refreshed = await this.tryRefreshTransactionalSupport(def);
+      if (refreshed) return;
+    }
+    this.warn('Atomicity group rejected: datasource lacks transaction support.', {
+      entitySet: def.name,
+      atomicityGroup: groupId,
+    });
+    throw this.atomicityNotSupported(def);
+  }
+
+  private async tryRefreshTransactionalSupport(def: EntitySetDef): Promise<boolean> {
+    if (!def.repositoryBindingKey) return false;
+    try {
+      const repository = await this.app.get(def.repositoryBindingKey);
+      const dataSource = (repository as { dataSource?: juggler.DataSource }).dataSource;
+      if (!dataSource) {
+        this.markEntitySetNonTransactional(def, def.repositoryBindingKey);
+        return false;
+      }
+      const { capability, error: probeError } =
+        await probeDataSourceTransactionalCapability(dataSource);
+      if (capability === 'supported') {
+        def.supportsTransactions = true;
+        def.transactionCapabilityLocked = true;
+        return true;
+      }
+      if (capability === 'unsupported') {
+        this.markEntitySetNonTransactional(def, dataSource.name ?? def.repositoryBindingKey);
+        return false;
+      }
+      this.markEntitySetNonTransactional(def, dataSource.name ?? def.repositoryBindingKey);
+      this.warn('Unable to verify datasource transaction capability during refresh.', {
+        entitySet: def.name,
+        dataSource: dataSource.name ?? def.repositoryBindingKey,
+        error: (probeError as Error)?.message ?? probeError,
+      });
+      if (probeError instanceof Error) throw probeError;
+      throw new Error('Datasource transaction capability could not be verified.');
+    } catch (error) {
+      this.warn('Failed to refresh datasource transaction capability; propagating error.', {
+        entitySet: def.name,
+        repositoryBindingKey: def.repositoryBindingKey,
+        error: (error as Error)?.message ?? error,
+      });
+      throw error;
+    }
+  }
+
+  private atomicityNotSupported(def: EntitySetDef): HttpErrors.HttpError {
+    return new HttpErrors.NotImplemented(
+      `Atomicity groups require datasource transactions, but entity set ${def.name} is backed by a datasource without transaction support.`,
+    );
+  }
+
+  private markEntitySetNonTransactional(def: EntitySetDef, dataSourceName?: string): void {
+    def.supportsTransactions = false;
+    def.transactionCapabilityLocked = true;
+    if (NON_TRANSACTIONAL_WARNINGS.has(def)) return;
+    NON_TRANSACTIONAL_WARNINGS.add(def);
+    this.warn('Entity set datasource does not support transactions; atomicity groups disabled.', {
+      entitySet: def.name,
+      dataSource: dataSourceName,
+    });
+  }
+
   private groupByAtomicity(requests: BatchRequest[]) {
     const result: Array<{ atomicityGroup?: string; requests: BatchRequest[] }> = [];
     const handled = new Set<string>();
@@ -454,6 +528,7 @@ export class ODataBatchController {
       for (const setName of setNames) {
         const def = this.registry.findByName(setName);
         if (!def) continue;
+        await this.ensureTransactionalSupport(def, groupId);
         if (!def.repositoryBindingKey) {
           throw new HttpErrors.InternalServerError(
             `Entity set ${def.name} is missing a repository binding and cannot participate in transactions.`,
@@ -461,27 +536,28 @@ export class ODataBatchController {
         }
 
         const repository = await this.app.get(def.repositoryBindingKey);
-        const dataSource = (
-          repository as { dataSource?: { beginTransaction?: Function; name?: string } }
-        ).dataSource;
-        if (!dataSource || typeof dataSource.beginTransaction !== 'function') {
-          throw new HttpErrors.NotImplemented(
-            `Repository for entity set ${def.name} does not support transactions required for atomicity group ${groupId}.`,
-          );
+        const dataSource = (repository as { dataSource?: juggler.DataSource }).dataSource;
+        if (!dataSource || !dataSourceSupportsTransactions(dataSource)) {
+          this.markEntitySetNonTransactional(def, dataSource?.name ?? def.repositoryBindingKey);
+          throw this.atomicityNotSupported(def);
         }
 
         const dsKey = dataSource.name ?? def.repositoryBindingKey;
         let tx = transactionsByDataSource.get(dsKey);
         if (!tx) {
-          tx = await this.beginTransactionForDataSource(
-            dataSource as {
-              beginTransaction: (options: IsolationLevel) => Promise<Transaction>;
-              name?: string;
-            },
-          );
+          try {
+            tx = await this.beginTransactionForDataSource(dataSource);
+          } catch (error) {
+            if (error instanceof HttpErrors.HttpError && error.statusCode === 501) {
+              this.markEntitySetNonTransactional(def, dataSource.name ?? def.repositoryBindingKey);
+            }
+            throw error;
+          }
           transactionsByDataSource.set(dsKey, tx);
           startedTransactions.push(tx);
         }
+        def.supportsTransactions = true;
+        def.transactionCapabilityLocked = true;
         transactionsBySet.set(def.name, tx);
       }
     } catch (error) {
@@ -519,12 +595,18 @@ export class ODataBatchController {
     return match[1]?.trim().replace(/^"|"$/g, '');
   }
 
-  private async beginTransactionForDataSource(dataSource: {
-    beginTransaction: (options: IsolationLevel) => Promise<Transaction>;
-    name?: string;
-  }): Promise<Transaction> {
+  private async beginTransactionForDataSource(
+    dataSource: juggler.DataSource,
+  ): Promise<Transaction> {
+    if (typeof dataSource.beginTransaction !== 'function') {
+      throw new HttpErrors.NotImplemented(
+        `Datasource ${dataSource.name ?? 'unknown'} cannot begin a transaction: missing beginTransaction().`,
+      );
+    }
     try {
-      return await dataSource.beginTransaction(IsolationLevel.READ_COMMITTED);
+      return (await dataSource.beginTransaction(
+        IsolationLevel.READ_COMMITTED,
+      )) as unknown as Transaction;
     } catch (err) {
       throw new HttpErrors.NotImplemented(
         `Datasource ${dataSource.name ?? 'unknown'} cannot begin a transaction: ${(err as Error).message ?? 'unsupported connector'}.`,
