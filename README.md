@@ -1007,7 +1007,8 @@ app.bind(ODATA_BINDINGS.CONFIG).to({
     maxRequestsPerMinute: 120,
     maxConcurrentRequests: 5,
     overrides: {
-      premium: { // 'premium' is just a plain object key, it represents whatever tenant identifier your tenantResolver returns.
+      premium: {
+        // 'premium' is just a plain object key, it represents whatever tenant identifier your tenantResolver returns.
         maxRequestsPerMinute: 600,
         maxConcurrentRequests: 20,
       },
@@ -1022,6 +1023,18 @@ With the snippet above every OData controller automatically throttles requests p
 - Premium tenants inherit the global limits unless an override is specified.
 - All operations (reads, writes, deletes, `$ref`) participate, and concurrency slots are released when the response finishes.
 - Keys inside `tenantQuotas.overrides` must match the string returned by your `tenantResolver`, so you can define arbitrary tiers such as `sandbox`, `enterprise`, or a specific tenant id like `tenant-42`.
+- Whenever throttling occurs the component logs a structured warning with `context.event === 'tenant-throttle'`. Hook into `config.onLog` to stream these events into your observability stack:
+
+```ts
+onLog(entry) {
+  if (entry.context?.event === 'tenant-throttle') {
+    console.warn('tenant saturated limits', entry.context);
+    // context contains tenantId, limitType, limit, hits, concurrent,
+    // windowResetMs, method, url, entitySet, operation, scope, and requestId.
+  }
+}
+```
+
 - `maxApplyResultSize`: Maximum number of rows the server will process in-memory when executing `$apply` fallbacks (default: `2000`). Requests that exceed the limit are rejected with `400 Bad Request`.
 - `logApplyFallbacks`: When `true`, logs a warning whenever `$apply` falls back to in-memory execution (default: `false`).
 - `onApplyFallback(event)`: Optional callback invoked whenever `$apply` falls back; receives `{event, entitySet, transformations, rows, limit}` so you can integrate with metrics/telemetry.

@@ -162,6 +162,15 @@ export interface ODataTenantQuotaConfig {
   overrides?: Record<string, { maxRequestsPerMinute?: number; maxConcurrentRequests?: number }>;
 }
 
+export interface ODataTenantThrottleContext {
+  entitySet?: string;
+  operation?: string;
+  scope?: string;
+  method?: string;
+  url?: string;
+  requestId?: string;
+}
+
 export interface ODataLogEntry {
   level: 'trace' | 'debug' | 'info' | 'warn' | 'error';
   message: string;

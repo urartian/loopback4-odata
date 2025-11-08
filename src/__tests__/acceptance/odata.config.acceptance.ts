@@ -7,7 +7,7 @@ import {
   seedExampleData,
 } from '../fixtures/odata-app.fixture';
 import { ODATA_BINDINGS } from '../../keys';
-import { ODataConfig, ODataPaginationConfig } from '../../types';
+import { ODataConfig, ODataLogEntry, ODataPaginationConfig } from '../../types';
 import { EntitySetRegistry } from '../../registry/entityset-registry';
 import { Order } from '../fixtures/odata-app.fixture';
 
@@ -380,5 +380,29 @@ describe('OData config plumbing acceptance', () => {
       .post(`/api/odata/Orders(${originalOrderId})/items/$ref`)
       .send(linkPayload)
       .expect(204);
+  });
+
+  it('emits structured tenant throttle events via onLog', async function (this: any) {
+    const events: ODataLogEntry[] = [];
+    await replaceApp(this, {
+      tenantResolver: (req) => req.get('x-tenant-id') ?? 'default',
+      tenantQuotas: { maxRequestsPerMinute: 1 },
+      onLog: (entry) => {
+        if (entry.context?.event === 'tenant-throttle') {
+          events.push(entry);
+        }
+      },
+    });
+
+    await client.get('/api/odata/Products').set('x-tenant-id', 'alpha').expect(200);
+    await client.get('/api/odata/Products').set('x-tenant-id', 'alpha').expect(429);
+
+    expect(events).to.have.length(1);
+    expect(events[0].context).to.containDeep({
+      event: 'tenant-throttle',
+      tenantId: 'alpha',
+      limitType: 'rate',
+      method: 'GET',
+    });
   });
 });

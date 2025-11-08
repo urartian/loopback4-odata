@@ -72,7 +72,7 @@ describe('CRUD controller response normalization', () => {
       {} as any,
       noopLogger,
       {
-        check: async () => undefined,
+        check: async (_tenant?: string) => undefined,
         release: () => undefined,
       } as ODataTenantThrottler,
     );
