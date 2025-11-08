@@ -296,4 +296,293 @@ describe('$batch controller', () => {
     assert.equal(failure.status, 501);
     assert.equal((failure.body as any)?.error?.code, 'BatchExecutionError');
   });
+
+  it('short-circuits atomicity groups when entity set is marked non-transactional', async () => {
+    let resolvedRepository = false;
+    const def = {
+      name: 'Products',
+      modelCtor: class {},
+      repositoryBindingKey: 'repositories.Products',
+      supportsTransactions: false,
+      transactionCapabilityLocked: true,
+    };
+    const registry = {
+      findByName: (name: string) => (name === 'Products' ? def : undefined),
+    } as any;
+    const controller = new ODataBatchController(
+      { handleRequest: async () => undefined } as any,
+      'http://localhost',
+      {
+        get: async () => {
+          resolvedRepository = true;
+          return { dataSource: { name: 'db' } };
+        },
+      } as any,
+      registry,
+      noopLogger,
+      defaultConfig,
+    );
+
+    const result = (await controller.handleBatch(
+      {
+        requests: [{ id: 'x', method: 'POST', url: '/odata/Products', atomicityGroup: 'locked' }],
+      },
+      responseStub,
+      requestStub('application/json'),
+    )) as BatchResponsePayload;
+
+    assert.equal(resolvedRepository, false);
+    assert.equal(result.responses.length, 1);
+    const failure = result.responses[0];
+    assert.equal(failure.status, 501);
+    assert.equal(failure.atomicityGroup, 'locked');
+    assert.equal((failure.body as any)?.error?.code, 'BatchExecutionError');
+  });
+
+  it('locks entity sets after refresh confirms lack of transaction support', async () => {
+    let repositoryResolutions = 0;
+    const def = {
+      name: 'Products',
+      modelCtor: class {},
+      repositoryBindingKey: 'repositories.Products',
+      supportsTransactions: false,
+      transactionCapabilityLocked: false,
+    };
+    const registry = {
+      findByName: (name: string) => (name === 'Products' ? def : undefined),
+    } as any;
+    const controller = new ODataBatchController(
+      { handleRequest: async () => undefined } as any,
+      'http://localhost',
+      {
+        get: async () => {
+          repositoryResolutions++;
+          return { dataSource: { name: 'mem' } };
+        },
+      } as any,
+      registry,
+      noopLogger,
+      defaultConfig,
+    );
+
+    await assert.rejects(
+      (controller as any).createAtomicGroupContext('g1', [
+        { method: 'POST', url: '/odata/Products' },
+      ]),
+      (err: unknown) => err instanceof HttpErrors.NotImplemented,
+    );
+
+    assert.equal(def.supportsTransactions, false);
+    assert.equal(def.transactionCapabilityLocked, true);
+    assert.equal(repositoryResolutions, 1);
+
+    await assert.rejects(
+      (controller as any).createAtomicGroupContext('g2', [
+        { method: 'POST', url: '/odata/Products' },
+      ]),
+      (err: unknown) => err instanceof HttpErrors.NotImplemented,
+    );
+
+    assert.equal(repositoryResolutions, 1);
+  });
+
+  it('propagates repository resolution errors when refresh fails', async () => {
+    const def = {
+      name: 'Products',
+      modelCtor: class {},
+      repositoryBindingKey: 'repositories.Products',
+      supportsTransactions: false,
+      transactionCapabilityLocked: false,
+    };
+    const registry = {
+      findByName: (name: string) => (name === 'Products' ? def : undefined),
+    } as any;
+    const failure = new Error('binding missing');
+    const controller = new ODataBatchController(
+      { handleRequest: async () => undefined } as any,
+      'http://localhost',
+      {
+        get: async () => {
+          throw failure;
+        },
+      } as any,
+      registry,
+      noopLogger,
+      defaultConfig,
+    );
+
+    await assert.rejects(
+      (controller as any).createAtomicGroupContext('g1', [
+        { method: 'POST', url: '/odata/Products' },
+      ]),
+      (err: unknown) => err === failure,
+    );
+
+    assert.equal(def.transactionCapabilityLocked, false);
+  });
+
+  it('marks entity sets as transactional after successfully opening transactions', async () => {
+    const def = {
+      name: 'Products',
+      modelCtor: class {},
+      repositoryBindingKey: 'repositories.Products',
+      supportsTransactions: undefined,
+    };
+    const registry = {
+      findByName: (name: string) => (name === 'Products' ? def : undefined),
+    } as any;
+    const controller = new ODataBatchController(
+      { handleRequest: async () => undefined } as any,
+      'http://localhost',
+      {
+        get: async () => ({
+          dataSource: {
+            name: 'pg',
+            async beginTransaction() {
+              return {
+                commit: async () => undefined,
+                rollback: async () => undefined,
+              } as any;
+            },
+          },
+        }),
+      } as any,
+      registry,
+      noopLogger,
+      defaultConfig,
+    );
+
+    const context = await (controller as any).createAtomicGroupContext('g1', [
+      { method: 'POST', url: '/odata/Products' },
+    ]);
+
+    assert.equal(typeof context, 'object');
+    assert.equal(def.supportsTransactions, true);
+    await context.commit();
+  });
+
+  it('marks entity sets as non-transactional when beginTransaction is missing', async () => {
+    const def = {
+      name: 'Products',
+      modelCtor: class {},
+      repositoryBindingKey: 'repositories.Products',
+      supportsTransactions: undefined,
+      transactionCapabilityLocked: undefined,
+    };
+    const registry = {
+      findByName: (name: string) => (name === 'Products' ? def : undefined),
+    } as any;
+    const controller = new ODataBatchController(
+      { handleRequest: async () => undefined } as any,
+      'http://localhost',
+      {
+        get: async () => ({ dataSource: { name: 'mem' } }),
+      } as any,
+      registry,
+      noopLogger,
+      defaultConfig,
+    );
+
+    await assert.rejects(
+      (controller as any).createAtomicGroupContext('g1', [
+        { method: 'POST', url: '/odata/Products' },
+      ]),
+      (err: unknown) => err instanceof HttpErrors.NotImplemented,
+    );
+
+    assert.equal(def.supportsTransactions, false);
+    assert.equal(def.transactionCapabilityLocked, true);
+  });
+
+  it('treats unknown probe results as non-transactional to avoid repeated refreshes', async () => {
+    let repositoryResolutions = 0;
+    const def = {
+      name: 'Products',
+      modelCtor: class {},
+      repositoryBindingKey: 'repositories.Products',
+      supportsTransactions: false,
+      transactionCapabilityLocked: false,
+    };
+    const registry = {
+      findByName: (name: string) => (name === 'Products' ? def : undefined),
+    } as any;
+    const controller = new ODataBatchController(
+      { handleRequest: async () => undefined } as any,
+      'http://localhost',
+      {
+        get: async () => {
+          repositoryResolutions++;
+          return {
+            dataSource: {
+              name: 'dbc',
+              beginTransaction: async () => {
+                throw new Error('timeout');
+              },
+            },
+          };
+        },
+      } as any,
+      registry,
+      noopLogger,
+      defaultConfig,
+    );
+
+    await assert.rejects(
+      (controller as any).createAtomicGroupContext('g1', [
+        { method: 'POST', url: '/odata/Products' },
+      ]),
+      (err: unknown) => err instanceof Error && err.message === 'timeout',
+    );
+
+    assert.equal(def.supportsTransactions, false);
+    assert.equal(def.transactionCapabilityLocked, true);
+    assert.equal(repositoryResolutions, 1);
+
+    await assert.rejects(
+      (controller as any).createAtomicGroupContext('g2', [
+        { method: 'POST', url: '/odata/Products' },
+      ]),
+      (err: unknown) => err instanceof HttpErrors.NotImplemented,
+    );
+
+    assert.equal(repositoryResolutions, 1);
+  });
+
+  it('marks entity sets as non-transactional when beginTransaction rejects as unsupported', async () => {
+    const def = {
+      name: 'Products',
+      modelCtor: class {},
+      repositoryBindingKey: 'repositories.Products',
+      supportsTransactions: undefined,
+    };
+    const registry = {
+      findByName: (name: string) => (name === 'Products' ? def : undefined),
+    } as any;
+    const controller = new ODataBatchController(
+      { handleRequest: async () => undefined } as any,
+      'http://localhost',
+      {
+        get: async () => ({
+          dataSource: {
+            name: 'mem',
+            beginTransaction: async () => {
+              throw new HttpErrors.NotImplemented('Transactions not supported');
+            },
+          },
+        }),
+      } as any,
+      registry,
+      noopLogger,
+      defaultConfig,
+    );
+
+    await assert.rejects(
+      (controller as any).createAtomicGroupContext('g1', [
+        { method: 'POST', url: '/odata/Products' },
+      ]),
+      (err: unknown) => err instanceof HttpErrors.NotImplemented,
+    );
+
+    assert.equal(def.supportsTransactions, false);
+  });
 });

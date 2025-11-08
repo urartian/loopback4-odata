@@ -6,6 +6,8 @@ import {
   inject,
   injectable,
   invokeMethod,
+  describeInjectedArguments,
+  describeInjectedProperties,
 } from '@loopback/core';
 import { Booter } from '@loopback/boot';
 import {
@@ -47,6 +49,7 @@ import { ensureNavigationTargetKey } from '../util/relation-metadata';
 import { ODataApplyExecutorRegistry } from '../services/odata-apply-executor.registry';
 import { inferSqlMetadata } from '../util/sql-metadata';
 import { ODATA_VERSION } from '../constants';
+import { probeDataSourceTransactionalCapability } from '../util/datasource-transactions';
 
 @injectable({ tags: { booters: 'odata' } })
 export class ODataBooter implements Booter {
@@ -269,6 +272,7 @@ export class ODataBooter implements Booter {
         documentInOpenApi,
       });
 
+      await this.detectTransactionalCapability(def, repoBinding);
       await this.configureApplyPushdown(def, repoBinding, modelMeta, modelCtor);
 
       const CrudController = defineODataCrudController(def);
@@ -277,6 +281,81 @@ export class ODataBooter implements Booter {
       this.registerOperations(def, ctor);
       this.registerNavigationRefRoutes(def, modelDefinition, CrudController);
     }
+  }
+
+  private async detectTransactionalCapability(
+    def: EntitySetDef,
+    repoBinding: Readonly<Binding<unknown>>,
+  ): Promise<void> {
+    if (def.supportsTransactions !== undefined) return;
+    const dataSourceBindingKey = this.resolveRepositoryDataSourceBindingKey(repoBinding);
+    if (!dataSourceBindingKey) return;
+    if (!this.app.isBound(dataSourceBindingKey)) return;
+    try {
+      const dataSource = (await this.app.get(dataSourceBindingKey)) as juggler.DataSource;
+      if (!dataSource) return;
+      const { capability, error } = await probeDataSourceTransactionalCapability(dataSource);
+      if (capability === 'supported') {
+        def.supportsTransactions = true;
+        def.transactionCapabilityLocked = true;
+        return;
+      }
+      if (capability === 'unsupported') {
+        def.supportsTransactions = false;
+        def.transactionCapabilityLocked = false;
+        return;
+      }
+      def.supportsTransactions = undefined;
+      def.transactionCapabilityLocked = false;
+      if (error) {
+        this.logger.warn('Failed to verify repository datasource transactions during boot.', {
+          entitySet: def.name,
+          dataSource: dataSource.name ?? dataSourceBindingKey,
+          error: (error as Error)?.message ?? error,
+        });
+      }
+    } catch (error) {
+      this.logger.warn('Error while probing repository datasource transactions during boot.', {
+        entitySet: def.name,
+        dataSourceBindingKey,
+        error: (error as Error)?.message ?? error,
+      });
+      // Leave undefined; runtime batch execution will detect and cache the result.
+    }
+  }
+
+  private resolveRepositoryDataSourceBindingKey(
+    repoBinding: Readonly<Binding<unknown>>,
+  ): string | undefined {
+    const repoCtor = repoBinding.valueConstructor as
+      | (new (...args: unknown[]) => unknown)
+      | undefined;
+    if (!repoCtor) return undefined;
+    const ctorSelector = this.findDatasourceSelector(describeInjectedArguments(repoCtor, ''));
+    if (ctorSelector) return ctorSelector;
+    const propertyInjections = describeInjectedProperties(repoCtor.prototype ?? {});
+    const propertySelector = this.findDatasourceSelector(
+      propertyInjections ? Object.values(propertyInjections) : undefined,
+    );
+    if (propertySelector) return propertySelector;
+    const staticName = (repoCtor as { dataSourceName?: string }).dataSourceName;
+    if (typeof staticName === 'string' && staticName.length) {
+      return staticName.startsWith('datasources.') ? staticName : `datasources.${staticName}`;
+    }
+    return undefined;
+  }
+
+  private findDatasourceSelector(
+    injections: ReadonlyArray<{ bindingSelector?: unknown }> | undefined,
+  ): string | undefined {
+    if (!injections) return undefined;
+    for (const injection of injections) {
+      const selector = injection?.bindingSelector;
+      if (typeof selector === 'string' && selector.startsWith('datasources.')) {
+        return selector;
+      }
+    }
+    return undefined;
   }
 
   private async configureApplyPushdown(

@@ -28,6 +28,8 @@ import { getODataSearchableProps } from '../decorators/search.decorators';
 
 const EDM_NAMESPACE = 'http://docs.oasis-open.org/odata/ns/edm';
 const EDMX_NAMESPACE = 'http://docs.oasis-open.org/odata/ns/edmx';
+const LOOPBACK_BATCH_NAMESPACE = 'LoopBack.V1.BatchCapabilities';
+const LOOPBACK_BATCH_TERM = `${LOOPBACK_BATCH_NAMESPACE}.ChangeSetsSupported`;
 
 interface ComplexTypeResult {
   name: string;
@@ -801,6 +803,8 @@ export class CsdlGenerator {
     const complexTypesXml: string[] = [];
     const enumTypesXml: string[] = [];
     const containerSetsXml: string[] = [];
+    const containerAnnotationsXml: string[] = [];
+    const supplementalSchemasXml: string[] = [];
     const actionXml: string[] = [];
     const functionXml: string[] = [];
     const operationImportsXml: string[] = [];
@@ -809,6 +813,8 @@ export class CsdlGenerator {
     const jsonEnumTypes: Record<string, unknown> = {};
     const jsonEntityTypes: Record<string, unknown> = {};
     const jsonEntitySets: Record<string, unknown> = {};
+    const jsonContainerAnnotations: Record<string, unknown> = {};
+    const jsonSupplementalSchemas: Record<string, unknown> = {};
     const jsonActions: Record<string, unknown> = {};
     const jsonFunctions: Record<string, unknown> = {};
     const jsonImports: Record<string, unknown> = {};
@@ -874,6 +880,11 @@ export class CsdlGenerator {
 
       const capabilityAnnotationsXml: string[] = [];
       const capabilityAnnotationsJson: Record<string, unknown> = {};
+      const changeSetsSupported = set.supportsTransactions === true;
+      capabilityAnnotationsXml.push(
+        `        <Annotation Term="${LOOPBACK_BATCH_TERM}" Bool="${changeSetsSupported ? 'true' : 'false'}"/>`,
+      );
+      capabilityAnnotationsJson[`@${LOOPBACK_BATCH_TERM}`] = changeSetsSupported;
       const searchRestrictions = mergeSearchRestrictions(
         this.deriveSearchRestrictions(set),
         capabilities.searchRestrictions,
@@ -1471,6 +1482,35 @@ export class CsdlGenerator {
       jsonEnumTypes[enumType.name] = enumType.json;
     }
 
+    const changeSetsSupported =
+      entitySets.length > 0 && entitySets.every((set) => set.supportsTransactions === true);
+    containerAnnotationsXml.push(
+      '        <Annotation Term="Org.OData.Capabilities.V1.BatchSupported">',
+      '          <Record>',
+      '            <PropertyValue Property="Supported" Bool="true"/>',
+      `            <PropertyValue Property="ChangeSetsSupported" Bool="${changeSetsSupported ? 'true' : 'false'}"/>`,
+      '          </Record>',
+      '        </Annotation>',
+    );
+    jsonContainerAnnotations['@Org.OData.Capabilities.V1.BatchSupported'] = {
+      Supported: true,
+      ChangeSetsSupported: changeSetsSupported,
+    };
+
+    supplementalSchemasXml.push(
+      `    <Schema Namespace="${LOOPBACK_BATCH_NAMESPACE}" xmlns="${EDM_NAMESPACE}">`,
+      '      <Term Name="ChangeSetsSupported" Type="Edm.Boolean" AppliesTo="EntitySet" />',
+      '    </Schema>',
+    );
+    jsonSupplementalSchemas[LOOPBACK_BATCH_NAMESPACE] = {
+      $Kind: 'Schema',
+      ChangeSetsSupported: {
+        $Kind: 'Term',
+        $Type: 'Edm.Boolean',
+        AppliesTo: ['EntitySet'],
+      },
+    };
+
     if (format === 'json') {
       return this.buildJsonDocument(
         namespace,
@@ -1478,6 +1518,8 @@ export class CsdlGenerator {
         containerName,
         jsonEntityTypes,
         jsonEntitySets,
+        jsonContainerAnnotations,
+        jsonSupplementalSchemas,
         jsonActions,
         jsonFunctions,
         jsonImports,
@@ -1502,9 +1544,11 @@ export class CsdlGenerator {
       ...functionXml,
       `      <EntityContainer Name="${containerName}">`,
       ...containerSetsXml,
+      ...containerAnnotationsXml,
       ...operationImportsXml,
       '      </EntityContainer>',
       '    </Schema>',
+      ...supplementalSchemasXml,
       '  </edmx:DataServices>',
       '</edmx:Edmx>',
     ].join('\n');
@@ -1591,6 +1635,8 @@ export class CsdlGenerator {
     containerName: string,
     entityTypes: Record<string, unknown>,
     entitySets: Record<string, unknown>,
+    containerAnnotations: Record<string, unknown>,
+    supplementalSchemas: Record<string, unknown>,
     actions: Record<string, unknown>,
     functions: Record<string, unknown>,
     imports: Record<string, unknown>,
@@ -1619,6 +1665,9 @@ export class CsdlGenerator {
       $Kind: 'EntityContainer',
       ...entitySets,
     };
+    if (Object.keys(containerAnnotations).length) {
+      Object.assign(container, containerAnnotations);
+    }
     if (Object.keys(imports).length) {
       Object.assign(container, imports);
     }
@@ -1627,6 +1676,7 @@ export class CsdlGenerator {
     const doc = {
       $Version: '4.0',
       [namespace]: schema,
+      ...supplementalSchemas,
     };
     return JSON.stringify(doc, null, 2);
   }
