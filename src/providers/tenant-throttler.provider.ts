@@ -108,6 +108,7 @@ export class TenantThrottlerProvider implements Provider<ODataTenantThrottler> {
       windowResetMs: stats.windowResetMs,
       ...extras,
       ...(context ?? {}),
+      correlationId: context?.correlationId,
     });
   }
 

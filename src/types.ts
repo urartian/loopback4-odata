@@ -171,6 +171,7 @@ export interface ODataTenantThrottleContext {
   method?: string;
   url?: string;
   requestId?: string;
+  correlationId?: string;
 }
 
 export interface ODataLogEntry {

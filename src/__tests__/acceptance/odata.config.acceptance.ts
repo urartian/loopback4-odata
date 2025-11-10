@@ -455,4 +455,98 @@ describe('OData config plumbing acceptance', () => {
     expect(stats.roundTrips).to.be.a.Number();
     expect(stats.rows).to.be.a.Number();
   });
+
+  it('emits apply telemetry entries when telemetry is enabled', async function (this: any) {
+    const logEntries: ODataLogEntry[] = [];
+    await replaceApp(this, {
+      telemetry: {
+        enabled: true,
+        categories: ['apply'],
+        sampleRate: 1,
+        includeApplyPlanOnFallback: true,
+      },
+      onLog: (entry) => {
+        if (entry.context?.telemetryCategory) {
+          logEntries.push(entry);
+        }
+      },
+    });
+
+    await client
+      .get('/api/odata/Products')
+      .query({ $apply: 'groupby((name),aggregate(price with sum as TotalPrice))' })
+      .expect(200);
+
+    const fallbackEvent = logEntries.find(
+      (entry) => entry.context?.telemetryEvent === 'apply-fallback',
+    );
+    expect(fallbackEvent).to.be.Object();
+    expect(fallbackEvent?.context).to.containDeep({
+      telemetryCategory: 'apply',
+      entitySet: 'Products',
+      reason: 'in-memory-apply',
+    });
+    expect(fallbackEvent?.context?.plan).to.be.an.Object();
+  });
+
+  it('emits hook telemetry entries for decorated controllers', async function (this: any) {
+    const logEntries: ODataLogEntry[] = [];
+    await replaceApp(this, {
+      telemetry: {
+        enabled: true,
+        categories: ['hooks'],
+        sampleRate: 1,
+      },
+      onLog: (entry) => {
+        if (entry.context?.telemetryCategory === 'hooks') {
+          logEntries.push(entry);
+        }
+      },
+    });
+
+    await client
+      .post('/api/odata/Products')
+      .send({ name: 'Telemetry Gizmo', price: 42 })
+      .expect(200);
+
+    const beforeEvent = logEntries.find((entry) => entry.context?.telemetryEvent === 'hook.before');
+    expect(beforeEvent).to.be.Object();
+    expect(beforeEvent?.context).to.containDeep({
+      hookName: 'validateCreate',
+      operation: 'CREATE',
+    });
+  });
+
+  it('emits throttle telemetry entries when tenant quotas reject requests', async function (this: any) {
+    const logEntries: ODataLogEntry[] = [];
+    await replaceApp(this, {
+      tenantResolver: (req) => req.get('x-tenant-id') ?? 'default',
+      tenantQuotas: { maxRequestsPerMinute: 1 },
+      telemetry: {
+        enabled: true,
+        categories: ['throttle'],
+        sampleRate: 1,
+      },
+      onLog: (entry) => {
+        if (entry.context?.telemetryCategory === 'throttle') {
+          logEntries.push(entry);
+        }
+      },
+    });
+
+    await client.get('/api/odata/Products').set('x-tenant-id', 'telemetry').expect(200);
+    await client.get('/api/odata/Products').set('x-tenant-id', 'telemetry').expect(429);
+
+    const rejectionEvent = logEntries.find(
+      (entry) =>
+        entry.context?.telemetryEvent === 'tenant-throttle-check' &&
+        entry.context?.result === 'rejected',
+    );
+    expect(rejectionEvent).to.be.Object();
+    expect(rejectionEvent?.context).to.containDeep({
+      telemetryCategory: 'throttle',
+      result: 'rejected',
+      tenantId: 'telemetry',
+    });
+  });
 });
