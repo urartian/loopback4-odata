@@ -32,9 +32,11 @@ const noopLogger: ODataLogger = {
 };
 
 function createController(stubs: StubResponseMap) {
+  const requestContext = createRequestContextStub();
   const controller = new ODataBatchController(
     { handleRequest: async () => undefined } as any,
     'http://localhost',
+    requestContext,
     { get: async () => undefined } as any,
     { findByName: () => undefined } as any,
     noopLogger,
@@ -53,6 +55,12 @@ function createController(stubs: StubResponseMap) {
     };
   };
   return controller;
+}
+
+function createRequestContextStub() {
+  return {
+    getSync: () => undefined,
+  } as any;
 }
 
 const responseStub = {
@@ -148,6 +156,7 @@ describe('$batch controller', () => {
     const controller = new ODataBatchController(
       { handleRequest: async () => undefined } as any,
       'http://localhost',
+      createRequestContextStub(),
       { get: async () => undefined } as any,
       { findByName: () => undefined } as any,
       noopLogger,
@@ -168,6 +177,7 @@ describe('$batch controller', () => {
     const controller = new ODataBatchController(
       { handleRequest: async () => undefined } as any,
       'http://localhost',
+      createRequestContextStub(),
       { get: async () => undefined } as any,
       { findByName: () => undefined } as any,
       noopLogger,
@@ -276,6 +286,7 @@ describe('$batch controller', () => {
     const controller = new ODataBatchController(
       { handleRequest: async () => undefined } as any,
       'http://localhost',
+      createRequestContextStub(),
       { get: async () => ({ dataSource: { name: 'db' } }) } as any,
       registry,
       noopLogger,
@@ -312,6 +323,7 @@ describe('$batch controller', () => {
     const controller = new ODataBatchController(
       { handleRequest: async () => undefined } as any,
       'http://localhost',
+      createRequestContextStub(),
       {
         get: async () => {
           resolvedRepository = true;
@@ -354,6 +366,7 @@ describe('$batch controller', () => {
     const controller = new ODataBatchController(
       { handleRequest: async () => undefined } as any,
       'http://localhost',
+      createRequestContextStub(),
       {
         get: async () => {
           repositoryResolutions++;
@@ -401,6 +414,7 @@ describe('$batch controller', () => {
     const controller = new ODataBatchController(
       { handleRequest: async () => undefined } as any,
       'http://localhost',
+      createRequestContextStub(),
       {
         get: async () => {
           throw failure;
@@ -434,6 +448,7 @@ describe('$batch controller', () => {
     const controller = new ODataBatchController(
       { handleRequest: async () => undefined } as any,
       'http://localhost',
+      createRequestContextStub(),
       {
         get: async () => ({
           dataSource: {
@@ -475,6 +490,7 @@ describe('$batch controller', () => {
     const controller = new ODataBatchController(
       { handleRequest: async () => undefined } as any,
       'http://localhost',
+      createRequestContextStub(),
       {
         get: async () => ({ dataSource: { name: 'mem' } }),
       } as any,
@@ -509,6 +525,7 @@ describe('$batch controller', () => {
     const controller = new ODataBatchController(
       { handleRequest: async () => undefined } as any,
       'http://localhost',
+      createRequestContextStub(),
       {
         get: async () => {
           repositoryResolutions++;
@@ -561,6 +578,7 @@ describe('$batch controller', () => {
     const controller = new ODataBatchController(
       { handleRequest: async () => undefined } as any,
       'http://localhost',
+      createRequestContextStub(),
       {
         get: async () => ({
           dataSource: {

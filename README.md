@@ -1528,6 +1528,40 @@ this.bind(ODATA_BINDINGS.CONFIG).to({
 
 Use `ODATA_BINDINGS.LOGGER` to plug in your preferred logger (e.g., Pino, Winston) and enrich telemetry events with tenant IDs or custom tags before forwarding them to your observability stack.
 
+### Configuration reference
+
+| Option                                 | Description                                                                                                                                   |
+| -------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- | ----- | ---- | ---- | ---------------------------- |
+| `telemetry.enabled`                    | Master switch. When `false`, no structured telemetry is emitted.                                                                              |
+| `telemetry.level`                      | Minimum level used for OData-generated events (`trace                                                                                         | debug | info | warn | error`). Defaults to `info`. |
+| `telemetry.categories`                 | Optional list to limit telemetry to specific areas: `apply`, `rewrite`, `hooks`, `batch`, `throttle`, `tokens`. Empty or omitted means “all”. |
+| `telemetry.sampleRate`                 | Float between `0` and `1`. When less than `1`, only that percentage of requests emit telemetry (useful for high-traffic services).            |
+| `telemetry.emitStatisticsHeader`       | Enables the server to honor `Prefer: telemetry=statistics` and respond with per-request metrics.                                              |
+| `telemetry.statisticsHeaderName`       | Response header name for statistics (`OData-Statistics` by default).                                                                          |
+| `telemetry.statisticsPrecision`        | Decimal precision for timing values in the stats header.                                                                                      |
+| `telemetry.includeApplyPlanOnFallback` | When true, `$apply` fallback events include the serialized execution plan in telemetry logs.                                                  |
+| `correlation.headerName`               | Request header inspected for correlation IDs (`x-correlation-id` default).                                                                    |
+| `correlation.responseHeaderName`       | Header echoed back on responses; set when clients need confirmation of the correlation ID that was used.                                      |
+| `correlation.generateWhenMissing`      | Generates a UUID when the client omits the correlation header (default `true`).                                                               |
+| `correlation.propagateToRepositories`  | Reserved for future use; when enabled, repository options will contain the correlation ID for downstream logging.                             |
+
+### Event schema
+
+Every telemetry record is emitted through the bound logger (`ODATA_BINDINGS.LOGGER`) and contains:
+
+- `telemetryEvent`: machine-friendly slug (e.g., `apply-fallback`, `hook.before`, `tenant-throttle-check`, `batch.request`, `token.validation`).
+- `telemetryCategory`: one of the categories listed above.
+- `correlationId`: value taken from the configured header or auto-generated UUID.
+- `sampled`: boolean indicating whether the current request was sampled for telemetry.
+- Context-specific fields. Examples:
+  - `apply-fallback`: `entitySet`, `reason`, `rows`, optional `plan` snapshot when enabled.
+  - `hook.before` / `hook.after` / `hook.on`: `entitySet`, `operation`, `scope`, `hookName`, `durationMs`, `status`.
+  - `tenant-throttle-check`: `tenantId`, `operation`, `result` (`allowed|rejected`), `reason` when rejected.
+  - `batch.request`: `operationCount`, `changesetCount`, `maxPayloadBytes`, `durationMs`, `status`.
+  - `token.validation`: `tokenType` (`skip|delta`), `status`, `reason` when validation fails.
+
+Telemetry respects LoopBack’s logging pipeline—you can forward the enriched records to OpenTelemetry, Splunk, CloudWatch, etc.
+
 ## Roadmap
 
 - [ ] Draft workflow for deep updates

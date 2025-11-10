@@ -1,5 +1,13 @@
 import { Application, CoreBindings, inject } from '@loopback/core';
-import { post, requestBody, Response, RestBindings, HttpErrors, Request } from '@loopback/rest';
+import {
+  post,
+  requestBody,
+  Response,
+  RestBindings,
+  HttpErrors,
+  Request,
+  RequestContext,
+} from '@loopback/rest';
 import { HttpHandler } from '@loopback/rest/dist/http-handler';
 import { IncomingMessage, ServerResponse } from 'http';
 import { PassThrough } from 'stream';
@@ -12,11 +20,12 @@ import { parseMultipartBatch } from '../services/multipart-batch.parser';
 import { serializeMultipartBatch } from '../services/multipart-batch.serializer';
 import { Readable } from 'stream';
 import { markUndocumentedOperation } from '../util/openapi';
-import { ODataBatchConfig, ODataConfig } from '../types';
+import { ODataBatchConfig, ODataConfig, ODataRequestState, ODataTelemetryLevel } from '../types';
 import {
   dataSourceSupportsTransactions,
   probeDataSourceTransactionalCapability,
 } from '../util/datasource-transactions';
+import { emitTelemetryEvent } from '../util/telemetry';
 
 const BATCH_OPERATION_SPEC = markUndocumentedOperation({
   responses: {
@@ -166,6 +175,8 @@ export class ODataBatchController {
     private readonly httpHandler: HttpHandler,
     @inject(RestBindings.URL)
     private readonly serverUrl: string,
+    @inject(RestBindings.Http.CONTEXT)
+    private readonly httpCtx: RequestContext,
     @inject(CoreBindings.APPLICATION_INSTANCE)
     private readonly app: Application,
     @inject(ODATA_BINDINGS.ENTITY_SET_REGISTRY)
@@ -175,6 +186,8 @@ export class ODataBatchController {
     @inject(ODATA_BINDINGS.CONFIG)
     private readonly cfg: ODataConfig,
   ) {}
+
+  private requestState?: ODataRequestState | null;
 
   @post('/odata/$batch', BATCH_OPERATION_SPEC)
   async handleBatch(
@@ -220,98 +233,134 @@ export class ODataBatchController {
     const limits = this.getBatchLimits();
     this.enforceDeclaredSizeLimit(request, limits);
     let requests: BatchRequest[];
-
-    if (isMultipart) {
-      const boundary = this.extractBoundary(contentType);
-      if (!boundary) {
-        throw new HttpErrors.BadRequest('Multipart batch request must specify a boundary.');
-      }
-      const stream = isReadable(payload) ? (payload as Readable) : (request as unknown as Readable);
-      const parsed = await parseMultipartBatch(stream, boundary, {
-        limits,
-        onLimitViolation: (reason) => this.warn(reason),
-      });
-      requests = parsed.requests as BatchRequest[];
-      if (!requests.length) {
-        throw new HttpErrors.BadRequest('Batch payload must contain at least one request.');
-      }
-    } else {
-      const jsonPayload = payload as BatchPayload;
-      const jsonRequests = jsonPayload?.requests;
-      if (!Array.isArray(jsonRequests) || !jsonRequests.length) {
-        throw new HttpErrors.BadRequest('Batch payload must contain at least one request.');
-      }
-      this.enforceOperationLimit(jsonRequests.length, limits);
-      this.enforceJsonPayloadSize(jsonPayload, limits);
-      requests = jsonRequests;
+    let grouped: Array<{ atomicityGroup?: string; requests: BatchRequest[] }> = [];
+    let boundary: string | undefined;
+    const startedAt = process.hrtime.bigint();
+    let telemetryContentLength: number | undefined;
+    let operationCount = 0;
+    let changesetCount = 0;
+    const declaredLength = request.headers['content-length'];
+    if (declaredLength) {
+      const normalized = Number(declaredLength);
+      if (Number.isFinite(normalized)) telemetryContentLength = normalized;
     }
 
-    this.enforceOperationLimit(requests.length, limits);
-
-    const grouped = this.groupByAtomicity(requests);
-    const responses: BatchResponseEntry[] = [];
-
-    const maxChangesetOps = limits.maxChangesetOperations;
-    if (maxChangesetOps && maxChangesetOps > 0) {
-      for (const group of grouped) {
-        if (group.atomicityGroup && group.requests.length > maxChangesetOps) {
-          this.warn('Changeset operation limit exceeded.', {
-            group: group.atomicityGroup,
-            operations: group.requests.length,
-            maxChangesetOperations: maxChangesetOps,
-          });
-          throw new HttpErrors.BadRequest(
-            'Changeset exceeds the configured operation limit for $batch requests.',
-          );
+    try {
+      if (isMultipart) {
+        boundary = this.extractBoundary(contentType);
+        if (!boundary) {
+          throw new HttpErrors.BadRequest('Multipart batch request must specify a boundary.');
         }
-      }
-    }
-
-    for (const group of grouped) {
-      if (group.atomicityGroup) {
-        try {
-          const entries = await this.executeAtomicGroup(
-            group.requests,
-            group.atomicityGroup,
-            request,
-          );
-          if (entries?.length) {
-            responses.push(
-              ...entries.map((entry) => ({
-                ...entry,
-                atomicityGroup: group.atomicityGroup,
-              })),
-            );
-          }
-        } catch (error) {
-          const status = this.resolveErrorStatus(error, 500);
-          responses.push({
-            atomicityGroup: group.atomicityGroup,
-            status,
-            body: this.odataError(
-              'BatchExecutionError',
-              (error as Error).message ?? 'Failed to execute atomicity group.',
-            ),
-          });
+        const stream = isReadable(payload)
+          ? (payload as Readable)
+          : (request as unknown as Readable);
+        const parsed = await parseMultipartBatch(stream, boundary, {
+          limits,
+          onLimitViolation: (reason) => this.warn(reason),
+        });
+        requests = parsed.requests as BatchRequest[];
+        if (!requests.length) {
+          throw new HttpErrors.BadRequest('Batch payload must contain at least one request.');
         }
       } else {
-        const entries = await this.executeGroup(group.requests, undefined, request);
-        responses.push(...entries);
+        const jsonPayload = payload as BatchPayload;
+        const jsonRequests = jsonPayload?.requests;
+        if (!Array.isArray(jsonRequests) || !jsonRequests.length) {
+          throw new HttpErrors.BadRequest('Batch payload must contain at least one request.');
+        }
+        this.enforceOperationLimit(jsonRequests.length, limits);
+        this.enforceJsonPayloadSize(jsonPayload, limits);
+        requests = jsonRequests;
       }
+
+      this.enforceOperationLimit(requests.length, limits);
+
+      grouped = this.groupByAtomicity(requests);
+      operationCount = requests.length;
+      changesetCount = grouped.filter((group) => Boolean(group.atomicityGroup)).length;
+      const responses: BatchResponseEntry[] = [];
+
+      const maxChangesetOps = limits.maxChangesetOperations;
+      if (maxChangesetOps && maxChangesetOps > 0) {
+        for (const group of grouped) {
+          if (group.atomicityGroup && group.requests.length > maxChangesetOps) {
+            this.warn('Changeset operation limit exceeded.', {
+              group: group.atomicityGroup,
+              operations: group.requests.length,
+              maxChangesetOperations: maxChangesetOps,
+            });
+            throw new HttpErrors.BadRequest(
+              'Changeset exceeds the configured operation limit for $batch requests.',
+            );
+          }
+        }
+      }
+
+      for (const group of grouped) {
+        if (group.atomicityGroup) {
+          try {
+            const entries = await this.executeAtomicGroup(
+              group.requests,
+              group.atomicityGroup,
+              request,
+            );
+            if (entries?.length) {
+              responses.push(
+                ...entries.map((entry) => ({
+                  ...entry,
+                  atomicityGroup: group.atomicityGroup,
+                })),
+              );
+            }
+          } catch (error) {
+            const status = this.resolveErrorStatus(error, 500);
+            responses.push({
+              atomicityGroup: group.atomicityGroup,
+              status,
+              body: this.odataError(
+                'BatchExecutionError',
+                (error as Error).message ?? 'Failed to execute atomicity group.',
+              ),
+            });
+          }
+        } else {
+          const entries = await this.executeGroup(group.requests, undefined, request);
+          responses.push(...entries);
+        }
+      }
+
+      response.set('OData-Version', ODATA_VERSION);
+
+      let result: BatchResponsePayload | void = { responses };
+      if (isMultipart) {
+        const { body, boundary: responseBoundary } = serializeMultipartBatch(responses);
+        response.set('Content-Type', `multipart/mixed; boundary=${responseBoundary}`);
+        response.set('Content-Length', Buffer.byteLength(body, 'utf-8').toString());
+        response.send(body);
+        result = undefined;
+      } else {
+        response.contentType('application/json');
+        result = { responses };
+      }
+
+      this.emitBatchSummary('completed', startedAt, {
+        contentType: isMultipart ? 'multipart' : 'json',
+        operationCount,
+        changesetCount,
+        declaredBytes: telemetryContentLength,
+      });
+
+      return result;
+    } catch (error) {
+      this.emitBatchSummary('failed', startedAt, {
+        contentType: isMultipart ? 'multipart' : 'json',
+        operationCount,
+        changesetCount,
+        declaredBytes: telemetryContentLength,
+        reason: (error as Error).message ?? 'Batch request failed.',
+      });
+      throw error;
     }
-
-    response.set('OData-Version', ODATA_VERSION);
-
-    if (isMultipart) {
-      const { body, boundary: responseBoundary } = serializeMultipartBatch(responses);
-      response.set('Content-Type', `multipart/mixed; boundary=${responseBoundary}`);
-      response.set('Content-Length', Buffer.byteLength(body, 'utf-8').toString());
-      response.send(body);
-      return;
-    }
-
-    response.contentType('application/json');
-    return { responses };
   }
 
   private getBatchLimits(): NormalizedBatchLimits {
@@ -370,7 +419,66 @@ export class ODataBatchController {
   }
 
   private warn(message: string, context?: Record<string, unknown>) {
-    this.logger.warn(message, { scope: 'batch', ...(context ?? {}) });
+    const payload = { scope: 'batch', ...(context ?? {}) };
+    this.logger.warn(message, payload);
+    this.emitBatchTelemetry(
+      'batch.warning',
+      {
+        message,
+        ...payload,
+      },
+      'warn',
+    );
+  }
+
+  private emitBatchSummary(
+    status: 'completed' | 'failed',
+    startedAt: bigint,
+    context: Record<string, unknown>,
+  ): void {
+    this.emitBatchTelemetry(
+      'batch.request',
+      {
+        status,
+        durationMs: this.durationSince(startedAt),
+        ...context,
+      },
+      status === 'completed' ? 'info' : 'warn',
+    );
+  }
+
+  private emitBatchTelemetry(
+    event: string,
+    context: Record<string, unknown>,
+    level: ODataTelemetryLevel = 'info',
+  ): void {
+    emitTelemetryEvent(this.logger, this.getRequestTelemetryState(), {
+      category: 'batch',
+      event,
+      level,
+      context,
+    });
+  }
+
+  private getRequestTelemetryState(): ODataRequestState | undefined {
+    if (this.requestState !== undefined) {
+      return this.requestState ?? undefined;
+    }
+    try {
+      const state = this.httpCtx.getSync(ODATA_BINDINGS.REQUEST_STATE, {
+        optional: true,
+      }) as ODataRequestState | undefined;
+      this.requestState = state ?? null;
+      return state;
+    } catch {
+      this.requestState = null;
+      return undefined;
+    }
+  }
+
+  private durationSince(startedAt: bigint): number {
+    const elapsed = process.hrtime.bigint() - startedAt;
+    return Number(elapsed) / 1e6;
   }
 
   private async ensureTransactionalSupport(def: EntitySetDef, groupId: string): Promise<void> {

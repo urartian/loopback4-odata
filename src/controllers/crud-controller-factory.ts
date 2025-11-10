@@ -110,6 +110,23 @@ type CrudRepo = DefaultCrudRepository<CrudEntity, unknown>;
 type NormalizedInclusion = Exclude<InclusionFilter, string>;
 type CrudWhere = Where<CrudEntity>;
 
+const DB_METHODS: ReadonlySet<string> = new Set([
+  'find',
+  'findOne',
+  'findById',
+  'create',
+  'createAll',
+  'updateAll',
+  'updateById',
+  'replaceById',
+  'deleteById',
+  'deleteAll',
+  'count',
+  'exists',
+  'execute',
+  'save',
+]);
+
 type SearchAst =
   | { kind: 'term'; value: string }
   | { kind: 'and'; nodes: SearchAst[] }
@@ -561,6 +578,7 @@ export function defineODataCrudController(def: EntitySetDef) {
       @inject(ODATA_BINDINGS.THROTTLER)
       public readonly throttler: ODataTenantThrottler,
     ) {
+      this.repository = this.wrapRepository(repository);
       ensureConfigValidated(this.cfg);
     }
 
@@ -4420,11 +4438,11 @@ export function defineODataCrudController(def: EntitySetDef) {
       return descriptors;
     }
 
-    parseApplySkipToken(
-      token: string | undefined,
+    decodeSkipTokenValues(
+      token: string,
       descriptors: OrderDescriptor[],
-    ): string[] | undefined {
-      if (!token) return undefined;
+      phase: 'apply' | 'collection',
+    ): string[] {
       const descriptorKey = this.buildSkipTokenDescriptorKey(descriptors);
       const context = this.buildSkipTokenContext();
       const options = this.buildSkipTokenOptions();
@@ -4433,13 +4451,34 @@ export function defineODataCrudController(def: EntitySetDef) {
         if (decoded.values.length !== descriptors.length) {
           throw new HttpErrors.BadRequest('Invalid $skiptoken value.');
         }
+        this.emitTokenTelemetry('skip', 'valid', {
+          phase,
+          descriptorKey,
+        });
         return decoded.values.map((value) => value ?? '');
       } catch (error) {
         if (error instanceof TokenVerificationError) {
+          const status = error.reason === 'expired' ? 'expired' : 'invalid';
+          this.emitTokenTelemetry('skip', status, {
+            phase,
+            descriptorKey,
+          });
           throw new HttpErrors.BadRequest('Invalid $skiptoken value.');
         }
+        this.emitTokenTelemetry('skip', 'invalid', {
+          phase,
+          descriptorKey,
+        });
         throw error;
       }
+    }
+
+    parseApplySkipToken(
+      token: string | undefined,
+      descriptors: OrderDescriptor[],
+    ): string[] | undefined {
+      if (!token) return undefined;
+      return this.decodeSkipTokenValues(token, descriptors, 'apply');
     }
 
     coerceTokenValue(raw: string, sample: unknown): unknown {
@@ -4512,22 +4551,7 @@ export function defineODataCrudController(def: EntitySetDef) {
       if (!token) {
         throw new HttpErrors.BadRequest('Empty $skiptoken is not allowed.');
       }
-      const descriptorKey = this.buildSkipTokenDescriptorKey(descriptors);
-      const context = this.buildSkipTokenContext();
-      const options = this.buildSkipTokenOptions();
-      let values: string[];
-      try {
-        const decoded = verifySkipToken(token, descriptorKey, context, options);
-        values = decoded.values;
-      } catch (error) {
-        if (error instanceof TokenVerificationError) {
-          throw new HttpErrors.BadRequest('Invalid $skiptoken value.');
-        }
-        throw error;
-      }
-      if (values.length !== descriptors.length) {
-        throw new HttpErrors.BadRequest('Invalid $skiptoken value.');
-      }
+      const values = this.decodeSkipTokenValues(token, descriptors, 'collection');
       return descriptors.map((descriptor, index) =>
         this.coerceSkipTokenValue(descriptor.field, values[index] ?? '', definition),
       );
@@ -5213,6 +5237,41 @@ export function defineODataCrudController(def: EntitySetDef) {
       return Boolean(this.getRequestTelemetryState()?.telemetry?.includeApplyPlanOnFallback);
     }
 
+    wrapRepository(repo: CrudRepo): CrudRepo {
+      const self = this;
+      return new Proxy(repo, {
+        get(target, prop, receiver) {
+          const value = Reflect.get(target, prop, receiver);
+          if (typeof value !== 'function') return value;
+          const methodName = String(prop);
+          if (!DB_METHODS.has(methodName)) {
+            return value.bind(target);
+          }
+          return function (...args: unknown[]) {
+            return self.trackDbOperation(methodName, () => value.apply(target, args));
+          };
+        },
+      });
+    }
+
+    async trackDbOperation<T>(operation: string, fn: () => Promise<T>): Promise<T> {
+      const startedAt = process.hrtime.bigint();
+      try {
+        const result = await fn();
+        this.recordTelemetryStats({
+          dbTimeNs: process.hrtime.bigint() - startedAt,
+          roundTripsIncrement: 1,
+        });
+        return result;
+      } catch (error) {
+        this.recordTelemetryStats({
+          dbTimeNs: process.hrtime.bigint() - startedAt,
+          roundTripsIncrement: 1,
+        });
+        throw error;
+      }
+    }
+
     getHookMethods(op: CrudOperation, scope?: CrudScope) {
       const before = (hooks?.before ?? [])
         .filter((h) => this.hookMatches(op, scope, h))
@@ -5247,6 +5306,23 @@ export function defineODataCrudController(def: EntitySetDef) {
           durationMs,
         },
         error,
+      });
+    }
+
+    emitTokenTelemetry(
+      tokenType: 'skip' | 'delta',
+      status: 'valid' | 'invalid' | 'expired' | 'legacy-denied',
+      context?: Record<string, unknown>,
+    ): void {
+      this.emitTelemetry({
+        category: 'tokens',
+        event: 'token.validation',
+        level: status === 'valid' ? 'debug' : 'warn',
+        context: {
+          tokenType,
+          status,
+          ...(context ?? {}),
+        },
       });
     }
 
@@ -5667,13 +5743,21 @@ export function defineODataCrudController(def: EntitySetDef) {
           deltaEnabled,
           entitySet: setName,
           logger: this.logger,
-          onTelemetry: this.cfg?.onDeltaTokenInvalid,
+          onTelemetry: (event) => {
+            this.cfg?.onDeltaTokenInvalid?.(event);
+            const status = event.code === 'expired' ? 'expired' : 'invalid';
+            this.emitTokenTelemetry('delta', status, {
+              entitySet: event.entitySet,
+              code: event.code,
+            });
+          },
           decode: () => decodeDeltaToken(deltaTokenValue!, this.buildDeltaTokenOptions()),
         });
         if (!validation.ok) {
           this.throwDeltaValidationError(validation);
         } else {
           deltaPayload = validation.payload;
+          this.emitTokenTelemetry('delta', 'valid', { entitySet: setName });
         }
       }
 
@@ -6086,6 +6170,7 @@ export function defineODataCrudController(def: EntitySetDef) {
             '@odata.context': contextBase,
             value: this.decoratePlainEntities(paged),
           } as AnyObject;
+          this.recordTelemetryStats({ rows: paged.length });
           ctx.result = result;
           return result;
         }
@@ -6147,6 +6232,7 @@ export function defineODataCrudController(def: EntitySetDef) {
         this.ensureODataHeaders();
         const decorated = this.decoratePlainEntities(paged);
         const combined = tombstones.length ? [...decorated, ...tombstones] : decorated;
+        this.recordTelemetryStats({ rows: combined.length });
         const result = {
           '@odata.context': contextBase,
           ...(inlineCountRequested ? { '@odata.count': totalCount ?? filteredResults.length } : {}),

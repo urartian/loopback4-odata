@@ -92,11 +92,11 @@ export class ODataComponent implements Component {
         return registry;
       })
       .inScope(BindingScope.SINGLETON),
-    createMiddlewareBinding(OdataPathRewriterProvider, {
-      key: 'middleware.odataPathRewriter',
-    }),
     createMiddlewareBinding(ODataRequestContextProvider, {
       key: 'middleware.odataRequestContext',
+    }),
+    createMiddlewareBinding(OdataPathRewriterProvider, {
+      key: 'middleware.odataPathRewriter',
     }),
     Binding.bind(RestBindings.SequenceActions.REJECT)
       .toProvider(ODataErrorProvider)
