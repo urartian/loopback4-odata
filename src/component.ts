@@ -9,6 +9,7 @@ import { ODataServiceDocumentController } from './controllers/service-document.c
 import { EntitySetRegistry } from './registry/entityset-registry';
 import { ODataBooter } from './booters/odata.booter';
 import { OdataPathRewriterProvider } from './middleware/odata-path-rewriter.provider';
+import { ODataRequestContextProvider } from './middleware/odata-request-context.provider';
 import { ODataErrorProvider } from './providers/odata-error.provider';
 import { ODataApplyExecutorRegistry } from './services/odata-apply-executor.registry';
 import { PostgresApplyExecutor } from './services/postgres-apply-executor';
@@ -54,6 +55,21 @@ export class ODataComponent implements Component {
         maxPageSize: 200,
         maxApplyPageSize: 200,
       },
+      telemetry: {
+        enabled: false,
+        level: 'info',
+        categories: [],
+        sampleRate: 1,
+        emitStatisticsHeader: false,
+        statisticsHeaderName: 'OData-Statistics',
+        statisticsPrecision: 2,
+        includeApplyPlanOnFallback: false,
+      },
+      correlation: {
+        headerName: 'x-correlation-id',
+        generateWhenMissing: true,
+        propagateToRepositories: false,
+      },
     } as ODataConfig),
     Binding.bind(ODATA_BINDINGS.CSDL_GEN).toClass(CsdlGenerator).inScope(BindingScope.SINGLETON),
     Binding.bind(ODATA_BINDINGS.ENTITY_SET_REGISTRY)
@@ -78,6 +94,9 @@ export class ODataComponent implements Component {
       .inScope(BindingScope.SINGLETON),
     createMiddlewareBinding(OdataPathRewriterProvider, {
       key: 'middleware.odataPathRewriter',
+    }),
+    createMiddlewareBinding(ODataRequestContextProvider, {
+      key: 'middleware.odataRequestContext',
     }),
     Binding.bind(RestBindings.SequenceActions.REJECT)
       .toProvider(ODataErrorProvider)

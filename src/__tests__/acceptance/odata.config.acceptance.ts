@@ -405,4 +405,54 @@ describe('OData config plumbing acceptance', () => {
       method: 'GET',
     });
   });
+
+  it('propagates correlation ids and generates fallback ids', async function (this: any) {
+    await replaceApp(this, {
+      correlation: {
+        headerName: 'x-correlation-id',
+        responseHeaderName: 'x-correlation-id',
+        generateWhenMissing: true,
+      },
+    });
+
+    const customId = 'req-custom-id';
+    const withHeader = await client
+      .get('/api/odata/Products')
+      .set('X-Correlation-Id', customId)
+      .expect(200);
+    expect(withHeader.headers['x-correlation-id']).to.equal(customId);
+
+    const generated = await client.get('/api/odata/Products').expect(200);
+    expect(generated.headers['x-correlation-id']).to.be.a.String();
+    expect(generated.headers['x-correlation-id']).to.not.equal('');
+    expect(generated.headers['x-correlation-id']).to.not.equal(customId);
+  });
+
+  it('emits statistics header when telemetry preference is honored', async function (this: any) {
+    await replaceApp(this, {
+      telemetry: {
+        enabled: true,
+        emitStatisticsHeader: true,
+        statisticsHeaderName: 'OData-Stats',
+        statisticsPrecision: 3,
+      },
+    });
+
+    const baseline = await client.get('/api/odata/Products').expect(200);
+    expect(baseline.headers['odata-stats']).to.be.undefined();
+
+    const res = await client
+      .get('/api/odata/Products')
+      .set('Prefer', 'telemetry=statistics')
+      .expect(200);
+
+    expect(res.headers['preference-applied']).to.match(/telemetry=statistics/);
+    const statsHeader = res.headers['odata-stats'];
+    expect(statsHeader).to.be.a.String();
+    const stats = JSON.parse(statsHeader as string);
+    expect(stats.processingTime).to.be.a.Number();
+    expect(stats.dbTime).to.be.a.Number();
+    expect(stats.roundTrips).to.be.a.Number();
+    expect(stats.rows).to.be.a.Number();
+  });
 });

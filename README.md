@@ -1496,6 +1496,38 @@ Content-Type: application/json
 
 All three requests execute atomically. If any fails, the entire changeset is rolled back and the batch returns per-request error details.
 
+## Observability & Telemetry
+
+The component can emit structured telemetry so operators can trace pushdown decisions, hook execution, throttling, and token validation with the same logger their LoopBack app already uses. Configure telemetry and correlation once in your application bootstrap:
+
+```ts
+const current = this.getSync(ODATA_BINDINGS.CONFIG) as ODataConfig;
+this.bind(ODATA_BINDINGS.CONFIG).to({
+  ...current,
+  telemetry: {
+    enabled: true,
+    level: 'debug',
+    categories: ['apply', 'rewrite', 'hooks'],
+    sampleRate: 0.25,
+    emitStatisticsHeader: true,
+    statisticsHeaderName: 'OData-Statistics',
+    includeApplyPlanOnFallback: true,
+  },
+  correlation: {
+    headerName: 'x-correlation-id',
+    responseHeaderName: 'x-correlation-id',
+    generateWhenMissing: true,
+  },
+});
+```
+
+- `telemetry.enabled` gates all instrumentation, while `categories` acts as a filter for noisy areas (`apply`, `rewrite`, `hooks`, `batch`, `throttle`, `tokens`). `includeApplyPlanOnFallback` embeds the `$apply` plan when a pushdown falls back to in-memory execution, making it easier to diagnose regressions.
+- `sampleRate` allows high-volume services to trace only a slice of requests (0 disables, 1 traces every request).
+- When `emitStatisticsHeader` is true, clients can opt in per request with `Prefer: telemetry=statistics`. Successful requests answer with `Preference-Applied: telemetry=statistics` and an `OData-Statistics` header such as `{"dbTime":21,"processingTime":12,"roundTrips":1,"rows":42}`.
+- The correlation block captures request IDs from headers (default `x-correlation-id`), optionally echoes them back on responses, and makes them available to repositories and telemetry emitters so your existing log aggregation or tracing tools can stitch events together.
+
+Use `ODATA_BINDINGS.LOGGER` to plug in your preferred logger (e.g., Pino, Winston) and enrich telemetry events with tenant IDs or custom tags before forwarding them to your observability stack.
+
 ## Roadmap
 
 - [ ] Draft workflow for deep updates
