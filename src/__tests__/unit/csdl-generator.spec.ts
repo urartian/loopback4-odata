@@ -211,7 +211,7 @@ describe('CsdlGenerator', () => {
     ).to.be.true();
     expect(
       xml.includes(
-        '<NavigationProperty Name="gadgets" Type="Collection(Catalog.Gadget)" Partner="widget">',
+        '<NavigationProperty Name="gadgets" Type="Collection(Catalog.Gadget)" Partner="widget" />',
       ),
     ).to.be.true();
     expect(
@@ -250,6 +250,16 @@ describe('CsdlGenerator', () => {
     expect(
       xml.includes('<EntityType Name="AdvancedWidget" BaseType="Catalog.Widget">'),
     ).to.be.true();
+    expect(
+      xml.includes(
+        '<edmx:Reference Uri="http://docs.oasis-open.org/odata/odata/v4.0/errata03/os/vocabularies/Org.OData.Core.V1.xml">',
+      ),
+    ).to.be.true();
+    expect(
+      xml.includes(
+        '<edmx:Reference Uri="http://docs.oasis-open.org/odata/odata/v4.0/errata03/os/vocabularies/Org.OData.Capabilities.V1.xml">',
+      ),
+    ).to.be.true();
   });
 
   it('produces aligned JSON CSDL', () => {
@@ -257,6 +267,16 @@ describe('CsdlGenerator', () => {
     const parsed = JSON.parse(jsonDoc);
 
     expect(parsed).to.have.property('$Version', '4.0');
+    expect(parsed.$Reference).to.containDeep({
+      'http://docs.oasis-open.org/odata/odata/v4.0/errata03/os/vocabularies/Org.OData.Core.V1.xml':
+        {
+          $Include: [{ $Namespace: 'Org.OData.Core.V1', $Alias: 'Core' }],
+        },
+      'http://docs.oasis-open.org/odata/odata/v4.0/errata03/os/vocabularies/Org.OData.Capabilities.V1.xml':
+        {
+          $Include: [{ $Namespace: 'Org.OData.Capabilities.V1', $Alias: 'Capabilities' }],
+        },
+    });
     expect(parsed).to.have.property('Catalog');
     const schema = parsed.Catalog;
     expect(schema.$Alias).to.equal('CatalogNS');
@@ -284,10 +304,7 @@ describe('CsdlGenerator', () => {
     expect(schema.Widget['@Org.OData.Core.V1.HasStream']).to.equal(true);
     expect(schema.AdvancedWidget.$BaseType).to.equal('Catalog.Widget');
     expect(schema.Widget.gadgets.$Partner).to.equal('widget');
-    expect(schema.Widget.gadgets.$ReferentialConstraint[0]).to.containDeep({
-      Property: 'widgetId',
-      ReferencedProperty: 'id',
-    });
+    expect(schema.Widget.gadgets.$ReferentialConstraint).to.equal(undefined);
     expect(schema.Gadget.widget.$ReferentialConstraint[0]).to.containDeep({
       Property: 'widgetId',
       ReferencedProperty: 'id',
