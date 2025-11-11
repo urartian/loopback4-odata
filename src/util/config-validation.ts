@@ -23,6 +23,7 @@ const TELEMETRY_CATEGORIES: ReadonlySet<ODataTelemetryCategory> = new Set([
   'batch',
   'throttle',
   'tokens',
+  'requests',
 ]);
 
 export function ensureConfigValidated(config: ODataConfig): void {
@@ -127,6 +128,9 @@ function validateTelemetryConfig(telemetry: ODataTelemetryConfig): void {
     telemetry.statisticsHeaderName = telemetry.statisticsHeaderName.trim();
   }
   assignNonNegative(telemetry as AnyObject, 'statisticsPrecision', 'ODataConfig.telemetry');
+  if (telemetry.requestLogging) {
+    validateRequestLoggingConfig(telemetry.requestLogging);
+  }
 }
 
 function validateCorrelationConfig(cfg: ODataCorrelationConfig): void {
@@ -153,4 +157,20 @@ function assignNonNegative(target: AnyObject, key: string, parentLabel = 'ODataC
     throw new Error(`${parentLabel}.${String(key)} must be a non-negative number.`);
   }
   target[key] = Math.floor(num);
+}
+
+function validateRequestLoggingConfig(config: AnyObject): void {
+  if (config.maxPayloadBytes !== undefined && config.maxPayloadBytes !== null) {
+    assignPositive(config, 'maxPayloadBytes', 'ODataConfig.telemetry.requestLogging');
+  }
+  if (config.maskHeaders !== undefined && config.maskHeaders !== null) {
+    if (!Array.isArray(config.maskHeaders)) {
+      throw new Error('ODataConfig.telemetry.requestLogging.maskHeaders must be an array.');
+    }
+  }
+  if (config.maskBodyPaths !== undefined && config.maskBodyPaths !== null) {
+    if (!Array.isArray(config.maskBodyPaths)) {
+      throw new Error('ODataConfig.telemetry.requestLogging.maskBodyPaths must be an array.');
+    }
+  }
 }

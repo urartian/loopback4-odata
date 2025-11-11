@@ -202,7 +202,8 @@ export type ODataTelemetryCategory =
   | 'hooks'
   | 'batch'
   | 'throttle'
-  | 'tokens';
+  | 'tokens'
+  | 'requests';
 
 export type ODataTelemetryLevel = 'trace' | 'debug' | 'info' | 'warn' | 'error';
 
@@ -215,6 +216,7 @@ export interface ODataTelemetryConfig {
   statisticsHeaderName?: string;
   statisticsPrecision?: number;
   includeApplyPlanOnFallback?: boolean;
+  requestLogging?: ODataRequestLoggingConfig;
 }
 
 export interface ODataCorrelationConfig {
@@ -222,6 +224,15 @@ export interface ODataCorrelationConfig {
   responseHeaderName?: string;
   generateWhenMissing?: boolean;
   propagateToRepositories?: boolean;
+}
+
+export interface ODataRequestLoggingConfig {
+  enabled?: boolean;
+  includeHeaders?: boolean;
+  includeResponseBody?: boolean;
+  maxPayloadBytes?: number;
+  maskHeaders?: string[];
+  maskBodyPaths?: string[];
 }
 
 export interface ODataTelemetryState {
@@ -233,6 +244,7 @@ export interface ODataTelemetryState {
   emitStatisticsHeader?: boolean;
   statisticsHeaderName?: string;
   statisticsPrecision?: number;
+  requestLoggingEnabled?: boolean;
 }
 
 export interface ODataStatisticsState {
@@ -245,7 +257,7 @@ export interface ODataStatisticsState {
 
 export interface ODataRequestState {
   correlationId?: string;
-  telemetryPreference?: 'statistics';
+  telemetryPreferences?: Set<'statistics' | 'request-log'>;
   telemetry?: ODataTelemetryState;
   statistics?: ODataStatisticsState;
   startedAtNs?: bigint;

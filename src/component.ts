@@ -10,6 +10,7 @@ import { EntitySetRegistry } from './registry/entityset-registry';
 import { ODataBooter } from './booters/odata.booter';
 import { OdataPathRewriterProvider } from './middleware/odata-path-rewriter.provider';
 import { ODataRequestContextProvider } from './middleware/odata-request-context.provider';
+import { RequestLoggingProvider } from './middleware/request-logging.provider';
 import { ODataErrorProvider } from './providers/odata-error.provider';
 import { ODataApplyExecutorRegistry } from './services/odata-apply-executor.registry';
 import { PostgresApplyExecutor } from './services/postgres-apply-executor';
@@ -64,6 +65,14 @@ export class ODataComponent implements Component {
         statisticsHeaderName: 'OData-Statistics',
         statisticsPrecision: 2,
         includeApplyPlanOnFallback: false,
+        requestLogging: {
+          enabled: false,
+          includeHeaders: true,
+          includeResponseBody: false,
+          maxPayloadBytes: 32 * 1024,
+          maskHeaders: ['authorization', 'cookie'],
+          maskBodyPaths: [],
+        },
       },
       correlation: {
         headerName: 'x-correlation-id',
@@ -97,6 +106,9 @@ export class ODataComponent implements Component {
     }),
     createMiddlewareBinding(OdataPathRewriterProvider, {
       key: 'middleware.odataPathRewriter',
+    }),
+    createMiddlewareBinding(RequestLoggingProvider, {
+      key: 'middleware.odataRequestLogging',
     }),
     Binding.bind(RestBindings.SequenceActions.REJECT)
       .toProvider(ODataErrorProvider)

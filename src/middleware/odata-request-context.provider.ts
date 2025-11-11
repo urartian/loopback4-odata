@@ -7,10 +7,11 @@ import {
   ODataCorrelationConfig,
   ODataRequestState,
   ODataTelemetryConfig,
+  ODataTelemetryCategory,
   ODataTelemetryState,
 } from '../types';
 
-type TelemetryPreference = 'statistics';
+type TelemetryPreference = 'statistics' | 'request-log';
 type MiddlewareContext = Parameters<Middleware>[0];
 
 export class ODataRequestContextProvider implements Provider<Middleware> {
@@ -29,7 +30,11 @@ export class ODataRequestContextProvider implements Provider<Middleware> {
       };
 
       this.applyCorrelation(ctx, requestState, this.cfg?.correlation);
-      this.applyTelemetry(ctx, requestState, this.cfg?.telemetry);
+      const preferences = this.parseTelemetryPreferences(ctx.request.header('prefer'));
+      if (preferences.size) {
+        requestState.telemetryPreferences = preferences;
+      }
+      this.applyTelemetry(ctx, requestState, preferences, this.cfg?.telemetry);
 
       ctx.bind(ODATA_BINDINGS.REQUEST_STATE).to(requestState).inScope(BindingScope.REQUEST);
 
@@ -83,10 +88,16 @@ export class ODataRequestContextProvider implements Provider<Middleware> {
   private applyTelemetry(
     ctx: MiddlewareContext,
     state: ODataRequestState,
+    preferences: Set<TelemetryPreference>,
     telemetry?: ODataTelemetryConfig,
   ): void {
-    const enabled = Boolean(telemetry?.enabled);
-    if (!enabled) {
+    const forcedRequestLogging = preferences.has('request-log');
+    const requestLoggingConfigured = telemetry?.requestLogging?.enabled === true;
+    const telemetryEnabled = Boolean(telemetry?.enabled);
+    const shouldEmitRequestLogs = requestLoggingConfigured || forcedRequestLogging;
+    const effectiveEnabled = telemetryEnabled || shouldEmitRequestLogs;
+
+    if (!effectiveEnabled) {
       state.telemetry = {
         enabled: false,
         level: telemetry?.level ?? 'info',
@@ -96,34 +107,50 @@ export class ODataRequestContextProvider implements Provider<Middleware> {
       return;
     }
 
-    const categories =
-      telemetry?.categories && telemetry.categories.length > 0
-        ? new Set(telemetry.categories)
-        : undefined;
+    let categories: Set<ODataTelemetryCategory> | undefined;
+    if (telemetryEnabled && telemetry?.categories && telemetry.categories.length > 0) {
+      categories = new Set(telemetry.categories);
+    } else if (!telemetryEnabled && shouldEmitRequestLogs) {
+      categories = new Set(['requests']);
+    }
     const level = telemetry?.level ?? 'info';
     const sampleRate = telemetry?.sampleRate ?? 1;
-    const sampled = sampleRate >= 1 ? true : Math.random() < sampleRate;
+    const sampled =
+      !telemetryEnabled && shouldEmitRequestLogs
+        ? true
+        : sampleRate >= 1
+          ? true
+          : Math.random() < sampleRate;
 
     const telemetryState: ODataTelemetryState = {
-      enabled: true,
+      enabled: effectiveEnabled,
       level,
       categories,
       sampled,
       includeApplyPlanOnFallback: Boolean(telemetry?.includeApplyPlanOnFallback),
-      emitStatisticsHeader: Boolean(telemetry?.emitStatisticsHeader),
+      emitStatisticsHeader: telemetryEnabled && Boolean(telemetry?.emitStatisticsHeader),
       statisticsHeaderName: telemetry?.statisticsHeaderName ?? 'OData-Statistics',
       statisticsPrecision: telemetry?.statisticsPrecision ?? 2,
     };
 
+    if (shouldEmitRequestLogs) {
+      telemetryState.requestLoggingEnabled = true;
+      if (categories) {
+        categories.add('requests');
+      } else if (telemetryEnabled) {
+        telemetryState.categories = undefined;
+      } else {
+        telemetryState.categories = new Set(['requests']);
+      }
+    }
+
     state.telemetry = telemetryState;
 
-    const preference = this.parseTelemetryPreference(ctx.request.header('prefer'));
     if (
-      preference === 'statistics' &&
+      preferences.has('statistics') &&
       telemetryState.emitStatisticsHeader &&
       telemetryState.enabled
     ) {
-      state.telemetryPreference = preference;
       state.statistics = {
         requested: true,
         startTimeNs: state.startedAtNs ?? process.hrtime.bigint(),
@@ -131,13 +158,18 @@ export class ODataRequestContextProvider implements Provider<Middleware> {
         roundTrips: 0,
         rows: 0,
       };
+      this.appendPreferenceApplied(ctx.response, 'telemetry=statistics');
+    }
+    if (forcedRequestLogging) {
+      this.appendPreferenceApplied(ctx.response, 'telemetry=request-log');
     }
   }
 
-  private parseTelemetryPreference(
+  private parseTelemetryPreferences(
     header: string | string[] | undefined,
-  ): TelemetryPreference | undefined {
-    if (!header) return undefined;
+  ): Set<TelemetryPreference> {
+    const preferences = new Set<TelemetryPreference>();
+    if (!header) return preferences;
     const values = Array.isArray(header) ? header : [header];
     for (const raw of values) {
       if (!raw) continue;
@@ -148,14 +180,16 @@ export class ODataRequestContextProvider implements Provider<Middleware> {
         if (token.trim().toLowerCase() !== 'telemetry') continue;
         const normalized = (value ?? '')
           .trim()
-          .replace(/^"(.*)"$/, '$1')
+          .replace(/^\"(.*)\"$/, '$1')
           .toLowerCase();
         if (normalized === 'statistics') {
-          return 'statistics';
+          preferences.add('statistics');
+        } else if (normalized === 'request-log' || normalized === 'requestlog') {
+          preferences.add('request-log');
         }
       }
     }
-    return undefined;
+    return preferences;
   }
 
   private finalizeResponse(

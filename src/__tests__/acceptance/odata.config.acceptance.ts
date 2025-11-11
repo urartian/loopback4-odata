@@ -549,4 +549,63 @@ describe('OData config plumbing acceptance', () => {
       tenantId: 'telemetry',
     });
   });
+
+  it('logs every request when request logging is enabled', async function (this: any) {
+    const logEntries: ODataLogEntry[] = [];
+    await replaceApp(this, {
+      telemetry: {
+        enabled: true,
+        categories: ['requests'],
+        sampleRate: 1,
+        requestLogging: {
+          enabled: true,
+          includeHeaders: true,
+          includeResponseBody: false,
+          maskHeaders: ['authorization'],
+          maxPayloadBytes: 1024,
+        },
+      },
+      onLog: (entry) => {
+        if (entry.context?.telemetryEvent === 'request.log') {
+          logEntries.push(entry);
+        }
+      },
+    });
+
+    await client
+      .post('/api/odata/Products')
+      .set('Authorization', 'Basic secret')
+      .send({ name: 'RequestLogTest', price: 99 })
+      .expect(200);
+
+    const requestLog = logEntries.find((entry) => entry.context?.telemetryEvent === 'request.log');
+    expect(requestLog).to.be.Object();
+    expect(requestLog?.context).to.containDeep({
+      method: 'POST',
+      status: 200,
+      telemetryCategory: 'requests',
+    });
+    const headers = requestLog?.context?.headers as Record<string, unknown>;
+    expect(headers?.authorization).to.equal('***');
+  });
+
+  it('logs requests when clients opt in via Prefer header', async function (this: any) {
+    const logEntries: ODataLogEntry[] = [];
+    await replaceApp(this, {
+      telemetry: { enabled: false },
+      onLog: (entry) => {
+        if (entry.context?.telemetryEvent === 'request.log') {
+          logEntries.push(entry);
+        }
+      },
+    });
+
+    await client.get('/api/odata/Products').set('Prefer', 'telemetry=request-log').expect(200);
+
+    expect(logEntries.length).to.equal(1);
+    expect(logEntries[0].context).to.containDeep({
+      telemetryCategory: 'requests',
+      method: 'GET',
+    });
+  });
 });
