@@ -45,6 +45,8 @@ export interface ODataConfig {
   allowLegacyUnsignedTokens?: boolean; // allow decoding legacy unsinged tokens (default false)
   batch?: ODataBatchConfig;
   onLog?: (entry: ODataLogEntry) => void;
+  telemetry?: ODataTelemetryConfig;
+  correlation?: ODataCorrelationConfig;
 }
 
 export interface ODataNavigationRestriction {
@@ -169,6 +171,7 @@ export interface ODataTenantThrottleContext {
   method?: string;
   url?: string;
   requestId?: string;
+  correlationId?: string;
 }
 
 export interface ODataLogEntry {
@@ -191,4 +194,71 @@ export interface ODataPaginationConfig {
   maxSkip?: number; // maximum client-requested $skip
   maxPageSize?: number; // maximum server-driven page size for collections
   maxApplyPageSize?: number; // maximum server-driven page size for $apply pipelines
+}
+
+export type ODataTelemetryCategory =
+  | 'apply'
+  | 'rewrite'
+  | 'hooks'
+  | 'batch'
+  | 'throttle'
+  | 'tokens'
+  | 'requests';
+
+export type ODataTelemetryLevel = 'trace' | 'debug' | 'info' | 'warn' | 'error';
+
+export interface ODataTelemetryConfig {
+  enabled?: boolean;
+  level?: ODataTelemetryLevel;
+  categories?: ODataTelemetryCategory[];
+  sampleRate?: number;
+  emitStatisticsHeader?: boolean;
+  statisticsHeaderName?: string;
+  statisticsPrecision?: number;
+  includeApplyPlanOnFallback?: boolean;
+  requestLogging?: ODataRequestLoggingConfig;
+}
+
+export interface ODataCorrelationConfig {
+  headerName?: string;
+  responseHeaderName?: string;
+  generateWhenMissing?: boolean;
+  propagateToRepositories?: boolean;
+}
+
+export interface ODataRequestLoggingConfig {
+  enabled?: boolean;
+  includeHeaders?: boolean;
+  includeResponseBody?: boolean;
+  maxPayloadBytes?: number;
+  maskHeaders?: string[];
+  maskBodyPaths?: string[];
+}
+
+export interface ODataTelemetryState {
+  enabled: boolean;
+  level: ODataTelemetryLevel;
+  categories?: Set<ODataTelemetryCategory>;
+  sampled: boolean;
+  includeApplyPlanOnFallback: boolean;
+  emitStatisticsHeader?: boolean;
+  statisticsHeaderName?: string;
+  statisticsPrecision?: number;
+  requestLoggingEnabled?: boolean;
+}
+
+export interface ODataStatisticsState {
+  requested: boolean;
+  startTimeNs: bigint;
+  dbTimeNs: bigint;
+  roundTrips: number;
+  rows: number;
+}
+
+export interface ODataRequestState {
+  correlationId?: string;
+  telemetryPreferences?: Set<'statistics' | 'request-log'>;
+  telemetry?: ODataTelemetryState;
+  statistics?: ODataStatisticsState;
+  startedAtNs?: bigint;
 }

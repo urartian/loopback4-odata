@@ -75,7 +75,7 @@ import {
   CrudScope,
 } from '../types/crud-hooks';
 import { ODATA_BINDINGS, ODataLogger, ODataTenantThrottler } from '../keys';
-import { ODataConfig, ODataApplyTelemetryEvent } from '../types';
+import { ODataConfig, ODataApplyTelemetryEvent, ODataRequestState } from '../types';
 import { getODataSearchableProps } from '../decorators/search.decorators';
 import { ensureNavigationTargetKey } from '../util/relation-metadata';
 import { ResolvedNavigationPath } from '../util/navigation-path';
@@ -99,10 +99,33 @@ import {
 } from '../util/token-signing';
 import { validateDeltaToken, DeltaTokenValidationResult } from '../util/delta-token-validation';
 import { ensureConfigValidated } from '../util/config-validation';
+import {
+  emitTelemetryEvent,
+  recordStatistics,
+  StatisticsUpdate,
+  TelemetryEventOptions,
+} from '../util/telemetry';
 type CrudEntity = Entity & { [key: string]: unknown };
 type CrudRepo = DefaultCrudRepository<CrudEntity, unknown>;
 type NormalizedInclusion = Exclude<InclusionFilter, string>;
 type CrudWhere = Where<CrudEntity>;
+
+const DB_METHODS: ReadonlySet<string> = new Set([
+  'find',
+  'findOne',
+  'findById',
+  'create',
+  'createAll',
+  'updateAll',
+  'updateById',
+  'replaceById',
+  'deleteById',
+  'deleteAll',
+  'count',
+  'exists',
+  'execute',
+  'save',
+]);
 
 type SearchAst =
   | { kind: 'term'; value: string }
@@ -535,6 +558,7 @@ export function defineODataCrudController(def: EntitySetDef) {
     formatOverridden = false;
     readonly entityCtor = modelCtor as typeof Entity;
     _throttleApplied = false;
+    requestStateCache?: ODataRequestState | null;
 
     constructor(
       @inject(repoBindingKey)
@@ -554,6 +578,7 @@ export function defineODataCrudController(def: EntitySetDef) {
       @inject(ODATA_BINDINGS.THROTTLER)
       public readonly throttler: ODataTenantThrottler,
     ) {
+      this.repository = this.wrapRepository(repository);
       ensureConfigValidated(this.cfg);
     }
 
@@ -2725,12 +2750,27 @@ export function defineODataCrudController(def: EntitySetDef) {
     logApplyFallback(
       event: string,
       detail: { entitySet: string; transformations?: number; rows?: number; limit?: number },
+      plan?: ApplyExecutionPlan,
     ) {
       const payload = { event, ...detail };
       this.cfg?.onApplyFallback?.(payload);
       if (this.cfg?.logApplyFallbacks) {
         this.logger.warn('$apply fallback', detail);
       }
+      if (typeof detail.rows === 'number') {
+        this.recordTelemetryStats({ rows: detail.rows });
+      }
+      const includePlan = plan && this.includeApplyPlanInTelemetry() ? { plan } : {};
+      this.emitTelemetry({
+        category: 'apply',
+        event: 'apply-fallback',
+        level: 'warn',
+        context: {
+          reason: event,
+          ...detail,
+          ...includePlan,
+        },
+      });
     }
 
     throwDeltaValidationError(
@@ -2748,30 +2788,49 @@ export function defineODataCrudController(def: EntitySetDef) {
       stageCount: number,
       data: { rows?: number; durationMs?: number; joinCount?: number; reason?: string } = {},
     ) {
-      if (!this.cfg?.onApplyTelemetry && !this.cfg?.logApplyTelemetry) return;
-      const event: ODataApplyTelemetryEvent = {
-        entitySet: setName,
-        stageIndex,
-        stageCount,
-        mode,
-        rows: data.rows,
-        durationMs: data.durationMs,
-        joinCount: data.joinCount,
-        reason: data.reason,
-      };
-      if (this.cfg?.onApplyTelemetry) {
-        try {
-          this.cfg.onApplyTelemetry(event);
-        } catch (err) {
-          this.logger.error(
-            'Failed to emit apply telemetry handler.',
-            { entitySet: setName },
-            err as Error,
-          );
+      const shouldNotifyHandler = Boolean(this.cfg?.onApplyTelemetry);
+      const shouldLogApply = Boolean(this.cfg?.logApplyTelemetry);
+      if (shouldNotifyHandler || shouldLogApply) {
+        const event: ODataApplyTelemetryEvent = {
+          entitySet: setName,
+          stageIndex,
+          stageCount,
+          mode,
+          rows: data.rows,
+          durationMs: data.durationMs,
+          joinCount: data.joinCount,
+          reason: data.reason,
+        };
+        if (shouldNotifyHandler && this.cfg?.onApplyTelemetry) {
+          try {
+            this.cfg.onApplyTelemetry(event);
+          } catch (err) {
+            this.logger.error(
+              'Failed to emit apply telemetry handler.',
+              { entitySet: setName },
+              err as Error,
+            );
+          }
+        }
+        if (shouldLogApply) {
+          this.logger.debug('$apply telemetry', {
+            entitySet: setName,
+            mode,
+            stageIndex: stageIndex + 1,
+            stageCount,
+            rows: data.rows,
+            durationMs: data.durationMs,
+            joinCount: data.joinCount,
+            reason: data.reason,
+          });
         }
       }
-      if (this.cfg?.logApplyTelemetry) {
-        this.logger.debug('$apply telemetry', {
+
+      this.emitTelemetry({
+        category: 'apply',
+        event: 'apply-stage',
+        level: mode === 'pushdown' ? 'debug' : 'info',
+        context: {
           entitySet: setName,
           mode,
           stageIndex: stageIndex + 1,
@@ -2780,7 +2839,11 @@ export function defineODataCrudController(def: EntitySetDef) {
           durationMs: data.durationMs,
           joinCount: data.joinCount,
           reason: data.reason,
-        });
+        },
+      });
+
+      if (stageIndex + 1 === stageCount && typeof data.rows === 'number') {
+        this.recordTelemetryStats({ rows: data.rows });
       }
     }
 
@@ -2974,11 +3037,15 @@ export function defineODataCrudController(def: EntitySetDef) {
           this.emitApplyTelemetry('pushdown', stageIndex, planStages.length, {
             reason: 'executor-declined',
           });
-          this.logApplyFallback('executor-declined', {
-            entitySet: setName,
-            transformations: effectivePipeline.transformations.length,
-            rows: 0,
-          });
+          this.logApplyFallback(
+            'executor-declined',
+            {
+              entitySet: setName,
+              transformations: effectivePipeline.transformations.length,
+              rows: 0,
+            },
+            executionPlan,
+          );
           return undefined;
         }
 
@@ -2989,11 +3056,15 @@ export function defineODataCrudController(def: EntitySetDef) {
         );
         if (requiresStageFilters && execResult.appliedStageFilters !== true) {
           emitReason('missing-stage-filters');
-          this.logApplyFallback('stage-filters-not-applied', {
-            entitySet: setName,
-            transformations: effectivePipeline.transformations.length,
-            rows: execResult.rows?.length ?? 0,
-          });
+          this.logApplyFallback(
+            'stage-filters-not-applied',
+            {
+              entitySet: setName,
+              transformations: effectivePipeline.transformations.length,
+              rows: execResult.rows?.length ?? 0,
+            },
+            executionPlan,
+          );
           return undefined;
         }
 
@@ -3002,11 +3073,15 @@ export function defineODataCrudController(def: EntitySetDef) {
         );
         if (requiresStagePagination && execResult.appliedPipelinePagination !== true) {
           emitReason('missing-stage-pagination');
-          this.logApplyFallback('stage-pagination-not-applied', {
-            entitySet: setName,
-            transformations: effectivePipeline.transformations.length,
-            rows: execResult.rows?.length ?? 0,
-          });
+          this.logApplyFallback(
+            'stage-pagination-not-applied',
+            {
+              entitySet: setName,
+              transformations: effectivePipeline.transformations.length,
+              rows: execResult.rows?.length ?? 0,
+            },
+            executionPlan,
+          );
           return undefined;
         }
         if (postFilterExpr) {
@@ -3074,16 +3149,23 @@ export function defineODataCrudController(def: EntitySetDef) {
         if (nextLinkToken) {
           response['@odata.nextLink'] = this.buildNextLink(nextLinkToken);
         }
+        if (Array.isArray(ordered)) {
+          this.recordTelemetryStats({ rows: ordered.length });
+        }
         return response;
       } catch (error) {
         this.emitApplyTelemetry('pushdown', stageIndex, planStages.length, {
           reason: 'executor-error',
         });
-        this.logApplyFallback('executor-error', {
-          entitySet: setName,
-          transformations: effectivePipeline.transformations.length ?? 0,
-          rows: 0,
-        });
+        this.logApplyFallback(
+          'executor-error',
+          {
+            entitySet: setName,
+            transformations: effectivePipeline.transformations.length ?? 0,
+            rows: 0,
+          },
+          executionPlan,
+        );
         return undefined;
       }
     }
@@ -4356,11 +4438,11 @@ export function defineODataCrudController(def: EntitySetDef) {
       return descriptors;
     }
 
-    parseApplySkipToken(
-      token: string | undefined,
+    decodeSkipTokenValues(
+      token: string,
       descriptors: OrderDescriptor[],
-    ): string[] | undefined {
-      if (!token) return undefined;
+      phase: 'apply' | 'collection',
+    ): string[] {
       const descriptorKey = this.buildSkipTokenDescriptorKey(descriptors);
       const context = this.buildSkipTokenContext();
       const options = this.buildSkipTokenOptions();
@@ -4369,13 +4451,34 @@ export function defineODataCrudController(def: EntitySetDef) {
         if (decoded.values.length !== descriptors.length) {
           throw new HttpErrors.BadRequest('Invalid $skiptoken value.');
         }
+        this.emitTokenTelemetry('skip', 'valid', {
+          phase,
+          descriptorKey,
+        });
         return decoded.values.map((value) => value ?? '');
       } catch (error) {
         if (error instanceof TokenVerificationError) {
+          const status = error.reason === 'expired' ? 'expired' : 'invalid';
+          this.emitTokenTelemetry('skip', status, {
+            phase,
+            descriptorKey,
+          });
           throw new HttpErrors.BadRequest('Invalid $skiptoken value.');
         }
+        this.emitTokenTelemetry('skip', 'invalid', {
+          phase,
+          descriptorKey,
+        });
         throw error;
       }
+    }
+
+    parseApplySkipToken(
+      token: string | undefined,
+      descriptors: OrderDescriptor[],
+    ): string[] | undefined {
+      if (!token) return undefined;
+      return this.decodeSkipTokenValues(token, descriptors, 'apply');
     }
 
     coerceTokenValue(raw: string, sample: unknown): unknown {
@@ -4448,22 +4551,7 @@ export function defineODataCrudController(def: EntitySetDef) {
       if (!token) {
         throw new HttpErrors.BadRequest('Empty $skiptoken is not allowed.');
       }
-      const descriptorKey = this.buildSkipTokenDescriptorKey(descriptors);
-      const context = this.buildSkipTokenContext();
-      const options = this.buildSkipTokenOptions();
-      let values: string[];
-      try {
-        const decoded = verifySkipToken(token, descriptorKey, context, options);
-        values = decoded.values;
-      } catch (error) {
-        if (error instanceof TokenVerificationError) {
-          throw new HttpErrors.BadRequest('Invalid $skiptoken value.');
-        }
-        throw error;
-      }
-      if (values.length !== descriptors.length) {
-        throw new HttpErrors.BadRequest('Invalid $skiptoken value.');
-      }
+      const values = this.decodeSkipTokenValues(token, descriptors, 'collection');
       return descriptors.map((descriptor, index) =>
         this.coerceSkipTokenValue(descriptor.field, values[index] ?? '', definition),
       );
@@ -5122,6 +5210,68 @@ export function defineODataCrudController(def: EntitySetDef) {
       return meta.scope === scope;
     }
 
+    getRequestTelemetryState(): ODataRequestState | undefined {
+      if (this.requestStateCache !== undefined) {
+        return this.requestStateCache ?? undefined;
+      }
+      try {
+        const state = this.httpCtx.getSync(ODATA_BINDINGS.REQUEST_STATE, {
+          optional: true,
+        }) as ODataRequestState | undefined;
+        this.requestStateCache = state ?? null;
+      } catch {
+        this.requestStateCache = null;
+      }
+      return this.requestStateCache ?? undefined;
+    }
+
+    emitTelemetry(event: TelemetryEventOptions): void {
+      emitTelemetryEvent(this.logger, this.getRequestTelemetryState(), event);
+    }
+
+    recordTelemetryStats(update: StatisticsUpdate): void {
+      recordStatistics(this.getRequestTelemetryState(), update);
+    }
+
+    includeApplyPlanInTelemetry(): boolean {
+      return Boolean(this.getRequestTelemetryState()?.telemetry?.includeApplyPlanOnFallback);
+    }
+
+    wrapRepository(repo: CrudRepo): CrudRepo {
+      const self = this;
+      return new Proxy(repo, {
+        get(target, prop, receiver) {
+          const value = Reflect.get(target, prop, receiver);
+          if (typeof value !== 'function') return value;
+          const methodName = String(prop);
+          if (!DB_METHODS.has(methodName)) {
+            return value.bind(target);
+          }
+          return function (...args: unknown[]) {
+            return self.trackDbOperation(methodName, () => value.apply(target, args));
+          };
+        },
+      });
+    }
+
+    async trackDbOperation<T>(operation: string, fn: () => Promise<T>): Promise<T> {
+      const startedAt = process.hrtime.bigint();
+      try {
+        const result = await fn();
+        this.recordTelemetryStats({
+          dbTimeNs: process.hrtime.bigint() - startedAt,
+          roundTripsIncrement: 1,
+        });
+        return result;
+      } catch (error) {
+        this.recordTelemetryStats({
+          dbTimeNs: process.hrtime.bigint() - startedAt,
+          roundTripsIncrement: 1,
+        });
+        throw error;
+      }
+    }
+
     getHookMethods(op: CrudOperation, scope?: CrudScope) {
       const before = (hooks?.before ?? [])
         .filter((h) => this.hookMatches(op, scope, h))
@@ -5131,6 +5281,49 @@ export function defineODataCrudController(def: EntitySetDef) {
         .map((h) => h.methodName);
       const on = (hooks?.on ?? []).find((h) => this.hookMatches(op, scope, h))?.methodName;
       return { before, after, on };
+    }
+
+    emitHookTelemetry(
+      phase: 'before' | 'after' | 'on',
+      op: CrudOperation,
+      scope: CrudScope | undefined,
+      hookName: string,
+      startedAt: bigint,
+      error?: Error,
+    ): void {
+      const durationNs = process.hrtime.bigint() - startedAt;
+      const durationMs = Number(durationNs) / 1e6;
+      this.emitTelemetry({
+        category: 'hooks',
+        event: `hook.${phase}`,
+        level: error ? 'warn' : 'debug',
+        context: {
+          entitySet: setName,
+          operation: op,
+          scope,
+          hookName,
+          status: error ? 'error' : 'completed',
+          durationMs,
+        },
+        error,
+      });
+    }
+
+    emitTokenTelemetry(
+      tokenType: 'skip' | 'delta',
+      status: 'valid' | 'invalid' | 'expired' | 'legacy-denied',
+      context?: Record<string, unknown>,
+    ): void {
+      this.emitTelemetry({
+        category: 'tokens',
+        event: 'token.validation',
+        level: status === 'valid' ? 'debug' : 'warn',
+        context: {
+          tokenType,
+          status,
+          ...(context ?? {}),
+        },
+      });
     }
 
     buildHookContext(base: Partial<CrudHookContext>): CrudHookContext {
@@ -5172,6 +5365,8 @@ export function defineODataCrudController(def: EntitySetDef) {
       this.response.once('finish', release);
       this.response.once('close', release);
       try {
+        const telemetryState = this.getRequestTelemetryState();
+        const correlationId = telemetryState?.correlationId;
         const requestId =
           this.request.get('x-request-id') ??
           (this.request.headers?.['x-request-id'] as string | undefined) ??
@@ -5184,11 +5379,40 @@ export function defineODataCrudController(def: EntitySetDef) {
           method: this.request.method,
           url: rawUrl,
           requestId,
+          correlationId,
         });
         this._throttleApplied = true;
+        this.emitTelemetry({
+          category: 'throttle',
+          event: 'tenant-throttle-check',
+          level: 'debug',
+          context: {
+            tenantId,
+            operation,
+            scope,
+            method: this.request.method,
+            url: rawUrl,
+            result: 'allowed',
+          },
+        });
       } catch (error) {
         release();
         const message = (error as Error).message;
+        this.emitTelemetry({
+          category: 'throttle',
+          event: 'tenant-throttle-check',
+          level: 'warn',
+          context: {
+            tenantId,
+            operation,
+            scope,
+            method: this.request.method,
+            url: (this.request as AnyObject).originalUrl ?? this.request.url,
+            result: 'rejected',
+            reason: message,
+          },
+          requireSample: false,
+        });
         if (message === 'tenant-rate-limit-exceeded') {
           throw new HttpErrors.TooManyRequests(
             'Tenant request rate exceeded. Retry after a short delay.',
@@ -5247,7 +5471,14 @@ export function defineODataCrudController(def: EntitySetDef) {
       const names = this.getHookMethods(op, scope).before;
       for (const name of names) {
         if (typeof source[name] === 'function') {
-          await source[name](ctx);
+          const startedAt = process.hrtime.bigint();
+          try {
+            await source[name](ctx);
+            this.emitHookTelemetry('before', op, scope, name, startedAt);
+          } catch (error) {
+            this.emitHookTelemetry('before', op, scope, name, startedAt, error as Error);
+            throw error;
+          }
         }
       }
     }
@@ -5268,9 +5499,16 @@ export function defineODataCrudController(def: EntitySetDef) {
         nextCalled = true;
         return next();
       };
-      const result = await source[name](onCtx, wrappedNext);
-      if (!nextCalled) return result;
-      return result ?? onCtx.result;
+      const startedAt = process.hrtime.bigint();
+      try {
+        const result = await source[name](onCtx, wrappedNext);
+        this.emitHookTelemetry('on', op, scope, name, startedAt);
+        if (!nextCalled) return result;
+        return result ?? onCtx.result;
+      } catch (error) {
+        this.emitHookTelemetry('on', op, scope, name, startedAt, error as Error);
+        throw error;
+      }
     }
 
     async runAfter(op: CrudOperation, scope: CrudScope | undefined, ctx: CrudHookContext) {
@@ -5281,7 +5519,15 @@ export function defineODataCrudController(def: EntitySetDef) {
       const names = this.getHookMethods(op, scope).after;
       for (const name of names) {
         if (typeof source[name] !== 'function') continue;
-        const maybe = await source[name](ctx);
+        const startedAt = process.hrtime.bigint();
+        let maybe: unknown;
+        try {
+          maybe = await source[name](ctx);
+          this.emitHookTelemetry('after', op, scope, name, startedAt);
+        } catch (error) {
+          this.emitHookTelemetry('after', op, scope, name, startedAt, error as Error);
+          throw error;
+        }
         if (maybe !== undefined) {
           ctx.result = maybe;
         }
@@ -5497,13 +5743,21 @@ export function defineODataCrudController(def: EntitySetDef) {
           deltaEnabled,
           entitySet: setName,
           logger: this.logger,
-          onTelemetry: this.cfg?.onDeltaTokenInvalid,
+          onTelemetry: (event) => {
+            this.cfg?.onDeltaTokenInvalid?.(event);
+            const status = event.code === 'expired' ? 'expired' : 'invalid';
+            this.emitTokenTelemetry('delta', status, {
+              entitySet: event.entitySet,
+              code: event.code,
+            });
+          },
           decode: () => decodeDeltaToken(deltaTokenValue!, this.buildDeltaTokenOptions()),
         });
         if (!validation.ok) {
           this.throwDeltaValidationError(validation);
         } else {
           deltaPayload = validation.payload;
+          this.emitTokenTelemetry('delta', 'valid', { entitySet: setName });
         }
       }
 
@@ -5777,23 +6031,31 @@ export function defineODataCrudController(def: EntitySetDef) {
             branchSegments = undefined;
           }
 
-          this.logApplyFallback('in-memory-apply', {
-            entitySet: setName,
-            transformations: applyPipeline?.transformations.length ?? 0,
-            rows: working.length,
-          });
+          this.logApplyFallback(
+            'in-memory-apply',
+            {
+              entitySet: setName,
+              transformations: applyPipeline?.transformations.length ?? 0,
+              rows: working.length,
+            },
+            planForFallback,
+          );
           const maxApplySize = this.cfg?.maxApplyResultSize;
           if (
             typeof maxApplySize === 'number' &&
             maxApplySize > 0 &&
             working.length > maxApplySize
           ) {
-            this.logApplyFallback('limit-exceeded', {
-              entitySet: setName,
-              transformations: applyPipeline?.transformations.length ?? 0,
-              rows: working.length,
-              limit: maxApplySize,
-            });
+            this.logApplyFallback(
+              'limit-exceeded',
+              {
+                entitySet: setName,
+                transformations: applyPipeline?.transformations.length ?? 0,
+                rows: working.length,
+                limit: maxApplySize,
+              },
+              planForFallback,
+            );
             throw new HttpErrors.BadRequest(
               `$apply result exceeds the server limit of ${maxApplySize} records. Refine the query or increase maxApplyResultSize.`,
             );
@@ -5908,6 +6170,7 @@ export function defineODataCrudController(def: EntitySetDef) {
             '@odata.context': contextBase,
             value: this.decoratePlainEntities(paged),
           } as AnyObject;
+          this.recordTelemetryStats({ rows: paged.length });
           ctx.result = result;
           return result;
         }
@@ -5969,6 +6232,7 @@ export function defineODataCrudController(def: EntitySetDef) {
         this.ensureODataHeaders();
         const decorated = this.decoratePlainEntities(paged);
         const combined = tombstones.length ? [...decorated, ...tombstones] : decorated;
+        this.recordTelemetryStats({ rows: combined.length });
         const result = {
           '@odata.context': contextBase,
           ...(inlineCountRequested ? { '@odata.count': totalCount ?? filteredResults.length } : {}),

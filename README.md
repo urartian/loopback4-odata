@@ -841,7 +841,7 @@ Keep the field fresh in your repository (for example, by stamping `updatedAt` in
 - Emits `ETag: W/"…"` headers and `@odata.etag` payload metadata on `GET /odata/Products(…)`.
 - Accepts optional `If-Match` headers on `PATCH`/`DELETE`. When present, the update succeeds only if the token still matches the stored value; stale tokens return `412 Precondition Failed`.
 - Supports caching via `If-None-Match` on reads (`GET` responds `304 Not Modified` when the token matches).
-- Treats related expansions the same way as SAP CAP: the ETag covers only the root entity unless you choose to update the parent token whenever child rows change.
+- The ETag covers only the root entity unless you choose to update the parent token whenever child rows change.
 
 You can pass an array of property names (`@odataModel({etag: ['id', 'updatedAt']})`) to build a composite token; the header value becomes a key/value list such as `W/"id=42&updatedAt=2025-04-01T10%3A00%3A00.000Z"`.
 
@@ -1285,7 +1285,7 @@ this.bind(ODATA_BINDINGS.CONFIG).to({
 
 ### Deep Insert
 
-Deep insert is enabled automatically for entity sets that expose composition-style relations (hasOne/hasMany navigations whose foreign key is required on the target model). The booter analyses relation metadata from the model definitions at startup and turns on deep insert/update whenever it detects such compositions. This mirrors CAP’s default behaviour: composed children can be created alongside their parent without additional configuration.
+Deep insert is enabled automatically for entity sets that expose composition-style relations (hasOne/hasMany navigations whose foreign key is required on the target model). The booter analyses relation metadata from the model definitions at startup and turns on deep insert/update whenever it detects such compositions. Composed children can be created alongside their parent without additional configuration.
 
 You can still control the behaviour explicitly:
 
@@ -1495,6 +1495,79 @@ Content-Type: application/json
 ```
 
 All three requests execute atomically. If any fails, the entire changeset is rolled back and the batch returns per-request error details.
+
+## Observability & Telemetry
+
+The component can emit structured telemetry so operators can trace pushdown decisions, hook execution, throttling, and token validation with the same logger their LoopBack app already uses. Configure telemetry and correlation once in your application bootstrap:
+
+```ts
+const current = this.getSync(ODATA_BINDINGS.CONFIG) as ODataConfig;
+this.bind(ODATA_BINDINGS.CONFIG).to({
+  ...current,
+  telemetry: {
+    enabled: true,
+    level: 'debug',
+    categories: ['apply', 'rewrite', 'hooks'],
+    sampleRate: 0.25,
+    emitStatisticsHeader: true,
+    statisticsHeaderName: 'OData-Statistics',
+    includeApplyPlanOnFallback: true,
+  },
+  correlation: {
+    headerName: 'x-correlation-id',
+    responseHeaderName: 'x-correlation-id',
+    generateWhenMissing: true,
+  },
+});
+```
+
+- `telemetry.enabled` gates all instrumentation, while `categories` acts as a filter for noisy areas (`apply`, `rewrite`, `hooks`, `batch`, `throttle`, `tokens`, `requests`). `includeApplyPlanOnFallback` embeds the `$apply` plan when a pushdown falls back to in-memory execution, making it easier to diagnose regressions.
+- `sampleRate` allows high-volume services to trace only a slice of requests (0 disables, 1 traces every request).
+- When `telemetry.requestLogging.enabled = true`—or when clients send `Prefer: telemetry=request-log`—the component emits request logs (`telemetryEvent=request.log`) with method, URL, status, masked headers, and optionally bodies (bounded by `maxPayloadBytes`). Response bodies are included only when `includeResponseBody` is true.
+- When `emitStatisticsHeader` is true, clients can opt in per request with `Prefer: telemetry=statistics`. Successful requests answer with `Preference-Applied: telemetry=statistics` and an `OData-Statistics` header such as `{"dbTime":21,"processingTime":12,"roundTrips":1,"rows":42}`.
+- The correlation block captures request IDs from headers (default `x-correlation-id`), optionally echoes them back on responses, and makes them available to repositories and telemetry emitters so your existing log aggregation or tracing tools can stitch events together.
+
+Use `ODATA_BINDINGS.LOGGER` to plug in your preferred logger (e.g., Pino, Winston) and enrich telemetry events with tenant IDs or custom tags before forwarding them to your observability stack.
+
+### Configuration reference
+
+| Option                                         | Description                                                                                                                                                           |
+| ---------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `telemetry.enabled`                            | Master switch. When `false`, telemetry is off unless you configure `telemetry.requestLogging.enabled = true` or a client opts in via `Prefer: telemetry=request-log`. |
+| `telemetry.level`                              | Minimum level used for OData-generated events (`trace`, `debug`, `info`, `warn`, `error`). Defaults to `info`.                                                        |
+| `telemetry.categories`                         | Optional list to limit telemetry to specific areas: `apply`, `rewrite`, `hooks`, `batch`, `throttle`, `tokens`, `requests`. Empty/omitted = all.                      |
+| `telemetry.sampleRate`                         | Float between `0` and `1`. When less than `1`, only that percentage of requests emit telemetry (useful for high-traffic services).                                    |
+| `telemetry.emitStatisticsHeader`               | Enables the server to honor `Prefer: telemetry=statistics` and respond with per-request metrics.                                                                      |
+| `telemetry.statisticsHeaderName`               | Response header name for statistics (`OData-Statistics` by default).                                                                                                  |
+| `telemetry.statisticsPrecision`                | Decimal precision for timing values in the stats header.                                                                                                              |
+| `telemetry.includeApplyPlanOnFallback`         | When true, `$apply` fallback events include the serialized execution plan in telemetry logs.                                                                          |
+| `telemetry.requestLogging.enabled`             | When true, every OData request is logged (`telemetryEvent=request.log`) with method/URL/status and masked headers/bodies.                                             |
+| `telemetry.requestLogging.includeHeaders`      | Include request headers in the log (masked via `maskHeaders`). Defaults to `true`.                                                                                    |
+| `telemetry.requestLogging.includeResponseBody` | Include response payloads (respecting `maxPayloadBytes`). Defaults to `false`.                                                                                        |
+| `telemetry.requestLogging.maxPayloadBytes`     | Maximum number of bytes captured from request/response bodies before truncation (default 32768).                                                                      |
+| `telemetry.requestLogging.maskHeaders`         | Array of header names to redact (e.g., `['authorization', 'cookie']`).                                                                                                |
+| `telemetry.requestLogging.maskBodyPaths`       | Array of top-level JSON field names to redact from request bodies (e.g., `['password']`).                                                                             |
+| `correlation.headerName`                       | Request header inspected for correlation IDs (`x-correlation-id` default).                                                                                            |
+| `correlation.responseHeaderName`               | Header echoed back on responses; set when clients need confirmation of the correlation ID that was used.                                                              |
+| `correlation.generateWhenMissing`              | Generates a UUID when the client omits the correlation header (default `true`).                                                                                       |
+| `correlation.propagateToRepositories`          | Reserved for future use; when enabled, repository options will contain the correlation ID for downstream logging.                                                     |
+
+### Event schema
+
+Every telemetry record is emitted through the bound logger (`ODATA_BINDINGS.LOGGER`) and contains:
+
+- `telemetryEvent`: machine-friendly slug (e.g., `apply-fallback`, `hook.before`, `tenant-throttle-check`, `batch.request`, `token.validation`).
+- `telemetryCategory`: one of the categories listed above.
+- `correlationId`: value taken from the configured header or auto-generated UUID.
+- `sampled`: boolean indicating whether the current request was sampled for telemetry.
+- Context-specific fields. Examples:
+  - `apply-fallback`: `entitySet`, `reason`, `rows`, optional `plan` snapshot when enabled.
+  - `hook.before` / `hook.after` / `hook.on`: `entitySet`, `operation`, `scope`, `hookName`, `durationMs`, `status`.
+  - `tenant-throttle-check`: `tenantId`, `operation`, `result` (`allowed|rejected`), `reason` when rejected.
+  - `batch.request`: `operationCount`, `changesetCount`, `maxPayloadBytes`, `durationMs`, `status`.
+  - `token.validation`: `tokenType` (`skip|delta`), `status`, `reason` when validation fails.
+
+Telemetry respects LoopBack’s logging pipeline—you can forward the enriched records to OpenTelemetry, Splunk, CloudWatch, etc.
 
 ## Roadmap
 

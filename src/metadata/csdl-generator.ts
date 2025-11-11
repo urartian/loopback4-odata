@@ -1,5 +1,6 @@
 import { BindingScope, inject, injectable } from '@loopback/core';
 import {
+  AnyObject,
   Entity,
   ModelDefinition,
   PropertyDefinition,
@@ -30,6 +31,18 @@ const EDM_NAMESPACE = 'http://docs.oasis-open.org/odata/ns/edm';
 const EDMX_NAMESPACE = 'http://docs.oasis-open.org/odata/ns/edmx';
 const LOOPBACK_BATCH_NAMESPACE = 'LoopBack.V1.BatchCapabilities';
 const LOOPBACK_BATCH_TERM = `${LOOPBACK_BATCH_NAMESPACE}.ChangeSetsSupported`;
+const VOCABULARY_REFERENCES = [
+  {
+    uri: 'http://docs.oasis-open.org/odata/odata/v4.0/errata03/os/vocabularies/Org.OData.Core.V1.xml',
+    namespace: 'Org.OData.Core.V1',
+    alias: 'Core',
+  },
+  {
+    uri: 'http://docs.oasis-open.org/odata/odata/v4.0/errata03/os/vocabularies/Org.OData.Capabilities.V1.xml',
+    namespace: 'Org.OData.Capabilities.V1',
+    alias: 'Capabilities',
+  },
+];
 
 interface ComplexTypeResult {
   name: string;
@@ -710,7 +723,7 @@ function buildEntityType(
     const partnerName = partnerInfo.name;
     const constraints = collectReferentialConstraints(
       relationDef as RelationDefinitionMap[string],
-      partnerInfo.relation,
+      modelDefinition,
       targetDefinition,
     );
 
@@ -818,6 +831,8 @@ export class CsdlGenerator {
     const jsonActions: Record<string, unknown> = {};
     const jsonFunctions: Record<string, unknown> = {};
     const jsonImports: Record<string, unknown> = {};
+    const referenceXml = buildVocabularyReferencesXml();
+    const referenceJson = buildVocabularyReferencesJson();
 
     const namespace = this.normalizeNamespace(this.cfg?.namespace);
     const namespaceAlias = this.cfg?.namespaceAlias?.trim();
@@ -1516,6 +1531,7 @@ export class CsdlGenerator {
         namespace,
         namespaceAlias,
         containerName,
+        referenceJson,
         jsonEntityTypes,
         jsonEntitySets,
         jsonContainerAnnotations,
@@ -1535,6 +1551,7 @@ export class CsdlGenerator {
     return [
       '<?xml version="1.0" encoding="UTF-8"?>',
       `<edmx:Edmx Version="4.0" xmlns:edmx="${EDMX_NAMESPACE}">`,
+      ...referenceXml,
       '  <edmx:DataServices>',
       schemaOpenTag,
       ...complexTypesXml,
@@ -1633,6 +1650,7 @@ export class CsdlGenerator {
     namespace: string,
     alias: string | undefined,
     containerName: string,
+    references: Record<string, unknown>,
     entityTypes: Record<string, unknown>,
     entitySets: Record<string, unknown>,
     containerAnnotations: Record<string, unknown>,
@@ -1673,11 +1691,14 @@ export class CsdlGenerator {
     }
     schema[containerName] = container;
 
-    const doc = {
+    const doc: Record<string, unknown> = {
       $Version: '4.0',
       [namespace]: schema,
       ...supplementalSchemas,
     };
+    if (Object.keys(references).length) {
+      doc.$Reference = references;
+    }
     return JSON.stringify(doc, null, 2);
   }
 
@@ -1816,6 +1837,16 @@ function unwrapPropertyType(type: unknown): unknown {
   return type;
 }
 
+function normalizeKeyArray(value: unknown): string[] {
+  if (!value) return [];
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => (typeof item === 'string' ? item : undefined))
+      .filter((item): item is string => Boolean(item));
+  }
+  return typeof value === 'string' ? [value] : [];
+}
+
 function resolvePartnerRelation(
   targetDefinition: ModelDefinition | undefined,
   sourceCtor: typeof Entity,
@@ -1840,30 +1871,72 @@ function resolvePartnerRelation(
 
 function collectReferentialConstraints(
   relation: RelationDefinitionMap[string],
-  inverse: RelationDefinitionMap[string] | undefined,
+  sourceDefinition: ModelDefinition | undefined,
   targetDefinition: ModelDefinition | undefined,
 ): Array<{ property: string; referencedProperty: string }> {
-  const constraints: Array<{ property: string; referencedProperty: string }> = [];
-  const addConstraint = (property?: string | string[]) => {
-    if (!property) return;
-    const list = Array.isArray(property) ? property : [property];
-    for (const prop of list) {
-      if (!prop) continue;
-      if (constraints.some((c) => c.property === prop)) continue;
-      constraints.push({ property: prop, referencedProperty: '' });
+  if ((relation as AnyObject)?.targetsMany) return [];
+  if (!sourceDefinition?.properties) return [];
+  const dependentKeys = normalizeKeyArray((relation as AnyObject)?.keyFrom);
+  if (!dependentKeys.length) return [];
+
+  const sourceProperties = sourceDefinition.properties ?? {};
+  const seen = new Set<string>();
+  const filtered = dependentKeys.filter((prop) => {
+    if (seen.has(prop)) return false;
+    if (!Object.prototype.hasOwnProperty.call(sourceProperties, prop)) return false;
+    seen.add(prop);
+    return true;
+  });
+  if (!filtered.length) return [];
+
+  const targetProps = targetDefinition?.properties ?? {};
+  const targetKeys = targetDefinition?.idProperties?.() ?? ['id'];
+  const keyToValues = normalizeKeyArray((relation as AnyObject)?.keyTo);
+  const fallbackKey = targetKeys[0] ?? 'id';
+  const resolveTargetKey = (index: number): string => {
+    const candidate = keyToValues[index] ?? keyToValues[0];
+    if (candidate && Object.prototype.hasOwnProperty.call(targetProps, candidate)) {
+      return candidate;
     }
+    const idCandidate = targetKeys[index] ?? fallbackKey;
+    if (idCandidate && Object.prototype.hasOwnProperty.call(targetProps, idCandidate)) {
+      return idCandidate;
+    }
+    return candidate ?? fallbackKey;
   };
 
-  addConstraint((relation as any)?.keyFrom);
-  addConstraint((relation as any)?.keyTo);
-  if (inverse) {
-    addConstraint((inverse as any)?.keyFrom);
-    addConstraint((inverse as any)?.keyTo);
+  return filtered.map((property, index) => ({
+    property,
+    referencedProperty: resolveTargetKey(index),
+  }));
+}
+
+function buildVocabularyReferencesXml(): string[] {
+  const blocks: string[] = [];
+  for (const reference of VOCABULARY_REFERENCES) {
+    const includeAttrs = [`Namespace="${xmlEscape(reference.namespace)}"`];
+    if (reference.alias) {
+      includeAttrs.push(`Alias="${xmlEscape(reference.alias)}"`);
+    }
+    blocks.push(
+      `  <edmx:Reference Uri="${xmlEscape(reference.uri)}">`,
+      `    <edmx:Include ${includeAttrs.join(' ')} />`,
+      '  </edmx:Reference>',
+    );
   }
+  return blocks;
+}
 
-  if (!constraints.length) return constraints;
-
-  const targetKeys = targetDefinition?.idProperties?.() ?? ['id'];
-  const referenced = targetKeys[0] ?? 'id';
-  return constraints.map((item) => ({ property: item.property, referencedProperty: referenced }));
+function buildVocabularyReferencesJson(): Record<string, unknown> {
+  const references: Record<string, unknown> = {};
+  for (const reference of VOCABULARY_REFERENCES) {
+    const includeEntry: Record<string, string> = { $Namespace: reference.namespace };
+    if (reference.alias) {
+      includeEntry.$Alias = reference.alias;
+    }
+    references[reference.uri] = {
+      $Include: [includeEntry],
+    };
+  }
+  return references;
 }

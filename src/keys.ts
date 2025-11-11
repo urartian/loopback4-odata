@@ -1,5 +1,5 @@
 import { BindingKey } from '@loopback/core';
-import { ODataConfig, ODataLogEntry, ODataTenantThrottleContext } from './types';
+import { ODataConfig, ODataLogEntry, ODataRequestState, ODataTenantThrottleContext } from './types';
 import { CsdlGenerator } from './metadata/csdl-generator';
 import { EntitySetRegistry } from './registry/entityset-registry';
 import { ODataApplyExecutorRegistry } from './services/odata-apply-executor.registry';
@@ -13,6 +13,7 @@ export const ODATA_BINDINGS = {
   LOGGER: BindingKey.create<ODataLogger>('odata.logger'),
   THROTTLER: BindingKey.create<ODataTenantThrottler>('odata.tenantThrottler'),
   THROTTLE_STORE: BindingKey.create<TenantThrottleStore>('odata.tenantThrottler.store'),
+  REQUEST_STATE: BindingKey.create<ODataRequestState>('odata.request.state'),
 };
 
 export interface ODataLogger {

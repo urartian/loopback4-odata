@@ -1,16 +1,6 @@
-import { Middleware, MiddlewareContext } from '@loopback/rest';
-
-const KEY_PREFIX_REGEX = /^(?:[A-Za-z_][A-Za-z0-9_.]*)'/;
 export const MAX_KEY_EXPRESSION_LENGTH = 4096;
 
-export const odataPathRewriter: Middleware = (ctx: MiddlewareContext, next) => {
-  const originalUrl = ctx.request.url ?? '';
-  const normalizedUrl = rewriteUrl(originalUrl);
-  ctx.request.url = normalizedUrl;
-  return next();
-};
-
-function rewriteUrl(url: string): string {
+export function rewriteODataUrl(url: string): string {
   const { path, suffix } = splitUrl(url);
   const rewrittenPath = rewritePath(path);
   if (!suffix) return rewrittenPath;
@@ -60,7 +50,6 @@ function rewritePath(path: string): string {
     const { keyExpression, closeIndex } = keySegment;
     const normalizedKey = normalizeKeyExpression(keyExpression);
 
-    // Slight guard: if normalization fails, keep original substring
     if (normalizedKey == null) {
       result += path.slice(index, closeIndex + 1);
       index = closeIndex + 1;
@@ -68,8 +57,6 @@ function rewritePath(path: string): string {
     }
 
     const encodedKey = encodeURIComponent(normalizedKey).replace(/'/g, '%27');
-
-    // Append everything up to the opening parenthesis, then the rewritten key.
     result += path.slice(index, openIndex);
     result += `/${encodedKey}`;
     index = closeIndex + 1;
@@ -88,9 +75,9 @@ function extractKeySegment(path: string, openIndex: number): KeySegmentParseResu
 
   const preceding = path[openIndex - 1];
   if (preceding === '/') {
-    // `(…)` immediately after a slash is expected for entity keys
+    // expected shape
   } else if (preceding === ')') {
-    // Navigating from a previous key segment, allow continuation
+    // navigating from previous key segment
   } else if (preceding && !isSegmentChar(preceding)) {
     return undefined;
   }
@@ -132,9 +119,9 @@ function extractKeySegment(path: string, openIndex: number): KeySegmentParseResu
 function isSegmentChar(ch: string): boolean {
   const code = ch.charCodeAt(0);
   return (
-    (code >= 48 && code <= 57) || // 0-9
-    (code >= 65 && code <= 90) || // A-Z
-    (code >= 97 && code <= 122) || // a-z
+    (code >= 48 && code <= 57) ||
+    (code >= 65 && code <= 90) ||
+    (code >= 97 && code <= 122) ||
     ch === '_' ||
     ch === '.'
   );
@@ -199,16 +186,17 @@ function splitTopLevel(input: string, delimiter: string): string[] {
   if (current.length) {
     result.push(current.trim());
   }
+
   return result.filter(Boolean);
 }
 
-function findTopLevelEquals(segment: string): number {
+function findTopLevelEquals(input: string): number {
   let inString = false;
-  for (let i = 0; i < segment.length; i++) {
-    const ch = segment[i];
+  for (let i = 0; i < input.length; i++) {
+    const ch = input[i];
     if (ch === "'") {
       if (inString) {
-        if (i + 1 < segment.length && segment[i + 1] === "'") {
+        if (i + 1 < input.length && input[i + 1] === "'") {
           i++;
           continue;
         }
@@ -223,6 +211,14 @@ function findTopLevelEquals(segment: string): number {
     }
   }
   return -1;
+}
+
+function decodeComponent(input: string): string {
+  try {
+    return decodeURIComponent(input);
+  } catch {
+    return input;
+  }
 }
 
 function normalizeLiteral(raw: string): string {
@@ -245,10 +241,4 @@ function normalizeLiteral(raw: string): string {
   return literal;
 }
 
-function decodeComponent(value: string): string {
-  try {
-    return decodeURIComponent(value);
-  } catch {
-    return value;
-  }
-}
+const KEY_PREFIX_REGEX = /^(?:[A-Za-z_][A-Za-z0-9_.]*)'/;
