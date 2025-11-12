@@ -77,6 +77,7 @@ import {
 import { ODATA_BINDINGS, ODataLogger, ODataTenantThrottler } from '../keys';
 import { ODataConfig, ODataApplyTelemetryEvent, ODataRequestState } from '../types';
 import { getODataSearchableProps } from '../decorators/search.decorators';
+import { ensureModelDefinitionWithRelations } from '../util/model-definition';
 import { ensureNavigationTargetKey } from '../util/relation-metadata';
 import { ResolvedNavigationPath } from '../util/navigation-path';
 import {
@@ -218,7 +219,10 @@ export function defineODataCrudController(def: EntitySetDef) {
 
   const contextBase = `/odata/$metadata#${setName}`;
   const entityContext = `${contextBase}/$entity`;
-  const modelDefinition = (modelCtor as { definition?: unknown }).definition as any;
+  const modelDefinition = (ensureModelDefinitionWithRelations(modelCtor) ??
+    ((modelCtor as { definition?: ModelDefinition }).definition as
+      | ModelDefinition
+      | undefined)) as any;
   const idType = inferIdParamType(modelDefinition);
   const idParam =
     idType === 'number'
