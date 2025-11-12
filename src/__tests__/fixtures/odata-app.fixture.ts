@@ -330,6 +330,86 @@ class OrderItemODataController {}
 @odataController(OrderItemNote)
 class OrderItemNoteODataController {}
 
+@odataModel({ entitySetName: 'OdataOnlyIncidents' })
+export class OdataOnlyIncident extends Entity {
+  @property({ type: 'string', id: true, defaultFn: 'uuid' })
+  id?: string;
+
+  @property({ type: 'string' })
+  title?: string;
+
+  @hasMany(() => OdataOnlyConversation, { keyTo: 'incidentId' })
+  conversations?: OdataOnlyConversation[];
+}
+
+@odataModel({ entitySetName: 'OdataOnlyConversations' })
+export class OdataOnlyConversation extends Entity {
+  @property({ type: 'string', id: true, defaultFn: 'uuid' })
+  id?: string;
+
+  @property({ type: 'string' })
+  message?: string;
+
+  @belongsTo(() => OdataOnlyIncident, { name: 'incident' })
+  incidentId!: string;
+}
+
+export class OdataOnlyIncidentRepository extends DefaultCrudRepository<
+  OdataOnlyIncident,
+  typeof OdataOnlyIncident.prototype.id
+> {
+  public readonly conversations: HasManyRepositoryFactory<
+    OdataOnlyConversation,
+    typeof OdataOnlyIncident.prototype.id
+  >;
+
+  constructor(
+    @inject('datasources.db') dataSource: juggler.DataSource,
+    @repository.getter('OdataOnlyConversationRepository')
+    protected conversationRepositoryGetter: Getter<OdataOnlyConversationRepository>,
+  ) {
+    super(OdataOnlyIncident, dataSource);
+    this.conversations = this.createHasManyRepositoryFactoryFor(
+      'conversations',
+      conversationRepositoryGetter,
+    );
+    this.registerInclusionResolver('conversations', this.conversations.inclusionResolver);
+  }
+}
+
+export class OdataOnlyConversationRepository extends DefaultCrudRepository<
+  OdataOnlyConversation,
+  typeof OdataOnlyConversation.prototype.id
+> {
+  public readonly incident: BelongsToAccessor<
+    OdataOnlyIncident,
+    typeof OdataOnlyConversation.prototype.id
+  >;
+
+  constructor(
+    @inject('datasources.db') dataSource: juggler.DataSource,
+    @repository.getter('OdataOnlyIncidentRepository')
+    protected incidentRepositoryGetter: Getter<OdataOnlyIncidentRepository>,
+  ) {
+    super(OdataOnlyConversation, dataSource);
+    this.incident = this.createBelongsToAccessorFor('incident', incidentRepositoryGetter);
+    this.registerInclusionResolver('incident', this.incident.inclusionResolver);
+  }
+}
+
+@odataController(OdataOnlyIncident)
+class OdataOnlyIncidentODataController {}
+
+@odataController(OdataOnlyConversation)
+class OdataOnlyConversationODataController {}
+
+export function registerODataOnlyModels(app: TestApplication) {
+  app.repository(OdataOnlyIncidentRepository);
+  app.repository(OdataOnlyConversationRepository);
+  app.controller(OdataOnlyIncidentODataController);
+  app.controller(OdataOnlyConversationODataController);
+}
+
 export async function givenODataApplication(
   config: RestServerConfig = {},
 ): Promise<TestApplication> {

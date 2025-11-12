@@ -30,7 +30,6 @@ import {
   Entity,
   ModelDefinition,
   MODEL_KEY,
-  buildModelDefinition,
   juggler,
   RelationDefinitionMap,
 } from '@loopback/repository';
@@ -45,6 +44,7 @@ import { collectControllerSecurityMetadata } from '../util/security-metadata';
 import { getODataHooks } from '../decorators/hook.decorators';
 import type { CrudHookBundle } from '../types/crud-hooks';
 import { ODataConfig } from '../types';
+import { ensureModelDefinitionWithRelations } from '../util/model-definition';
 import { ensureNavigationTargetKey } from '../util/relation-metadata';
 import { ODataApplyExecutorRegistry } from '../services/odata-apply-executor.registry';
 import { inferSqlMetadata } from '../util/sql-metadata';
@@ -154,15 +154,6 @@ export class ODataBooter implements Booter {
     return Boolean(globalDefault);
   }
 
-  private ensureModelDefinition(modelCtor: typeof Entity): ModelDefinition | undefined {
-    let modelDefinition = (modelCtor as typeof Entity).definition as ModelDefinition | undefined;
-    if (modelDefinition) return modelDefinition;
-
-    buildModelDefinition(modelCtor as typeof Entity & { definition?: ModelDefinition | undefined });
-    modelDefinition = (modelCtor as typeof Entity).definition as ModelDefinition | undefined;
-    return modelDefinition;
-  }
-
   private applyGeneratedRouteMetadata(
     spec: OperationObject,
     visibility: 'documented' | 'undocumented',
@@ -212,7 +203,7 @@ export class ODataBooter implements Booter {
       }
 
       const securityMetadata = collectControllerSecurityMetadata(ctor);
-      const modelDefinition = this.ensureModelDefinition(modelCtor);
+      const modelDefinition = ensureModelDefinitionWithRelations(modelCtor);
       const hooks = getODataHooks(ctor);
 
       // Validate @odata.on uniqueness per (op, scope)

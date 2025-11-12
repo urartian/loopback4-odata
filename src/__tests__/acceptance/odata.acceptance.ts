@@ -7,6 +7,7 @@ import {
   TestApplication,
   givenODataApplication,
   seedExampleData,
+  registerODataOnlyModels,
 } from '../fixtures/odata-app.fixture';
 import { ODATA_BINDINGS } from '../../keys';
 import { ODataConfig } from '../../types';
@@ -190,6 +191,28 @@ describe('OData component acceptance', () => {
     const firstIds = first.body.value.map((item: AnyObject) => item.id);
     const secondIds = second.body.value.map((item: AnyObject) => item.id);
     expect(secondIds.some((id: number) => !firstIds.includes(id))).to.be.true();
+  });
+
+  it('creates related entities for @odataModel-only definitions', async function (this: SkipContext) {
+    await rebuildApp(this, {}, async (instance: TestApplication) => {
+      registerODataOnlyModels(instance);
+    });
+
+    const incident = await client
+      .post('/odata/OdataOnlyIncidents')
+      .send({ title: 'New incident' })
+      .expect(200);
+    const incidentId = incident.body.id;
+    expect(incidentId).to.be.a.String();
+
+    const conversation = await client
+      .post('/odata/OdataOnlyConversations')
+      .send({ message: 'First reply', incidentId })
+      .expect(200);
+    expect(conversation.body.incidentId).to.equal(incidentId);
+
+    const spec = await client.get('/openapi.json').expect(200);
+    expect(JSON.stringify(spec.body)).to.not.match(/components\/schemas\/undefined/);
   });
 
   it('rejects invalid $skiptoken values', async () => {
