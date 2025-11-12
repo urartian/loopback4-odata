@@ -106,31 +106,15 @@ interface NormalizedBatchLimits {
   maxPartBodyBytes?: number;
 }
 
+interface ContentIdTokenMatch {
+  token: string;
+  wrapper?: {
+    prefix: string;
+    suffix: string;
+  };
+}
+
 const NON_TRANSACTIONAL_WARNINGS = new WeakSet<EntitySetDef>();
-const RESERVED_CONTENT_ID_TOKENS = new Set([
-  'metadata',
-  'batch',
-  'count',
-  'value',
-  'delta',
-  'deltatoken',
-  'ref',
-  'id',
-  'entity',
-  'links',
-  'top',
-  'skip',
-  'skiptoken',
-  'filter',
-  'select',
-  'search',
-  'orderby',
-  'expand',
-  'apply',
-  'compute',
-  'format',
-  'it',
-]);
 
 class AtomicityGroupContext {
   private readonly requestState: AtomicityRequestState;
@@ -717,7 +701,14 @@ export class ODataBatchController {
       entries.push(entry);
       if (request.id) dependencyResults.set(request.id, entry);
       if (contentIdMap) {
-        this.recordContentIdResult(prepared, entry, contentIdMap, requestOrder, contentIdEtags);
+        this.recordContentIdResult(
+          request,
+          prepared,
+          entry,
+          contentIdMap,
+          requestOrder,
+          contentIdEtags,
+        );
       }
       if (entry.status >= 400 && abortOnFailure) break;
     }
@@ -738,17 +729,11 @@ export class ODataBatchController {
     contentIds: Map<string, string>,
   ) {
     if (!value) return;
-    const pattern = /\$(requests\([^)]*\)|[A-Za-z_][A-Za-z0-9_.-]*|\d+)/gi;
-    value.replace(pattern, (match, token) => {
-      const normalized = token ?? match.slice(1);
-      if (this.isReservedContentIdToken(normalized)) {
-        return match;
-      }
-      if (!this.resolveContentIdTokenValue(normalized, contentIds)) {
-        throw new HttpErrors.BadRequest(`Unknown Content-ID reference ${match}.`);
-      }
-      return match;
-    });
+    const placeholder = this.extractContentIdToken(value);
+    if (!placeholder) return;
+    if (!this.resolveContentIdTokenValue(placeholder.token, contentIds)) {
+      throw new HttpErrors.BadRequest(`Unknown Content-ID reference ${value}.`);
+    }
   }
 
   private detectUnknownContentIdsInBody(
@@ -782,43 +767,40 @@ export class ODataBatchController {
     return normalized === '@odata.id' || normalized.endsWith('@odata.bind');
   }
 
-  private isReservedContentIdToken(token: string): boolean {
-    const normalized = token.toLowerCase();
-    return RESERVED_CONTENT_ID_TOKENS.has(normalized);
-  }
-
   private applyContentIdReferences(
     request: BatchRequest,
     contentIds: Map<string, string>,
   ): BatchRequest {
-    if (!contentIds.size) return request;
-    request.url = this.replaceContentIdTokensInString(request.url, contentIds) ?? request.url;
+    const updated: BatchRequest = { ...request };
+    updated.url = this.replaceContentIdTokensInString(request.url, contentIds) ?? request.url;
     if (request.headers) {
+      const headers: Record<string, string> = {};
       for (const [key, value] of Object.entries(request.headers)) {
-        request.headers[key] = this.replaceContentIdTokensInString(value, contentIds) ?? value;
+        headers[key] = this.replaceContentIdTokensInString(value, contentIds) ?? value;
       }
+      updated.headers = headers;
     }
     if (request.body !== undefined) {
-      request.body = this.replaceContentIdTokensInBody(request.body, contentIds);
+      updated.body = this.replaceContentIdTokensInBody(request.body, contentIds);
     }
-    return request;
+    return updated;
   }
 
   private replaceContentIdTokensInString(
     value: string | undefined,
     contentIds: Map<string, string>,
   ): string | undefined {
-    if (!value || !contentIds.size) return value;
-    const pattern = this.buildContentIdPattern(contentIds.keys());
-    if (!pattern) return value;
-    return value.replace(pattern, (match) => {
-      const token = match.slice(1);
-      const resolved = this.resolveContentIdTokenValue(token, contentIds);
-      if (!resolved) {
-        throw new HttpErrors.BadRequest(`Unknown Content-ID reference ${match}.`);
-      }
-      return resolved;
-    });
+    if (!value) return value;
+    const placeholder = this.extractContentIdToken(value);
+    if (!placeholder) return value;
+    const resolved = this.resolveContentIdTokenValue(placeholder.token, contentIds);
+    if (!resolved) {
+      throw new HttpErrors.BadRequest(`Unknown Content-ID reference ${value}.`);
+    }
+    if (placeholder.wrapper) {
+      return `${placeholder.wrapper.prefix}${resolved}${placeholder.wrapper.suffix}`;
+    }
+    return resolved;
   }
 
   private replaceContentIdTokensInBody(
@@ -836,23 +818,80 @@ export class ODataBatchController {
     if (Array.isArray(value)) {
       return value.map((entry) => this.replaceContentIdTokensInBody(entry, contentIds, currentKey));
     }
-    if (typeof value === 'object') {
-      for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
-        (value as Record<string, unknown>)[key] = this.replaceContentIdTokensInBody(
-          entry,
-          contentIds,
-          key,
-        );
+    if (this.isPlainObject(value)) {
+      const result: Record<string, unknown> = {};
+      for (const [key, entry] of Object.entries(value)) {
+        result[key] = this.replaceContentIdTokensInBody(entry, contentIds, key);
       }
+      return result;
     }
     return value;
   }
 
-  private buildContentIdPattern(keys: Iterable<string>): RegExp | undefined {
-    const tokens = Array.from(new Set(Array.from(keys).filter((key) => Boolean(key))));
-    if (!tokens.length) return undefined;
-    const escaped = tokens.map((token) => token.replace(/[-/\\^$*+?.()|[\]{}]/g, '\\$&'));
-    return new RegExp(`\\$(?:${escaped.join('|')})`, 'g');
+  private isPlainObject(value: unknown): value is Record<string, unknown> {
+    if (value === null || typeof value !== 'object') return false;
+    const prototype = Object.getPrototypeOf(value);
+    return prototype === Object.prototype || prototype === null;
+  }
+
+  private extractContentIdToken(value: string | undefined): ContentIdTokenMatch | undefined {
+    if (!value || value.length < 2) return undefined;
+    let candidate = value;
+    let wrapper: ContentIdTokenMatch['wrapper'];
+    const unwrapped = this.unwrapContentIdWrapper(candidate);
+    if (unwrapped) {
+      candidate = unwrapped.value;
+      wrapper = unwrapped.wrapper;
+    }
+    if (candidate.length < 2 || candidate[0] !== '$') return undefined;
+    if (/^\$\d+$/.test(candidate)) {
+      return { token: candidate.slice(1), wrapper };
+    }
+    if (/^\$[A-Za-z_][A-Za-z0-9_.-]*$/.test(candidate)) {
+      return { token: candidate.slice(1), wrapper };
+    }
+    if (/^\$requests\([^)]*\)$/i.test(candidate)) {
+      const inner = candidate.slice(candidate.indexOf('(') + 1, -1);
+      if (!inner) return undefined;
+      return { token: `requests(${inner})`, wrapper };
+    }
+    return undefined;
+  }
+
+  private unwrapContentIdWrapper(value: string):
+    | {
+        value: string;
+        wrapper: {
+          prefix: string;
+          suffix: string;
+        };
+      }
+    | undefined {
+    if (value.length < 2) return undefined;
+    const first = value[0];
+    const last = value[value.length - 1];
+    if ((first === '"' || first === "'") && last === first) {
+      if (value.length <= 2) return undefined;
+      return {
+        value: value.slice(1, -1),
+        wrapper: { prefix: first, suffix: first },
+      };
+    }
+    if (
+      value.length >= 4 &&
+      value[0] === '\\' &&
+      (value[1] === '"' || value[1] === "'") &&
+      value[value.length - 2] === '\\' &&
+      value[value.length - 1] === value[1]
+    ) {
+      if (value.length <= 4) return undefined;
+      const quote = value[1];
+      return {
+        value: value.slice(2, -2),
+        wrapper: { prefix: `\\${quote}`, suffix: `\\${quote}` },
+      };
+    }
+    return undefined;
   }
 
   private resolveContentIdTokenValue(
@@ -861,22 +900,23 @@ export class ODataBatchController {
   ): string | undefined {
     if (!token) return undefined;
     if (!token.startsWith('requests(')) {
-      return contentIds.get(token);
+      return this.getContentIdValue(contentIds, token);
     }
     const candidates = this.expandContentIdToken(token);
     for (const candidate of candidates) {
-      const resolved = contentIds.get(candidate);
+      const resolved = this.getContentIdValue(contentIds, candidate);
       if (resolved) return resolved;
     }
     const inner = token.slice('requests('.length, -1);
     if (!inner) return undefined;
-    if (contentIds.get(inner)) return contentIds.get(inner);
+    const direct = this.getContentIdValue(contentIds, inner);
+    if (direct) return direct;
     if (
       (inner.startsWith("'") && inner.endsWith("'")) ||
       (inner.startsWith('"') && inner.endsWith('"'))
     ) {
       const stripped = inner.slice(1, -1);
-      return contentIds.get(stripped);
+      return this.getContentIdValue(contentIds, stripped);
     }
     return undefined;
   }
@@ -894,25 +934,55 @@ export class ODataBatchController {
     return [token];
   }
 
+  private getContentIdValue(contentIds: Map<string, string>, key: string): string | undefined {
+    if (!key) return undefined;
+    const direct = contentIds.get(key);
+    if (direct !== undefined) return direct;
+    const normalized = this.normalizeContentIdKey(key);
+    if (normalized && normalized !== key) {
+      return contentIds.get(normalized);
+    }
+    return undefined;
+  }
+
+  private normalizeContentIdKey(key?: string): string | undefined {
+    if (!key) return undefined;
+    return key.toLowerCase();
+  }
+
+  private registerContentIdAlias(
+    contentIds: Map<string, string>,
+    key: string | undefined,
+    value: string,
+  ) {
+    if (!key) return;
+    contentIds.set(key, value);
+    const normalized = this.normalizeContentIdKey(key);
+    if (normalized && normalized !== key) {
+      contentIds.set(normalized, value);
+    }
+  }
+
   private recordContentIdResult(
-    request: BatchRequest,
+    originalRequest: BatchRequest,
+    preparedRequest: BatchRequest,
     response: BatchResponseEntry,
     contentIds: Map<string, string>,
     requestOrder: Map<BatchRequest, number>,
     contentIdEtags?: Map<string, string>,
   ) {
-    if (!request.id) return;
+    if (!originalRequest.id) return;
     if (response.status < 200 || response.status >= 400) return;
-    const target = this.resolveContentIdTarget(request, response);
+    const target = this.resolveContentIdTarget(preparedRequest, response);
     if (!target) return;
-    contentIds.set(request.id, target);
-    const ordinal = requestOrder.get(request);
+    this.registerContentIdAlias(contentIds, originalRequest.id, target);
+    const ordinal = requestOrder.get(originalRequest);
     if (ordinal !== undefined) {
-      contentIds.set(`requests(${ordinal + 1})`, target);
+      this.registerContentIdAlias(contentIds, `requests(${ordinal + 1})`, target);
     }
-    contentIds.set(`requests(${request.id})`, target);
-    contentIds.set(`requests('${request.id}')`, target);
-    contentIds.set(`requests("${request.id}")`, target);
+    this.registerContentIdAlias(contentIds, `requests(${originalRequest.id})`, target);
+    this.registerContentIdAlias(contentIds, `requests('${originalRequest.id}')`, target);
+    this.registerContentIdAlias(contentIds, `requests("${originalRequest.id}")`, target);
     if (contentIdEtags) {
       this.recordContentIdEtag(target, response, contentIdEtags);
     }

@@ -670,25 +670,218 @@ describe('$batch controller', () => {
     );
   });
 
-  it('allows reserved system tokens like $skiptoken and $deltatoken', () => {
+  it('allows dollar-prefixed literals and query options without Content-ID references', async () => {
     const controller = createController({
       list: { status: 200, body: { value: [] } },
     });
 
-    assert.doesNotThrow(async () => {
-      await controller.handleBatch(
+    await assert.doesNotReject(() =>
+      controller.handleBatch(
         {
           requests: [
             {
               id: 'list',
               method: 'GET',
-              url: '/odata/Products?$skiptoken=abc&$deltatoken=xyz',
+              url: "/odata/Products('SKU$001')?$filter=contains(description,'$100')&$expand=Categories($levels=2)",
             },
           ],
         },
         responseStub,
         requestStub('application/json'),
-      );
-    });
+      ),
+    );
+  });
+
+  it('ignores substrings in headers and non-metadata body fields', () => {
+    const controller = createController({});
+    const contentIds = new Map<string, string>([['known', '/odata/Products(1)']]);
+
+    assert.doesNotThrow(() =>
+      (controller as any).assertContentIdAvailability(
+        {
+          url: '/odata/Products',
+          method: 'GET',
+          headers: {
+            Authorization: 'Bearer $known',
+          },
+          body: {
+            description: 'Costs $100',
+          },
+        },
+        contentIds,
+      ),
+    );
+  });
+
+  it('allows metadata literals containing dollar signs', () => {
+    const controller = createController({});
+    assert.doesNotThrow(() =>
+      (controller as any).assertContentIdAvailability(
+        {
+          url: '/odata/Products',
+          method: 'PATCH',
+          body: {
+            '@odata.id': "/odata/Products('SKU$001')",
+          },
+        },
+        new Map(),
+      ),
+    );
+  });
+
+  it('rejects placeholder references even when content ID map is empty', () => {
+    const controller = createController({});
+
+    assert.throws(
+      () =>
+        (controller as any).assertContentIdAvailability(
+          {
+            url: '/odata/Products',
+            method: 'GET',
+            headers: {
+              'If-Match': '"$missing"',
+            },
+            body: {
+              '@odata.id': "'$missing'",
+            },
+          },
+          new Map(),
+        ),
+      (err: unknown) => err instanceof HttpErrors.BadRequest,
+    );
+  });
+
+  it('resolves quoted placeholders and preserves wrappers when present', () => {
+    const controller = createController({});
+    const request = {
+      method: 'PATCH',
+      id: 'update',
+      url: '"$parent"',
+      headers: {
+        Location: "'$REQUESTS(parent)'",
+        Authorization: 'Bearer $parent',
+      },
+      body: {
+        '@odata.id': '"$parent"',
+        link: {
+          '@odata.bind': '\'$REQUESTS("parent")\'',
+        },
+      },
+    };
+    const contentIds = new Map<string, string>([
+      ['parent', '/odata/Products(1)'],
+      ['requests(parent)', '/odata/Products(1)'],
+      ['requests("parent")', '/odata/Products(1)'],
+    ]);
+
+    const result = (controller as any).applyContentIdReferences(request, contentIds);
+    assert.equal(result.url, '"/odata/Products(1)"');
+    assert.equal(result.headers?.Location, "'/odata/Products(1)'");
+    assert.equal(result.headers?.Authorization, 'Bearer $parent');
+    const body = result.body as Record<string, any>;
+    assert.equal(body?.['@odata.id'], '"/odata/Products(1)"');
+    assert.equal(body?.link?.['@odata.bind'], "'/odata/Products(1)'");
+  });
+
+  it('resolves case-insensitive content-id placeholders', () => {
+    const controller = createController({});
+    const request = {
+      method: 'PATCH',
+      id: 'update',
+      url: '$PARENT',
+      headers: {
+        Location: '$REQUESTS("PARENT")',
+        'If-Match': '$Requests(parent)',
+      },
+      body: {
+        '@odata.id': '$parent',
+      },
+    };
+    const contentIds = new Map<string, string>([
+      ['parent', '/odata/Products(1)'],
+      ['requests(parent)', '/odata/Products(1)'],
+      ['requests("parent")', '/odata/Products(1)'],
+    ]);
+
+    const result = (controller as any).applyContentIdReferences(request, contentIds);
+    assert.equal(result.url, '/odata/Products(1)');
+    assert.equal(result.headers?.Location, '/odata/Products(1)');
+    assert.equal(result.headers?.['If-Match'], '/odata/Products(1)');
+    const body = result.body as Record<string, any>;
+    assert.equal(body?.['@odata.id'], '/odata/Products(1)');
+  });
+
+  it('supports escaped quote placeholders', () => {
+    const controller = createController({});
+    const request = {
+      method: 'PATCH',
+      id: 'update',
+      url: '\\"$parent\\"',
+      headers: {
+        ETag: "\\'$parent\\'",
+      },
+      body: {
+        '@odata.id': '\\"$parent\\"',
+      },
+    };
+    const contentIds = new Map<string, string>([['parent', '/odata/Products(1)']]);
+
+    const result = (controller as any).applyContentIdReferences(request, contentIds);
+    assert.equal(result.url, '\\"/odata/Products(1)\\"');
+    assert.equal(result.headers?.ETag, "\\'/odata/Products(1)\\'");
+    const body = result.body as Record<string, any>;
+    assert.equal(body?.['@odata.id'], '\\"/odata/Products(1)\\"');
+  });
+
+  it('does not mutate original request when substitution fails', () => {
+    const controller = createController({});
+    const request = {
+      method: 'PATCH',
+      id: 'update',
+      url: '$missing',
+      headers: {
+        Location: '$missing',
+      },
+    };
+
+    assert.throws(
+      () => (controller as any).applyContentIdReferences(request, new Map()),
+      (err: unknown) => err instanceof HttpErrors.BadRequest,
+    );
+    assert.equal(request.url, '$missing');
+    assert.equal(request.headers?.Location, '$missing');
+  });
+
+  it('replaces only whole-value placeholders in urls, headers, and metadata fields', () => {
+    const controller = createController({});
+    const request = {
+      method: 'PATCH',
+      id: 'update',
+      url: '$parent',
+      headers: {
+        Location: '$REQUESTS(parent)',
+        Authorization: 'Bearer $parent',
+      },
+      body: {
+        '@odata.id': '$parent',
+        link: {
+          '@odata.bind': '$REQUESTS("parent")',
+        },
+      },
+    };
+    const contentIds = new Map<string, string>([
+      ['parent', '/odata/Products(1)'],
+      ['requests(parent)', '/odata/Products(1)'],
+      ['requests("parent")', '/odata/Products(1)'],
+    ]);
+
+    const result = (controller as any).applyContentIdReferences(request, contentIds);
+
+    assert.equal(result.url, '/odata/Products(1)');
+    assert.equal(result.headers?.Location, '/odata/Products(1)');
+    assert.equal(result.headers?.Authorization, 'Bearer $parent');
+    const body = result.body as Record<string, any>;
+    assert.equal(body?.['@odata.id'], '/odata/Products(1)');
+    assert.equal(body?.link?.['@odata.bind'], '/odata/Products(1)');
   });
 });
