@@ -146,4 +146,27 @@ describe('MySqlApplyExecutor (multi-stage)', () => {
       executedSql.indexOf('SELECT * FROM stage1 ORDER BY `OverallCount` DESC LIMIT 1'),
     );
   });
+
+  it('treats ilike/nilike as case-insensitive comparisons', () => {
+    const executor = new MySqlApplyExecutor();
+    const internal = executor as AnyObject;
+    expect(typeof internal.buildPropertyCondition).to.equal('function');
+    const params: unknown[] = [];
+    const likeClause = internal.buildPropertyCondition(
+      '`orders`.`status`',
+      { ilike: '%foo%' },
+      params,
+    );
+    expect(likeClause).to.equal('LOWER(`orders`.`status`) LIKE LOWER(?)');
+    expect(params).to.deepEqual(['%foo%']);
+
+    const params2: unknown[] = [];
+    const notLikeClause = internal.buildPropertyCondition(
+      '`orders`.`status`',
+      { nilike: '%foo%' },
+      params2,
+    );
+    expect(notLikeClause).to.equal('LOWER(`orders`.`status`) NOT LIKE LOWER(?)');
+    expect(params2).to.deepEqual(['%foo%']);
+  });
 });

@@ -1336,6 +1336,197 @@ describe('OData component acceptance', () => {
     expect(second.body?.error?.code).to.equal('FailedDependency');
   });
 
+  it('allows service-root-relative URLs in JSON $batch requests', async () => {
+    const res = await client
+      .post('/odata/$batch')
+      .send({
+        requests: [{ id: 'relative', method: 'GET', url: 'Products?$top=1' }],
+      })
+      .expect(200);
+
+    const [responseEntry] = res.body.responses;
+    expect(responseEntry.status).to.equal(200);
+    expect(Array.isArray(responseEntry.body.value)).to.be.true();
+    expect(responseEntry.body.value).to.have.length(1);
+  });
+
+  it('rejects dependsOn references to later requests', async () => {
+    await client
+      .post('/odata/$batch')
+      .send({
+        requests: [
+          {
+            id: 'first',
+            method: 'GET',
+            url: '/odata/Products',
+            dependsOn: ['second'],
+          },
+          {
+            id: 'second',
+            method: 'GET',
+            url: '/odata/Products?$top=1',
+          },
+        ],
+      })
+      .expect(400)
+      .expect((res) => {
+        expect(res.body.error?.message).to.match(/appears later/i);
+      });
+  });
+
+  it('skips dependent requests when dependencies fail', async () => {
+    const res = await client
+      .post('/odata/$batch')
+      .send({
+        requests: [
+          {
+            id: 'invalid-create',
+            method: 'POST',
+            url: '/odata/Products',
+            body: { price: 10 },
+          },
+          {
+            id: 'should-skip',
+            method: 'GET',
+            url: '/odata/Products',
+            dependsOn: ['invalid-create'],
+          },
+          {
+            id: 'independent',
+            method: 'GET',
+            url: '/odata/Products?$top=1',
+          },
+        ],
+      })
+      .expect(200);
+
+    const responses = res.body.responses;
+    const failing = responses.find((entry: AnyObject) => entry.id === 'invalid-create');
+    const skipped = responses.find((entry: AnyObject) => entry.id === 'should-skip');
+    const independent = responses.find((entry: AnyObject) => entry.id === 'independent');
+    expect(failing).to.be.Object();
+    expect(skipped).to.be.Object();
+    expect(independent).to.be.Object();
+    expect(failing.status).to.equal(422);
+    expect(skipped.status).to.equal(424);
+    expect(skipped.body?.error?.code).to.equal('FailedDependency');
+    expect(independent.status).to.equal(200);
+    expect(Array.isArray(independent.body?.value)).to.be.true();
+  });
+
+  it('substitutes Content-ID references within JSON changesets', async () => {
+    const dataSource = await app.get('datasources.db');
+    (dataSource as AnyObject).beginTransaction = async (_isolation?: unknown) => ({
+      commit: async () => undefined,
+      rollback: async () => undefined,
+    });
+
+    const res = await client
+      .post('/odata/$batch')
+      .send({
+        requests: [
+          {
+            id: 'create-product',
+            atomicityGroup: 'set-2',
+            method: 'POST',
+            url: '/odata/Products',
+            body: { name: 'Batch Camera', price: 899 },
+          },
+          {
+            id: 'update-product',
+            atomicityGroup: 'set-2',
+            method: 'PATCH',
+            url: '$create-product',
+            body: { price: 999 },
+          },
+          {
+            id: 'fetch-product',
+            atomicityGroup: 'set-2',
+            method: 'GET',
+            url: '$requests(1)',
+            dependsOn: ['create-product', 'update-product'],
+          },
+        ],
+      })
+      .expect(200);
+
+    const responses = res.body.responses;
+    const create = responses.find((entry: AnyObject) => entry.id === 'create-product');
+    const update = responses.find((entry: AnyObject) => entry.id === 'update-product');
+    const fetch = responses.find((entry: AnyObject) => entry.id === 'fetch-product');
+    expect(create.status).to.equal(200);
+    expect(update.status).to.equal(200);
+    expect(fetch.status).to.equal(200);
+    const productId = create.body?.id;
+    expect(productId).to.be.ok();
+    expect(fetch.body?.price).to.equal(999);
+    const persisted = await client.get(`/odata/Products(${productId})`).expect(200);
+    expect(persisted.body.price).to.equal(999);
+  });
+
+  it('resolves Content-ID references across JSON requests', async () => {
+    const res = await client
+      .post('/odata/$batch')
+      .send({
+        requests: [
+          {
+            id: 'create-product-json',
+            method: 'POST',
+            url: '/odata/Products',
+            body: { name: 'Json Batch Camera', price: 512 },
+          },
+          {
+            id: 'fetch-product-json',
+            method: 'GET',
+            url: '$create-product-json',
+            dependsOn: ['create-product-json'],
+          },
+        ],
+      })
+      .expect(200);
+
+    const responses = res.body.responses;
+    const create = responses.find((entry: AnyObject) => entry.id === 'create-product-json');
+    const fetch = responses.find((entry: AnyObject) => entry.id === 'fetch-product-json');
+    expect(create.status).to.equal(200);
+    expect(fetch.status).to.equal(200);
+    expect(fetch.body?.price).to.equal(512);
+    expect(fetch.body?.id).to.equal(create.body?.id);
+  });
+
+  it('rejects JSON changesets that reference unknown Content-ID tokens', async () => {
+    const dataSource = await app.get('datasources.db');
+    (dataSource as AnyObject).beginTransaction = async (_isolation?: unknown) => ({
+      commit: async () => undefined,
+      rollback: async () => undefined,
+    });
+
+    await client
+      .post('/odata/$batch')
+      .send({
+        requests: [
+          {
+            id: 'create-product',
+            atomicityGroup: 'set-unknown',
+            method: 'POST',
+            url: '/odata/Products',
+            body: { name: 'Camera', price: 199 },
+          },
+          {
+            id: 'broken-reference',
+            atomicityGroup: 'set-unknown',
+            method: 'PATCH',
+            url: '$missing-token',
+            body: { price: 299 },
+          },
+        ],
+      })
+      .expect(400)
+      .expect((res) => {
+        expect(res.body.error?.message).to.match(/Content-ID/i);
+      });
+  });
+
   it('applies string predicates through REST filter', async () => {
     const res = await client
       .get('/odata/Products')
@@ -1513,7 +1704,7 @@ describe('OData component acceptance', () => {
     const res = await client
       .post('/odata/$batch')
       .send({
-        requests: [{ id: 'bad', method: 'GET', url: 'notaurl' }],
+        requests: [{ id: 'bad', method: 'GET', url: '' }],
       })
       .expect(200);
 

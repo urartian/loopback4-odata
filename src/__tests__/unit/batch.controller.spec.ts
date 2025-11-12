@@ -144,6 +144,32 @@ describe('$batch controller', () => {
     assert.equal(rollbackCalled, true);
   });
 
+  it('continues executing independent JSON requests after a failure', async () => {
+    const controller = createController({
+      fail: { status: 422, body: { error: { code: 'Invalid' } } },
+      ok: { status: 200, body: { value: [{ id: 1 }] } },
+    });
+
+    const result = (await controller.handleBatch(
+      {
+        requests: [
+          { id: 'fail', method: 'POST', url: '/odata/Products' },
+          { id: 'ok', method: 'GET', url: '/odata/Products' },
+        ],
+      },
+      responseStub,
+      requestStub('application/json'),
+    )) as BatchResponsePayload;
+
+    assert.equal(result.responses.length, 2);
+    const [first, second] = result.responses;
+    assert.equal(first.id, 'fail');
+    assert.equal(first.status, 422);
+    assert.equal(second.id, 'ok');
+    assert.equal(second.status, 200);
+    assert.deepStrictEqual(second.body, { value: [{ id: 1 }] });
+  });
+
   it('rejects empty request arrays', async () => {
     const controller = createController({});
     await assert.rejects(
@@ -602,5 +628,67 @@ describe('$batch controller', () => {
     );
 
     assert.equal(def.supportsTransactions, false);
+  });
+
+  it('rejects dependsOn references to later requests', async () => {
+    const controller = createController({
+      first: { status: 200 },
+      second: { status: 200 },
+    });
+
+    await assert.rejects(
+      controller.handleBatch(
+        {
+          requests: [
+            { id: 'first', method: 'GET', url: '/odata/Products', dependsOn: ['second'] },
+            { id: 'second', method: 'GET', url: '/odata/Products?$top=1' },
+          ],
+        },
+        responseStub,
+        requestStub('application/json'),
+      ),
+      (err: unknown) =>
+        err instanceof HttpErrors.BadRequest &&
+        /appears later in the payload/i.test(err.message ?? ''),
+    );
+  });
+
+  it('throws when Content-ID references are unknown string tokens', () => {
+    const controller = createController({});
+    const contentIds = new Map<string, string>([['known-token', '/odata/Products(1)']]);
+    assert.throws(
+      () =>
+        (controller as any).assertContentIdAvailability(
+          {
+            url: '$missing-token',
+            headers: {},
+            method: 'GET',
+          },
+          contentIds,
+        ),
+      (err: unknown) => err instanceof HttpErrors.BadRequest,
+    );
+  });
+
+  it('allows reserved system tokens like $skiptoken and $deltatoken', () => {
+    const controller = createController({
+      list: { status: 200, body: { value: [] } },
+    });
+
+    assert.doesNotThrow(async () => {
+      await controller.handleBatch(
+        {
+          requests: [
+            {
+              id: 'list',
+              method: 'GET',
+              url: '/odata/Products?$skiptoken=abc&$deltatoken=xyz',
+            },
+          ],
+        },
+        responseStub,
+        requestStub('application/json'),
+      );
+    });
   });
 });
