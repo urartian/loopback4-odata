@@ -11,7 +11,13 @@ import {
 import { HttpHandler } from '@loopback/rest/dist/http-handler';
 import { IncomingMessage, ServerResponse } from 'http';
 import { PassThrough } from 'stream';
-import { IsolationLevel, Transaction, juggler } from '@loopback/repository';
+import {
+  Entity,
+  IsolationLevel,
+  PropertyDefinition,
+  Transaction,
+  juggler,
+} from '@loopback/repository';
 import { ODATA_BINDINGS, ODataLogger } from '../keys';
 import { EntitySetDef, EntitySetRegistry } from '../registry/entityset-registry';
 import { ODATA_ATOMICITY_STATE, ODATA_VERSION } from '../constants';
@@ -26,6 +32,7 @@ import {
   probeDataSourceTransactionalCapability,
 } from '../util/datasource-transactions';
 import { emitTelemetryEvent } from '../util/telemetry';
+import { rewriteODataUrl } from '../middleware/odata-path-rewriter';
 
 const BATCH_OPERATION_SPEC = markUndocumentedOperation({
   responses: {
@@ -72,6 +79,7 @@ export interface BatchRequest {
   url: string;
   headers?: Record<string, string>;
   body?: unknown;
+  dependsOn?: string[];
 }
 
 interface BatchPayload {
@@ -96,6 +104,14 @@ interface NormalizedBatchLimits {
   maxChangesetOperations?: number;
   maxDepth?: number;
   maxPartBodyBytes?: number;
+}
+
+interface ContentIdTokenMatch {
+  token: string;
+  wrapper?: {
+    prefix: string;
+    suffix: string;
+  };
 }
 
 const NON_TRANSACTIONAL_WARNINGS = new WeakSet<EntitySetDef>();
@@ -170,6 +186,9 @@ class AtomicityGroupContext {
 }
 
 export class ODataBatchController {
+  private readonly serviceRootPath: string;
+  private readonly serviceRootSegments: string[];
+
   constructor(
     @inject(RestBindings.HANDLER)
     private readonly httpHandler: HttpHandler,
@@ -185,7 +204,10 @@ export class ODataBatchController {
     private readonly logger: ODataLogger,
     @inject(ODATA_BINDINGS.CONFIG)
     private readonly cfg: ODataConfig,
-  ) {}
+  ) {
+    this.serviceRootPath = this.normalizeServiceRootPath(this.cfg?.basePath);
+    this.serviceRootSegments = this.serviceRootPath.split('/').filter(Boolean);
+  }
 
   private requestState?: ODataRequestState | null;
 
@@ -212,6 +234,10 @@ export class ODataBatchController {
                     },
                     body: {},
                     atomicityGroup: { type: 'string' },
+                    dependsOn: {
+                      type: 'array',
+                      items: { type: 'string' },
+                    },
                   },
                 },
               },
@@ -271,13 +297,18 @@ export class ODataBatchController {
         this.enforceOperationLimit(jsonRequests.length, limits);
         this.enforceJsonPayloadSize(jsonPayload, limits);
         requests = jsonRequests;
+        this.validateJsonDependsOn(requests);
       }
 
       this.enforceOperationLimit(requests.length, limits);
+      const requestOrder = this.buildRequestOrderIndex(requests);
 
       grouped = this.groupByAtomicity(requests);
       operationCount = requests.length;
       changesetCount = grouped.filter((group) => Boolean(group.atomicityGroup)).length;
+      const dependencyResults = new Map<string, BatchResponseEntry>();
+      const contentIdMap = new Map<string, string>();
+      const contentIdEtags = new Map<string, string>();
       const responses: BatchResponseEntry[] = [];
 
       const maxChangesetOps = limits.maxChangesetOperations;
@@ -303,6 +334,10 @@ export class ODataBatchController {
               group.requests,
               group.atomicityGroup,
               request,
+              dependencyResults,
+              requestOrder,
+              contentIdMap,
+              contentIdEtags,
             );
             if (entries?.length) {
               responses.push(
@@ -313,6 +348,9 @@ export class ODataBatchController {
               );
             }
           } catch (error) {
+            if (this.isBatchValidationError(error)) {
+              throw error;
+            }
             const status = this.resolveErrorStatus(error, 500);
             responses.push({
               atomicityGroup: group.atomicityGroup,
@@ -324,7 +362,16 @@ export class ODataBatchController {
             });
           }
         } else {
-          const entries = await this.executeGroup(group.requests, undefined, request);
+          const entries = await this.executeGroup(
+            group.requests,
+            undefined,
+            request,
+            dependencyResults,
+            requestOrder,
+            false,
+            contentIdMap,
+            contentIdEtags,
+          );
           responses.push(...entries);
         }
       }
@@ -567,52 +614,656 @@ export class ODataBatchController {
     return result;
   }
 
+  private buildRequestOrderIndex(requests: BatchRequest[]): Map<BatchRequest, number> {
+    const index = new Map<BatchRequest, number>();
+    requests.forEach((req, idx) => index.set(req, idx));
+    return index;
+  }
+
+  private validateJsonDependsOn(requests: BatchRequest[]): void {
+    const idPositions = new Map<string, number>();
+
+    requests.forEach((request, index) => {
+      if (request.id) {
+        if (idPositions.has(request.id)) {
+          throw new HttpErrors.BadRequest(
+            `Duplicate request id detected in batch payload: ${request.id}`,
+          );
+        }
+        idPositions.set(request.id, index);
+      }
+      if (request.dependsOn === undefined) return;
+      if (!Array.isArray(request.dependsOn)) {
+        throw new HttpErrors.BadRequest('dependsOn must be an array of request identifiers.');
+      }
+      const normalized: string[] = [];
+      for (const value of request.dependsOn) {
+        if (typeof value !== 'string' || !value.trim()) {
+          throw new HttpErrors.BadRequest('dependsOn entries must be non-empty strings.');
+        }
+        normalized.push(value.trim());
+      }
+      request.dependsOn = normalized;
+    });
+
+    for (let index = 0; index < requests.length; index++) {
+      const request = requests[index];
+      const deps = request.dependsOn;
+      if (!deps?.length) continue;
+      if (!request.id) {
+        throw new HttpErrors.BadRequest('Requests that declare dependsOn must also specify an id.');
+      }
+      for (const dependencyId of deps) {
+        const dependencyIndex = idPositions.get(dependencyId);
+        if (dependencyIndex === undefined) {
+          throw new HttpErrors.BadRequest(
+            `dependsOn references unknown request id: ${dependencyId}.`,
+          );
+        }
+        if (dependencyIndex >= index) {
+          throw new HttpErrors.BadRequest(
+            `Request ${request.id} depends on ${dependencyId}, which appears later in the payload.`,
+          );
+        }
+      }
+    }
+  }
+
   private async executeGroup(
     requests: BatchRequest[],
     context: AtomicityGroupContext | undefined,
     parentRequest: Request,
+    dependencyResults: Map<string, BatchResponseEntry>,
+    requestOrder: Map<BatchRequest, number>,
+    abortOnFailure: boolean,
+    contentIdMap?: Map<string, string>,
+    contentIdEtags?: Map<string, string>,
   ): Promise<BatchResponseEntry[]> {
     const entries: BatchResponseEntry[] = [];
     for (const request of requests) {
-      const entry = await this.executeSingle(request, context, parentRequest);
+      if (contentIdMap) {
+        this.assertContentIdAvailability(request, contentIdMap);
+      }
+      const dependencyFailure = this.evaluateDependsOn(request, dependencyResults);
+      if (dependencyFailure) {
+        entries.push(dependencyFailure);
+        if (request.id) dependencyResults.set(request.id, dependencyFailure);
+        if (abortOnFailure) break;
+        continue;
+      }
+      const prepared = contentIdMap
+        ? this.applyContentIdReferences(request, contentIdMap)
+        : request;
+      if (contentIdEtags) {
+        this.ensureEtagPreconditions(prepared, contentIdEtags);
+      }
+      const entry = await this.executeSingle(prepared, context, parentRequest);
       entries.push(entry);
-      if (entry.status >= 400) break;
+      if (request.id) dependencyResults.set(request.id, entry);
+      if (contentIdMap) {
+        this.recordContentIdResult(
+          request,
+          prepared,
+          entry,
+          contentIdMap,
+          requestOrder,
+          contentIdEtags,
+        );
+      }
+      if (entry.status >= 400 && abortOnFailure) break;
     }
     return entries;
+  }
+
+  private assertContentIdAvailability(request: BatchRequest, contentIds: Map<string, string>) {
+    this.detectUnknownContentIdsInString(request.url, contentIds);
+    const headers = request.headers ?? {};
+    for (const value of Object.values(headers)) {
+      this.detectUnknownContentIdsInString(value, contentIds);
+    }
+    this.detectUnknownContentIdsInBody(request.body, contentIds);
+  }
+
+  private detectUnknownContentIdsInString(
+    value: string | undefined,
+    contentIds: Map<string, string>,
+  ) {
+    if (!value) return;
+    const placeholder = this.extractContentIdToken(value);
+    if (!placeholder) return;
+    if (!this.resolveContentIdTokenValue(placeholder.token, contentIds)) {
+      throw new HttpErrors.BadRequest(`Unknown Content-ID reference ${value}.`);
+    }
+  }
+
+  private detectUnknownContentIdsInBody(
+    value: unknown,
+    contentIds: Map<string, string>,
+    currentKey?: string,
+  ) {
+    if (value === null || value === undefined) return;
+    if (typeof value === 'string') {
+      if (this.shouldInspectContentIdValue(currentKey)) {
+        this.detectUnknownContentIdsInString(value, contentIds);
+      }
+      return;
+    }
+    if (Array.isArray(value)) {
+      for (const entry of value) {
+        this.detectUnknownContentIdsInBody(entry, contentIds, currentKey);
+      }
+      return;
+    }
+    if (typeof value === 'object') {
+      for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+        this.detectUnknownContentIdsInBody(entry, contentIds, key);
+      }
+    }
+  }
+
+  private shouldInspectContentIdValue(key?: string): boolean {
+    if (!key) return false;
+    const normalized = key.toLowerCase();
+    return normalized === '@odata.id' || normalized.endsWith('@odata.bind');
+  }
+
+  private applyContentIdReferences(
+    request: BatchRequest,
+    contentIds: Map<string, string>,
+  ): BatchRequest {
+    const updated: BatchRequest = { ...request };
+    updated.url = this.replaceContentIdTokensInString(request.url, contentIds) ?? request.url;
+    if (request.headers) {
+      const headers: Record<string, string> = {};
+      for (const [key, value] of Object.entries(request.headers)) {
+        headers[key] = this.replaceContentIdTokensInString(value, contentIds) ?? value;
+      }
+      updated.headers = headers;
+    }
+    if (request.body !== undefined) {
+      updated.body = this.replaceContentIdTokensInBody(request.body, contentIds);
+    }
+    return updated;
+  }
+
+  private replaceContentIdTokensInString(
+    value: string | undefined,
+    contentIds: Map<string, string>,
+  ): string | undefined {
+    if (!value) return value;
+    const placeholder = this.extractContentIdToken(value);
+    if (!placeholder) return value;
+    const resolved = this.resolveContentIdTokenValue(placeholder.token, contentIds);
+    if (!resolved) {
+      throw new HttpErrors.BadRequest(`Unknown Content-ID reference ${value}.`);
+    }
+    if (placeholder.wrapper) {
+      return `${placeholder.wrapper.prefix}${resolved}${placeholder.wrapper.suffix}`;
+    }
+    return resolved;
+  }
+
+  private replaceContentIdTokensInBody(
+    value: unknown,
+    contentIds: Map<string, string>,
+    currentKey?: string,
+  ): unknown {
+    if (value === null || value === undefined) return value;
+    if (typeof value === 'string') {
+      if (this.shouldInspectContentIdValue(currentKey)) {
+        return this.replaceContentIdTokensInString(value, contentIds);
+      }
+      return value;
+    }
+    if (Array.isArray(value)) {
+      return value.map((entry) => this.replaceContentIdTokensInBody(entry, contentIds, currentKey));
+    }
+    if (this.isPlainObject(value)) {
+      const result: Record<string, unknown> = {};
+      for (const [key, entry] of Object.entries(value)) {
+        result[key] = this.replaceContentIdTokensInBody(entry, contentIds, key);
+      }
+      return result;
+    }
+    return value;
+  }
+
+  private isPlainObject(value: unknown): value is Record<string, unknown> {
+    if (value === null || typeof value !== 'object') return false;
+    const prototype = Object.getPrototypeOf(value);
+    return prototype === Object.prototype || prototype === null;
+  }
+
+  private extractContentIdToken(value: string | undefined): ContentIdTokenMatch | undefined {
+    if (!value || value.length < 2) return undefined;
+    let candidate = value;
+    let wrapper: ContentIdTokenMatch['wrapper'];
+    const unwrapped = this.unwrapContentIdWrapper(candidate);
+    if (unwrapped) {
+      candidate = unwrapped.value;
+      wrapper = unwrapped.wrapper;
+    }
+    if (candidate.length < 2 || candidate[0] !== '$') return undefined;
+    if (/^\$\d+$/.test(candidate)) {
+      return { token: candidate.slice(1), wrapper };
+    }
+    if (/^\$[A-Za-z_][A-Za-z0-9_.-]*$/.test(candidate)) {
+      return { token: candidate.slice(1), wrapper };
+    }
+    if (/^\$requests\([^)]*\)$/i.test(candidate)) {
+      const inner = candidate.slice(candidate.indexOf('(') + 1, -1);
+      if (!inner) return undefined;
+      return { token: `requests(${inner})`, wrapper };
+    }
+    return undefined;
+  }
+
+  private unwrapContentIdWrapper(value: string):
+    | {
+        value: string;
+        wrapper: {
+          prefix: string;
+          suffix: string;
+        };
+      }
+    | undefined {
+    if (value.length < 2) return undefined;
+    const first = value[0];
+    const last = value[value.length - 1];
+    if ((first === '"' || first === "'") && last === first) {
+      if (value.length <= 2) return undefined;
+      return {
+        value: value.slice(1, -1),
+        wrapper: { prefix: first, suffix: first },
+      };
+    }
+    if (
+      value.length >= 4 &&
+      value[0] === '\\' &&
+      (value[1] === '"' || value[1] === "'") &&
+      value[value.length - 2] === '\\' &&
+      value[value.length - 1] === value[1]
+    ) {
+      if (value.length <= 4) return undefined;
+      const quote = value[1];
+      return {
+        value: value.slice(2, -2),
+        wrapper: { prefix: `\\${quote}`, suffix: `\\${quote}` },
+      };
+    }
+    return undefined;
+  }
+
+  private resolveContentIdTokenValue(
+    token: string,
+    contentIds: Map<string, string>,
+  ): string | undefined {
+    if (!token) return undefined;
+    if (!token.startsWith('requests(')) {
+      return this.getContentIdValue(contentIds, token);
+    }
+    const candidates = this.expandContentIdToken(token);
+    for (const candidate of candidates) {
+      const resolved = this.getContentIdValue(contentIds, candidate);
+      if (resolved) return resolved;
+    }
+    const inner = token.slice('requests('.length, -1);
+    if (!inner) return undefined;
+    const direct = this.getContentIdValue(contentIds, inner);
+    if (direct) return direct;
+    if (
+      (inner.startsWith("'") && inner.endsWith("'")) ||
+      (inner.startsWith('"') && inner.endsWith('"'))
+    ) {
+      const stripped = inner.slice(1, -1);
+      return this.getContentIdValue(contentIds, stripped);
+    }
+    return undefined;
+  }
+
+  private expandContentIdToken(token: string): string[] {
+    if (!token.startsWith('requests(') || !token.endsWith(')')) return [token];
+    const inner = token.slice('requests('.length, -1);
+    if (
+      (inner.startsWith("'") && inner.endsWith("'")) ||
+      (inner.startsWith('"') && inner.endsWith('"'))
+    ) {
+      const unquoted = inner.slice(1, -1);
+      return [token, `requests(${unquoted})`];
+    }
+    return [token];
+  }
+
+  private getContentIdValue(contentIds: Map<string, string>, key: string): string | undefined {
+    if (!key) return undefined;
+    const direct = contentIds.get(key);
+    if (direct !== undefined) return direct;
+    const normalized = this.normalizeContentIdKey(key);
+    if (normalized && normalized !== key) {
+      return contentIds.get(normalized);
+    }
+    return undefined;
+  }
+
+  private normalizeContentIdKey(key?: string): string | undefined {
+    if (!key) return undefined;
+    return key.toLowerCase();
+  }
+
+  private registerContentIdAlias(
+    contentIds: Map<string, string>,
+    key: string | undefined,
+    value: string,
+  ) {
+    if (!key) return;
+    contentIds.set(key, value);
+    const normalized = this.normalizeContentIdKey(key);
+    if (normalized && normalized !== key) {
+      contentIds.set(normalized, value);
+    }
+  }
+
+  private recordContentIdResult(
+    originalRequest: BatchRequest,
+    preparedRequest: BatchRequest,
+    response: BatchResponseEntry,
+    contentIds: Map<string, string>,
+    requestOrder: Map<BatchRequest, number>,
+    contentIdEtags?: Map<string, string>,
+  ) {
+    if (!originalRequest.id) return;
+    if (response.status < 200 || response.status >= 400) return;
+    const target = this.resolveContentIdTarget(preparedRequest, response);
+    if (!target) return;
+    this.registerContentIdAlias(contentIds, originalRequest.id, target);
+    const ordinal = requestOrder.get(originalRequest);
+    if (ordinal !== undefined) {
+      this.registerContentIdAlias(contentIds, `requests(${ordinal + 1})`, target);
+    }
+    this.registerContentIdAlias(contentIds, `requests(${originalRequest.id})`, target);
+    this.registerContentIdAlias(contentIds, `requests('${originalRequest.id}')`, target);
+    this.registerContentIdAlias(contentIds, `requests("${originalRequest.id}")`, target);
+    if (contentIdEtags) {
+      this.recordContentIdEtag(target, response, contentIdEtags);
+    }
+  }
+
+  private recordContentIdEtag(
+    target: string,
+    response: BatchResponseEntry,
+    contentIdEtags: Map<string, string>,
+  ) {
+    const etag = this.extractEtagFromResponse(response);
+    if (!etag) return;
+    const normalized = this.normalizeContentIdPath(target);
+    if (!normalized) return;
+    contentIdEtags.set(normalized, etag);
+  }
+
+  private extractEtagFromResponse(response: BatchResponseEntry): string | undefined {
+    const fromHeader = this.getHeaderCaseInsensitive(response.headers, 'etag');
+    if (fromHeader) return fromHeader;
+    if (response.body && typeof response.body === 'object') {
+      const candidate = (response.body as Record<string, unknown>)['@odata.etag'];
+      if (typeof candidate === 'string' && candidate.trim()) {
+        return candidate;
+      }
+    }
+    return undefined;
+  }
+
+  private normalizeContentIdPath(value: string | undefined): string | undefined {
+    if (!value) return undefined;
+    const trimmed = value.trim();
+    if (!trimmed) return undefined;
+    const question = trimmed.indexOf('?');
+    return question >= 0 ? trimmed.slice(0, question) : trimmed;
+  }
+
+  private ensureEtagPreconditions(
+    request: BatchRequest,
+    contentIdEtags: Map<string, string>,
+  ): void {
+    const method = request.method?.toUpperCase();
+    if (!method) return;
+    if (!['PATCH', 'PUT', 'DELETE'].includes(method)) return;
+    const headers = request.headers ?? {};
+    if (this.hasIfMatchHeader(headers)) return;
+    const normalizedUrl = this.normalizeContentIdPath(request.url);
+    if (!normalizedUrl) return;
+    const etag = contentIdEtags.get(normalizedUrl);
+    if (!etag) return;
+    request.headers = headers;
+    headers['If-Match'] = etag;
+  }
+
+  private hasIfMatchHeader(headers: Record<string, string>): boolean {
+    for (const key of Object.keys(headers)) {
+      if (key.toLowerCase() === 'if-match') return true;
+    }
+    return false;
+  }
+
+  private resolveContentIdTarget(
+    request: BatchRequest,
+    response: BatchResponseEntry,
+  ): string | undefined {
+    const fromHeaders =
+      this.getHeaderCaseInsensitive(response.headers, 'location') ??
+      this.getHeaderCaseInsensitive(response.headers, 'odata-entityid') ??
+      this.getHeaderCaseInsensitive(response.headers, 'odata-entity-id');
+    if (fromHeaders) {
+      const normalized = this.normalizeReferencedUrl(fromHeaders);
+      if (normalized) return normalized;
+    }
+
+    if (response.body && typeof response.body === 'object') {
+      const bodyObject = response.body as Record<string, unknown>;
+      const odataId = bodyObject['@odata.id'];
+      if (typeof odataId === 'string') {
+        const normalized = this.normalizeReferencedUrl(odataId);
+        if (normalized) return normalized;
+      }
+      const entitySet = this.resolveEntitySetName(request.url);
+      if (entitySet) {
+        const derived = this.buildEntityKeyPath(entitySet, bodyObject);
+        if (derived) return derived;
+      }
+    }
+    return undefined;
+  }
+
+  private normalizeReferencedUrl(raw: string): string | undefined {
+    if (!raw) return undefined;
+    const trimmed = raw.trim();
+    if (!trimmed) return undefined;
+    if (/^https?:\/\//i.test(trimmed)) {
+      try {
+        const parsed = new URL(trimmed);
+        return parsed.pathname + parsed.search;
+      } catch {
+        return undefined;
+      }
+    }
+    if (trimmed.startsWith('/')) return trimmed;
+    return this.buildServiceRelativePath(trimmed);
+  }
+
+  private buildEntityKeyPath(
+    entitySetName: string,
+    body: Record<string, unknown>,
+  ): string | undefined {
+    const def = this.registry.findByName(entitySetName);
+    const modelCtor = def?.modelCtor as
+      | (typeof Entity & {
+          definition?: {
+            properties?: Record<string, PropertyDefinition>;
+            idProperties?: () => string[];
+          };
+        })
+      | undefined;
+    if (!modelCtor) return undefined;
+    const definition = modelCtor.definition as
+      | {
+          properties?: Record<string, PropertyDefinition>;
+          idProperties?: () => string[];
+        }
+      | undefined;
+    const idProps = modelCtor.getIdProperties?.() ?? definition?.idProperties?.() ?? [];
+    const properties = definition?.properties ?? {};
+    const keys = idProps.length
+      ? idProps
+      : Object.keys(properties).filter((name) => {
+          const meta = properties[name];
+          return Boolean(meta && (meta.id === true || meta.id === 1));
+        });
+    const targetKeys = keys.length ? keys : ['id'];
+    const entries: Array<{ name: string; value: unknown; def?: PropertyDefinition }> = [];
+    for (const key of targetKeys) {
+      if (!Object.prototype.hasOwnProperty.call(body, key)) return undefined;
+      entries.push({ name: key, value: body[key], def: properties[key] });
+    }
+    if (!entries.length) return undefined;
+    const literal = this.buildKeyLiteral(entries);
+    const baseRoot = this.serviceRootPath === '/' ? '/' : this.serviceRootPath;
+    const separator = baseRoot.endsWith('/') ? '' : '/';
+    return `${baseRoot}${separator}${entitySetName}(${literal})`;
+  }
+
+  private buildKeyLiteral(
+    entries: Array<{ name: string; value: unknown; def?: PropertyDefinition }>,
+  ): string {
+    if (entries.length === 1) {
+      return this.serializeKeyValue(entries[0].value, entries[0].def);
+    }
+    return entries
+      .map(({ name, value, def }) => `${name}=${this.serializeKeyValue(value, def)}`)
+      .join(',');
+  }
+
+  private serializeKeyValue(value: unknown, def?: PropertyDefinition): string {
+    if (value === null || value === undefined) {
+      throw new HttpErrors.BadRequest('Missing key value for Content-ID reference.');
+    }
+    const type = def?.type;
+    if (type === Number || type === 'number') {
+      const num = Number(value);
+      if (!Number.isNaN(num)) return String(num);
+    }
+    if (type === Boolean || type === 'boolean') {
+      return value ? 'true' : 'false';
+    }
+    if (value instanceof Date) {
+      return `datetime'${value.toISOString()}'`;
+    }
+    const literal = String(value);
+    const escaped = literal.replace(/'/g, "''");
+    return `'${escaped}'`;
+  }
+
+  private getHeaderCaseInsensitive(
+    headers: Record<string, string> | undefined,
+    name: string,
+  ): string | undefined {
+    if (!headers) return undefined;
+    const target = name.toLowerCase();
+    for (const [key, value] of Object.entries(headers)) {
+      if (key.toLowerCase() === target) return value;
+    }
+    return undefined;
   }
 
   private async executeAtomicGroup(
     requests: BatchRequest[],
     groupId: string,
     parentRequest: Request,
+    dependencyResults: Map<string, BatchResponseEntry>,
+    requestOrder: Map<BatchRequest, number>,
+    sharedContentIds: Map<string, string>,
+    sharedContentIdEtags: Map<string, string>,
   ): Promise<BatchResponseEntry[]> {
     const context = await this.createAtomicGroupContext(groupId, requests);
+    const contentIdMap = new Map<string, string>(sharedContentIds);
+    const contentIdEtags = new Map<string, string>(sharedContentIdEtags);
     try {
-      const entries = await this.executeGroup(requests, context, parentRequest);
+      const entries = await this.executeGroup(
+        requests,
+        context,
+        parentRequest,
+        dependencyResults,
+        requestOrder,
+        true,
+        contentIdMap,
+        contentIdEtags,
+      );
       const failedIndex = entries.findIndex((entry) => entry.status >= 400);
       if (failedIndex >= 0) {
         await context.rollback();
         // Append synthetic responses for any requests that were not executed due to failure
         if (entries.length < requests.length) {
           for (const req of requests.slice(entries.length)) {
-            entries.push({
+            const synthetic: BatchResponseEntry = {
               id: req.id,
               status: 424, // Failed Dependency – request aborted due to earlier failure
               body: this.odataError(
                 'FailedDependency',
                 'Request not executed due to prior failure in changeset.',
               ),
-            });
+            };
+            entries.push(synthetic);
+            if (req.id) dependencyResults.set(req.id, synthetic);
           }
         }
         return entries;
       }
       await context.commit();
+      for (const [key, value] of contentIdMap) {
+        if (!sharedContentIds.has(key)) {
+          sharedContentIds.set(key, value);
+        }
+      }
+      for (const [key, value] of contentIdEtags) {
+        if (!sharedContentIdEtags.has(key)) {
+          sharedContentIdEtags.set(key, value);
+        }
+      }
       return entries;
     } catch (error) {
       await context.rollback();
       throw error;
     }
+  }
+
+  private evaluateDependsOn(
+    request: BatchRequest,
+    dependencyResults: Map<string, BatchResponseEntry>,
+  ): BatchResponseEntry | undefined {
+    const dependsOn = request.dependsOn;
+    if (!dependsOn || !dependsOn.length) return undefined;
+    for (const dependencyId of dependsOn) {
+      const prior = dependencyResults.get(dependencyId);
+      if (!prior) {
+        return {
+          id: request.id,
+          status: 424,
+          body: this.odataError(
+            'FailedDependency',
+            `Request depends on ${dependencyId}, which did not execute.`,
+          ),
+        };
+      }
+      if (prior.status >= 400) {
+        return {
+          id: request.id,
+          status: 424,
+          body: this.odataError(
+            'FailedDependency',
+            `Request depends on ${dependencyId}, which failed.`,
+          ),
+        };
+      }
+    }
+    return undefined;
   }
 
   private async createAtomicGroupContext(
@@ -687,9 +1338,9 @@ export class ODataBatchController {
     if (!sanitized) return undefined;
     const [path] = sanitized.split('?');
     const segments = path.split('/').filter(Boolean);
-    if (segments.length < 2) return undefined;
-    if (segments[0].toLowerCase() !== 'odata') return undefined;
-    const candidate = segments[1];
+    const stripped = this.stripServiceRootSegments(segments);
+    if (!stripped || !stripped.length) return undefined;
+    const candidate = stripped[0];
     if (!candidate || candidate.startsWith('$')) return undefined;
     const normalized = candidate.includes('(')
       ? candidate.slice(0, candidate.indexOf('('))
@@ -736,6 +1387,8 @@ export class ODataBatchController {
       };
     }
 
+    const rewrittenUrl = rewriteODataUrl(url);
+
     const method = request.method?.toUpperCase();
     if (!method) {
       return {
@@ -759,11 +1412,16 @@ export class ODataBatchController {
 
     const req = new IncomingMessage(socket);
     req.method = method;
-    req.url = url;
+    req.url = rewrittenUrl;
     const combinedHeaders = this.buildHeadersForRequest(request, parentRequest);
     (req as any).headers = combinedHeaders;
-    const [pathOnly] = url.split('?');
+    const queryIndex = rewrittenUrl.indexOf('?');
+    const pathOnly = queryIndex >= 0 ? rewrittenUrl.slice(0, queryIndex) : rewrittenUrl;
     (req as any).path = pathOnly;
+    (req as any).query =
+      queryIndex >= 0 && queryIndex < rewrittenUrl.length - 1
+        ? this.buildQueryObject(rewrittenUrl.slice(queryIndex + 1))
+        : {};
     if (bodyBuffer.length && !combinedHeaders['content-type']) {
       combinedHeaders['content-type'] = 'application/json';
     }
@@ -917,7 +1575,8 @@ export class ODataBatchController {
         ? ((parentRequest as any).get('content-type') as string | undefined)
         : ((parentRequest as any)?.headers?.['content-type'] as string | undefined);
     const parentContentType = parentContentTypeRaw ?? '';
-    const allowRelative = /multipart\/mixed/i.test(parentContentType);
+    const allowRelative =
+      /multipart\/mixed/i.test(parentContentType) || /application\/json/i.test(parentContentType);
     const path = this.sanitizeUrl(request.url, allowRelative);
     if (!path) {
       return {
@@ -990,11 +1649,66 @@ export class ODataBatchController {
     if (rawUrl.startsWith('/')) return rawUrl;
     // Optionally resolve relative OData paths (e.g. "Books", "Books(1)?$select=...")
     if (allowRelative) {
-      const trimmed = String(rawUrl).trim().replace(/^\/?/, '');
-      return `/odata/${trimmed}`;
+      return this.buildServiceRelativePath(rawUrl);
     }
     // Otherwise, treat relative URLs as invalid in JSON $batch
     return undefined;
+  }
+
+  private buildServiceRelativePath(rawUrl: string): string | undefined {
+    const trimmed = String(rawUrl ?? '').trim();
+    if (!trimmed) return this.serviceRootPath;
+    if (trimmed.startsWith('/')) return trimmed;
+    const question = trimmed.indexOf('?');
+    const pathPart = question >= 0 ? trimmed.slice(0, question) : trimmed;
+    const query = question >= 0 ? trimmed.slice(question) : '';
+    const normalizedPath = pathPart.replace(/^\/+/, '');
+    const prefix = this.serviceRootPath === '/' ? '/' : this.serviceRootPath;
+    const separator = normalizedPath.length === 0 ? '' : this.serviceRootPath === '/' ? '' : '/';
+    return `${prefix}${separator}${normalizedPath}${query}`;
+  }
+
+  private buildQueryObject(query: string): Record<string, string | string[]> {
+    const result: Record<string, string | string[]> = {};
+    if (!query) return result;
+    const params = new URLSearchParams(query);
+    for (const [key, value] of params.entries()) {
+      if (Object.prototype.hasOwnProperty.call(result, key)) {
+        const current = result[key];
+        if (Array.isArray(current)) {
+          current.push(value);
+        } else {
+          result[key] = [current, value];
+        }
+      } else {
+        result[key] = value;
+      }
+    }
+    return result;
+  }
+
+  private normalizeServiceRootPath(basePath?: string): string {
+    const fallback = '/odata';
+    const candidate =
+      typeof basePath === 'string' && basePath.trim().length ? basePath.trim() : fallback;
+    let normalized = candidate.startsWith('/') ? candidate : `/${candidate}`;
+    if (normalized.length > 1) {
+      normalized = normalized.replace(/\/+$/, '');
+      if (!normalized) normalized = '/';
+    }
+    return normalized || '/';
+  }
+
+  private stripServiceRootSegments(segments: string[]): string[] | undefined {
+    if (!this.serviceRootSegments.length) return segments;
+    if (segments.length < this.serviceRootSegments.length) return undefined;
+    for (let i = 0; i < this.serviceRootSegments.length; i++) {
+      const expected = this.serviceRootSegments[i];
+      if ((segments[i] ?? '').toLowerCase() !== expected.toLowerCase()) {
+        return undefined;
+      }
+    }
+    return segments.slice(this.serviceRootSegments.length);
   }
 
   private buildHeadersForRequest(
@@ -1040,6 +1754,15 @@ export class ODataBatchController {
     }
 
     return merged;
+  }
+
+  private isBatchValidationError(error: unknown): boolean {
+    if (error instanceof HttpErrors.HttpError) {
+      const candidate = error as { statusCode?: number; status?: number };
+      const status = candidate.statusCode ?? candidate.status;
+      return typeof status === 'number' && status >= 400 && status < 500;
+    }
+    return false;
   }
 
   private resolveErrorStatus(error: unknown, fallback: number): number {

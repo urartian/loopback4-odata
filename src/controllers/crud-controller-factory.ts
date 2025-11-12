@@ -4185,7 +4185,7 @@ export function defineODataCrudController(def: EntitySetDef) {
       const pattern = `%${this.escapeSearchTerm(term)}%`;
       const clauses = fields.map((field) => {
         return {
-          [field]: { ilike: pattern, escape: '\\' },
+          [field]: { ilike: pattern },
         } as unknown as CrudWhere;
       });
       if (!clauses.length) return undefined;
@@ -4200,7 +4200,7 @@ export function defineODataCrudController(def: EntitySetDef) {
         // we need: (field NOT LIKE 'pattern' OR field IS NULL)
         // This ensures that NULL fields don't cause the condition to fail
         return {
-          or: [{ [field]: { nilike: pattern, escape: '\\' } }, { [field]: null }],
+          or: [{ [field]: { nilike: pattern } }, { [field]: null }],
         } as unknown as CrudWhere;
       });
       if (!clauses.length) return undefined;

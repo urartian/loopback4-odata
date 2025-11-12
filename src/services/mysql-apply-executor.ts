@@ -855,10 +855,24 @@ export class MySqlApplyExecutor implements ODataApplyExecutor {
           fragments.push(`${column} BETWEEN ? AND ?`);
           break;
         }
-        case 'like':
-        case 'ilike': {
+        case 'like': {
           params.push(operand);
           fragments.push(`${column} LIKE ?`);
+          break;
+        }
+        case 'ilike': {
+          params.push(operand);
+          fragments.push(`LOWER(${column}) LIKE LOWER(?)`);
+          break;
+        }
+        case 'nlike': {
+          params.push(operand);
+          fragments.push(`${column} NOT LIKE ?`);
+          break;
+        }
+        case 'nilike': {
+          params.push(operand);
+          fragments.push(`LOWER(${column}) NOT LIKE LOWER(?)`);
           break;
         }
         default:

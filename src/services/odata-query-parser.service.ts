@@ -1002,33 +1002,33 @@ function translateLengthComparison(expr: LengthExpression): Where<AnyObject> {
   }
   if (comparator === 'eq') {
     if (value === 0) return { [field]: '' } as Where<AnyObject>;
-    return { [field]: { like: underscorePattern(value), escape: '\\' } } as Where<AnyObject>;
+    return { [field]: { like: underscorePattern(value) } } as Where<AnyObject>;
   }
   if (comparator === 'neq') {
     if (value === 0) return { [field]: { neq: '' } } as Where<AnyObject>;
-    return { [field]: { nlike: underscorePattern(value), escape: '\\' } } as Where<AnyObject>;
+    return { [field]: { nlike: underscorePattern(value) } } as Where<AnyObject>;
   }
   if (comparator === 'gt') {
     if (value === 0) {
       return { [field]: { neq: '' } } as Where<AnyObject>;
     }
     return {
-      [field]: { like: `${underscorePattern(value + 1)}%`, escape: '\\' },
+      [field]: { like: `${underscorePattern(value + 1)}%` },
     } as Where<AnyObject>;
   }
   if (comparator === 'gte') {
     if (value <= 0) {
-      return { [field]: { like: '%', escape: '\\' } } as Where<AnyObject>;
+      return { [field]: { like: '%' } } as Where<AnyObject>;
     }
-    return { [field]: { like: `${underscorePattern(value)}%`, escape: '\\' } } as Where<AnyObject>;
+    return { [field]: { like: `${underscorePattern(value)}%` } } as Where<AnyObject>;
   }
   if (comparator === 'lt') {
-    return { [field]: { nlike: `${underscorePattern(value)}%`, escape: '\\' } } as Where<AnyObject>;
+    return { [field]: { nlike: `${underscorePattern(value)}%` } } as Where<AnyObject>;
   }
   if (comparator === 'lte') {
     if (value === 0) return { [field]: '' } as Where<AnyObject>;
     return {
-      [field]: { nlike: `${underscorePattern(value + 1)}%`, escape: '\\' },
+      [field]: { nlike: `${underscorePattern(value + 1)}%` },
     } as Where<AnyObject>;
   }
   throw new Error('Unsupported length comparison.');
@@ -1112,9 +1112,7 @@ function buildWhere(expr: ParsedExpression): Where<AnyObject> {
         : expr.name === 'startswith'
           ? `${escaped}%`
           : `%${escaped}`;
-    const clause: AnyObject = expr.negated
-      ? { nlike: pattern, escape: '\\' }
-      : { like: pattern, escape: '\\' };
+    const clause: AnyObject = expr.negated ? { nlike: pattern } : { like: pattern };
     if (expr.caseInsensitive) clause.options = 'i';
     return {
       [expr.field]: clause,
@@ -1125,11 +1123,11 @@ function buildWhere(expr: ParsedExpression): Where<AnyObject> {
     const { field, comparator, value, needle } = expr;
     if ((comparator === 'gte' && value >= 0) || (comparator === 'gt' && value > -1)) {
       const lit = needle.replace(/%/g, '\\%').replace(/_/g, '\\_');
-      return { [field]: { like: `%${lit}%`, escape: '\\', options: 'i' } } as Where<AnyObject>;
+      return { [field]: { like: `%${lit}%`, options: 'i' } } as Where<AnyObject>;
     }
     if (comparator === 'eq' && value === -1) {
       const lit = needle.replace(/%/g, '\\%').replace(/_/g, '\\_');
-      return { [field]: { nlike: `%${lit}%`, escape: '\\', options: 'i' } } as Where<AnyObject>;
+      return { [field]: { nlike: `%${lit}%`, options: 'i' } } as Where<AnyObject>;
     }
     throw new Error('Unsupported indexof comparison. Supported: ge 0, gt -1, eq -1.');
   }
@@ -1139,8 +1137,7 @@ function buildWhere(expr: ParsedExpression): Where<AnyObject> {
     const lit = literal.replace(/%/g, '\\%').replace(/_/g, '\\_');
     const underscores = '_'.repeat(Math.max(0, start));
     const pattern = length !== undefined ? `${underscores}${lit}%` : `${underscores}${lit}`;
-    const clause: AnyObject =
-      comparator === 'eq' ? { like: pattern, escape: '\\' } : { nlike: pattern, escape: '\\' };
+    const clause: AnyObject = comparator === 'eq' ? { like: pattern } : { nlike: pattern };
     return { [field]: clause } as Where<AnyObject>;
   }
 

@@ -29,8 +29,8 @@ describe('parseODataQuery basics', () => {
       and: [
         {
           or: [
-            { title: { like: '%test%', escape: '\\', options: 'i' } },
-            { descr: { like: '%test%', escape: '\\', options: 'i' } },
+            { title: { like: '%test%', options: 'i' } },
+            { descr: { like: '%test%', options: 'i' } },
           ],
         },
         { genreId: 'abc' },
