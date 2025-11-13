@@ -1192,7 +1192,19 @@ export class ODataBatchController {
     headers: Record<string, string> | undefined,
   ): Record<string, string> | undefined {
     if (!headers) return undefined;
-    const disallowed = new Set(['content-length', 'content-transfer-encoding', 'content-encoding']);
+    // Strip hop-by-hop or length/encoding headers that no longer match the base64 payload.
+    const disallowed = new Set([
+      'content-length',
+      'content-transfer-encoding',
+      'content-encoding',
+      'transfer-encoding',
+      'te',
+      'trailer',
+      'connection',
+      'keep-alive',
+      'upgrade',
+      'proxy-connection',
+    ]);
     let mutated = false;
     const result: Record<string, string> = {};
     for (const [key, value] of Object.entries(headers)) {
