@@ -455,7 +455,17 @@ describe('$batch controller', () => {
   it('encodes binary responses when returning JSON batch payloads', async () => {
     const blob = Buffer.from([0xde, 0xad, 0xbe, 0xef]);
     const controller = createController({
-      bin: { status: 200, headers: { 'content-type': 'application/pdf' }, body: blob },
+      bin: {
+        status: 200,
+        headers: {
+          'Content-Type': 'application/pdf',
+          'Content-Length': blob.length.toString(),
+          'content-transfer-encoding': 'binary',
+          'CONTENT-ENCODING': 'gzip',
+          'x-custom': 'keep-me',
+        },
+        body: blob,
+      },
       txt: { status: 200, body: { value: 1 } },
     });
 
@@ -474,7 +484,10 @@ describe('$batch controller', () => {
     const [binaryEntry, jsonEntry] = batchResult.responses;
     assert.equal(binaryEntry.id, 'bin');
     assert.equal(binaryEntry.status, 200);
-    assert.deepStrictEqual(binaryEntry.headers?.['content-type'], 'application/pdf');
+    assert.deepStrictEqual(binaryEntry.headers, {
+      'Content-Type': 'application/pdf',
+      'x-custom': 'keep-me',
+    });
     const body = binaryEntry.body as any;
     assert.deepStrictEqual(body, {
       encoding: 'base64',

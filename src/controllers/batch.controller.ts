@@ -1188,6 +1188,23 @@ export class ODataBatchController {
     return undefined;
   }
 
+  private sanitizeHeadersForJsonBatchBody(
+    headers: Record<string, string> | undefined,
+  ): Record<string, string> | undefined {
+    if (!headers) return undefined;
+    const disallowed = new Set(['content-length', 'content-transfer-encoding', 'content-encoding']);
+    let mutated = false;
+    const result: Record<string, string> = {};
+    for (const [key, value] of Object.entries(headers)) {
+      if (disallowed.has(key.toLowerCase())) {
+        mutated = true;
+        continue;
+      }
+      result[key] = value;
+    }
+    return mutated ? result : headers;
+  }
+
   private async executeAtomicGroup(
     requests: BatchRequest[],
     groupId: string,
@@ -1815,7 +1832,7 @@ export class ODataBatchController {
   private normalizeJsonBatchResponses(responses: BatchResponseEntry[]): BatchResponseEntry[] {
     return responses.map((entry) => {
       if (!Buffer.isBuffer(entry.body)) return entry;
-      const headers = entry.headers ?? {};
+      const headers = this.sanitizeHeadersForJsonBatchBody(entry.headers) ?? {};
       const contentType = this.getHeaderCaseInsensitive(headers, 'content-type');
       return {
         ...entry,
