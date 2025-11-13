@@ -14,6 +14,7 @@ export interface DeltaTokenPayload {
   entitySet: string;
   lastValue: string;
   keyValues?: Record<string, unknown>;
+  pageKeys?: Record<string, unknown>[];
   buckets?: DeltaTokenBucketState[];
   issuedAt?: string;
 }
@@ -59,6 +60,16 @@ function encodeKeyValues(keyValues?: Record<string, unknown>): Record<string, un
   return serialized;
 }
 
+function encodeKeyValuesArray(
+  list?: Record<string, unknown>[],
+): Record<string, unknown>[] | undefined {
+  if (!list?.length) return undefined;
+  const result = list
+    .map((entry) => encodeKeyValues(entry))
+    .filter((entry): entry is Record<string, unknown> => Boolean(entry));
+  return result.length ? result : undefined;
+}
+
 function decodeKeyValuesObject(raw?: Record<string, unknown>): Record<string, unknown> | undefined {
   if (!raw) return undefined;
   const result: Record<string, unknown> = {};
@@ -66,6 +77,18 @@ function decodeKeyValuesObject(raw?: Record<string, unknown>): Record<string, un
     result[key] = typeof value === 'string' ? deserializeValue(value) : value;
   }
   return result;
+}
+
+function decodeKeyValuesArray(raw?: unknown): Record<string, unknown>[] | undefined {
+  if (!Array.isArray(raw) || !raw.length) return undefined;
+  const decoded = raw
+    .map((entry) =>
+      typeof entry === 'object' && entry
+        ? decodeKeyValuesObject(entry as Record<string, unknown>)
+        : undefined,
+    )
+    .filter((entry): entry is Record<string, unknown> => Boolean(entry));
+  return decoded.length ? decoded : undefined;
 }
 
 export function encodeDeltaToken(
@@ -76,6 +99,7 @@ export function encodeDeltaToken(
     entitySet: payload.entitySet,
     lastValue: payload.lastValue,
     keyValues: encodeKeyValues(payload.keyValues),
+    pageKeys: encodeKeyValuesArray(payload.pageKeys),
     buckets: payload.buckets ? payload.buckets.map(cloneBucketState) : undefined,
     issuedAt: payload.issuedAt ?? new Date().toISOString(),
   };
@@ -108,6 +132,7 @@ function decodeJsonToken(token: string): DeltaTokenPayload {
     entitySet: string;
     lastValue: string;
     keyValues?: Record<string, unknown>;
+    pageKeys?: Record<string, unknown>[];
     buckets?: unknown;
     issuedAt?: string;
   };
@@ -118,6 +143,7 @@ function decodeJsonToken(token: string): DeltaTokenPayload {
     entitySet: parsed.entitySet,
     lastValue: parsed.lastValue,
     keyValues: decodeKeyValuesObject(parsed.keyValues),
+    pageKeys: decodeKeyValuesArray(parsed.pageKeys),
     buckets: normalizeBucketStates(parsed.buckets),
     issuedAt: parsed.issuedAt,
   };
@@ -145,6 +171,7 @@ export function decodeDeltaToken(
     entitySet: payload.entitySet,
     lastValue: payload.lastValue,
     keyValues: decodeKeyValuesObject(payload.keyValues),
+    pageKeys: decodeKeyValuesArray(payload.pageKeys),
     buckets: normalizeBucketStates(payload.buckets),
     issuedAt: payload.issuedAt,
   };

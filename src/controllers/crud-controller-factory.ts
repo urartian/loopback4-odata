@@ -4721,7 +4721,8 @@ export function defineODataCrudController(def: EntitySetDef) {
       }
       params.set('$skiptoken', skipToken);
       const queryString = params.toString();
-      return queryString ? `${this.request.path}?${queryString}` : this.request.path;
+      const basePath = this.resolveLinkBasePath();
+      return queryString ? `${basePath}?${queryString}` : basePath;
     }
 
     buildDeltaLink(deltaToken: string): string {
@@ -4742,7 +4743,23 @@ export function defineODataCrudController(def: EntitySetDef) {
       }
       params.set('$deltatoken', deltaToken);
       const queryString = params.toString();
-      return queryString ? `${this.request.path}?${queryString}` : this.request.path;
+      const basePath = this.resolveLinkBasePath();
+      return queryString ? `${basePath}?${queryString}` : basePath;
+    }
+
+    resolveLinkBasePath(): string {
+      const originalUrl = this.request.originalUrl;
+      if (typeof originalUrl === 'string' && originalUrl.trim()) {
+        const question = originalUrl.indexOf('?');
+        return question >= 0 ? originalUrl.slice(0, question) : originalUrl;
+      }
+      const baseUrl =
+        typeof (this.request as AnyObject)?.baseUrl === 'string'
+          ? (this.request as AnyObject).baseUrl
+          : '';
+      const path = this.request.path ?? '';
+      if (baseUrl) return `${baseUrl}${path}`;
+      return path || '/';
     }
 
     createDeltaTokenForRows(
@@ -4752,6 +4769,7 @@ export function defineODataCrudController(def: EntitySetDef) {
       idProps: string[],
       previousToken?: string,
       buckets?: DeltaTokenBucketState[],
+      pageRows?: AnyObject[],
     ): string {
       if (!rows.length) {
         return (
@@ -4762,8 +4780,13 @@ export function defineODataCrudController(def: EntitySetDef) {
           )
         );
       }
-      const first = rows[0];
-      const deltaValue = this.extractFieldValue(first, deltaField);
+      const filteredPageRows = this.filterDeltaPageRows(pageRows, deltaField);
+      let visibleRows = filteredPageRows && filteredPageRows.length ? filteredPageRows : undefined;
+      if (!visibleRows || !visibleRows.length) {
+        visibleRows = rows;
+      }
+      const anchor = visibleRows[visibleRows.length - 1] ?? rows[rows.length - 1];
+      const deltaValue = this.extractFieldValue(anchor, deltaField);
       if (deltaValue === undefined) {
         return (
           previousToken ??
@@ -4773,34 +4796,87 @@ export function defineODataCrudController(def: EntitySetDef) {
           )
         );
       }
-      const payload = {
+      const payload: DeltaTokenPayload = {
         entitySet,
         lastValue: this.stringifySkipTokenValue(deltaValue),
         buckets,
-      } as DeltaTokenPayload;
-      const keyValues: Record<string, unknown> = {};
-      for (const key of idProps) {
-        const value = this.extractFieldValue(first, key);
-        if (value !== undefined) {
-          keyValues[key] = value;
-        }
+      };
+      const cursorKeys = this.collectKeyValues(anchor, idProps);
+      if (cursorKeys) {
+        payload.keyValues = cursorKeys;
       }
-      if (Object.keys(keyValues).length) {
-        payload.keyValues = keyValues;
+      const pageKeySource =
+        filteredPageRows && filteredPageRows.length ? filteredPageRows : visibleRows;
+      const pageKeys = pageKeySource
+        .map((row) => this.collectKeyValues(row, idProps))
+        .filter((entry): entry is Record<string, unknown> => Boolean(entry));
+      if (pageKeys.length) {
+        payload.pageKeys = pageKeys;
       }
       return encodeDeltaToken(payload, this.buildDeltaTokenOptions());
     }
 
-    async computeTombstones(keyValues: Record<string, unknown> | undefined): Promise<AnyObject[]> {
-      if (!keyValues || !Object.keys(keyValues).length) return [];
-      const existing = await this.repository.findOne({ where: keyValues as CrudWhere });
-      if (existing) return [];
-      return [
-        {
-          ...keyValues,
+    collectKeyValues(
+      row: AnyObject | undefined,
+      idProps: string[],
+    ): Record<string, unknown> | undefined {
+      if (!row || !idProps.length) return undefined;
+      const keyValues: Record<string, unknown> = {};
+      for (const key of idProps) {
+        const value = this.extractFieldValue(row, key);
+        if (value === undefined) {
+          return undefined;
+        }
+        keyValues[key] = value;
+      }
+      return Object.keys(keyValues).length ? keyValues : undefined;
+    }
+
+    filterDeltaPageRows(
+      rows: AnyObject[] | undefined,
+      deltaField: string,
+    ): AnyObject[] | undefined {
+      if (!rows?.length) return undefined;
+      const filtered = rows.filter(
+        (row) => !this.isTombstoneRow(row) && this.extractFieldValue(row, deltaField) !== undefined,
+      );
+      return filtered.length ? filtered : undefined;
+    }
+
+    isTombstoneRow(row: AnyObject | undefined): boolean {
+      if (!row || typeof row !== 'object') return false;
+      const marker = (row as AnyObject)['@removed'];
+      if (!marker || typeof marker !== 'object') return false;
+      const reason = (marker as AnyObject)['reason'];
+      return typeof reason === 'string' ? reason.trim().length > 0 : true;
+    }
+
+    async computeTombstones(
+      keyCandidates: Record<string, unknown>[] | undefined,
+    ): Promise<AnyObject[]> {
+      const entries = keyCandidates?.filter((entry) => entry && Object.keys(entry).length);
+      if (!entries?.length) return [];
+      const tombstones: AnyObject[] = [];
+      const seen = new Set<string>();
+      for (const candidate of entries) {
+        const signature = JSON.stringify(
+          Object.keys(candidate)
+            .sort()
+            .reduce<Record<string, unknown>>((acc, key) => {
+              acc[key] = candidate[key];
+              return acc;
+            }, {}),
+        );
+        if (seen.has(signature)) continue;
+        seen.add(signature);
+        const existing = await this.repository.findOne({ where: candidate as CrudWhere });
+        if (existing) continue;
+        tombstones.push({
+          ...candidate,
           '@removed': { reason: 'deleted' },
-        },
-      ];
+        });
+      }
+      return tombstones;
     }
 
     async computeDeltaTokenFromRepository(
@@ -4820,7 +4896,15 @@ export function defineODataCrudController(def: EntitySetDef) {
       const latest = await this.repository.findOne({ where, order }, options);
       if (!latest) return undefined;
       const plain = this.toPlainEntity(latest) ?? {};
-      return this.createDeltaTokenForRows(entitySet, [plain], deltaField, idProps, undefined);
+      return this.createDeltaTokenForRows(
+        entitySet,
+        [plain],
+        deltaField,
+        idProps,
+        undefined,
+        undefined,
+        [plain],
+      );
     }
 
     buildBucketState(groupKeys: string[], rows: AnyObject[]): DeltaTokenBucketState[] {
@@ -5980,6 +6064,7 @@ export function defineODataCrudController(def: EntitySetDef) {
               : pushdownRows;
             pushdownResult.value = combinedRows;
             if (deltaEnabled && deltaField) {
+              const filteredPageRows = this.filterDeltaPageRows(combinedRows, deltaField);
               const applyDeltaToken = this.createDeltaTokenForRows(
                 setName,
                 pushdownRows,
@@ -5987,6 +6072,7 @@ export function defineODataCrudController(def: EntitySetDef) {
                 [],
                 deltaTokenValue,
                 bucketState,
+                filteredPageRows,
               );
               pushdownResult['@odata.deltaLink'] = this.buildDeltaLink(applyDeltaToken);
             }
@@ -6139,6 +6225,10 @@ export function defineODataCrudController(def: EntitySetDef) {
             result['@odata.nextLink'] = this.buildNextLink(nextLinkToken);
           }
           if (deltaEnabled && deltaField) {
+            const rawPageRows = Array.isArray(result.value)
+              ? (result.value as AnyObject[])
+              : decorated;
+            const deltaPageRows = this.filterDeltaPageRows(rawPageRows, deltaField);
             const applyDeltaToken = this.createDeltaTokenForRows(
               setName,
               decorated,
@@ -6146,6 +6236,7 @@ export function defineODataCrudController(def: EntitySetDef) {
               [],
               deltaTokenValue,
               bucketState,
+              deltaPageRows,
             );
             result['@odata.deltaLink'] = this.buildDeltaLink(applyDeltaToken);
           }
@@ -6186,10 +6277,13 @@ export function defineODataCrudController(def: EntitySetDef) {
           : plainResults;
         this.applyComputeExpressions(filteredResults, computeExpressions);
         let totalCount: number | undefined;
+        const tombstoneKeys = deltaPayload?.pageKeys?.length
+          ? deltaPayload.pageKeys
+          : deltaPayload?.keyValues
+            ? [deltaPayload.keyValues]
+            : undefined;
         const tombstones =
-          deltaEnabled && deltaPayload?.keyValues
-            ? await this.computeTombstones(deltaPayload.keyValues)
-            : [];
+          deltaEnabled && tombstoneKeys?.length ? await this.computeTombstones(tombstoneKeys) : [];
 
         if (inlineCountRequested) {
           if (requiresPostFilter) {
@@ -6202,15 +6296,6 @@ export function defineODataCrudController(def: EntitySetDef) {
         }
 
         const ordered = this.orderResults(filteredResults, baseFilter.order);
-        if (deltaEnabled && deltaField) {
-          deltaLinkToken = this.createDeltaTokenForRows(
-            setName,
-            ordered,
-            deltaField,
-            idProperties,
-            deltaTokenValue,
-          );
-        }
         let nextLinkToken: string | undefined;
         let paged: AnyObject[];
         if (serverPagingEnabled) {
@@ -6231,6 +6316,18 @@ export function defineODataCrudController(def: EntitySetDef) {
           paged = this.sliceResults(ordered, requestedOffset, requestedLimit);
         } else {
           paged = ordered;
+        }
+
+        if (deltaEnabled && deltaField) {
+          deltaLinkToken = this.createDeltaTokenForRows(
+            setName,
+            ordered,
+            deltaField,
+            idProperties,
+            deltaTokenValue,
+            undefined,
+            paged,
+          );
         }
 
         this.ensureODataHeaders();

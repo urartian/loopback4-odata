@@ -1029,12 +1029,19 @@ export class ODataBatchController {
     if (!['PATCH', 'PUT', 'DELETE'].includes(method)) return;
     const headers = request.headers ?? {};
     if (this.hasIfMatchHeader(headers)) return;
-    const normalizedUrl = this.normalizeContentIdPath(request.url);
+    const normalizedUrl = this.normalizeContentIdLookupPath(request.url);
     if (!normalizedUrl) return;
     const etag = contentIdEtags.get(normalizedUrl);
     if (!etag) return;
     request.headers = headers;
     headers['If-Match'] = etag;
+  }
+
+  private normalizeContentIdLookupPath(value: string | undefined): string | undefined {
+    if (!value) return undefined;
+    const sanitized = this.sanitizeUrl(value, true);
+    if (sanitized) return this.normalizeContentIdPath(sanitized);
+    return this.normalizeContentIdPath(value);
   }
 
   private hasIfMatchHeader(headers: Record<string, string>): boolean {

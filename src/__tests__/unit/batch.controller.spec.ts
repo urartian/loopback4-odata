@@ -833,6 +833,19 @@ describe('$batch controller', () => {
     assert.equal(body?.['@odata.id'], '\\"/odata/Products(1)\\"');
   });
 
+  it('injects If-Match for relative JSON batch requests when ETags are known', () => {
+    const controller = createController({});
+    const request: any = {
+      method: 'PATCH',
+      url: 'Products(1)',
+    };
+    const etags = new Map<string, string>([['/odata/Products(1)', 'W/"etag"']]);
+
+    (controller as any).ensureEtagPreconditions(request, etags);
+
+    assert.equal(request.headers?.['If-Match'], 'W/"etag"');
+  });
+
   it('does not mutate original request when substitution fails', () => {
     const controller = createController({});
     const request = {
