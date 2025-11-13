@@ -13,17 +13,7 @@ export class OdataPathRewriterProvider implements Provider<Middleware> {
   ) {}
 
   value(): Middleware {
-    const normalizeBasePath = (configured?: string): string => {
-      let basePath = configured?.trim() ?? '';
-      if (!basePath) return '/odata';
-      if (!basePath.startsWith('/')) basePath = `/${basePath}`;
-      if (basePath.length > 1 && basePath.endsWith('/')) {
-        basePath = basePath.slice(0, -1);
-      }
-      return basePath || '/';
-    };
-
-    const basePath = normalizeBasePath(this.cfg?.basePath);
+    const basePath = this.normalizeBasePath(this.cfg?.basePath);
     const needsRewrite = basePath !== '/odata';
 
     const middleware: Middleware = async (ctx, next) => {
@@ -32,8 +22,8 @@ export class OdataPathRewriterProvider implements Provider<Middleware> {
 
       if (needsRewrite) {
         const url = ctx.request.url || '';
-        if (url === basePath || url.startsWith(basePath + '/') || url.startsWith(basePath + '?')) {
-          ctx.request.url = '/odata' + url.substring(basePath.length);
+        if (this.pathMatches(url, basePath)) {
+          ctx.request.url = '/odata' + this.stripBasePath(url, basePath);
           basePathRewritten = true;
         }
       }
@@ -59,6 +49,41 @@ export class OdataPathRewriterProvider implements Provider<Middleware> {
     };
 
     return middleware;
+  }
+
+  private normalizeBasePath(configured?: string): string {
+    let basePath = configured?.trim() ?? '';
+    if (!basePath) return '/odata';
+    if (!basePath.startsWith('/')) basePath = `/${basePath}`;
+    if (basePath.length > 1 && basePath.endsWith('/')) {
+      basePath = basePath.slice(0, -1);
+    }
+    return basePath || '/';
+  }
+
+  private pathMatches(url: string, basePath: string): boolean {
+    if (!basePath) return false;
+    if (basePath === '/') {
+      return url.startsWith('/');
+    }
+    if (url === basePath) return true;
+    if (url.startsWith(basePath + '/')) return true;
+    if (url.startsWith(basePath + '?')) return true;
+    if (url.startsWith(basePath + '#')) return true;
+    return false;
+  }
+
+  private stripBasePath(url: string, basePath: string): string {
+    if (basePath === '/') {
+      const remainder = url.slice(1);
+      if (!remainder) return '';
+      if (remainder.startsWith('?') || remainder.startsWith('#')) {
+        return remainder;
+      }
+      return `/${remainder}`;
+    }
+    const remainder = url.substring(basePath.length);
+    return remainder || '/';
   }
 
   private emitRewriteTelemetry(ctx: MiddlewareContext, context: Record<string, unknown>) {

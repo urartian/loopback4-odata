@@ -92,8 +92,9 @@ export class ODataServiceDocumentController {
     }
 
     const serviceRoot = normalizeBasePath(this.config.basePath);
+    const contextUrl = serviceRoot === '/' ? '/$metadata' : `${serviceRoot}/$metadata`;
     const payload: ServiceDocumentPayload = {
-      '@odata.context': `${serviceRoot}/$metadata`,
+      '@odata.context': contextUrl,
       value: this.registry.list().map((def) => ({
         name: def.name,
         kind: 'EntitySet',
