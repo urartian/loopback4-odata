@@ -5089,6 +5089,7 @@ export function defineODataCrudController(def: EntitySetDef) {
     }
 
     validateFieldsStrict(filter: Filter<CrudEntity>) {
+      this.validateOrderByFields(filter);
       if (!this.cfg?.strict) return;
       const { props, relations } = this.allowedProperties();
 
@@ -5100,17 +5101,6 @@ export function defineODataCrudController(def: EntitySetDef) {
         }
       }
 
-      if (filter.order) {
-        const list = Array.isArray(filter.order) ? filter.order : [filter.order];
-        for (const item of list) {
-          const raw = String(item ?? '').trim();
-          const field = raw.split(/\s+/)[0];
-          if (field && !props.has(field)) {
-            throw new HttpErrors.BadRequest(`Unknown property in $orderby: ${field}`);
-          }
-        }
-      }
-
       if (filter.where) {
         const used = new Set<string>();
         this.collectWhereFields(filter.where as AnyObject, used);
@@ -5118,6 +5108,20 @@ export function defineODataCrudController(def: EntitySetDef) {
           if (!props.has(field)) {
             throw new HttpErrors.BadRequest(`Unknown property in $filter: ${field}`);
           }
+        }
+      }
+    }
+
+    validateOrderByFields(filter: Filter<CrudEntity>) {
+      if (!filter?.order) return;
+      const { props } = this.allowedProperties();
+      const list = Array.isArray(filter.order) ? filter.order : [filter.order];
+      for (const item of list) {
+        const raw = String(item ?? '').trim();
+        if (!raw) continue;
+        const field = raw.split(/\s+/)[0];
+        if (field && !props.has(field)) {
+          throw new HttpErrors.BadRequest(`Unknown property in $orderby: ${field}`);
         }
       }
     }

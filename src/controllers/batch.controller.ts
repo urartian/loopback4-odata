@@ -79,6 +79,7 @@ export interface BatchRequest {
   url: string;
   headers?: Record<string, string>;
   body?: unknown;
+  rawBody?: Buffer;
   dependsOn?: string[];
 }
 
@@ -1405,7 +1406,7 @@ export class ODataBatchController {
       };
     }
 
-    const bodyBuffer = request.body ? Buffer.from(JSON.stringify(request.body)) : Buffer.alloc(0);
+    const bodyBuffer = this.resolveRequestBodyBuffer(request);
     const socket = new PassThrough() as any;
     // minimal socket surface for Node/Express expectations
     socket.writable = true;
@@ -1429,7 +1430,11 @@ export class ODataBatchController {
       queryIndex >= 0 && queryIndex < rewrittenUrl.length - 1
         ? this.buildQueryObject(rewrittenUrl.slice(queryIndex + 1))
         : {};
-    if (bodyBuffer.length && !combinedHeaders['content-type']) {
+    if (
+      bodyBuffer.length &&
+      this.shouldDefaultJsonContentType(request) &&
+      !combinedHeaders['content-type']
+    ) {
       combinedHeaders['content-type'] = 'application/json';
     }
     if (bodyBuffer.length) {
@@ -1603,12 +1608,15 @@ export class ODataBatchController {
     try {
       const target = new URL(path, this.serverUrl).toString();
       const headers = this.buildHeadersForRequest(request, parentRequest);
-      let body: string | undefined;
-      if (request.body !== undefined) {
-        body = typeof request.body === 'string' ? request.body : JSON.stringify(request.body);
-        if (!headers['content-type']) headers['content-type'] = 'application/json';
+      const bodyBuffer = this.resolveRequestBodyBuffer(request);
+      const body = bodyBuffer.length ? bodyBuffer : undefined;
+      if (bodyBuffer.length) {
+        headers['content-length'] = String(bodyBuffer.length);
+        if (this.shouldDefaultJsonContentType(request) && !headers['content-type']) {
+          headers['content-type'] = 'application/json';
+        }
       }
-      const resp = await fetch(target, { method, headers, body } as any);
+      const resp = await this.fetchWithRedirects(target, { method, headers, body });
       const text = await resp.text();
       let parsed: unknown;
       try {
@@ -1644,19 +1652,24 @@ export class ODataBatchController {
 
   private sanitizeUrl(rawUrl: string, allowRelative = false): string | undefined {
     if (!rawUrl) return undefined;
-    if (/^https?:\/\//i.test(rawUrl)) {
+    const trimmed = String(rawUrl).trim();
+    if (!trimmed) return undefined;
+    if (trimmed.startsWith('//')) {
+      return undefined;
+    }
+    if (/^https?:\/\//i.test(trimmed)) {
       try {
-        const parsed = new URL(rawUrl);
+        const parsed = new URL(trimmed);
         return parsed.pathname + parsed.search;
       } catch {
         return undefined;
       }
     }
     // Accept absolute app paths as-is
-    if (rawUrl.startsWith('/')) return rawUrl;
+    if (trimmed.startsWith('/')) return trimmed;
     // Optionally resolve relative OData paths (e.g. "Books", "Books(1)?$select=...")
     if (allowRelative) {
-      return this.buildServiceRelativePath(rawUrl);
+      return this.buildServiceRelativePath(trimmed);
     }
     // Otherwise, treat relative URLs as invalid in JSON $batch
     return undefined;
@@ -1665,6 +1678,7 @@ export class ODataBatchController {
   private buildServiceRelativePath(rawUrl: string): string | undefined {
     const trimmed = String(rawUrl ?? '').trim();
     if (!trimmed) return this.serviceRootPath;
+    if (trimmed.startsWith('//')) return undefined;
     if (trimmed.startsWith('/')) return trimmed;
     const question = trimmed.indexOf('?');
     const pathPart = question >= 0 ? trimmed.slice(0, question) : trimmed;
@@ -1761,6 +1775,91 @@ export class ODataBatchController {
     }
 
     return merged;
+  }
+
+  private resolveRequestBodyBuffer(request: BatchRequest): Buffer {
+    if (request.rawBody) {
+      return request.rawBody;
+    }
+    if (request.body === undefined) {
+      return Buffer.alloc(0);
+    }
+    if (typeof request.body === 'string') {
+      return Buffer.from(request.body);
+    }
+    return Buffer.from(JSON.stringify(request.body));
+  }
+
+  private shouldDefaultJsonContentType(request: BatchRequest): boolean {
+    return !request.rawBody && request.body !== undefined && typeof request.body !== 'string';
+  }
+
+  private async fetchWithRedirects(
+    initialTarget: string,
+    init: { method: string; headers: Record<string, string>; body?: Buffer },
+  ): Promise<globalThis.Response> {
+    const MAX_REDIRECTS = 3;
+    let target = initialTarget;
+    let remaining = MAX_REDIRECTS;
+
+    while (remaining >= 0) {
+      const response = await fetch(target, {
+        method: init.method,
+        headers: init.headers,
+        body: init.body,
+        redirect: 'manual',
+      } as any);
+
+      if (!this.isRedirectResponse(response)) {
+        return response;
+      }
+
+      if (!['GET', 'HEAD'].includes(init.method)) {
+        return response;
+      }
+
+      if (remaining === 0) {
+        throw new HttpErrors.BadRequest('Batch sub-request exceeded redirect limits.');
+      }
+
+      const nextTarget = this.resolveRedirectLocation(response.headers.get('location'));
+      if (!nextTarget) {
+        return response;
+      }
+      remaining -= 1;
+      target = nextTarget;
+    }
+
+    throw new HttpErrors.InternalServerError('Failed to resolve redirect target.');
+  }
+
+  private isRedirectResponse(response: globalThis.Response): boolean {
+    return [301, 302, 303, 307, 308].includes(response.status);
+  }
+
+  private resolveRedirectLocation(location: string | null): string | undefined {
+    if (!location) return undefined;
+    const trimmed = location.trim();
+    if (!trimmed) return undefined;
+    if (/^https?:\/\//i.test(trimmed)) {
+      try {
+        const candidate = new URL(trimmed);
+        const base = new URL(this.serverUrl);
+        if (candidate.origin !== base.origin) {
+          return undefined;
+        }
+        return candidate.toString();
+      } catch {
+        return undefined;
+      }
+    }
+    const sanitized = this.sanitizeUrl(trimmed, true);
+    if (!sanitized) return undefined;
+    try {
+      return new URL(sanitized, this.serverUrl).toString();
+    } catch {
+      return undefined;
+    }
   }
 
   private isBatchValidationError(error: unknown): boolean {

@@ -76,6 +76,31 @@ function requestStub(contentType: string): any {
   };
 }
 
+function createFetchResponse(options: {
+  status: number;
+  body?: string;
+  headers?: Record<string, string>;
+}) {
+  const headerMap = new Map<string, string>();
+  for (const [key, value] of Object.entries(options.headers ?? {})) {
+    headerMap.set(key.toLowerCase(), value);
+  }
+  return {
+    status: options.status,
+    headers: {
+      get: (name: string) => headerMap.get(name.toLowerCase()) ?? null,
+      forEach: (cb: (value: string, key: string) => void) => {
+        for (const [key, value] of headerMap.entries()) {
+          cb(value, key);
+        }
+      },
+    },
+    async text() {
+      return options.body ?? '';
+    },
+  };
+}
+
 describe('$batch controller', () => {
   it('returns batched responses in order', async () => {
     const controller = createController({
@@ -218,6 +243,120 @@ describe('$batch controller', () => {
 
     assert.equal(result.status, 400);
     assert.equal((result.body as any)?.error?.code, 'InvalidMethod');
+  });
+
+  it('rejects protocol-relative URLs inside batch requests', async () => {
+    const controller = new ODataBatchController(
+      { handleRequest: async () => undefined } as any,
+      'http://localhost',
+      createRequestContextStub(),
+      { get: async () => undefined } as any,
+      { findByName: () => undefined } as any,
+      noopLogger,
+      defaultConfig,
+    );
+
+    const result = await (controller as any).executeSingle(
+      {
+        id: 'ssrf',
+        method: 'GET',
+        url: '//169.254.169.254/latest/meta-data',
+      },
+      undefined,
+      requestStub('application/json'),
+    );
+
+    assert.equal(result.status, 400);
+    assert.equal((result.body as any)?.error?.code, 'InvalidUrl');
+  });
+
+  it('does not follow redirects that point outside the service root', async () => {
+    const controller = new ODataBatchController(
+      { handleRequest: async () => undefined } as any,
+      'http://localhost',
+      createRequestContextStub(),
+      { get: async () => undefined } as any,
+      { findByName: () => undefined } as any,
+      noopLogger,
+      defaultConfig,
+    );
+
+    const originalFetch = (global as any).fetch;
+    let callCount = 0;
+    (global as any).fetch = async () => {
+      callCount++;
+      const headers = new Map<string, string>([['location', 'https://evil.example/loop']]);
+      return {
+        status: 302,
+        headers: {
+          get: (name: string) => headers.get(name.toLowerCase()) ?? null,
+          forEach: (cb: (value: string, key: string) => void) => {
+            for (const [key, value] of headers.entries()) cb(value, key);
+          },
+        },
+        async text() {
+          return '';
+        },
+      };
+    };
+
+    try {
+      const result = await (controller as any).executeSingle(
+        {
+          id: 'redir',
+          method: 'GET',
+          url: '/odata/Redirect',
+        },
+        undefined,
+        requestStub('application/json'),
+      );
+
+      assert.equal(result.status, 302);
+      assert.equal(callCount, 1);
+    } finally {
+      (global as any).fetch = originalFetch;
+    }
+  });
+
+  it('follows same-origin redirects for GET requests', async () => {
+    const controller = new ODataBatchController(
+      { handleRequest: async () => undefined } as any,
+      'http://localhost',
+      createRequestContextStub(),
+      { get: async () => undefined } as any,
+      { findByName: () => undefined } as any,
+      noopLogger,
+      defaultConfig,
+    );
+
+    const originalFetch = (global as any).fetch;
+    const responses = [
+      createFetchResponse({ status: 302, headers: { location: '/odata/next' } }),
+      createFetchResponse({ status: 200, body: '{"value":42}' }),
+    ];
+    (global as any).fetch = async () => {
+      const next = responses.shift();
+      if (!next) throw new Error('Unexpected fetch');
+      return next;
+    };
+
+    try {
+      const result = await (controller as any).executeSingle(
+        {
+          id: 'redir',
+          method: 'GET',
+          url: '/odata/Redirect',
+        },
+        undefined,
+        requestStub('application/json'),
+      );
+
+      assert.equal(result.status, 200);
+      assert.deepStrictEqual(result.body, { value: 42 });
+      assert.equal(responses.length, 0);
+    } finally {
+      (global as any).fetch = originalFetch;
+    }
   });
 
   it('commits transactional group when all requests succeed', async () => {

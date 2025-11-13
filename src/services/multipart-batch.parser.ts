@@ -11,12 +11,13 @@ export interface ParsedBatchRequest {
   url: string;
   headers: Record<string, string>;
   body?: unknown;
+  rawBody?: Buffer;
   atomicityGroup?: string;
 }
 
 interface MultipartPart {
   headers: Record<string, string>;
-  body: string;
+  body: Buffer;
 }
 
 export interface MultipartParserLimits {
@@ -131,11 +132,13 @@ class StreamingBatchParser {
   private currentHeaders: Record<string, string> | undefined;
   private ended = false;
   private readonly requests: ParsedBatchRequest[] = [];
+  private changesetOperationIndex = 0;
 
   constructor(
     private readonly boundary: string,
     private readonly context: ParserContext,
     private readonly depth: number,
+    private readonly changesetId?: string,
   ) {
     this.boundaryPrefix = Buffer.from(`--${boundary}`);
     this.boundaryMarker = Buffer.from(`\r\n--${boundary}`);
@@ -150,6 +153,18 @@ class StreamingBatchParser {
         : Buffer.from(bufferChunk);
       this.processBuffer(false);
     }
+    this.processBuffer(true);
+
+    if (!this.ended) {
+      throw new HttpErrors.BadRequest('Malformed batch payload: missing closing boundary.');
+    }
+
+    return this.requests;
+  }
+
+  parseBuffer(buffer: Buffer): ParsedBatchRequest[] {
+    const chunk = this.toBuffer(buffer);
+    this.buffer = this.buffer.length ? Buffer.concat([this.buffer, chunk]) : Buffer.from(chunk);
     this.processBuffer(true);
 
     if (!this.ended) {
@@ -271,32 +286,46 @@ class StreamingBatchParser {
       }
       this.context.ensureDepth(this.depth + 1);
       const groupId = headers['content-id'] ?? nestedBoundary;
-      const nestedContent = body.toString('utf-8');
-      const nestedParts = parseMultipartString(nestedContent, nestedBoundary);
-      let index = 0;
-      for (const nested of nestedParts) {
-        const request = parseHttpPart(nested, () => `auto-${this.context.nextAutoId()}`, groupId);
-        index++;
-        this.context.recordOperation(groupId, index);
-        this.requests.push(request);
-      }
-      if (nestedParts.length === 0) {
+      const nestedParser = new StreamingBatchParser(
+        nestedBoundary,
+        this.context,
+        this.depth + 1,
+        groupId,
+      );
+      const nestedRequests = nestedParser.parseBuffer(body);
+      if (!nestedRequests.length) {
         throw new HttpErrors.BadRequest('Changeset part must contain at least one request.');
       }
-    } else if (contentType.startsWith('application/http')) {
-      const part: MultipartPart = { headers, body: body.toString('utf-8') };
-      const request = parseHttpPart(part, () => `auto-${this.context.nextAutoId()}`);
-      this.context.recordOperation();
-      this.requests.push(request);
-    } else {
-      throw new HttpErrors.BadRequest(
-        `Unsupported part content-type: ${contentType || 'unknown'}.`,
-      );
+      for (const nested of nestedRequests) {
+        this.requests.push(nested);
+      }
+      return;
     }
+
+    if (contentType.startsWith('application/http')) {
+      const part: MultipartPart = { headers, body };
+      const request = parseHttpPart(
+        part,
+        () => `auto-${this.context.nextAutoId()}`,
+        this.changesetId,
+      );
+      const position = this.nextChangesetOperation();
+      this.context.recordOperation(this.changesetId, position);
+      this.requests.push(request);
+      return;
+    }
+
+    throw new HttpErrors.BadRequest(`Unsupported part content-type: ${contentType || 'unknown'}.`);
   }
 
   private toBuffer(chunk: Buffer | string): Buffer {
     return Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+  }
+
+  private nextChangesetOperation(): number | undefined {
+    if (!this.changesetId) return undefined;
+    this.changesetOperationIndex += 1;
+    return this.changesetOperationIndex;
   }
 }
 
@@ -313,47 +342,45 @@ function parseHttpPart(
     url: payload.url,
     headers: payload.headers,
     body: payload.body,
+    rawBody: payload.rawBody,
     atomicityGroup,
   };
 }
 
-function parseHttpPayload(body: string) {
-  const sanitized = body.replace(/^\r?\n/, '');
-  const lineBreak = sanitized.includes('\r\n') ? '\r\n' : '\n';
-  const requestLineEnd = sanitized.indexOf(lineBreak);
-  if (requestLineEnd < 0) {
+function parseHttpPayload(body: Buffer) {
+  const sanitized = stripLeadingEmptyLine(body);
+  const requestLineInfo = findLineBreak(sanitized);
+  if (!requestLineInfo) {
     throw new HttpErrors.BadRequest('Malformed batch part: missing request line.');
   }
-  const requestLine = sanitized.slice(0, requestLineEnd).trim();
-  const rest = sanitized.slice(requestLineEnd + lineBreak.length);
-  const [method, url] = requestLine.split(' ');
+  const requestLine = sanitized.slice(0, requestLineInfo.index).toString('utf-8').trim();
+  const rest = sanitized.slice(requestLineInfo.index + requestLineInfo.length);
+  const [method, url] = requestLine.split(/\s+/);
   if (!method || !url) {
     throw new HttpErrors.BadRequest('Malformed batch part: invalid request line.');
   }
 
-  const headerSeparator = rest.indexOf(`${lineBreak}${lineBreak}`);
-  let headerText: string;
-  let rawBody = '';
-  if (headerSeparator >= 0) {
-    headerText = rest.slice(0, headerSeparator);
-    rawBody = rest.slice(headerSeparator + 2 * lineBreak.length);
-  } else {
-    headerText = rest;
-  }
-
-  const headers = parseHeaders(headerText);
+  const headerInfo = findHeaderSeparator(rest);
+  const headerBuffer = headerInfo ? rest.slice(0, headerInfo.index) : rest;
+  const headers = parseHeaders(headerBuffer.toString('utf-8'));
+  const bodyStart = headerInfo ? headerInfo.index + headerInfo.length : rest.length;
+  const rawBody = rest.slice(bodyStart);
   const contentType = headers['content-type'];
-  const trimmedBody = rawBody.replace(/^\r?\n/, '').replace(/\r?\n$/, '');
   let parsedBody: unknown;
-  if (trimmedBody.length) {
+  let rawBodyBuffer: Buffer | undefined;
+
+  if (rawBody.length) {
     if (contentType && /application\/json/i.test(contentType)) {
       try {
-        parsedBody = JSON.parse(trimmedBody);
-      } catch (error) {
+        parsedBody = JSON.parse(rawBody.toString('utf-8'));
+      } catch {
         throw new HttpErrors.BadRequest('Invalid JSON payload inside batch part.');
       }
     } else {
-      parsedBody = trimmedBody;
+      rawBodyBuffer = rawBody;
+      if (contentType && /^text\//i.test(contentType)) {
+        parsedBody = rawBody.toString('utf-8');
+      }
     }
   }
 
@@ -362,35 +389,39 @@ function parseHttpPayload(body: string) {
     url,
     headers,
     body: parsedBody,
+    rawBody: rawBodyBuffer,
   };
 }
 
-function parseMultipartString(content: string, boundary: string): MultipartPart[] {
-  const delimiter = `--${boundary}`;
-  const segments = content.split(delimiter);
-  const parts: MultipartPart[] = [];
-
-  for (const rawSegment of segments) {
-    let segment = rawSegment;
-    if (!segment) continue;
-    segment = segment.replace(/^\r?\n/, '').replace(/\r?\n$/, '');
-    if (!segment || segment === '--') continue;
-    if (segment.startsWith('--')) {
-      continue;
-    }
-
-    const headerEnd = findHeaderBoundaryString(segment);
-    if (headerEnd < 0) {
-      throw new HttpErrors.BadRequest('Malformed multipart part: missing header separator.');
-    }
-
-    const headerText = segment.slice(0, headerEnd);
-    const bodyText = segment.slice(headerEnd).replace(/^\r?\n\r?\n/, '');
-    const headers = parseHeaders(headerText);
-    parts.push({ headers, body: bodyText });
+function stripLeadingEmptyLine(buffer: Buffer): Buffer {
+  if (!buffer.length) return buffer;
+  if (buffer[0] === 13 && buffer[1] === 10) {
+    return buffer.slice(2);
   }
+  if (buffer[0] === 10) {
+    return buffer.slice(1);
+  }
+  return buffer;
+}
 
-  return parts;
+function findLineBreak(buffer: Buffer): { index: number; length: number } | undefined {
+  for (let i = 0; i < buffer.length; i++) {
+    if (buffer[i] === 13 && i + 1 < buffer.length && buffer[i + 1] === 10) {
+      return { index: i, length: 2 };
+    }
+    if (buffer[i] === 10) {
+      return { index: i, length: 1 };
+    }
+  }
+  return undefined;
+}
+
+function findHeaderSeparator(buffer: Buffer): { index: number; length: number } | undefined {
+  const crlfIdx = buffer.indexOf(Buffer.from('\r\n\r\n'));
+  if (crlfIdx >= 0) return { index: crlfIdx, length: 4 };
+  const lfIdx = buffer.indexOf(Buffer.from('\n\n'));
+  if (lfIdx >= 0) return { index: lfIdx, length: 2 };
+  return undefined;
 }
 
 function indexOfDoubleCRLF(buffer: Buffer): number {
@@ -405,12 +436,6 @@ function indexOfDoubleCRLF(buffer: Buffer): number {
     }
   }
   return -1;
-}
-
-function findHeaderBoundaryString(content: string): number {
-  const idx = content.indexOf('\r\n\r\n');
-  if (idx >= 0) return idx;
-  return content.indexOf('\n\n');
 }
 
 function parseHeaders(raw: string): Record<string, string> {
