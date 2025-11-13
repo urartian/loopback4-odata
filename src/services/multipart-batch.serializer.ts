@@ -9,24 +9,24 @@ interface ResponseGroup {
 
 export interface SerializedMultipartBatch {
   boundary: string;
-  body: string;
+  body: Buffer;
 }
 
 export function serializeMultipartBatch(responses: BatchResponseEntry[]): SerializedMultipartBatch {
   const boundary = generateBoundary('batch');
   const groups = groupResponses(responses);
-  let result = '';
+  const chunks: Buffer[] = [];
 
   for (const group of groups) {
     if (group.type === 'single') {
-      result += renderSinglePart(boundary, group.entries[0]);
+      chunks.push(renderSinglePart(boundary, group.entries[0]));
     } else {
-      result += renderChangesetPart(boundary, group);
+      chunks.push(renderChangesetPart(boundary, group));
     }
   }
 
-  result += `--${boundary}--\r\n`;
-  return { boundary, body: result };
+  chunks.push(Buffer.from(`--${boundary}--\r\n`, 'utf-8'));
+  return { boundary, body: Buffer.concat(chunks) };
 }
 
 function groupResponses(entries: BatchResponseEntry[]): ResponseGroup[] {
@@ -46,22 +46,35 @@ function groupResponses(entries: BatchResponseEntry[]): ResponseGroup[] {
   return groups;
 }
 
-function renderSinglePart(boundary: string, entry: BatchResponseEntry): string {
+function renderSinglePart(boundary: string, entry: BatchResponseEntry): Buffer {
   const headers = buildPartHeaders(entry);
   const httpPayload = renderHttpResponse(entry);
-  return `--${boundary}\r\n${headers}\r\n\r\n${httpPayload}\r\n`;
+  return Buffer.concat([
+    Buffer.from(`--${boundary}\r\n${headers}\r\n\r\n`, 'utf-8'),
+    httpPayload,
+    Buffer.from('\r\n', 'utf-8'),
+  ]);
 }
 
-function renderChangesetPart(boundary: string, group: ResponseGroup): string {
+function renderChangesetPart(boundary: string, group: ResponseGroup): Buffer {
   const changesetBoundary = generateBoundary(group.id ?? 'changeset');
-  let part = `--${boundary}\r\nContent-Type: multipart/mixed; boundary=${changesetBoundary}\r\n\r\n`;
+  const chunks: Buffer[] = [
+    Buffer.from(
+      `--${boundary}\r\nContent-Type: multipart/mixed; boundary=${changesetBoundary}\r\n\r\n`,
+      'utf-8',
+    ),
+  ];
   for (const entry of group.entries) {
     const headers = buildPartHeaders(entry);
     const httpPayload = renderHttpResponse(entry);
-    part += `--${changesetBoundary}\r\n${headers}\r\n\r\n${httpPayload}\r\n`;
+    chunks.push(
+      Buffer.from(`--${changesetBoundary}\r\n${headers}\r\n\r\n`, 'utf-8'),
+      httpPayload,
+      Buffer.from('\r\n', 'utf-8'),
+    );
   }
-  part += `--${changesetBoundary}--\r\n`;
-  return part;
+  chunks.push(Buffer.from(`--${changesetBoundary}--\r\n`, 'utf-8'));
+  return Buffer.concat(chunks);
 }
 
 function buildPartHeaders(entry: BatchResponseEntry): string {
@@ -74,40 +87,43 @@ function buildPartHeaders(entry: BatchResponseEntry): string {
   return lines.join('\r\n');
 }
 
-function renderHttpResponse(entry: BatchResponseEntry): string {
+function renderHttpResponse(entry: BatchResponseEntry): Buffer {
   const reason = STATUS_CODES[entry.status] ?? '';
   const headers = normaliseHeaders(entry.headers ?? {});
-  let bodyString = '';
+  const bodyBuffer = serializeEntryBody(entry.body, headers);
 
-  if (entry.body !== undefined && entry.body !== null) {
-    if (typeof entry.body === 'string') {
-      bodyString = entry.body;
-    } else if (Buffer.isBuffer(entry.body)) {
-      bodyString = entry.body.toString('utf-8');
-    } else {
-      bodyString = JSON.stringify(entry.body);
-      if (!headers['content-type']) {
-        headers['content-type'] = 'application/json; charset=utf-8';
-      }
-    }
-  }
-
-  if (bodyString && !headers['content-length']) {
-    headers['content-length'] = Buffer.byteLength(bodyString, 'utf-8').toString();
+  if (bodyBuffer && bodyBuffer.length && !headers['content-length']) {
+    headers['content-length'] = bodyBuffer.length.toString();
   }
 
   const headerLines = Object.entries(headers).map(
     ([key, value]) => `${formatHeaderName(key)}: ${value}`,
   );
-  let response = `HTTP/1.1 ${entry.status} ${reason}`;
+  let responseHead = `HTTP/1.1 ${entry.status} ${reason}`;
   if (headerLines.length) {
-    response += '\r\n' + headerLines.join('\r\n');
+    responseHead += '\r\n' + headerLines.join('\r\n');
   }
-  response += '\r\n\r\n';
-  if (bodyString) {
-    response += bodyString;
+  responseHead += '\r\n\r\n';
+  const headBuffer = Buffer.from(responseHead, 'utf-8');
+  if (!bodyBuffer || bodyBuffer.length === 0) {
+    return headBuffer;
   }
-  return response;
+  return Buffer.concat([headBuffer, bodyBuffer]);
+}
+
+function serializeEntryBody(body: unknown, headers: Record<string, string>): Buffer | undefined {
+  if (body === undefined || body === null) return undefined;
+  if (Buffer.isBuffer(body)) return body;
+  if (typeof body === 'string') {
+    return Buffer.from(body, 'utf-8');
+  }
+  if (typeof body === 'number' || typeof body === 'boolean' || typeof body === 'object') {
+    if (!headers['content-type']) {
+      headers['content-type'] = 'application/json; charset=utf-8';
+    }
+    return Buffer.from(JSON.stringify(body));
+  }
+  return Buffer.from(String(body));
 }
 
 function normaliseHeaders(headers: Record<string, string>): Record<string, string> {

@@ -78,13 +78,17 @@ function requestStub(contentType: string): any {
 
 function createFetchResponse(options: {
   status: number;
-  body?: string;
+  body?: string | Buffer;
   headers?: Record<string, string>;
 }) {
   const headerMap = new Map<string, string>();
   for (const [key, value] of Object.entries(options.headers ?? {})) {
     headerMap.set(key.toLowerCase(), value);
   }
+  const rawBody =
+    typeof options.body === 'string'
+      ? Buffer.from(options.body, 'utf-8')
+      : (options.body ?? Buffer.alloc(0));
   return {
     status: options.status,
     headers: {
@@ -96,7 +100,10 @@ function createFetchResponse(options: {
       },
     },
     async text() {
-      return options.body ?? '';
+      return rawBody.toString('utf-8');
+    },
+    async arrayBuffer() {
+      return rawBody;
     },
   };
 }
@@ -297,6 +304,9 @@ describe('$batch controller', () => {
         async text() {
           return '';
         },
+        async arrayBuffer() {
+          return Buffer.alloc(0);
+        },
       };
     };
 
@@ -332,7 +342,11 @@ describe('$batch controller', () => {
     const originalFetch = (global as any).fetch;
     const responses = [
       createFetchResponse({ status: 302, headers: { location: '/odata/next' } }),
-      createFetchResponse({ status: 200, body: '{"value":42}' }),
+      createFetchResponse({
+        status: 200,
+        body: '{"value":42}',
+        headers: { 'content-type': 'application/json' },
+      }),
     ];
     (global as any).fetch = async () => {
       const next = responses.shift();
@@ -357,6 +371,118 @@ describe('$batch controller', () => {
     } finally {
       (global as any).fetch = originalFetch;
     }
+  });
+
+  it('preserves binary payloads returned via fetch()', async () => {
+    const controller = new ODataBatchController(
+      { handleRequest: async () => undefined } as any,
+      'http://localhost',
+      createRequestContextStub(),
+      { get: async () => undefined } as any,
+      { findByName: () => undefined } as any,
+      noopLogger,
+      defaultConfig,
+    );
+
+    const originalFetch = (global as any).fetch;
+    const blob = Buffer.from([0x00, 0xff, 0x10]);
+    (global as any).fetch = async () =>
+      createFetchResponse({
+        status: 200,
+        body: blob,
+        headers: {
+          'content-type': 'application/octet-stream',
+          'content-length': String(blob.length),
+        },
+      });
+
+    try {
+      const result = await (controller as any).executeSingle(
+        {
+          id: 'bin',
+          method: 'GET',
+          url: '/odata/Binary',
+        },
+        undefined,
+        requestStub('multipart/mixed'),
+      );
+
+      assert.equal(result.status, 200);
+      assert.equal(Buffer.isBuffer(result.body), true);
+      assert.equal((result.body as Buffer).equals(blob), true);
+    } finally {
+      (global as any).fetch = originalFetch;
+    }
+  });
+
+  it('preserves binary payloads returned via in-process handler', async () => {
+    const blob = Buffer.from([0xde, 0xad, 0xbe, 0xef]);
+    const controller = new ODataBatchController(
+      {
+        handleRequest: async (_req: unknown, res: any) => {
+          res.setHeader('Content-Type', 'application/octet-stream');
+          res.end(blob);
+        },
+      } as any,
+      'http://localhost',
+      createRequestContextStub(),
+      { get: async () => undefined } as any,
+      { findByName: () => undefined } as any,
+      noopLogger,
+      defaultConfig,
+    );
+
+    const contextStub = {
+      applyTo: () => undefined,
+      clearFrom: () => undefined,
+    };
+
+    const result = await (controller as any).executeWithHandler(
+      {
+        id: 'bin',
+        method: 'GET',
+        url: '/odata/Binary',
+      },
+      contextStub,
+      requestStub('multipart/mixed'),
+    );
+
+    assert.equal(result.status, 200);
+    assert.equal(Buffer.isBuffer(result.body), true);
+    assert.equal((result.body as Buffer).equals(blob), true);
+  });
+
+  it('encodes binary responses when returning JSON batch payloads', async () => {
+    const blob = Buffer.from([0xde, 0xad, 0xbe, 0xef]);
+    const controller = createController({
+      bin: { status: 200, headers: { 'content-type': 'application/pdf' }, body: blob },
+      txt: { status: 200, body: { value: 1 } },
+    });
+
+    const batchResult = (await controller.handleBatch(
+      {
+        requests: [
+          { id: 'bin', method: 'GET', url: '/odata/Binary' },
+          { id: 'txt', method: 'GET', url: '/odata/Text' },
+        ],
+      },
+      responseStub,
+      requestStub('application/json'),
+    )) as BatchResponsePayload;
+
+    assert.equal(batchResult.responses.length, 2);
+    const [binaryEntry, jsonEntry] = batchResult.responses;
+    assert.equal(binaryEntry.id, 'bin');
+    assert.equal(binaryEntry.status, 200);
+    assert.deepStrictEqual(binaryEntry.headers?.['content-type'], 'application/pdf');
+    const body = binaryEntry.body as any;
+    assert.deepStrictEqual(body, {
+      encoding: 'base64',
+      contentType: 'application/pdf',
+      value: blob.toString('base64'),
+    });
+    assert.equal(jsonEntry.id, 'txt');
+    assert.deepStrictEqual(jsonEntry.body, { value: 1 });
   });
 
   it('commits transactional group when all requests succeed', async () => {

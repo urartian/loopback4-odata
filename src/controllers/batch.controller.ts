@@ -116,6 +116,13 @@ interface ContentIdTokenMatch {
 }
 
 const NON_TRANSACTIONAL_WARNINGS = new WeakSet<EntitySetDef>();
+const TEXT_LIKE_MIME_TYPES = new Set([
+  'application/xml',
+  'application/xhtml+xml',
+  'application/javascript',
+  'application/ecmascript',
+  'application/x-www-form-urlencoded',
+]);
 
 class AtomicityGroupContext {
   private readonly requestState: AtomicityRequestState;
@@ -383,12 +390,12 @@ export class ODataBatchController {
       if (isMultipart) {
         const { body, boundary: responseBoundary } = serializeMultipartBatch(responses);
         response.set('Content-Type', `multipart/mixed; boundary=${responseBoundary}`);
-        response.set('Content-Length', Buffer.byteLength(body, 'utf-8').toString());
+        response.set('Content-Length', body.length.toString());
         response.send(body);
         result = undefined;
       } else {
         response.contentType('application/json');
-        result = { responses };
+        result = { responses: this.normalizeJsonBatchResponses(responses) };
       }
 
       this.emitBatchSummary('completed', startedAt, {
@@ -1459,18 +1466,13 @@ export class ODataBatchController {
       const finalize = () => {
         if (resolved) return;
         resolved = true;
-        const bodyText = Buffer.concat(chunks).toString('utf-8');
-        let body: unknown;
-        try {
-          body = bodyText ? JSON.parse(bodyText) : undefined;
-        } catch {
-          body = bodyText;
-        }
+        const payloadBuffer = Buffer.concat(chunks);
         const headers: Record<string, string> = {};
         for (const [key, value] of Object.entries(res.getHeaders())) {
           if (typeof value === 'string') headers[key] = value;
           else if (Array.isArray(value)) headers[key] = value.join(',');
         }
+        const body = this.decodeBufferedBody(payloadBuffer, headers);
         resolve({ id: request.id, status: res.statusCode, headers, body });
       };
 
@@ -1617,18 +1619,13 @@ export class ODataBatchController {
         }
       }
       const resp = await this.fetchWithRedirects(target, { method, headers, body });
-      const text = await resp.text();
-      let parsed: unknown;
-      try {
-        parsed = text ? JSON.parse(text) : undefined;
-      } catch {
-        parsed = text;
-      }
+      const payloadBuffer = Buffer.from(await resp.arrayBuffer());
       const outHeaders: Record<string, string> = {};
       resp.headers.forEach((v, k) => {
         outHeaders[k] = v;
       });
-      return { id: request.id, status: resp.status, headers: outHeaders, body: parsed };
+      const bodyPayload = this.decodeBufferedBody(payloadBuffer, outHeaders);
+      return { id: request.id, status: resp.status, headers: outHeaders, body: bodyPayload };
     } catch (err) {
       return {
         id: request.id,
@@ -1775,6 +1772,61 @@ export class ODataBatchController {
     }
 
     return merged;
+  }
+
+  private decodeBufferedBody(bodyBuffer: Buffer, headers?: Record<string, string>): unknown {
+    if (!bodyBuffer.length) return undefined;
+    const contentType = this.getHeaderCaseInsensitive(headers, 'content-type');
+    if (this.isJsonContentType(contentType)) {
+      const text = bodyBuffer.toString('utf-8');
+      try {
+        return text ? JSON.parse(text) : undefined;
+      } catch {
+        return text;
+      }
+    }
+    if (this.isTextContentType(contentType)) {
+      return bodyBuffer.toString('utf-8');
+    }
+    return bodyBuffer;
+  }
+
+  private isJsonContentType(contentType?: string): boolean {
+    const normalized = this.normalizeContentType(contentType);
+    if (!normalized) return false;
+    return normalized === 'application/json' || normalized.endsWith('+json');
+  }
+
+  private isTextContentType(contentType?: string): boolean {
+    const normalized = this.normalizeContentType(contentType);
+    if (!normalized) return false;
+    if (normalized.startsWith('text/')) return true;
+    if (normalized.endsWith('+xml')) return true;
+    return TEXT_LIKE_MIME_TYPES.has(normalized);
+  }
+
+  private normalizeContentType(value?: string): string | undefined {
+    if (!value) return undefined;
+    const [type] = value.split(';', 1);
+    const normalized = type?.trim().toLowerCase();
+    return normalized || undefined;
+  }
+
+  private normalizeJsonBatchResponses(responses: BatchResponseEntry[]): BatchResponseEntry[] {
+    return responses.map((entry) => {
+      if (!Buffer.isBuffer(entry.body)) return entry;
+      const headers = entry.headers ?? {};
+      const contentType = this.getHeaderCaseInsensitive(headers, 'content-type');
+      return {
+        ...entry,
+        headers,
+        body: {
+          encoding: 'base64',
+          contentType: contentType ?? 'application/octet-stream',
+          value: (entry.body as Buffer).toString('base64'),
+        },
+      };
+    });
   }
 
   private resolveRequestBodyBuffer(request: BatchRequest): Buffer {
