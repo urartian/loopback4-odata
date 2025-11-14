@@ -12,6 +12,7 @@ import { HttpHandler } from '@loopback/rest/dist/http-handler';
 import { IncomingMessage, ServerResponse } from 'http';
 import { PassThrough } from 'stream';
 import {
+  AnyObject,
   Entity,
   IsolationLevel,
   PropertyDefinition,
@@ -33,6 +34,7 @@ import {
 } from '../util/datasource-transactions';
 import { emitTelemetryEvent } from '../util/telemetry';
 import { rewriteODataUrl } from '../middleware/odata-path-rewriter';
+import { ensureModelDefinitionWithRelations } from '../util/model-definition';
 
 const BATCH_OPERATION_SPEC = markUndocumentedOperation({
   responses: {
@@ -79,6 +81,7 @@ export interface BatchRequest {
   url: string;
   headers?: Record<string, string>;
   body?: unknown;
+  rawBody?: Buffer;
   dependsOn?: string[];
 }
 
@@ -115,6 +118,13 @@ interface ContentIdTokenMatch {
 }
 
 const NON_TRANSACTIONAL_WARNINGS = new WeakSet<EntitySetDef>();
+const TEXT_LIKE_MIME_TYPES = new Set([
+  'application/xml',
+  'application/xhtml+xml',
+  'application/javascript',
+  'application/ecmascript',
+  'application/x-www-form-urlencoded',
+]);
 
 class AtomicityGroupContext {
   private readonly requestState: AtomicityRequestState;
@@ -303,9 +313,10 @@ export class ODataBatchController {
       this.enforceOperationLimit(requests.length, limits);
       const requestOrder = this.buildRequestOrderIndex(requests);
 
-      grouped = this.groupByAtomicity(requests);
+      this.validateContiguousAtomicityGroups(requests);
+      const changeSets = this.collectAtomicityGroups(requests);
       operationCount = requests.length;
-      changesetCount = grouped.filter((group) => Boolean(group.atomicityGroup)).length;
+      changesetCount = changeSets.size;
       const dependencyResults = new Map<string, BatchResponseEntry>();
       const contentIdMap = new Map<string, string>();
       const contentIdEtags = new Map<string, string>();
@@ -313,11 +324,11 @@ export class ODataBatchController {
 
       const maxChangesetOps = limits.maxChangesetOperations;
       if (maxChangesetOps && maxChangesetOps > 0) {
-        for (const group of grouped) {
-          if (group.atomicityGroup && group.requests.length > maxChangesetOps) {
+        for (const [groupId, groupRequests] of changeSets.entries()) {
+          if (groupRequests.length > maxChangesetOps) {
             this.warn('Changeset operation limit exceeded.', {
-              group: group.atomicityGroup,
-              operations: group.requests.length,
+              group: groupId,
+              operations: groupRequests.length,
               maxChangesetOperations: maxChangesetOps,
             });
             throw new HttpErrors.BadRequest(
@@ -327,53 +338,60 @@ export class ODataBatchController {
         }
       }
 
-      for (const group of grouped) {
-        if (group.atomicityGroup) {
-          try {
-            const entries = await this.executeAtomicGroup(
-              group.requests,
-              group.atomicityGroup,
-              request,
-              dependencyResults,
-              requestOrder,
-              contentIdMap,
-              contentIdEtags,
-            );
-            if (entries?.length) {
-              responses.push(
-                ...entries.map((entry) => ({
-                  ...entry,
-                  atomicityGroup: group.atomicityGroup,
-                })),
+      const executedGroups = new Map<string, BatchResponseEntry[]>();
+
+      for (const req of requests) {
+        const groupId = req.atomicityGroup;
+        if (groupId) {
+          let pending = executedGroups.get(groupId);
+          if (!pending) {
+            const groupRequests = changeSets.get(groupId) ?? [];
+            try {
+              pending = await this.executeAtomicGroup(
+                groupRequests,
+                groupId,
+                request,
+                dependencyResults,
+                requestOrder,
+                contentIdMap,
+                contentIdEtags,
               );
+              pending = pending.map((entry) => ({ ...entry, atomicityGroup: groupId }));
+            } catch (error) {
+              if (this.isBatchValidationError(error)) {
+                throw error;
+              }
+              const status = this.resolveErrorStatus(error, 500);
+              pending = groupRequests.map((original) => ({
+                id: original.id,
+                atomicityGroup: groupId,
+                status,
+                body: this.odataError(
+                  'BatchExecutionError',
+                  (error as Error).message ?? 'Failed to execute atomicity group.',
+                ),
+              }));
             }
-          } catch (error) {
-            if (this.isBatchValidationError(error)) {
-              throw error;
-            }
-            const status = this.resolveErrorStatus(error, 500);
-            responses.push({
-              atomicityGroup: group.atomicityGroup,
-              status,
-              body: this.odataError(
-                'BatchExecutionError',
-                (error as Error).message ?? 'Failed to execute atomicity group.',
-              ),
-            });
+            executedGroups.set(groupId, pending);
           }
-        } else {
-          const entries = await this.executeGroup(
-            group.requests,
-            undefined,
-            request,
-            dependencyResults,
-            requestOrder,
-            false,
-            contentIdMap,
-            contentIdEtags,
-          );
-          responses.push(...entries);
+          const next = pending.shift();
+          if (next) {
+            responses.push(next);
+          }
+          continue;
         }
+
+        const entries = await this.executeGroup(
+          [req],
+          undefined,
+          request,
+          dependencyResults,
+          requestOrder,
+          false,
+          contentIdMap,
+          contentIdEtags,
+        );
+        responses.push(...entries);
       }
 
       response.set('OData-Version', ODATA_VERSION);
@@ -382,12 +400,12 @@ export class ODataBatchController {
       if (isMultipart) {
         const { body, boundary: responseBoundary } = serializeMultipartBatch(responses);
         response.set('Content-Type', `multipart/mixed; boundary=${responseBoundary}`);
-        response.set('Content-Length', Buffer.byteLength(body, 'utf-8').toString());
+        response.set('Content-Length', body.length.toString());
         response.send(body);
         result = undefined;
       } else {
         response.contentType('application/json');
-        result = { responses };
+        result = { responses: this.normalizeJsonBatchResponses(responses) };
       }
 
       this.emitBatchSummary('completed', startedAt, {
@@ -596,22 +614,45 @@ export class ODataBatchController {
     });
   }
 
-  private groupByAtomicity(requests: BatchRequest[]) {
-    const result: Array<{ atomicityGroup?: string; requests: BatchRequest[] }> = [];
-    const handled = new Set<string>();
-
+  private collectAtomicityGroups(requests: BatchRequest[]): Map<string, BatchRequest[]> {
+    const groups = new Map<string, BatchRequest[]>();
     for (const req of requests) {
-      if (req.atomicityGroup) {
-        if (handled.has(req.atomicityGroup)) continue;
-        const groupRequests = requests.filter((r) => r.atomicityGroup === req.atomicityGroup);
-        handled.add(req.atomicityGroup);
-        result.push({ atomicityGroup: req.atomicityGroup, requests: groupRequests });
-      } else {
-        result.push({ requests: [req] });
+      const groupId = req.atomicityGroup?.trim();
+      if (!groupId) continue;
+      req.atomicityGroup = groupId;
+      let buffer = groups.get(groupId);
+      if (!buffer) {
+        buffer = [];
+        groups.set(groupId, buffer);
       }
+      buffer.push(req);
     }
+    return groups;
+  }
 
-    return result;
+  private validateContiguousAtomicityGroups(requests: BatchRequest[]): void {
+    const seen = new Map<string, number>();
+    let activeGroup: string | undefined;
+    requests.forEach((req, index) => {
+      const groupId = req.atomicityGroup?.trim();
+      if (!groupId) {
+        activeGroup = undefined;
+        return;
+      }
+      req.atomicityGroup = groupId;
+      const firstIndex = seen.get(groupId);
+      if (firstIndex === undefined) {
+        seen.set(groupId, index);
+        activeGroup = groupId;
+        return;
+      }
+      if (activeGroup !== groupId) {
+        throw new HttpErrors.BadRequest(
+          `Atomicity group ${groupId} must be contiguous within the batch payload.`,
+        );
+      }
+      activeGroup = groupId;
+    });
   }
 
   private buildRequestOrderIndex(requests: BatchRequest[]): Map<BatchRequest, number> {
@@ -1029,12 +1070,19 @@ export class ODataBatchController {
     if (!['PATCH', 'PUT', 'DELETE'].includes(method)) return;
     const headers = request.headers ?? {};
     if (this.hasIfMatchHeader(headers)) return;
-    const normalizedUrl = this.normalizeContentIdPath(request.url);
+    const normalizedUrl = this.normalizeContentIdLookupPath(request.url);
     if (!normalizedUrl) return;
     const etag = contentIdEtags.get(normalizedUrl);
     if (!etag) return;
     request.headers = headers;
     headers['If-Match'] = etag;
+  }
+
+  private normalizeContentIdLookupPath(value: string | undefined): string | undefined {
+    if (!value) return undefined;
+    const sanitized = this.sanitizeUrl(value, true);
+    if (sanitized) return this.normalizeContentIdPath(sanitized);
+    return this.normalizeContentIdPath(value);
   }
 
   private hasIfMatchHeader(headers: Record<string, string>): boolean {
@@ -1173,6 +1221,35 @@ export class ODataBatchController {
     return undefined;
   }
 
+  private sanitizeHeadersForJsonBatchBody(
+    headers: Record<string, string> | undefined,
+  ): Record<string, string> | undefined {
+    if (!headers) return undefined;
+    // Strip hop-by-hop or length/encoding headers that no longer match the base64 payload.
+    const disallowed = new Set([
+      'content-length',
+      'content-transfer-encoding',
+      'content-encoding',
+      'transfer-encoding',
+      'te',
+      'trailer',
+      'connection',
+      'keep-alive',
+      'upgrade',
+      'proxy-connection',
+    ]);
+    let mutated = false;
+    const result: Record<string, string> = {};
+    for (const [key, value] of Object.entries(headers)) {
+      if (disallowed.has(key.toLowerCase())) {
+        mutated = true;
+        continue;
+      }
+      result[key] = value;
+    }
+    return mutated ? result : headers;
+  }
+
   private async executeAtomicGroup(
     requests: BatchRequest[],
     groupId: string,
@@ -1182,6 +1259,7 @@ export class ODataBatchController {
     sharedContentIds: Map<string, string>,
     sharedContentIdEtags: Map<string, string>,
   ): Promise<BatchResponseEntry[]> {
+    this.ensureAtomicityGroupContainsOnlyWrites(groupId, requests);
     const context = await this.createAtomicGroupContext(groupId, requests);
     const contentIdMap = new Map<string, string>(sharedContentIds);
     const contentIdEtags = new Map<string, string>(sharedContentIdEtags);
@@ -1266,6 +1344,18 @@ export class ODataBatchController {
     return undefined;
   }
 
+  private ensureAtomicityGroupContainsOnlyWrites(groupId: string, requests: BatchRequest[]): void {
+    const allowed = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
+    for (const request of requests) {
+      const method = (request.method ?? '').toUpperCase();
+      if (!allowed.has(method)) {
+        throw new HttpErrors.BadRequest(
+          `Atomicity group ${groupId} contains unsupported ${method || 'unknown'} request.`,
+        );
+      }
+    }
+  }
+
   private async createAtomicGroupContext(
     groupId: string,
     requests: BatchRequest[],
@@ -1340,12 +1430,97 @@ export class ODataBatchController {
     const segments = path.split('/').filter(Boolean);
     const stripped = this.stripServiceRootSegments(segments);
     if (!stripped || !stripped.length) return undefined;
-    const candidate = stripped[0];
-    if (!candidate || candidate.startsWith('$')) return undefined;
-    const normalized = candidate.includes('(')
-      ? candidate.slice(0, candidate.indexOf('('))
-      : candidate;
-    return normalized;
+
+    const normalizedSegments = stripped
+      .map((segment) => this.normalizePathSegment(segment))
+      .filter((segment): segment is string => Boolean(segment));
+
+    if (!normalizedSegments.length) return undefined;
+    const [first, ...rest] = normalizedSegments;
+    if (!first || first.startsWith('$')) return undefined;
+
+    let current = this.registry.findByName(first);
+    if (!current) return undefined;
+
+    for (const segment of rest) {
+      if (!segment || segment.startsWith('$')) break;
+      const next = this.resolveNavigationTargetEntitySet(current, segment);
+      if (!next) break;
+      current = next;
+    }
+
+    return current?.name;
+  }
+
+  private normalizePathSegment(segment: string): string | undefined {
+    if (!segment) return undefined;
+    const trimmed = segment.trim();
+    if (!trimmed) return undefined;
+    const parenIndex = trimmed.indexOf('(');
+    const base = parenIndex >= 0 ? trimmed.slice(0, parenIndex) : trimmed;
+    if (!base) return undefined;
+    try {
+      return decodeURIComponent(base);
+    } catch {
+      return base;
+    }
+  }
+
+  private resolveNavigationTargetEntitySet(
+    current: EntitySetDef,
+    segment: string,
+  ): EntitySetDef | undefined {
+    const modelCtor = current.modelCtor as typeof Entity | undefined;
+    if (!modelCtor) return undefined;
+    const definition = ensureModelDefinitionWithRelations(modelCtor);
+    const relations = (definition?.relations ?? {}) as Record<string, AnyObject | undefined>;
+    const relation = this.findRelationMeta(relations, segment);
+    if (!relation) return undefined;
+    const targetModel = this.resolveRelationTargetModel(relation);
+    if (!targetModel) return undefined;
+    return this.registry.get(targetModel);
+  }
+
+  private findRelationMeta(
+    relations: Record<string, AnyObject | undefined>,
+    segment: string,
+  ): AnyObject | undefined {
+    const exact = relations[segment];
+    if (exact) return exact;
+    const lower = segment.toLowerCase();
+    for (const [name, meta] of Object.entries(relations)) {
+      if (name.toLowerCase() === lower && meta) {
+        return meta;
+      }
+    }
+    return undefined;
+  }
+
+  private resolveRelationTargetModel(meta: AnyObject | undefined): typeof Entity | undefined {
+    if (!meta) return undefined;
+    const target = meta.target;
+    if (!target) return undefined;
+    if (this.isEntityConstructor(target as AnyObject)) {
+      return target as typeof Entity;
+    }
+    if (typeof target === 'function') {
+      try {
+        const resolved = (target as () => typeof Entity)();
+        if (this.isEntityConstructor(resolved as AnyObject)) {
+          return resolved as typeof Entity;
+        }
+        if (typeof resolved === 'function' && this.isEntityConstructor(resolved as AnyObject)) {
+          return resolved as typeof Entity;
+        }
+      } catch {
+        return undefined;
+      }
+    }
+    return undefined;
+  }
+
+  private isEntityConstructor(value: AnyObject): value is typeof Entity {
+    return typeof value === 'function' && value.prototype instanceof Entity;
   }
 
   private extractBoundary(contentType: string): string | undefined {
@@ -1387,7 +1562,10 @@ export class ODataBatchController {
       };
     }
 
-    const rewrittenUrl = rewriteODataUrl(url);
+    const rewrittenUrl = rewriteODataUrl(url, {
+      namespace: this.cfg?.namespace,
+      namespaceAlias: this.cfg?.namespaceAlias,
+    });
 
     const method = request.method?.toUpperCase();
     if (!method) {
@@ -1398,7 +1576,7 @@ export class ODataBatchController {
       };
     }
 
-    const bodyBuffer = request.body ? Buffer.from(JSON.stringify(request.body)) : Buffer.alloc(0);
+    const bodyBuffer = this.resolveRequestBodyBuffer(request);
     const socket = new PassThrough() as any;
     // minimal socket surface for Node/Express expectations
     socket.writable = true;
@@ -1422,7 +1600,11 @@ export class ODataBatchController {
       queryIndex >= 0 && queryIndex < rewrittenUrl.length - 1
         ? this.buildQueryObject(rewrittenUrl.slice(queryIndex + 1))
         : {};
-    if (bodyBuffer.length && !combinedHeaders['content-type']) {
+    if (
+      bodyBuffer.length &&
+      this.shouldDefaultJsonContentType(request) &&
+      !combinedHeaders['content-type']
+    ) {
       combinedHeaders['content-type'] = 'application/json';
     }
     if (bodyBuffer.length) {
@@ -1447,18 +1629,13 @@ export class ODataBatchController {
       const finalize = () => {
         if (resolved) return;
         resolved = true;
-        const bodyText = Buffer.concat(chunks).toString('utf-8');
-        let body: unknown;
-        try {
-          body = bodyText ? JSON.parse(bodyText) : undefined;
-        } catch {
-          body = bodyText;
-        }
+        const payloadBuffer = Buffer.concat(chunks);
         const headers: Record<string, string> = {};
         for (const [key, value] of Object.entries(res.getHeaders())) {
           if (typeof value === 'string') headers[key] = value;
           else if (Array.isArray(value)) headers[key] = value.join(',');
         }
+        const body = this.decodeBufferedBody(payloadBuffer, headers);
         resolve({ id: request.id, status: res.statusCode, headers, body });
       };
 
@@ -1539,17 +1716,17 @@ export class ODataBatchController {
     }
     (req as any).push(null);
 
+    // Add per-request timeout to avoid hangs; wait for finish/close
+    const TIMEOUT_MS = 30000;
+    let timeoutHandle: NodeJS.Timeout | undefined;
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      timeoutHandle = setTimeout(() => reject(new Error('Batch sub-request timeout')), TIMEOUT_MS);
+    });
+
     try {
-      // Add per-request timeout to avoid hangs; wait for finish/close
-      const TIMEOUT_MS = 30000;
-      const timeoutPromise = new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error('Batch sub-request timeout')), TIMEOUT_MS),
-      );
       const result = await Promise.race([finishPromise, timeoutPromise]);
-      context.clearFrom(req);
       return result;
     } catch (error) {
-      context.clearFrom(req);
       const status =
         (error && typeof error === 'object' && 'statusCode' in error
           ? (error as { statusCode?: number }).statusCode
@@ -1563,6 +1740,11 @@ export class ODataBatchController {
         status,
         body,
       };
+    } finally {
+      if (timeoutHandle) {
+        clearTimeout(timeoutHandle);
+      }
+      context.clearFrom(req);
     }
   }
 
@@ -1596,24 +1778,22 @@ export class ODataBatchController {
     try {
       const target = new URL(path, this.serverUrl).toString();
       const headers = this.buildHeadersForRequest(request, parentRequest);
-      let body: string | undefined;
-      if (request.body !== undefined) {
-        body = typeof request.body === 'string' ? request.body : JSON.stringify(request.body);
-        if (!headers['content-type']) headers['content-type'] = 'application/json';
+      const bodyBuffer = this.resolveRequestBodyBuffer(request);
+      const body = bodyBuffer.length ? bodyBuffer : undefined;
+      if (bodyBuffer.length) {
+        headers['content-length'] = String(bodyBuffer.length);
+        if (this.shouldDefaultJsonContentType(request) && !headers['content-type']) {
+          headers['content-type'] = 'application/json';
+        }
       }
-      const resp = await fetch(target, { method, headers, body } as any);
-      const text = await resp.text();
-      let parsed: unknown;
-      try {
-        parsed = text ? JSON.parse(text) : undefined;
-      } catch {
-        parsed = text;
-      }
+      const resp = await this.fetchWithRedirects(target, { method, headers, body });
+      const payloadBuffer = Buffer.from(await resp.arrayBuffer());
       const outHeaders: Record<string, string> = {};
       resp.headers.forEach((v, k) => {
         outHeaders[k] = v;
       });
-      return { id: request.id, status: resp.status, headers: outHeaders, body: parsed };
+      const bodyPayload = this.decodeBufferedBody(payloadBuffer, outHeaders);
+      return { id: request.id, status: resp.status, headers: outHeaders, body: bodyPayload };
     } catch (err) {
       return {
         id: request.id,
@@ -1637,19 +1817,24 @@ export class ODataBatchController {
 
   private sanitizeUrl(rawUrl: string, allowRelative = false): string | undefined {
     if (!rawUrl) return undefined;
-    if (/^https?:\/\//i.test(rawUrl)) {
+    const trimmed = String(rawUrl).trim();
+    if (!trimmed) return undefined;
+    if (trimmed.startsWith('//')) {
+      return undefined;
+    }
+    if (/^https?:\/\//i.test(trimmed)) {
       try {
-        const parsed = new URL(rawUrl);
+        const parsed = new URL(trimmed);
         return parsed.pathname + parsed.search;
       } catch {
         return undefined;
       }
     }
     // Accept absolute app paths as-is
-    if (rawUrl.startsWith('/')) return rawUrl;
+    if (trimmed.startsWith('/')) return trimmed;
     // Optionally resolve relative OData paths (e.g. "Books", "Books(1)?$select=...")
     if (allowRelative) {
-      return this.buildServiceRelativePath(rawUrl);
+      return this.buildServiceRelativePath(trimmed);
     }
     // Otherwise, treat relative URLs as invalid in JSON $batch
     return undefined;
@@ -1658,6 +1843,7 @@ export class ODataBatchController {
   private buildServiceRelativePath(rawUrl: string): string | undefined {
     const trimmed = String(rawUrl ?? '').trim();
     if (!trimmed) return this.serviceRootPath;
+    if (trimmed.startsWith('//')) return undefined;
     if (trimmed.startsWith('/')) return trimmed;
     const question = trimmed.indexOf('?');
     const pathPart = question >= 0 ? trimmed.slice(0, question) : trimmed;
@@ -1754,6 +1940,146 @@ export class ODataBatchController {
     }
 
     return merged;
+  }
+
+  private decodeBufferedBody(bodyBuffer: Buffer, headers?: Record<string, string>): unknown {
+    if (!bodyBuffer.length) return undefined;
+    const contentType = this.getHeaderCaseInsensitive(headers, 'content-type');
+    if (this.isJsonContentType(contentType)) {
+      const text = bodyBuffer.toString('utf-8');
+      try {
+        return text ? JSON.parse(text) : undefined;
+      } catch {
+        return text;
+      }
+    }
+    if (this.isTextContentType(contentType)) {
+      return bodyBuffer.toString('utf-8');
+    }
+    return bodyBuffer;
+  }
+
+  private isJsonContentType(contentType?: string): boolean {
+    const normalized = this.normalizeContentType(contentType);
+    if (!normalized) return false;
+    return normalized === 'application/json' || normalized.endsWith('+json');
+  }
+
+  private isTextContentType(contentType?: string): boolean {
+    const normalized = this.normalizeContentType(contentType);
+    if (!normalized) return false;
+    if (normalized.startsWith('text/')) return true;
+    if (normalized.endsWith('+xml')) return true;
+    return TEXT_LIKE_MIME_TYPES.has(normalized);
+  }
+
+  private normalizeContentType(value?: string): string | undefined {
+    if (!value) return undefined;
+    const [type] = value.split(';', 1);
+    const normalized = type?.trim().toLowerCase();
+    return normalized || undefined;
+  }
+
+  private normalizeJsonBatchResponses(responses: BatchResponseEntry[]): BatchResponseEntry[] {
+    return responses.map((entry) => {
+      if (!Buffer.isBuffer(entry.body)) return entry;
+      const headers = this.sanitizeHeadersForJsonBatchBody(entry.headers) ?? {};
+      const contentType = this.getHeaderCaseInsensitive(headers, 'content-type');
+      return {
+        ...entry,
+        headers,
+        body: {
+          encoding: 'base64',
+          contentType: contentType ?? 'application/octet-stream',
+          value: (entry.body as Buffer).toString('base64'),
+        },
+      };
+    });
+  }
+
+  private resolveRequestBodyBuffer(request: BatchRequest): Buffer {
+    if (request.rawBody) {
+      return request.rawBody;
+    }
+    if (request.body === undefined) {
+      return Buffer.alloc(0);
+    }
+    if (typeof request.body === 'string') {
+      return Buffer.from(request.body);
+    }
+    return Buffer.from(JSON.stringify(request.body));
+  }
+
+  private shouldDefaultJsonContentType(request: BatchRequest): boolean {
+    return !request.rawBody && request.body !== undefined && typeof request.body !== 'string';
+  }
+
+  private async fetchWithRedirects(
+    initialTarget: string,
+    init: { method: string; headers: Record<string, string>; body?: Buffer },
+  ): Promise<globalThis.Response> {
+    const MAX_REDIRECTS = 3;
+    let target = initialTarget;
+    let remaining = MAX_REDIRECTS;
+
+    while (remaining >= 0) {
+      const response = await fetch(target, {
+        method: init.method,
+        headers: init.headers,
+        body: init.body,
+        redirect: 'manual',
+      } as any);
+
+      if (!this.isRedirectResponse(response)) {
+        return response;
+      }
+
+      if (!['GET', 'HEAD'].includes(init.method)) {
+        return response;
+      }
+
+      if (remaining === 0) {
+        throw new HttpErrors.BadRequest('Batch sub-request exceeded redirect limits.');
+      }
+
+      const nextTarget = this.resolveRedirectLocation(response.headers.get('location'));
+      if (!nextTarget) {
+        return response;
+      }
+      remaining -= 1;
+      target = nextTarget;
+    }
+
+    throw new HttpErrors.InternalServerError('Failed to resolve redirect target.');
+  }
+
+  private isRedirectResponse(response: globalThis.Response): boolean {
+    return [301, 302, 303, 307, 308].includes(response.status);
+  }
+
+  private resolveRedirectLocation(location: string | null): string | undefined {
+    if (!location) return undefined;
+    const trimmed = location.trim();
+    if (!trimmed) return undefined;
+    if (/^https?:\/\//i.test(trimmed)) {
+      try {
+        const candidate = new URL(trimmed);
+        const base = new URL(this.serverUrl);
+        if (candidate.origin !== base.origin) {
+          return undefined;
+        }
+        return candidate.toString();
+      } catch {
+        return undefined;
+      }
+    }
+    const sanitized = this.sanitizeUrl(trimmed, true);
+    if (!sanitized) return undefined;
+    try {
+      return new URL(sanitized, this.serverUrl).toString();
+    } catch {
+      return undefined;
+    }
   }
 
   private isBatchValidationError(error: unknown): boolean {

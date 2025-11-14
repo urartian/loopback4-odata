@@ -1,5 +1,5 @@
 import 'reflect-metadata';
-import { Entity, model, property } from '@loopback/repository';
+import { Entity, Filter, model, property } from '@loopback/repository';
 import { expect } from '@loopback/testlab';
 import { defineODataCrudController } from '../../controllers/crud-controller-factory';
 import { EntitySetDef } from '../../registry/entityset-registry';
@@ -187,5 +187,28 @@ describe('CRUD controller response normalization', () => {
       elapsed: 1500,
     } as any);
     expect(millisDecorated.elapsed).to.equal('PT1.5S');
+  });
+
+  it('normalizes scientific decimal strings without losing precision', () => {
+    const controller = createController();
+    expect(controller.normalizeDecimalString('1.234567890123456789e18')).to.equal(
+      '1234567890123456789',
+    );
+    expect(controller.normalizeDecimalString('5.5e-4')).to.equal('0.00055');
+    expect(controller.normalizeDecimalString('000123.4500e2')).to.equal('12345');
+  });
+
+  it('merges field selections without mutating array inputs', () => {
+    const controller = createController();
+    const target: Filter<Invoice> = { fields: ['id'] };
+    controller.mergeFilters(target, { fields: { status: true } });
+    expect(target.fields).to.deepEqual({ id: true, status: true });
+  });
+
+  it('preserves explicit field exclusions when merging filters', () => {
+    const controller = createController();
+    const target: Filter<Invoice> = { fields: { history: false } };
+    controller.mergeFilters(target, { fields: ['status'] });
+    expect(target.fields).to.deepEqual({ history: false, status: true });
   });
 });

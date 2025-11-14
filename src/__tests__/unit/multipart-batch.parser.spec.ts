@@ -174,6 +174,34 @@ describe('multipart batch parser', () => {
       }),
     ).to.be.rejectedWith(/part exceeds the configured size limit/i);
   });
+
+  it('preserves raw binary payloads inside application/http parts', async () => {
+    const boundary = 'batch_binary';
+    const binaryPayload = Buffer.from([0x00, 0xff, 0x41, 0x42, 0x10, 0x99]);
+    const prefix = Buffer.from(
+      [
+        `--${boundary}`,
+        'Content-Type: application/http',
+        'Content-Transfer-Encoding: binary',
+        '',
+        'POST /odata/Documents HTTP/1.1',
+        'Content-Type: application/octet-stream',
+        '',
+        '',
+      ].join('\r\n'),
+      'utf-8',
+    );
+    const suffix = Buffer.from([`\r\n--${boundary}--`, '', ''].join('\r\n'), 'utf-8');
+    const body = Buffer.concat([prefix, binaryPayload, suffix]);
+    const stream = Readable.from(body);
+    const result = await parseMultipartBatch(stream, boundary);
+    expect(result.requests).to.have.length(1);
+    const [request] = result.requests;
+    expect(request.method).to.equal('POST');
+    expect(request.rawBody).to.be.instanceOf(Buffer);
+    expect(request.rawBody?.equals(binaryPayload)).to.be.true();
+    expect(request.body).to.be.undefined();
+  });
 });
 
 function buildBatchBody({

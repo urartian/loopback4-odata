@@ -14,6 +14,7 @@ export interface DeltaTokenPayload {
   entitySet: string;
   lastValue: string;
   keyValues?: Record<string, unknown>;
+  pageKeys?: Record<string, unknown>[];
   buckets?: DeltaTokenBucketState[];
   issuedAt?: string;
 }
@@ -21,14 +22,86 @@ export interface DeltaTokenPayload {
 const LEGACY_PREFIX = 'v1:';
 const JSON_PREFIX = 'v2:';
 
-function serializeValue(value: unknown): string {
-  if (value === null || value === undefined) return 'null';
-  if (value instanceof Date) return value.toISOString();
-  if (typeof value === 'object') return JSON.stringify(value);
-  return String(value);
+type EncodedDeltaValue =
+  | { kind: 'null' }
+  | { kind: 'string'; value: string }
+  | { kind: 'number'; value: string }
+  | { kind: 'bigint'; value: string }
+  | { kind: 'boolean'; value: boolean }
+  | { kind: 'date'; value: string }
+  | { kind: 'json'; value: string };
+
+function encodeValue(value: unknown): EncodedDeltaValue {
+  if (value === null || value === undefined) return { kind: 'null' };
+  if (typeof value === 'string') return { kind: 'string', value };
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) return { kind: 'string', value: String(value) };
+    return { kind: 'number', value: value.toString() };
+  }
+  if (typeof value === 'bigint') {
+    return { kind: 'bigint', value: value.toString() };
+  }
+  if (typeof value === 'boolean') return { kind: 'boolean', value };
+  if (value instanceof Date) return { kind: 'date', value: value.toISOString() };
+  if (typeof value === 'object') {
+    return { kind: 'json', value: JSON.stringify(value) };
+  }
+  return { kind: 'string', value: String(value) };
 }
 
-function deserializeValue(value: string): unknown {
+function decodeStoredValue(value: unknown): unknown {
+  if (isEncodedDeltaValue(value)) {
+    switch (value.kind) {
+      case 'null':
+        return null;
+      case 'string':
+        return value.value ?? '';
+      case 'number':
+        return typeof value.value === 'string' ? Number(value.value) : Number(value.value ?? 0);
+      case 'bigint':
+        if (typeof value.value === 'string') {
+          try {
+            return BigInt(value.value);
+          } catch {
+            return value.value;
+          }
+        }
+        return value.value;
+      case 'boolean':
+        return Boolean(value.value);
+      case 'date':
+        if (typeof value.value === 'string') {
+          const date = new Date(value.value);
+          if (!Number.isNaN(date.getTime())) return date;
+          return value.value;
+        }
+        return value.value;
+      case 'json':
+        if (typeof value.value === 'string') {
+          try {
+            return JSON.parse(value.value);
+          } catch {
+            return value.value;
+          }
+        }
+        return value.value;
+      default:
+        return (value as { value?: unknown }).value;
+    }
+  }
+  if (typeof value === 'string') {
+    return coerceLegacyValue(value);
+  }
+  return value;
+}
+
+function isEncodedDeltaValue(value: unknown): value is EncodedDeltaValue {
+  if (!value || typeof value !== 'object') return false;
+  const marker = (value as { kind?: unknown }).kind;
+  return typeof marker === 'string';
+}
+
+function coerceLegacyValue(value: string): unknown {
   if (value === 'null') return null;
   if (!Number.isNaN(Number(value)) && value.trim() !== '') {
     const num = Number(value);
@@ -54,18 +127,40 @@ function encodeKeyValues(keyValues?: Record<string, unknown>): Record<string, un
   if (!entries.length) return undefined;
   const serialized: Record<string, unknown> = {};
   for (const [key, value] of entries) {
-    serialized[key] = serializeValue(value);
+    serialized[key] = encodeValue(value);
   }
   return serialized;
+}
+
+function encodeKeyValuesArray(
+  list?: Record<string, unknown>[],
+): Record<string, unknown>[] | undefined {
+  if (!list?.length) return undefined;
+  const result = list
+    .map((entry) => encodeKeyValues(entry))
+    .filter((entry): entry is Record<string, unknown> => Boolean(entry));
+  return result.length ? result : undefined;
 }
 
 function decodeKeyValuesObject(raw?: Record<string, unknown>): Record<string, unknown> | undefined {
   if (!raw) return undefined;
   const result: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(raw)) {
-    result[key] = typeof value === 'string' ? deserializeValue(value) : value;
+    result[key] = decodeStoredValue(value);
   }
   return result;
+}
+
+function decodeKeyValuesArray(raw?: unknown): Record<string, unknown>[] | undefined {
+  if (!Array.isArray(raw) || !raw.length) return undefined;
+  const decoded = raw
+    .map((entry) =>
+      typeof entry === 'object' && entry
+        ? decodeKeyValuesObject(entry as Record<string, unknown>)
+        : undefined,
+    )
+    .filter((entry): entry is Record<string, unknown> => Boolean(entry));
+  return decoded.length ? decoded : undefined;
 }
 
 export function encodeDeltaToken(
@@ -76,6 +171,7 @@ export function encodeDeltaToken(
     entitySet: payload.entitySet,
     lastValue: payload.lastValue,
     keyValues: encodeKeyValues(payload.keyValues),
+    pageKeys: encodeKeyValuesArray(payload.pageKeys),
     buckets: payload.buckets ? payload.buckets.map(cloneBucketState) : undefined,
     issuedAt: payload.issuedAt ?? new Date().toISOString(),
   };
@@ -95,7 +191,7 @@ function decodeLegacyToken(token: string): DeltaTokenPayload {
         if (!keyRaw) return acc;
         const key = decodeURIComponent(keyRaw);
         const value = valueRaw ? decodeURIComponent(valueRaw) : '';
-        acc[key] = deserializeValue(value);
+        acc[key] = coerceLegacyValue(value);
         return acc;
       }, {})
     : undefined;
@@ -108,6 +204,7 @@ function decodeJsonToken(token: string): DeltaTokenPayload {
     entitySet: string;
     lastValue: string;
     keyValues?: Record<string, unknown>;
+    pageKeys?: Record<string, unknown>[];
     buckets?: unknown;
     issuedAt?: string;
   };
@@ -118,6 +215,7 @@ function decodeJsonToken(token: string): DeltaTokenPayload {
     entitySet: parsed.entitySet,
     lastValue: parsed.lastValue,
     keyValues: decodeKeyValuesObject(parsed.keyValues),
+    pageKeys: decodeKeyValuesArray(parsed.pageKeys),
     buckets: normalizeBucketStates(parsed.buckets),
     issuedAt: parsed.issuedAt,
   };
@@ -145,6 +243,7 @@ export function decodeDeltaToken(
     entitySet: payload.entitySet,
     lastValue: payload.lastValue,
     keyValues: decodeKeyValuesObject(payload.keyValues),
+    pageKeys: decodeKeyValuesArray(payload.pageKeys),
     buckets: normalizeBucketStates(payload.buckets),
     issuedAt: payload.issuedAt,
   };

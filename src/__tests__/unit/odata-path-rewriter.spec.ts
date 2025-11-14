@@ -71,4 +71,40 @@ describe('odataPathRewriter', () => {
     const rewritten = rewriteODataUrl('/odata/$metadata');
     assert.equal(rewritten, '/odata/$metadata');
   });
+
+  it('converts canonical function calls into query parameters', () => {
+    const rewritten = rewriteODataUrl('/odata/Products(1)/Default.CalculateTax(rate=0.05)', {
+      namespace: 'Default',
+    });
+    assert.equal(rewritten, '/odata/Products/1/CalculateTax?rate=0.05');
+  });
+
+  it('preserves canonical function calls without parameters', () => {
+    const rewritten = rewriteODataUrl('/odata/Products(1)/Default.Ping()', {
+      namespace: 'Default',
+    });
+    assert.equal(rewritten, '/odata/Products/1/Ping');
+  });
+
+  it('merges canonical function parameters with existing queries', () => {
+    const rewritten = rewriteODataUrl(
+      '/odata/Products(1)/Default.CalculateTax(rate=0.05)?$format=json',
+      { namespace: 'Default' },
+    );
+    assert.equal(rewritten, '/odata/Products/1/CalculateTax?$format=json&rate=0.05');
+  });
+
+  it('preserves explicit namespaces when rewriting canonical functions', () => {
+    const rewritten = rewriteODataUrl('/odata/Products(1)/Contoso.Sales.CalculateTax(rate=0.05)', {
+      namespace: 'Default',
+    });
+    assert.equal(rewritten, '/odata/Products/1/Contoso.Sales.CalculateTax?rate=0.05');
+  });
+
+  it('strips canonical string literal quotes when building query parameters', () => {
+    const rewritten = rewriteODataUrl("/odata/Products(1)/Default.Lookup(code='ABC''123')", {
+      namespace: 'Default',
+    });
+    assert.equal(rewritten, '/odata/Products/1/Lookup?code=ABC%27123');
+  });
 });

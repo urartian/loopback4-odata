@@ -97,6 +97,14 @@ describe('OData config plumbing acceptance', () => {
     expect(res.body['@odata.context']).to.equal('/api/odata/$metadata');
   });
 
+  it('supports root basePath configuration', async function (this: any) {
+    await replaceApp(this, { basePath: '/' });
+    const res = await client.get('/').expect(200);
+    expect(res.headers['odata-version']).to.equal('4.0');
+    expect(res.body['@odata.context']).to.equal('/$metadata');
+    await client.get('/Products').expect(200);
+  });
+
   it('clamps $top according to maxTop when strict=false', async () => {
     const res = await client.get('/api/odata/Products').query({ $top: '5' }).expect(200);
     expect(res.body.value).to.be.Array();

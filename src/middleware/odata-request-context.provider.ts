@@ -63,7 +63,14 @@ export class ODataRequestContextProvider implements Provider<Middleware> {
 
   private pathMatches(path: string, base: string): boolean {
     if (!base) return false;
-    return path === base || path.startsWith(`${base}/`) || path.startsWith(`${base}?`);
+    if (base === '/') {
+      return path.startsWith('/');
+    }
+    if (path === base) return true;
+    if (path.startsWith(`${base}/`)) return true;
+    if (path.startsWith(`${base}?`)) return true;
+    if (path.startsWith(`${base}#`)) return true;
+    return false;
   }
 
   private applyCorrelation(

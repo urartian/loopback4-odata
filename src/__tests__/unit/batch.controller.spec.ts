@@ -6,6 +6,8 @@ import { ODataConfig } from '../../types';
 import { HttpErrors, Response } from '@loopback/rest';
 import { Readable } from 'stream';
 import { ODataLogger } from '../../keys';
+import { EntitySetRegistry } from '../../registry/entityset-registry';
+import { Order, OrderItem } from '../fixtures/odata-app.fixture';
 
 type StubResponseMap = Record<
   string,
@@ -73,6 +75,70 @@ function requestStub(contentType: string): any {
   return {
     headers: { 'content-type': contentType },
     get: (header: string) => (header.toLowerCase() === 'content-type' ? contentType : undefined),
+  };
+}
+
+function createControllerWithRegistry(
+  stubs: StubResponseMap,
+  registry: EntitySetRegistry,
+  executedUrls: Record<string, string>,
+) {
+  const controller = new ODataBatchController(
+    { handleRequest: async () => undefined } as any,
+    'http://localhost',
+    createRequestContextStub(),
+    { get: async () => undefined } as any,
+    registry,
+    noopLogger,
+    defaultConfig,
+  );
+  (controller as any).executeSingle = async (request: { id: string; url?: string }) => {
+    if (request.id && request.url) {
+      executedUrls[request.id] = request.url;
+    }
+    const stub = stubs[request.id];
+    if (!stub) {
+      throw new Error(`Missing stub for request ${request.id}`);
+    }
+    return {
+      id: request.id,
+      status: stub.status,
+      headers: stub.headers,
+      body: stub.body,
+    };
+  };
+  return controller;
+}
+
+function createFetchResponse(options: {
+  status: number;
+  body?: string | Buffer;
+  headers?: Record<string, string>;
+}) {
+  const headerMap = new Map<string, string>();
+  for (const [key, value] of Object.entries(options.headers ?? {})) {
+    headerMap.set(key.toLowerCase(), value);
+  }
+  const rawBody =
+    typeof options.body === 'string'
+      ? Buffer.from(options.body, 'utf-8')
+      : (options.body ?? Buffer.alloc(0));
+  return {
+    status: options.status,
+    headers: {
+      get: (name: string) => headerMap.get(name.toLowerCase()) ?? null,
+      forEach: (cb: (value: string, key: string) => void) => {
+        for (const [key, value] of headerMap.entries()) {
+          cb(value, key);
+        }
+      },
+    },
+    async text() {
+      return rawBody.toString('utf-8');
+    },
+    async arrayBuffer() {
+      return rawBody;
+    },
   };
 }
 
@@ -218,6 +284,256 @@ describe('$batch controller', () => {
 
     assert.equal(result.status, 400);
     assert.equal((result.body as any)?.error?.code, 'InvalidMethod');
+  });
+
+  it('rejects protocol-relative URLs inside batch requests', async () => {
+    const controller = new ODataBatchController(
+      { handleRequest: async () => undefined } as any,
+      'http://localhost',
+      createRequestContextStub(),
+      { get: async () => undefined } as any,
+      { findByName: () => undefined } as any,
+      noopLogger,
+      defaultConfig,
+    );
+
+    const result = await (controller as any).executeSingle(
+      {
+        id: 'ssrf',
+        method: 'GET',
+        url: '//169.254.169.254/latest/meta-data',
+      },
+      undefined,
+      requestStub('application/json'),
+    );
+
+    assert.equal(result.status, 400);
+    assert.equal((result.body as any)?.error?.code, 'InvalidUrl');
+  });
+
+  it('does not follow redirects that point outside the service root', async () => {
+    const controller = new ODataBatchController(
+      { handleRequest: async () => undefined } as any,
+      'http://localhost',
+      createRequestContextStub(),
+      { get: async () => undefined } as any,
+      { findByName: () => undefined } as any,
+      noopLogger,
+      defaultConfig,
+    );
+
+    const originalFetch = (global as any).fetch;
+    let callCount = 0;
+    (global as any).fetch = async () => {
+      callCount++;
+      const headers = new Map<string, string>([['location', 'https://evil.example/loop']]);
+      return {
+        status: 302,
+        headers: {
+          get: (name: string) => headers.get(name.toLowerCase()) ?? null,
+          forEach: (cb: (value: string, key: string) => void) => {
+            for (const [key, value] of headers.entries()) cb(value, key);
+          },
+        },
+        async text() {
+          return '';
+        },
+        async arrayBuffer() {
+          return Buffer.alloc(0);
+        },
+      };
+    };
+
+    try {
+      const result = await (controller as any).executeSingle(
+        {
+          id: 'redir',
+          method: 'GET',
+          url: '/odata/Redirect',
+        },
+        undefined,
+        requestStub('application/json'),
+      );
+
+      assert.equal(result.status, 302);
+      assert.equal(callCount, 1);
+    } finally {
+      (global as any).fetch = originalFetch;
+    }
+  });
+
+  it('follows same-origin redirects for GET requests', async () => {
+    const controller = new ODataBatchController(
+      { handleRequest: async () => undefined } as any,
+      'http://localhost',
+      createRequestContextStub(),
+      { get: async () => undefined } as any,
+      { findByName: () => undefined } as any,
+      noopLogger,
+      defaultConfig,
+    );
+
+    const originalFetch = (global as any).fetch;
+    const responses = [
+      createFetchResponse({ status: 302, headers: { location: '/odata/next' } }),
+      createFetchResponse({
+        status: 200,
+        body: '{"value":42}',
+        headers: { 'content-type': 'application/json' },
+      }),
+    ];
+    (global as any).fetch = async () => {
+      const next = responses.shift();
+      if (!next) throw new Error('Unexpected fetch');
+      return next;
+    };
+
+    try {
+      const result = await (controller as any).executeSingle(
+        {
+          id: 'redir',
+          method: 'GET',
+          url: '/odata/Redirect',
+        },
+        undefined,
+        requestStub('application/json'),
+      );
+
+      assert.equal(result.status, 200);
+      assert.deepStrictEqual(result.body, { value: 42 });
+      assert.equal(responses.length, 0);
+    } finally {
+      (global as any).fetch = originalFetch;
+    }
+  });
+
+  it('preserves binary payloads returned via fetch()', async () => {
+    const controller = new ODataBatchController(
+      { handleRequest: async () => undefined } as any,
+      'http://localhost',
+      createRequestContextStub(),
+      { get: async () => undefined } as any,
+      { findByName: () => undefined } as any,
+      noopLogger,
+      defaultConfig,
+    );
+
+    const originalFetch = (global as any).fetch;
+    const blob = Buffer.from([0x00, 0xff, 0x10]);
+    (global as any).fetch = async () =>
+      createFetchResponse({
+        status: 200,
+        body: blob,
+        headers: {
+          'content-type': 'application/octet-stream',
+          'content-length': String(blob.length),
+        },
+      });
+
+    try {
+      const result = await (controller as any).executeSingle(
+        {
+          id: 'bin',
+          method: 'GET',
+          url: '/odata/Binary',
+        },
+        undefined,
+        requestStub('multipart/mixed'),
+      );
+
+      assert.equal(result.status, 200);
+      assert.equal(Buffer.isBuffer(result.body), true);
+      assert.equal((result.body as Buffer).equals(blob), true);
+    } finally {
+      (global as any).fetch = originalFetch;
+    }
+  });
+
+  it('preserves binary payloads returned via in-process handler', async () => {
+    const blob = Buffer.from([0xde, 0xad, 0xbe, 0xef]);
+    const controller = new ODataBatchController(
+      {
+        handleRequest: async (_req: unknown, res: any) => {
+          res.setHeader('Content-Type', 'application/octet-stream');
+          res.end(blob);
+        },
+      } as any,
+      'http://localhost',
+      createRequestContextStub(),
+      { get: async () => undefined } as any,
+      { findByName: () => undefined } as any,
+      noopLogger,
+      defaultConfig,
+    );
+
+    const contextStub = {
+      applyTo: () => undefined,
+      clearFrom: () => undefined,
+    };
+
+    const result = await (controller as any).executeWithHandler(
+      {
+        id: 'bin',
+        method: 'GET',
+        url: '/odata/Binary',
+      },
+      contextStub,
+      requestStub('multipart/mixed'),
+    );
+
+    assert.equal(result.status, 200);
+    assert.equal(Buffer.isBuffer(result.body), true);
+    assert.equal((result.body as Buffer).equals(blob), true);
+  });
+
+  it('encodes binary responses when returning JSON batch payloads', async () => {
+    const blob = Buffer.from([0xde, 0xad, 0xbe, 0xef]);
+    const controller = createController({
+      bin: {
+        status: 200,
+        headers: {
+          'Content-Type': 'application/pdf',
+          'Content-Length': blob.length.toString(),
+          'content-transfer-encoding': 'binary',
+          'CONTENT-ENCODING': 'gzip',
+          'Transfer-Encoding': 'chunked',
+          Connection: 'keep-alive',
+          TE: 'trailers',
+          trailer: 'Expires',
+          'x-custom': 'keep-me',
+        },
+        body: blob,
+      },
+      txt: { status: 200, body: { value: 1 } },
+    });
+
+    const batchResult = (await controller.handleBatch(
+      {
+        requests: [
+          { id: 'bin', method: 'GET', url: '/odata/Binary' },
+          { id: 'txt', method: 'GET', url: '/odata/Text' },
+        ],
+      },
+      responseStub,
+      requestStub('application/json'),
+    )) as BatchResponsePayload;
+
+    assert.equal(batchResult.responses.length, 2);
+    const [binaryEntry, jsonEntry] = batchResult.responses;
+    assert.equal(binaryEntry.id, 'bin');
+    assert.equal(binaryEntry.status, 200);
+    assert.deepStrictEqual(binaryEntry.headers, {
+      'Content-Type': 'application/pdf',
+      'x-custom': 'keep-me',
+    });
+    const body = binaryEntry.body as any;
+    assert.deepStrictEqual(body, {
+      encoding: 'base64',
+      contentType: 'application/pdf',
+      value: blob.toString('base64'),
+    });
+    assert.equal(jsonEntry.id, 'txt');
+    assert.deepStrictEqual(jsonEntry.body, { value: 1 });
   });
 
   it('commits transactional group when all requests succeed', async () => {
@@ -833,6 +1149,19 @@ describe('$batch controller', () => {
     assert.equal(body?.['@odata.id'], '\\"/odata/Products(1)\\"');
   });
 
+  it('injects If-Match for relative JSON batch requests when ETags are known', () => {
+    const controller = createController({});
+    const request: any = {
+      method: 'PATCH',
+      url: 'Products(1)',
+    };
+    const etags = new Map<string, string>([['/odata/Products(1)', 'W/"etag"']]);
+
+    (controller as any).ensureEtagPreconditions(request, etags);
+
+    assert.equal(request.headers?.['If-Match'], 'W/"etag"');
+  });
+
   it('does not mutate original request when substitution fails', () => {
     const controller = createController({});
     const request = {
@@ -883,5 +1212,81 @@ describe('$batch controller', () => {
     const body = result.body as Record<string, any>;
     assert.equal(body?.['@odata.id'], '/odata/Products(1)');
     assert.equal(body?.link?.['@odata.bind'], '/odata/Products(1)');
+  });
+
+  it('substitutes Content-ID references for navigation property creates', async () => {
+    const registry = new EntitySetRegistry();
+    registry.register({ name: 'Orders', modelCtor: Order } as any);
+    registry.register({ name: 'OrderItems', modelCtor: OrderItem } as any);
+    const executedUrls: Record<string, string> = {};
+    const controller = createControllerWithRegistry(
+      {
+        'nav-create': { status: 200, body: { id: 99, orderId: 1, productId: 1 } },
+        'nav-fetch': { status: 200, body: { id: 99 } },
+      },
+      registry,
+      executedUrls,
+    );
+
+    const result = (await controller.handleBatch(
+      {
+        requests: [
+          { id: 'nav-create', method: 'POST', url: '/odata/Orders(1)/items' },
+          {
+            id: 'nav-fetch',
+            method: 'GET',
+            url: '$nav-create',
+            dependsOn: ['nav-create'],
+          },
+        ],
+      },
+      responseStub,
+      requestStub('application/json'),
+    )) as BatchResponsePayload;
+
+    assert.equal(result.responses.length, 2);
+    assert.equal(executedUrls['nav-fetch'], '/odata/OrderItems(99)');
+  });
+
+  it('rejects interleaved atomicity groups to preserve submission order', async () => {
+    const controller = createController({
+      a: { status: 200, body: { id: 'a' } },
+      b: { status: 200, body: { id: 'b' } },
+      c: { status: 200, body: { id: 'c' } },
+    });
+    await assert.rejects(
+      controller.handleBatch(
+        {
+          requests: [
+            { id: 'a', method: 'POST', url: '/odata/Products', atomicityGroup: 'set-1' },
+            { id: 'b', method: 'GET', url: '/odata/Products?$top=1' },
+            { id: 'c', method: 'PATCH', url: '/odata/Products(1)', atomicityGroup: 'set-1' },
+          ],
+        },
+        responseStub,
+        requestStub('application/json'),
+      ),
+      (err: unknown) =>
+        err instanceof HttpErrors.BadRequest && /contiguous/i.test((err as Error).message ?? ''),
+    );
+  });
+
+  it('rejects read operations inside atomicity groups', async () => {
+    const controller = createController({});
+    await assert.rejects(
+      controller.handleBatch(
+        {
+          requests: [
+            { id: 'a', method: 'POST', url: '/odata/Products', atomicityGroup: 'set-1' },
+            { id: 'b', method: 'GET', url: '/odata/Products', atomicityGroup: 'set-1' },
+          ],
+        },
+        responseStub,
+        requestStub('application/json'),
+      ),
+      (err: unknown) =>
+        err instanceof HttpErrors.BadRequest &&
+        /unsupported get/i.test((err as Error).message ?? ''),
+    );
   });
 });
