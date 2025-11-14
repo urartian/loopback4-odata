@@ -159,6 +159,15 @@ describe('OData component acceptance', () => {
     expect(res.body.value.every((item: { price: number }) => item.price >= 1000)).to.be.true();
   });
 
+  it('invokes collection-bound functions using canonical syntax', async () => {
+    const res = await client
+      .get('/odata/Products/Default.premiumProducts(minPrice=1000)')
+      .expect(200);
+
+    expect(res.body.value).to.be.Array();
+    expect(res.body.value.every((item: { price: number }) => item.price >= 1000)).to.be.true();
+  });
+
   it('supports inline $count with filters', async () => {
     const res = await client
       .get('/odata/Products')
@@ -1464,7 +1473,6 @@ describe('OData component acceptance', () => {
           },
           {
             id: 'fetch-product',
-            atomicityGroup: 'set-2',
             method: 'GET',
             url: '$requests(1)',
             dependsOn: ['create-product', 'update-product'],
@@ -1515,6 +1523,72 @@ describe('OData component acceptance', () => {
     expect(fetch.status).to.equal(200);
     expect(fetch.body?.price).to.equal(512);
     expect(fetch.body?.id).to.equal(create.body?.id);
+  });
+
+  it('rejects JSON $batch payloads with non-contiguous atomicity groups', async () => {
+    const dataSource = await app.get('datasources.db');
+    (dataSource as AnyObject).beginTransaction = async (_isolation?: unknown) => ({
+      commit: async () => undefined,
+      rollback: async () => undefined,
+    });
+
+    await client
+      .post('/odata/$batch')
+      .send({
+        requests: [
+          {
+            id: 'first',
+            atomicityGroup: 'set-alpha',
+            method: 'POST',
+            url: '/odata/Products',
+            body: { name: 'A1', price: 1 },
+          },
+          {
+            id: 'middle',
+            method: 'GET',
+            url: '/odata/Products?$top=1',
+          },
+          {
+            id: 'second',
+            atomicityGroup: 'set-alpha',
+            method: 'PATCH',
+            url: '$first',
+            dependsOn: ['first'],
+            body: { price: 10 },
+          },
+        ],
+      })
+      .expect(400)
+      .expect((res) => {
+        expect(res.body.error?.message).to.match(/contiguous/i);
+      });
+  });
+
+  it('rejects change sets that contain read operations', async () => {
+    await client
+      .post('/odata/$batch')
+      .send({
+        requests: [
+          {
+            id: 'writer',
+            atomicityGroup: 'set-beta',
+            method: 'POST',
+            url: '/odata/Products',
+            body: { name: 'Writer', price: 1 },
+          },
+          {
+            id: 'reader',
+            atomicityGroup: 'set-beta',
+            method: 'GET',
+            url: '/odata/Products',
+            dependsOn: ['writer'],
+          },
+        ],
+      })
+      .expect(400)
+      .expect((res) => {
+        expect(res.body.error?.message).to.match(/unsupported/i);
+      });
   });
 
   it('rejects JSON changesets that reference unknown Content-ID tokens', async () => {
@@ -1758,11 +1832,12 @@ describe('OData component acceptance', () => {
       })
       .expect(200);
 
-    expect(res.body.responses).to.have.lengthOf(1);
-    const failure = res.body.responses[0];
-    expect(failure.atomicityGroup).to.equal('g1');
-    expect(failure.status).to.equal(501);
-    expect(failure.body?.error?.code).to.equal('BatchExecutionError');
+    const failures = res.body.responses.filter((entry: AnyObject) => entry.atomicityGroup === 'g1');
+    expect(failures).to.have.lengthOf(2);
+    failures.forEach((failure: AnyObject) => {
+      expect(failure.status).to.equal(501);
+      expect(failure.body?.error?.code).to.equal('BatchExecutionError');
+    });
   });
 
   it('rejects $batch requests that exceed maxOperations', async () => {

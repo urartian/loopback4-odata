@@ -1,37 +1,63 @@
 export const MAX_KEY_EXPRESSION_LENGTH = 4096;
 
-export function rewriteODataUrl(url: string): string {
-  const { path, suffix } = splitUrl(url);
-  const rewrittenPath = rewritePath(path);
-  if (!suffix) return rewrittenPath;
-  return rewrittenPath + suffix;
+export interface RewriteOptions {
+  namespace?: string;
+  namespaceAlias?: string;
 }
 
-function splitUrl(url: string): { path: string; suffix: string } {
-  const queryIndex = url.indexOf('?');
-  const hashIndex = url.indexOf('#');
-  let cut = -1;
-  if (queryIndex !== -1 && hashIndex !== -1) {
-    cut = Math.min(queryIndex, hashIndex);
-  } else if (queryIndex !== -1) {
-    cut = queryIndex;
-  } else if (hashIndex !== -1) {
-    cut = hashIndex;
-  }
-  if (cut === -1) {
-    return { path: url, suffix: '' };
-  }
-  return {
-    path: url.slice(0, cut),
-    suffix: url.slice(cut),
-  };
+export function rewriteODataUrl(url: string, options?: RewriteOptions): string {
+  const { path, query, hash } = splitUrl(url);
+  const { path: rewrittenPath, extraQuery } = rewritePath(path, options);
+  const mergedQuery = mergeQueryStrings(query, extraQuery);
+  return rewrittenPath + buildSuffix(mergedQuery, hash);
 }
 
-function rewritePath(path: string): string {
-  if (!path.includes('(')) return path;
+function splitUrl(url: string): { path: string; query?: string; hash?: string } {
+  let path = url;
+  let query: string | undefined;
+  let hash: string | undefined;
+
+  const hashIndex = path.indexOf('#');
+  if (hashIndex >= 0) {
+    hash = path.slice(hashIndex + 1);
+    path = path.slice(0, hashIndex);
+  }
+
+  const queryIndex = path.indexOf('?');
+  if (queryIndex >= 0) {
+    query = path.slice(queryIndex + 1);
+    path = path.slice(0, queryIndex);
+  }
+
+  return { path, query, hash };
+}
+
+function buildSuffix(query?: string, hash?: string): string {
+  let suffix = '';
+  if (query && query.length) {
+    suffix += `?${query}`;
+  }
+  if (hash && hash.length) {
+    suffix += `#${hash}`;
+  }
+  return suffix;
+}
+
+function mergeQueryStrings(existing?: string, extra?: string): string | undefined {
+  if (extra == null || extra === '') return existing;
+  if (!existing || existing === '') return extra;
+  return `${existing}&${extra}`;
+}
+
+function rewritePath(
+  path: string,
+  options?: RewriteOptions,
+): { path: string; extraQuery?: string } {
+  if (!path.includes('(')) return { path };
 
   let result = '';
   let index = 0;
+  const queryFragments: string[] = [];
 
   while (index < path.length) {
     const openIndex = path.indexOf('(', index);
@@ -48,8 +74,20 @@ function rewritePath(path: string): string {
     }
 
     const { keyExpression, closeIndex } = keySegment;
-    const normalizedKey = normalizeKeyExpression(keyExpression);
+    const segmentStart = path.lastIndexOf('/', openIndex - 1) + 1;
+    const segmentName = path.slice(segmentStart, openIndex);
+    if (segmentName.includes('.')) {
+      const query = canonicalParametersToQuery(keyExpression);
+      if (query !== undefined) {
+        if (query) queryFragments.push(query);
+        const normalizedSegment = stripNamespace(segmentName, options);
+        result += path.slice(index, segmentStart) + normalizedSegment;
+        index = closeIndex + 1;
+        continue;
+      }
+    }
 
+    const normalizedKey = normalizeKeyExpression(keyExpression);
     if (normalizedKey == null) {
       result += path.slice(index, closeIndex + 1);
       index = closeIndex + 1;
@@ -62,7 +100,8 @@ function rewritePath(path: string): string {
     index = closeIndex + 1;
   }
 
-  return result;
+  const extraQuery = queryFragments.length ? queryFragments.join('&') : undefined;
+  return extraQuery ? { path: result, extraQuery } : { path: result };
 }
 
 interface KeySegmentParseResult {
@@ -150,6 +189,57 @@ function normalizeKeyExpression(expression: string): string | undefined {
 
   const normalizedValues = parts.map((part) => normalizeLiteral(part));
   return normalizedValues.join(',');
+}
+
+function canonicalParametersToQuery(expression: string): string | undefined {
+  const trimmed = expression.trim();
+  if (!trimmed) return '';
+  const parts = splitTopLevel(trimmed, ',');
+  if (!parts.length) return '';
+  const queryParts: string[] = [];
+  for (const part of parts) {
+    const eqIndex = findTopLevelEquals(part);
+    if (eqIndex === -1) return undefined;
+    const rawName = part.slice(0, eqIndex).trim();
+    const name = decodeComponent(rawName);
+    if (!name) return undefined;
+    const rawValue = part.slice(eqIndex + 1).trim();
+    const encodedValue = encodeCanonicalLiteral(rawValue);
+    queryParts.push(`${encodeURIComponent(name)}=${encodedValue}`);
+  }
+  return queryParts.join('&');
+}
+
+function encodeCanonicalLiteral(rawValue: string): string {
+  const trimmed = rawValue.trim();
+  if (!trimmed) return '';
+  const typedMatch = /^([A-Za-z_][\w.]*)'(.*)'$/.exec(trimmed);
+  if (typedMatch) {
+    const [, type, literal] = typedMatch;
+    const unescaped = literal.replace(/''/g, "'");
+    return encodeLiteral(`${type}'${unescaped}'`);
+  }
+  if (trimmed.startsWith("'") && trimmed.endsWith("'")) {
+    const inner = trimmed.slice(1, -1).replace(/''/g, "'");
+    return encodeLiteral(inner);
+  }
+  return encodeLiteral(trimmed);
+}
+
+function encodeLiteral(value: string): string {
+  return encodeURIComponent(value).replace(/'/g, '%27');
+}
+
+function stripNamespace(segment: string, options?: RewriteOptions): string {
+  const prefixes = [options?.namespace, options?.namespaceAlias]
+    .filter((value): value is string => Boolean(value))
+    .map((value) => `${value}.`);
+  for (const prefix of prefixes) {
+    if (prefix && segment.startsWith(prefix)) {
+      return segment.slice(prefix.length);
+    }
+  }
+  return segment;
 }
 
 function splitTopLevel(input: string, delimiter: string): string[] {

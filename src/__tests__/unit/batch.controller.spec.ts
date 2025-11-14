@@ -1247,4 +1247,46 @@ describe('$batch controller', () => {
     assert.equal(result.responses.length, 2);
     assert.equal(executedUrls['nav-fetch'], '/odata/OrderItems(99)');
   });
+
+  it('rejects interleaved atomicity groups to preserve submission order', async () => {
+    const controller = createController({
+      a: { status: 200, body: { id: 'a' } },
+      b: { status: 200, body: { id: 'b' } },
+      c: { status: 200, body: { id: 'c' } },
+    });
+    await assert.rejects(
+      controller.handleBatch(
+        {
+          requests: [
+            { id: 'a', method: 'POST', url: '/odata/Products', atomicityGroup: 'set-1' },
+            { id: 'b', method: 'GET', url: '/odata/Products?$top=1' },
+            { id: 'c', method: 'PATCH', url: '/odata/Products(1)', atomicityGroup: 'set-1' },
+          ],
+        },
+        responseStub,
+        requestStub('application/json'),
+      ),
+      (err: unknown) =>
+        err instanceof HttpErrors.BadRequest && /contiguous/i.test((err as Error).message ?? ''),
+    );
+  });
+
+  it('rejects read operations inside atomicity groups', async () => {
+    const controller = createController({});
+    await assert.rejects(
+      controller.handleBatch(
+        {
+          requests: [
+            { id: 'a', method: 'POST', url: '/odata/Products', atomicityGroup: 'set-1' },
+            { id: 'b', method: 'GET', url: '/odata/Products', atomicityGroup: 'set-1' },
+          ],
+        },
+        responseStub,
+        requestStub('application/json'),
+      ),
+      (err: unknown) =>
+        err instanceof HttpErrors.BadRequest &&
+        /unsupported get/i.test((err as Error).message ?? ''),
+    );
+  });
 });

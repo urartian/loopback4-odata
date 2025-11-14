@@ -313,9 +313,10 @@ export class ODataBatchController {
       this.enforceOperationLimit(requests.length, limits);
       const requestOrder = this.buildRequestOrderIndex(requests);
 
-      grouped = this.groupByAtomicity(requests);
+      this.validateContiguousAtomicityGroups(requests);
+      const changeSets = this.collectAtomicityGroups(requests);
       operationCount = requests.length;
-      changesetCount = grouped.filter((group) => Boolean(group.atomicityGroup)).length;
+      changesetCount = changeSets.size;
       const dependencyResults = new Map<string, BatchResponseEntry>();
       const contentIdMap = new Map<string, string>();
       const contentIdEtags = new Map<string, string>();
@@ -323,11 +324,11 @@ export class ODataBatchController {
 
       const maxChangesetOps = limits.maxChangesetOperations;
       if (maxChangesetOps && maxChangesetOps > 0) {
-        for (const group of grouped) {
-          if (group.atomicityGroup && group.requests.length > maxChangesetOps) {
+        for (const [groupId, groupRequests] of changeSets.entries()) {
+          if (groupRequests.length > maxChangesetOps) {
             this.warn('Changeset operation limit exceeded.', {
-              group: group.atomicityGroup,
-              operations: group.requests.length,
+              group: groupId,
+              operations: groupRequests.length,
               maxChangesetOperations: maxChangesetOps,
             });
             throw new HttpErrors.BadRequest(
@@ -337,53 +338,60 @@ export class ODataBatchController {
         }
       }
 
-      for (const group of grouped) {
-        if (group.atomicityGroup) {
-          try {
-            const entries = await this.executeAtomicGroup(
-              group.requests,
-              group.atomicityGroup,
-              request,
-              dependencyResults,
-              requestOrder,
-              contentIdMap,
-              contentIdEtags,
-            );
-            if (entries?.length) {
-              responses.push(
-                ...entries.map((entry) => ({
-                  ...entry,
-                  atomicityGroup: group.atomicityGroup,
-                })),
+      const executedGroups = new Map<string, BatchResponseEntry[]>();
+
+      for (const req of requests) {
+        const groupId = req.atomicityGroup;
+        if (groupId) {
+          let pending = executedGroups.get(groupId);
+          if (!pending) {
+            const groupRequests = changeSets.get(groupId) ?? [];
+            try {
+              pending = await this.executeAtomicGroup(
+                groupRequests,
+                groupId,
+                request,
+                dependencyResults,
+                requestOrder,
+                contentIdMap,
+                contentIdEtags,
               );
+              pending = pending.map((entry) => ({ ...entry, atomicityGroup: groupId }));
+            } catch (error) {
+              if (this.isBatchValidationError(error)) {
+                throw error;
+              }
+              const status = this.resolveErrorStatus(error, 500);
+              pending = groupRequests.map((original) => ({
+                id: original.id,
+                atomicityGroup: groupId,
+                status,
+                body: this.odataError(
+                  'BatchExecutionError',
+                  (error as Error).message ?? 'Failed to execute atomicity group.',
+                ),
+              }));
             }
-          } catch (error) {
-            if (this.isBatchValidationError(error)) {
-              throw error;
-            }
-            const status = this.resolveErrorStatus(error, 500);
-            responses.push({
-              atomicityGroup: group.atomicityGroup,
-              status,
-              body: this.odataError(
-                'BatchExecutionError',
-                (error as Error).message ?? 'Failed to execute atomicity group.',
-              ),
-            });
+            executedGroups.set(groupId, pending);
           }
-        } else {
-          const entries = await this.executeGroup(
-            group.requests,
-            undefined,
-            request,
-            dependencyResults,
-            requestOrder,
-            false,
-            contentIdMap,
-            contentIdEtags,
-          );
-          responses.push(...entries);
+          const next = pending.shift();
+          if (next) {
+            responses.push(next);
+          }
+          continue;
         }
+
+        const entries = await this.executeGroup(
+          [req],
+          undefined,
+          request,
+          dependencyResults,
+          requestOrder,
+          false,
+          contentIdMap,
+          contentIdEtags,
+        );
+        responses.push(...entries);
       }
 
       response.set('OData-Version', ODATA_VERSION);
@@ -606,22 +614,45 @@ export class ODataBatchController {
     });
   }
 
-  private groupByAtomicity(requests: BatchRequest[]) {
-    const result: Array<{ atomicityGroup?: string; requests: BatchRequest[] }> = [];
-    const handled = new Set<string>();
-
+  private collectAtomicityGroups(requests: BatchRequest[]): Map<string, BatchRequest[]> {
+    const groups = new Map<string, BatchRequest[]>();
     for (const req of requests) {
-      if (req.atomicityGroup) {
-        if (handled.has(req.atomicityGroup)) continue;
-        const groupRequests = requests.filter((r) => r.atomicityGroup === req.atomicityGroup);
-        handled.add(req.atomicityGroup);
-        result.push({ atomicityGroup: req.atomicityGroup, requests: groupRequests });
-      } else {
-        result.push({ requests: [req] });
+      const groupId = req.atomicityGroup?.trim();
+      if (!groupId) continue;
+      req.atomicityGroup = groupId;
+      let buffer = groups.get(groupId);
+      if (!buffer) {
+        buffer = [];
+        groups.set(groupId, buffer);
       }
+      buffer.push(req);
     }
+    return groups;
+  }
 
-    return result;
+  private validateContiguousAtomicityGroups(requests: BatchRequest[]): void {
+    const seen = new Map<string, number>();
+    let activeGroup: string | undefined;
+    requests.forEach((req, index) => {
+      const groupId = req.atomicityGroup?.trim();
+      if (!groupId) {
+        activeGroup = undefined;
+        return;
+      }
+      req.atomicityGroup = groupId;
+      const firstIndex = seen.get(groupId);
+      if (firstIndex === undefined) {
+        seen.set(groupId, index);
+        activeGroup = groupId;
+        return;
+      }
+      if (activeGroup !== groupId) {
+        throw new HttpErrors.BadRequest(
+          `Atomicity group ${groupId} must be contiguous within the batch payload.`,
+        );
+      }
+      activeGroup = groupId;
+    });
   }
 
   private buildRequestOrderIndex(requests: BatchRequest[]): Map<BatchRequest, number> {
@@ -1228,6 +1259,7 @@ export class ODataBatchController {
     sharedContentIds: Map<string, string>,
     sharedContentIdEtags: Map<string, string>,
   ): Promise<BatchResponseEntry[]> {
+    this.ensureAtomicityGroupContainsOnlyWrites(groupId, requests);
     const context = await this.createAtomicGroupContext(groupId, requests);
     const contentIdMap = new Map<string, string>(sharedContentIds);
     const contentIdEtags = new Map<string, string>(sharedContentIdEtags);
@@ -1310,6 +1342,18 @@ export class ODataBatchController {
       }
     }
     return undefined;
+  }
+
+  private ensureAtomicityGroupContainsOnlyWrites(groupId: string, requests: BatchRequest[]): void {
+    const allowed = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
+    for (const request of requests) {
+      const method = (request.method ?? '').toUpperCase();
+      if (!allowed.has(method)) {
+        throw new HttpErrors.BadRequest(
+          `Atomicity group ${groupId} contains unsupported ${method || 'unknown'} request.`,
+        );
+      }
+    }
   }
 
   private async createAtomicGroupContext(
@@ -1518,7 +1562,10 @@ export class ODataBatchController {
       };
     }
 
-    const rewrittenUrl = rewriteODataUrl(url);
+    const rewrittenUrl = rewriteODataUrl(url, {
+      namespace: this.cfg?.namespace,
+      namespaceAlias: this.cfg?.namespaceAlias,
+    });
 
     const method = request.method?.toUpperCase();
     if (!method) {

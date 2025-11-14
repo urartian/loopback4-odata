@@ -29,7 +29,10 @@ export class OdataPathRewriterProvider implements Provider<Middleware> {
       }
 
       const afterBaseRewrite = ctx.request.url ?? '';
-      const rewritten = rewriteODataUrl(afterBaseRewrite);
+      const rewritten = rewriteODataUrl(afterBaseRewrite, {
+        namespace: this.cfg?.namespace,
+        namespaceAlias: this.cfg?.namespaceAlias,
+      });
       const keyRewritten = rewritten !== afterBaseRewrite;
       if (keyRewritten) {
         ctx.request.url = rewritten;
