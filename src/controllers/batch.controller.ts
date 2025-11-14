@@ -12,6 +12,7 @@ import { HttpHandler } from '@loopback/rest/dist/http-handler';
 import { IncomingMessage, ServerResponse } from 'http';
 import { PassThrough } from 'stream';
 import {
+  AnyObject,
   Entity,
   IsolationLevel,
   PropertyDefinition,
@@ -33,6 +34,7 @@ import {
 } from '../util/datasource-transactions';
 import { emitTelemetryEvent } from '../util/telemetry';
 import { rewriteODataUrl } from '../middleware/odata-path-rewriter';
+import { ensureModelDefinitionWithRelations } from '../util/model-definition';
 
 const BATCH_OPERATION_SPEC = markUndocumentedOperation({
   responses: {
@@ -1384,12 +1386,97 @@ export class ODataBatchController {
     const segments = path.split('/').filter(Boolean);
     const stripped = this.stripServiceRootSegments(segments);
     if (!stripped || !stripped.length) return undefined;
-    const candidate = stripped[0];
-    if (!candidate || candidate.startsWith('$')) return undefined;
-    const normalized = candidate.includes('(')
-      ? candidate.slice(0, candidate.indexOf('('))
-      : candidate;
-    return normalized;
+
+    const normalizedSegments = stripped
+      .map((segment) => this.normalizePathSegment(segment))
+      .filter((segment): segment is string => Boolean(segment));
+
+    if (!normalizedSegments.length) return undefined;
+    const [first, ...rest] = normalizedSegments;
+    if (!first || first.startsWith('$')) return undefined;
+
+    let current = this.registry.findByName(first);
+    if (!current) return undefined;
+
+    for (const segment of rest) {
+      if (!segment || segment.startsWith('$')) break;
+      const next = this.resolveNavigationTargetEntitySet(current, segment);
+      if (!next) break;
+      current = next;
+    }
+
+    return current?.name;
+  }
+
+  private normalizePathSegment(segment: string): string | undefined {
+    if (!segment) return undefined;
+    const trimmed = segment.trim();
+    if (!trimmed) return undefined;
+    const parenIndex = trimmed.indexOf('(');
+    const base = parenIndex >= 0 ? trimmed.slice(0, parenIndex) : trimmed;
+    if (!base) return undefined;
+    try {
+      return decodeURIComponent(base);
+    } catch {
+      return base;
+    }
+  }
+
+  private resolveNavigationTargetEntitySet(
+    current: EntitySetDef,
+    segment: string,
+  ): EntitySetDef | undefined {
+    const modelCtor = current.modelCtor as typeof Entity | undefined;
+    if (!modelCtor) return undefined;
+    const definition = ensureModelDefinitionWithRelations(modelCtor);
+    const relations = (definition?.relations ?? {}) as Record<string, AnyObject | undefined>;
+    const relation = this.findRelationMeta(relations, segment);
+    if (!relation) return undefined;
+    const targetModel = this.resolveRelationTargetModel(relation);
+    if (!targetModel) return undefined;
+    return this.registry.get(targetModel);
+  }
+
+  private findRelationMeta(
+    relations: Record<string, AnyObject | undefined>,
+    segment: string,
+  ): AnyObject | undefined {
+    const exact = relations[segment];
+    if (exact) return exact;
+    const lower = segment.toLowerCase();
+    for (const [name, meta] of Object.entries(relations)) {
+      if (name.toLowerCase() === lower && meta) {
+        return meta;
+      }
+    }
+    return undefined;
+  }
+
+  private resolveRelationTargetModel(meta: AnyObject | undefined): typeof Entity | undefined {
+    if (!meta) return undefined;
+    const target = meta.target;
+    if (!target) return undefined;
+    if (this.isEntityConstructor(target as AnyObject)) {
+      return target as typeof Entity;
+    }
+    if (typeof target === 'function') {
+      try {
+        const resolved = (target as () => typeof Entity)();
+        if (this.isEntityConstructor(resolved as AnyObject)) {
+          return resolved as typeof Entity;
+        }
+        if (typeof resolved === 'function' && this.isEntityConstructor(resolved as AnyObject)) {
+          return resolved as typeof Entity;
+        }
+      } catch {
+        return undefined;
+      }
+    }
+    return undefined;
+  }
+
+  private isEntityConstructor(value: AnyObject): value is typeof Entity {
+    return typeof value === 'function' && value.prototype instanceof Entity;
   }
 
   private extractBoundary(contentType: string): string | undefined {
@@ -1582,17 +1669,17 @@ export class ODataBatchController {
     }
     (req as any).push(null);
 
+    // Add per-request timeout to avoid hangs; wait for finish/close
+    const TIMEOUT_MS = 30000;
+    let timeoutHandle: NodeJS.Timeout | undefined;
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      timeoutHandle = setTimeout(() => reject(new Error('Batch sub-request timeout')), TIMEOUT_MS);
+    });
+
     try {
-      // Add per-request timeout to avoid hangs; wait for finish/close
-      const TIMEOUT_MS = 30000;
-      const timeoutPromise = new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error('Batch sub-request timeout')), TIMEOUT_MS),
-      );
       const result = await Promise.race([finishPromise, timeoutPromise]);
-      context.clearFrom(req);
       return result;
     } catch (error) {
-      context.clearFrom(req);
       const status =
         (error && typeof error === 'object' && 'statusCode' in error
           ? (error as { statusCode?: number }).statusCode
@@ -1606,6 +1693,11 @@ export class ODataBatchController {
         status,
         body,
       };
+    } finally {
+      if (timeoutHandle) {
+        clearTimeout(timeoutHandle);
+      }
+      context.clearFrom(req);
     }
   }
 

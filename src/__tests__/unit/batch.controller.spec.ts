@@ -6,6 +6,8 @@ import { ODataConfig } from '../../types';
 import { HttpErrors, Response } from '@loopback/rest';
 import { Readable } from 'stream';
 import { ODataLogger } from '../../keys';
+import { EntitySetRegistry } from '../../registry/entityset-registry';
+import { Order, OrderItem } from '../fixtures/odata-app.fixture';
 
 type StubResponseMap = Record<
   string,
@@ -74,6 +76,38 @@ function requestStub(contentType: string): any {
     headers: { 'content-type': contentType },
     get: (header: string) => (header.toLowerCase() === 'content-type' ? contentType : undefined),
   };
+}
+
+function createControllerWithRegistry(
+  stubs: StubResponseMap,
+  registry: EntitySetRegistry,
+  executedUrls: Record<string, string>,
+) {
+  const controller = new ODataBatchController(
+    { handleRequest: async () => undefined } as any,
+    'http://localhost',
+    createRequestContextStub(),
+    { get: async () => undefined } as any,
+    registry,
+    noopLogger,
+    defaultConfig,
+  );
+  (controller as any).executeSingle = async (request: { id: string; url?: string }) => {
+    if (request.id && request.url) {
+      executedUrls[request.id] = request.url;
+    }
+    const stub = stubs[request.id];
+    if (!stub) {
+      throw new Error(`Missing stub for request ${request.id}`);
+    }
+    return {
+      id: request.id,
+      status: stub.status,
+      headers: stub.headers,
+      body: stub.body,
+    };
+  };
+  return controller;
 }
 
 function createFetchResponse(options: {
@@ -1178,5 +1212,39 @@ describe('$batch controller', () => {
     const body = result.body as Record<string, any>;
     assert.equal(body?.['@odata.id'], '/odata/Products(1)');
     assert.equal(body?.link?.['@odata.bind'], '/odata/Products(1)');
+  });
+
+  it('substitutes Content-ID references for navigation property creates', async () => {
+    const registry = new EntitySetRegistry();
+    registry.register({ name: 'Orders', modelCtor: Order } as any);
+    registry.register({ name: 'OrderItems', modelCtor: OrderItem } as any);
+    const executedUrls: Record<string, string> = {};
+    const controller = createControllerWithRegistry(
+      {
+        'nav-create': { status: 200, body: { id: 99, orderId: 1, productId: 1 } },
+        'nav-fetch': { status: 200, body: { id: 99 } },
+      },
+      registry,
+      executedUrls,
+    );
+
+    const result = (await controller.handleBatch(
+      {
+        requests: [
+          { id: 'nav-create', method: 'POST', url: '/odata/Orders(1)/items' },
+          {
+            id: 'nav-fetch',
+            method: 'GET',
+            url: '$nav-create',
+            dependsOn: ['nav-create'],
+          },
+        ],
+      },
+      responseStub,
+      requestStub('application/json'),
+    )) as BatchResponsePayload;
+
+    assert.equal(result.responses.length, 2);
+    assert.equal(executedUrls['nav-fetch'], '/odata/OrderItems(99)');
   });
 });

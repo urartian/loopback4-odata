@@ -1205,19 +1205,65 @@ export function defineODataCrudController(def: EntitySetDef) {
     normalizeDecimalString(input: string): string | undefined {
       const trimmed = input.trim();
       if (!trimmed) return undefined;
-      const scientific = /^[+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?$/i;
-      if (!scientific.test(trimmed)) return undefined;
-      if (/e/i.test(trimmed)) {
-        const asNumber = Number(trimmed);
-        if (!Number.isFinite(asNumber)) return undefined;
-        return this.toPlainString(asNumber);
-      }
+      const numeric = /^[+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?$/i;
+      if (!numeric.test(trimmed)) return undefined;
       const sign = trimmed.startsWith('-') ? '-' : trimmed.startsWith('+') ? '' : '';
       const unsigned = trimmed.replace(/^[+-]/, '');
+      if (!/e/i.test(unsigned)) {
+        return this.normalizePlainDecimal(sign, unsigned);
+      }
+      return this.normalizeScientificDecimal(sign, unsigned);
+    }
+
+    normalizePlainDecimal(sign: string, unsigned: string): string {
       const parts = unsigned.split('.');
-      const integer = parts[0].replace(/^0+(?=\d)/, '') || '0';
-      const fraction = (parts[1] ?? '').replace(/0+$/, '');
-      return fraction ? `${sign}${integer}.${fraction}` : `${sign}${integer}`;
+      const integerPart = parts[0]?.length ? parts[0] : '0';
+      const fractionPart = parts[1] ?? '';
+      return this.combineDecimalParts(sign, integerPart, fractionPart);
+    }
+
+    normalizeScientificDecimal(sign: string, unsigned: string): string | undefined {
+      const exponentIndex = unsigned.toLowerCase().lastIndexOf('e');
+      if (exponentIndex < 0) return undefined;
+      const mantissa = unsigned.slice(0, exponentIndex);
+      const exponentRaw = unsigned.slice(exponentIndex + 1);
+      if (!mantissa) return undefined;
+      const exponent = Number(exponentRaw);
+      if (!Number.isFinite(exponent) || !Number.isInteger(exponent)) return undefined;
+      const normalizedMantissa = mantissa.replace(/^[+-]/, '');
+      const mantissaParts = normalizedMantissa.split('.');
+      const whole = mantissaParts[0] ?? '';
+      const decimals = mantissaParts[1] ?? '';
+      const digits = `${whole}${decimals}`;
+      if (!digits) return `${sign}0`;
+      const decimalIndex = whole.length;
+      const targetIndex = decimalIndex + exponent;
+      let integer: string;
+      let fraction: string;
+
+      if (targetIndex <= 0) {
+        integer = '0';
+        const zeros = '0'.repeat(Math.abs(targetIndex));
+        fraction = `${zeros}${digits}`;
+      } else if (targetIndex >= digits.length) {
+        const zeros = '0'.repeat(targetIndex - digits.length);
+        integer = `${digits}${zeros}`;
+        fraction = '';
+      } else {
+        integer = digits.slice(0, targetIndex);
+        fraction = digits.slice(targetIndex);
+      }
+
+      return this.combineDecimalParts(sign, integer, fraction);
+    }
+
+    combineDecimalParts(sign: string, integer: string, fraction: string): string {
+      const normalizedInteger = integer.replace(/^0+(?=\d)/, '') || '0';
+      const normalizedFraction = fraction.replace(/0+$/, '');
+      if (normalizedFraction) {
+        return `${sign}${normalizedInteger}.${normalizedFraction}`;
+      }
+      return `${sign}${normalizedInteger}`;
     }
 
     toPlainString(value: number): string {
@@ -7125,10 +7171,10 @@ export function defineODataCrudController(def: EntitySetDef) {
       if (source.limit !== undefined) target.limit = source.limit;
       if (source.offset !== undefined) target.offset = source.offset;
       if (source.fields) {
-        target.fields = {
-          ...(target.fields ?? {}),
-          ...source.fields,
-        } as Filter<CrudEntity>['fields'];
+        const mergedFields = this.mergeFieldSelections(target.fields, source.fields);
+        if (mergedFields) {
+          target.fields = mergedFields as Filter<CrudEntity>['fields'];
+        }
       }
 
       if (source.include?.length) {
@@ -7142,6 +7188,47 @@ export function defineODataCrudController(def: EntitySetDef) {
         modelRelations,
       );
       this.ensureEtagField(target);
+    }
+
+    mergeFieldSelections(
+      targetFields: Filter<CrudEntity>['fields'],
+      sourceFields: Filter<CrudEntity>['fields'],
+    ): Filter<CrudEntity>['fields'] | undefined {
+      const normalizedTarget = this.normalizeFieldSelection(targetFields);
+      const normalizedSource = this.normalizeFieldSelection(sourceFields);
+      if (!normalizedSource) return normalizedTarget;
+      return {
+        ...(normalizedTarget ?? {}),
+        ...normalizedSource,
+      };
+    }
+
+    normalizeFieldSelection(
+      input: Filter<CrudEntity>['fields'],
+    ): Record<string, boolean> | undefined {
+      if (!input) return undefined;
+      if (Array.isArray(input)) {
+        const out: Record<string, boolean> = {};
+        for (const field of input) {
+          if (typeof field === 'string' && field) {
+            out[field] = true;
+          }
+        }
+        return Object.keys(out).length ? out : undefined;
+      }
+      if (typeof input === 'string') {
+        return input ? { [input]: true } : undefined;
+      }
+      if (typeof input === 'object') {
+        const out: Record<string, boolean> = {};
+        for (const [key, value] of Object.entries(input)) {
+          if (!key) continue;
+          if (value === undefined || value === null) continue;
+          out[key] = Boolean(value);
+        }
+        return Object.keys(out).length ? out : undefined;
+      }
+      return undefined;
     }
   }
   const controllerMethodSet = collectControllerMethodNames(ODataCrudController);
