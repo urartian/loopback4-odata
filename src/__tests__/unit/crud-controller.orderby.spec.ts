@@ -1,5 +1,5 @@
 import 'reflect-metadata';
-import { Entity, model, property } from '@loopback/repository';
+import { AnyObject, Entity, model, property } from '@loopback/repository';
 import { expect } from '@loopback/testlab';
 import { HttpErrors } from '@loopback/rest';
 import { defineODataCrudController } from '../../controllers/crud-controller-factory';
@@ -69,5 +69,27 @@ describe('CRUD controller $orderby validation', () => {
     const filter = { order: ['name ASC'] };
 
     expect(() => (controller as any).validateFieldsStrict(filter)).to.not.throw();
+  });
+
+  it('appends entity keys to manual $orderby when enabled', () => {
+    const controller = createController({ appendKeysForClientPaging: true });
+    const filter: AnyObject = { order: ['name DESC'], fields: ['name'] };
+
+    const descriptors = (controller as any).ensureManualSkipOrderDeterminism(filter, ['id']);
+
+    expect(descriptors?.map((item: AnyObject) => item.field)).to.eql(['name', 'id']);
+    expect(filter.order).to.eql(['name DESC', 'id ASC']);
+    expect(filter.fields).to.containEql('id');
+  });
+
+  it('respects appendKeysForClientPaging=false', () => {
+    const controller = createController({ appendKeysForClientPaging: false });
+    const filter: AnyObject = { order: ['name DESC'], fields: ['name'] };
+
+    const descriptors = (controller as any).ensureManualSkipOrderDeterminism(filter, ['id']);
+
+    expect(descriptors).to.be.undefined();
+    expect(filter.order).to.eql(['name DESC']);
+    expect(filter.fields).to.eql(['name']);
   });
 });

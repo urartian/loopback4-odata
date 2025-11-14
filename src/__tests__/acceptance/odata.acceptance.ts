@@ -295,6 +295,105 @@ describe('OData component acceptance', () => {
     });
   });
 
+  it('treats $skip/$top requests as manual paging and clamps the slice', async () => {
+    const current = app.getSync(ODATA_BINDINGS.CONFIG) as ODataConfig;
+    app.bind(ODATA_BINDINGS.CONFIG).to({
+      ...current,
+      pageSize: 1,
+    });
+
+    const first = await client.get('/odata/Products').query({ $skip: '0', $top: '5' }).expect(200);
+    expect(first.body.value).to.have.length(1);
+    expect(first.body['@odata.nextLink']).to.be.undefined();
+
+    app.bind(ODATA_BINDINGS.CONFIG).to({
+      ...current,
+    });
+  });
+
+  it('continues emitting @odata.nextLink when $skip lacks $top', async () => {
+    const current = app.getSync(ODATA_BINDINGS.CONFIG) as ODataConfig;
+    app.bind(ODATA_BINDINGS.CONFIG).to({
+      ...current,
+      pageSize: 1,
+    });
+
+    const serverDriven = await client.get('/odata/Products').query({ $skip: '0' }).expect(200);
+    expect(serverDriven.body.value).to.have.length(1);
+    expect(serverDriven.body['@odata.nextLink']).to.match(/(%24|\$)skiptoken=/);
+
+    app.bind(ODATA_BINDINGS.CONFIG).to({
+      ...current,
+    });
+  });
+
+  it('preserves client $top for $skip=0 and enforces deterministic manual paging', async () => {
+    const current = app.getSync(ODATA_BINDINGS.CONFIG) as ODataConfig;
+    app.bind(ODATA_BINDINGS.CONFIG).to({
+      ...current,
+      pageSize: 2,
+    });
+
+    const premiumOne = await client
+      .post('/odata/Products')
+      .send({ name: 'Premium One', price: 9000 })
+      .expect(200);
+    const premiumTwo = await client
+      .post('/odata/Products')
+      .send({ name: 'Premium Two', price: 9000 })
+      .expect(200);
+
+    const first = await client
+      .get('/odata/Products')
+      .query({ $orderby: 'price desc', $skip: '0', $top: '2', $select: 'id,price' })
+      .expect(200);
+
+    expect(first.body.value).to.have.length(2);
+    expect(first.body.value[0].price).to.equal(9000);
+    expect(first.body.value[1].price).to.equal(9000);
+    expect(first.body.value.map((item: AnyObject) => item.id)).to.eql([
+      premiumOne.body.id,
+      premiumTwo.body.id,
+    ]);
+
+    const third = await client
+      .get('/odata/Products')
+      .query({ $orderby: 'price desc', $skip: '2', $top: '1', $select: 'id,price' })
+      .expect(200);
+
+    expect(third.body.value).to.have.length(1);
+    expect(third.body.value[0].price).to.be.below(9000);
+
+    app.bind(ODATA_BINDINGS.CONFIG).to({
+      ...current,
+    });
+  });
+
+  it('clamps manual $top to pagination guardrails', async () => {
+    const current = app.getSync(ODATA_BINDINGS.CONFIG) as ODataConfig;
+    app.bind(ODATA_BINDINGS.CONFIG).to({
+      ...current,
+      pageSize: 10,
+      strict: false,
+      pagination: {
+        ...(current.pagination ?? {}),
+        maxTop: 2,
+      },
+    });
+
+    const res = await client
+      .get('/odata/Products')
+      .query({ $skip: '0', $top: '1000', $orderby: 'id asc', $select: 'id' })
+      .expect(200);
+
+    expect(res.body.value).to.have.length(2);
+    expect(res.body['@odata.nextLink']).to.be.undefined();
+
+    app.bind(ODATA_BINDINGS.CONFIG).to({
+      ...current,
+    });
+  });
+
   it('honors $format=json even when Accept header excludes JSON', async () => {
     const res = await client
       .get('/odata/Products')

@@ -56,6 +56,7 @@ export class ODataComponent implements Component {
         maxPageSize: 200,
         maxApplyPageSize: 200,
       },
+      appendKeysForClientPaging: true,
       telemetry: {
         enabled: false,
         level: 'info',
