@@ -4419,7 +4419,7 @@ export function defineODataCrudController(def: EntitySetDef) {
       const params: Array<[string, string]> = [];
       const query = this.request.query ?? {};
       for (const [key, paramValue] of Object.entries(query)) {
-        if (key === '$skiptoken') continue;
+        if (key === '$skiptoken' || key === '$skip') continue;
         if (Array.isArray(paramValue)) {
           for (const entry of paramValue) {
             params.push([key, this.canonicalizeQueryValue(entry)]);

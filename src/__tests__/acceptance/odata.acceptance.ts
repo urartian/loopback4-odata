@@ -295,6 +295,27 @@ describe('OData component acceptance', () => {
     });
   });
 
+  it('accepts @odata.nextLink when clients send $skip=0 on the first page', async () => {
+    const current = app.getSync(ODATA_BINDINGS.CONFIG) as ODataConfig;
+    app.bind(ODATA_BINDINGS.CONFIG).to({
+      ...current,
+      pageSize: 1,
+    });
+
+    const first = await client.get('/odata/Products').query({ $skip: '0' }).expect(200);
+    expect(first.body.value).to.be.Array();
+    expect(first.body['@odata.nextLink']).to.match(/(%24|\$)skiptoken=/);
+    const nextLink = String(first.body['@odata.nextLink']);
+
+    const second = await client.get(nextLink).expect(200);
+    expect(second.body.value).to.be.Array();
+    expect(second.body.value).to.not.be.empty();
+
+    app.bind(ODATA_BINDINGS.CONFIG).to({
+      ...current,
+    });
+  });
+
   it('honors $format=json even when Accept header excludes JSON', async () => {
     const res = await client
       .get('/odata/Products')
