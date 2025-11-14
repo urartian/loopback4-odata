@@ -4336,6 +4336,21 @@ export function defineODataCrudController(def: EntitySetDef) {
       return descriptors;
     }
 
+    ensureManualSkipOrderDeterminism(
+      filter: Filter<CrudEntity>,
+      idProperties: string[],
+    ): OrderDescriptor[] | undefined {
+      if (this.cfg?.appendKeysForClientPaging === false) return undefined;
+      if (!idProperties.length) return undefined;
+      const descriptors = this.normalizeOrderDescriptors(filter.order, idProperties);
+      if (!descriptors.length) return undefined;
+      filter.order = descriptors.map((item) => `${item.field} ${item.direction}`);
+      if (filter.fields) {
+        filter.fields = this.ensureOrderProjection(filter.fields, descriptors);
+      }
+      return descriptors;
+    }
+
     resolvePageSize(
       requested?: number,
       options: { maxPageSize?: number; context?: string } = {},
@@ -5949,10 +5964,32 @@ export function defineODataCrudController(def: EntitySetDef) {
       this.validateFieldsStrict(baseFilter);
       this.enforceSkipLimit(baseFilter, paginationLimits);
 
+      const queryParams = this.request.query ?? {};
+      const extractQueryValue = (value: unknown): string | undefined => {
+        if (typeof value === 'string') return value;
+        if (Array.isArray(value) && value.length) {
+          const [first] = value;
+          return typeof first === 'string' ? first : String(first);
+        }
+        return undefined;
+      };
+      const clientSkipProvided = Object.prototype.hasOwnProperty.call(queryParams, '$skip');
+      const clientTopRaw = extractQueryValue(queryParams['$top']);
+      const clientTopNumber = clientTopRaw != null ? Number(clientTopRaw) : undefined;
+      const clientTopProvided =
+        Number.isFinite(clientTopNumber) && (clientTopNumber as number) > 0
+          ? (clientTopNumber as number)
+          : undefined;
       const skipApplied = typeof baseFilter.offset === 'number' && baseFilter.offset > 0;
-      if (skipApplied && skipTokenValue) {
+      const explicitClientSkip = clientSkipProvided || skipApplied;
+      if (explicitClientSkip && skipTokenValue) {
         throw new HttpErrors.BadRequest('$skip cannot be combined with $skiptoken.');
       }
+      const manualPagingRequested =
+        !skipTokenValue &&
+        !aggregationSpec &&
+        clientSkipProvided &&
+        clientTopProvided !== undefined;
 
       if (deltaPayload && deltaField) {
         const deltaWhere = this.buildDeltaPredicate(
@@ -5969,7 +6006,7 @@ export function defineODataCrudController(def: EntitySetDef) {
       }
 
       const originalTop = typeof baseFilter.limit === 'number' ? baseFilter.limit : undefined;
-      const serverPagingEnabled = !aggregationSpec && !skipApplied;
+      const serverPagingEnabled = !aggregationSpec && !manualPagingRequested;
       let pageSize = serverPagingEnabled
         ? this.resolvePageSize(originalTop, {
             maxPageSize: paginationLimits.maxPageSize,
@@ -5997,8 +6034,23 @@ export function defineODataCrudController(def: EntitySetDef) {
             maxPageSize: paginationLimits.maxPageSize,
             context: 'collection',
           });
+        const effectiveOffset =
+          typeof baseFilter.offset === 'number' && baseFilter.offset > 0
+            ? Math.floor(baseFilter.offset)
+            : 0;
         baseFilter.limit = (pageSize ?? 0) + 1;
-        baseFilter.offset = 0;
+        baseFilter.offset = effectiveOffset;
+      } else if (manualPagingRequested) {
+        const manualRequestedTop =
+          typeof baseFilter.limit === 'number' ? baseFilter.limit : clientTopProvided;
+        const manualPageSize = this.resolvePageSize(manualRequestedTop, {
+          maxPageSize: paginationLimits.maxPageSize,
+          context: 'collection',
+        });
+        baseFilter.limit = manualPageSize;
+        orderDescriptors =
+          this.ensureManualSkipOrderDeterminism(baseFilter as Filter<CrudEntity>, idProperties) ??
+          orderDescriptors;
       }
 
       if (serverPagingEnabled && baseFilter.fields) {

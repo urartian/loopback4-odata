@@ -47,6 +47,7 @@ export interface ODataConfig {
   onLog?: (entry: ODataLogEntry) => void;
   telemetry?: ODataTelemetryConfig;
   correlation?: ODataCorrelationConfig;
+  appendKeysForClientPaging?: boolean; // default true - stabilize manual $skip order
 }
 
 export interface ODataNavigationRestriction {
