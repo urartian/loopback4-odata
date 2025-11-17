@@ -1110,6 +1110,17 @@ describe('OData component acceptance', () => {
     expect(first.OverallCount).to.be.greaterThan(0);
   });
 
+  it('executes non-aggregate $apply pipelines with filter and top stages', async () => {
+    const res = await client
+      .get('/odata/Products')
+      .query({ $apply: 'filter(price gt 200)/top(2)' })
+      .expect(200);
+
+    expect(res.body.value).to.be.Array();
+    expect(res.body.value.length).to.be.lessThanOrEqual(2);
+    expect(res.body.value.every((item: any) => item.price > 200)).to.be.true();
+  });
+
   it('supports $apply pipelines that use concat transformations', async () => {
     const pipeline =
       'concat(aggregate(quantity with sum as TotalQuantity),groupby((product/name), aggregate(quantity with sum as TotalQuantity))/concat(aggregate($count as UI5__count),top(3)))';

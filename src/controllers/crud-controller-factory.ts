@@ -128,6 +128,22 @@ const DB_METHODS: ReadonlySet<string> = new Set([
   'save',
 ]);
 
+class ApplyResultLimitExceededError extends HttpErrors.BadRequest {
+  constructor(
+    public readonly limit: number,
+    public readonly currentSize: number,
+  ) {
+    super(
+      `$apply result exceeds the server limit of ${limit} records. Refine the query or increase maxApplyResultSize.`,
+    );
+    this.name = 'ApplyResultLimitExceededError';
+  }
+}
+
+interface ApplyFallbackOptions {
+  maxRows?: number;
+}
+
 type SearchAst =
   | { kind: 'term'; value: string }
   | { kind: 'and'; nodes: SearchAst[] }
@@ -2642,10 +2658,11 @@ export function defineODataCrudController(def: EntitySetDef) {
     runApplyPlanFallback(
       plan: ApplyExecutionPlan,
       input: AnyObject[],
+      options?: ApplyFallbackOptions,
     ): { rows: AnyObject[]; lastStageOrdered: boolean; branchSegments?: AnyObject[][] } {
       const stageCount = Math.max(this.countApplyPlanStages(plan), 1);
       const cursor = { value: 0 };
-      return this.executeApplyPlanBranch(plan, input, stageCount, cursor);
+      return this.executeApplyPlanBranch(plan, input, stageCount, cursor, options);
     }
 
     executeApplyPlanBranch(
@@ -2653,11 +2670,13 @@ export function defineODataCrudController(def: EntitySetDef) {
       input: AnyObject[],
       stageCount: number,
       cursor: { value: number },
+      options?: ApplyFallbackOptions,
     ): { rows: AnyObject[]; lastStageOrdered: boolean; branchSegments?: AnyObject[][] } {
       let working = input;
       if (plan.preAggregationFilters.length) {
         working = this.applyPostFilters(working, plan.preAggregationFilters);
       }
+      this.ensureApplyFallbackLimit(working.length, options?.maxRows);
 
       let lastStageOrdered = false;
       let branchSegments: AnyObject[][] | undefined;
@@ -2667,6 +2686,7 @@ export function defineODataCrudController(def: EntitySetDef) {
         if (stage.postAggregationFilters.length) {
           working = this.applyPostFilters(working, stage.postAggregationFilters);
         }
+        this.ensureApplyFallbackLimit(working.length, options?.maxRows);
         if (stage.orderBy?.length) {
           const clauses = stage.orderBy.map(
             (item) => `${item.field} ${item.direction.toUpperCase()}`,
@@ -2679,6 +2699,7 @@ export function defineODataCrudController(def: EntitySetDef) {
         if (stage.skip !== undefined || stage.top !== undefined) {
           working = this.sliceResults(working, stage.skip, stage.top);
         }
+        this.ensureApplyFallbackLimit(working.length, options?.maxRows);
         this.emitApplyTelemetry('fallback', cursor.value, stageCount, {
           rows: working.length,
           joinCount: stage.navigationPaths?.length,
@@ -2690,12 +2711,19 @@ export function defineODataCrudController(def: EntitySetDef) {
         const branchResults: AnyObject[] = [];
         const segments: AnyObject[][] = [];
         for (const branch of plan.concat) {
-          const branchOutcome = this.executeApplyPlanBranch(branch, working, stageCount, cursor);
+          const branchOutcome = this.executeApplyPlanBranch(
+            branch,
+            working,
+            stageCount,
+            cursor,
+            options,
+          );
           branchResults.push(...branchOutcome.rows);
+          this.ensureApplyFallbackLimit(branchResults.length, options?.maxRows);
           if (branchOutcome.branchSegments?.length) {
             segments.push(...branchOutcome.branchSegments);
           } else {
-            segments.push([...branchOutcome.rows]);
+            segments.push(branchOutcome.rows);
           }
         }
         working = branchResults;
@@ -2714,6 +2742,7 @@ export function defineODataCrudController(def: EntitySetDef) {
           working = this.applyPostFilters(working, filters);
         }
       }
+      this.ensureApplyFallbackLimit(working.length, options?.maxRows);
 
       if (plan.postOrderBy?.length) {
         const clauses = plan.postOrderBy.map(
@@ -2727,13 +2756,22 @@ export function defineODataCrudController(def: EntitySetDef) {
         }
         lastStageOrdered = true;
       }
+      this.ensureApplyFallbackLimit(working.length, options?.maxRows);
 
       if (plan.postSkip !== undefined || plan.postTop !== undefined) {
         working = this.sliceResults(working, plan.postSkip, plan.postTop);
         branchSegments = undefined;
       }
+      this.ensureApplyFallbackLimit(working.length, options?.maxRows);
 
       return { rows: working, lastStageOrdered, branchSegments };
+    }
+
+    ensureApplyFallbackLimit(count: number, limit?: number) {
+      if (typeof limit !== 'number' || limit <= 0) return;
+      if (count > limit) {
+        throw new ApplyResultLimitExceededError(limit, count);
+      }
     }
 
     getValueAtPath(source: AnyObject, path: string): unknown {
@@ -6187,6 +6225,7 @@ export function defineODataCrudController(def: EntitySetDef) {
           let working = plainEntities;
           let lastStageHasOrder = false;
           let branchSegments: AnyObject[][] | undefined;
+          const maxApplySize = this.cfg?.maxApplyResultSize;
 
           let planForFallback: ApplyExecutionPlan | undefined = applyPlan;
           if (!planForFallback && aggregationSpec) {
@@ -6212,10 +6251,28 @@ export function defineODataCrudController(def: EntitySetDef) {
           }
 
           if (planForFallback) {
-            const fallbackOutcome = this.runApplyPlanFallback(planForFallback, working);
-            working = fallbackOutcome.rows;
-            lastStageHasOrder = fallbackOutcome.lastStageOrdered;
-            branchSegments = fallbackOutcome.branchSegments;
+            try {
+              const fallbackOutcome = this.runApplyPlanFallback(planForFallback, working, {
+                maxRows: maxApplySize,
+              });
+              working = fallbackOutcome.rows;
+              lastStageHasOrder = fallbackOutcome.lastStageOrdered;
+              branchSegments = fallbackOutcome.branchSegments;
+            } catch (error) {
+              if (error instanceof ApplyResultLimitExceededError) {
+                this.logApplyFallback(
+                  'limit-exceeded',
+                  {
+                    entitySet: setName,
+                    transformations: applyPipeline?.transformations.length ?? 0,
+                    rows: error.currentSize,
+                    limit: error.limit,
+                  },
+                  planForFallback,
+                );
+              }
+              throw error;
+            }
           }
 
           if (postFilterExpr) {
@@ -6232,7 +6289,6 @@ export function defineODataCrudController(def: EntitySetDef) {
             },
             planForFallback,
           );
-          const maxApplySize = this.cfg?.maxApplyResultSize;
           if (
             typeof maxApplySize === 'number' &&
             maxApplySize > 0 &&
@@ -6261,11 +6317,7 @@ export function defineODataCrudController(def: EntitySetDef) {
           let nextLinkToken: string | undefined;
 
           if (planIncludesConcat && branchSegments?.length) {
-            const preservedSegments = branchSegments.slice(
-              0,
-              Math.max(branchSegments.length - 1, 0),
-            );
-            const preservedRows = preservedSegments.flat();
+            const preservedCount = Math.max(branchSegments.length - 1, 0);
             let detailRows = branchSegments[branchSegments.length - 1] ?? [];
 
             if (!lastStageHasOrder && baseFilter.order) {
@@ -6284,7 +6336,16 @@ export function defineODataCrudController(def: EntitySetDef) {
               applyPageSize,
             );
             const pagedDetail = pagination.items;
-            paged = preservedRows.length ? [...preservedRows, ...pagedDetail] : pagedDetail;
+            if (preservedCount > 0) {
+              const combined: AnyObject[] = [];
+              for (let i = 0; i < preservedCount; i++) {
+                combined.push(...branchSegments[i]);
+              }
+              combined.push(...pagedDetail);
+              paged = combined;
+            } else {
+              paged = pagedDetail;
+            }
             nextLinkToken = pagination.token;
           } else {
             let ordered = working;
@@ -6373,10 +6434,34 @@ export function defineODataCrudController(def: EntitySetDef) {
         }
 
         const results = await this.repository.find(baseFilter, options);
-        const plainResults = results.map((entity) => this.toPlainEntity(entity) ?? {});
+        let workingResults = results.map((entity) => this.toPlainEntity(entity) ?? {});
+
+        if (applyPlan && !aggregationSpec) {
+          try {
+            const outcome = this.runApplyPlanFallback(applyPlan, workingResults, {
+              maxRows: this.cfg?.maxApplyResultSize,
+            });
+            workingResults = outcome.rows;
+          } catch (error) {
+            if (error instanceof ApplyResultLimitExceededError) {
+              this.logApplyFallback(
+                'limit-exceeded',
+                {
+                  entitySet: setName,
+                  transformations: applyPipeline?.transformations.length ?? 0,
+                  rows: error.currentSize,
+                  limit: error.limit,
+                },
+                applyPlan,
+              );
+            }
+            throw error;
+          }
+        }
+
         const filteredResults = requiresPostFilter
-          ? this.applyPostFilter(plainResults, postFilterExpr)
-          : plainResults;
+          ? this.applyPostFilter(workingResults, postFilterExpr)
+          : workingResults;
         this.applyComputeExpressions(filteredResults, computeExpressions);
         let totalCount: number | undefined;
         const tombstoneKeys = deltaPayload?.pageKeys?.length
