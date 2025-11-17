@@ -8,6 +8,7 @@ import { Readable } from 'stream';
 import { ODataLogger } from '../../keys';
 import { EntitySetRegistry } from '../../registry/entityset-registry';
 import { Order, OrderItem } from '../fixtures/odata-app.fixture';
+import { ODATA_ATOMICITY_STATE } from '../../constants';
 
 type StubResponseMap = Record<
   string,
@@ -33,7 +34,7 @@ const noopLogger: ODataLogger = {
   error: () => undefined,
 };
 
-function createController(stubs: StubResponseMap) {
+function createController(stubs: StubResponseMap, config: ODataConfig = defaultConfig) {
   const requestContext = createRequestContextStub();
   const controller = new ODataBatchController(
     { handleRequest: async () => undefined } as any,
@@ -42,7 +43,7 @@ function createController(stubs: StubResponseMap) {
     { get: async () => undefined } as any,
     { findByName: () => undefined } as any,
     noopLogger,
-    defaultConfig,
+    config,
   );
   (controller as any).executeSingle = async (request: { id: string }) => {
     const stub = stubs[request.id];
@@ -71,11 +72,18 @@ const responseStub = {
   send: () => undefined,
 } as unknown as Response;
 
-function requestStub(contentType: string): any {
-  return {
-    headers: { 'content-type': contentType },
-    get: (header: string) => (header.toLowerCase() === 'content-type' ? contentType : undefined),
+function requestStub(contentType: string, overrides?: Record<string, unknown>): any {
+  const headers: Record<string, string> = {};
+  const extraHeaders = (overrides?.headers ?? {}) as Record<string, string>;
+  for (const [key, value] of Object.entries(extraHeaders)) {
+    headers[key.toLowerCase()] = value;
+  }
+  headers['content-type'] = headers['content-type'] ?? contentType;
+  const stub: any = {
+    headers,
+    get: (header: string) => headers[header.toLowerCase()],
   };
+  return Object.assign(stub, overrides);
 }
 
 function createControllerWithRegistry(
@@ -108,38 +116,6 @@ function createControllerWithRegistry(
     };
   };
   return controller;
-}
-
-function createFetchResponse(options: {
-  status: number;
-  body?: string | Buffer;
-  headers?: Record<string, string>;
-}) {
-  const headerMap = new Map<string, string>();
-  for (const [key, value] of Object.entries(options.headers ?? {})) {
-    headerMap.set(key.toLowerCase(), value);
-  }
-  const rawBody =
-    typeof options.body === 'string'
-      ? Buffer.from(options.body, 'utf-8')
-      : (options.body ?? Buffer.alloc(0));
-  return {
-    status: options.status,
-    headers: {
-      get: (name: string) => headerMap.get(name.toLowerCase()) ?? null,
-      forEach: (cb: (value: string, key: string) => void) => {
-        for (const [key, value] of headerMap.entries()) {
-          cb(value, key);
-        }
-      },
-    },
-    async text() {
-      return rawBody.toString('utf-8');
-    },
-    async arrayBuffer() {
-      return rawBody;
-    },
-  };
 }
 
 describe('$batch controller', () => {
@@ -236,6 +212,114 @@ describe('$batch controller', () => {
     assert.deepStrictEqual(second.body, { value: [{ id: 1 }] });
   });
 
+  it('rejects JSON requests that exceed per-part size limit', async () => {
+    const config: ODataConfig = {
+      ...defaultConfig,
+      batch: { ...defaultConfig.batch, maxPartBodyBytes: 32 },
+    };
+    const controller = createController({}, config);
+
+    await assert.rejects(
+      controller.handleBatch(
+        {
+          requests: [
+            {
+              id: 'big',
+              method: 'POST',
+              url: '/odata/Products',
+              body: 'x'.repeat(64),
+            },
+          ],
+        },
+        responseStub,
+        requestStub('application/json'),
+      ),
+      (err: unknown) => err instanceof HttpErrors.PayloadTooLarge,
+    );
+  });
+
+  it('reuses parent request user for JSON batch entries', async () => {
+    const captured: unknown[] = [];
+    const handler = {
+      async handleRequest(_req: any, res: any) {
+        captured.push((_req as any).user);
+        res.statusCode = 200;
+        res.end(JSON.stringify({ ok: true }));
+      },
+    };
+    const controller = new ODataBatchController(
+      handler as any,
+      'http://localhost',
+      createRequestContextStub(),
+      { get: async () => undefined } as any,
+      { findByName: () => undefined } as any,
+      noopLogger,
+      defaultConfig,
+    );
+    const parent = requestStub('application/json');
+    (parent as any).user = { id: 'user-1' };
+
+    await controller.handleBatch(
+      {
+        requests: [{ id: 'req-1', method: 'GET', url: '/odata/Products' }],
+      },
+      responseStub,
+      parent as any,
+    );
+
+    assert.deepStrictEqual(captured, [{ id: 'user-1' }]);
+  });
+
+  it('applies atomicity context when executing JSON changesets', async () => {
+    const seenStates: unknown[] = [];
+    const handler = {
+      async handleRequest(req: any, res: any) {
+        seenStates.push((req as any)[ODATA_ATOMICITY_STATE]);
+        res.statusCode = 204;
+        res.end();
+      },
+    };
+    const controller = new ODataBatchController(
+      handler as any,
+      'http://localhost',
+      createRequestContextStub(),
+      { get: async () => undefined } as any,
+      { findByName: () => undefined } as any,
+      noopLogger,
+      defaultConfig,
+    );
+    const atomicityState = { groupId: 'g1', getTransaction: () => undefined };
+    (controller as any).createAtomicGroupContext = async () => ({
+      id: 'g1',
+      applyTo: (req: any) => {
+        (req as any)[ODATA_ATOMICITY_STATE] = atomicityState;
+      },
+      clearFrom: (req: any) => {
+        delete (req as any)[ODATA_ATOMICITY_STATE];
+      },
+      commit: async () => undefined,
+      rollback: async () => undefined,
+    });
+
+    await controller.handleBatch(
+      {
+        requests: [
+          {
+            id: 'req-1',
+            method: 'POST',
+            url: '/odata/Products',
+            atomicityGroup: 'g1',
+          },
+        ],
+      },
+      responseStub,
+      requestStub('application/json'),
+    );
+
+    assert.equal(seenStates.length, 1);
+    assert.deepStrictEqual(seenStates[0], atomicityState);
+  });
+
   it('rejects empty request arrays', async () => {
     const controller = createController({});
     await assert.rejects(
@@ -312,8 +396,16 @@ describe('$batch controller', () => {
   });
 
   it('does not follow redirects that point outside the service root', async () => {
+    let callCount = 0;
     const controller = new ODataBatchController(
-      { handleRequest: async () => undefined } as any,
+      {
+        handleRequest: async (_req: unknown, res: any) => {
+          callCount++;
+          res.statusCode = 302;
+          res.setHeader('Location', 'https://evil.example/loop');
+          res.end();
+        },
+      } as any,
       'http://localhost',
       createRequestContextStub(),
       { get: async () => undefined } as any,
@@ -322,49 +414,37 @@ describe('$batch controller', () => {
       defaultConfig,
     );
 
-    const originalFetch = (global as any).fetch;
-    let callCount = 0;
-    (global as any).fetch = async () => {
-      callCount++;
-      const headers = new Map<string, string>([['location', 'https://evil.example/loop']]);
-      return {
-        status: 302,
-        headers: {
-          get: (name: string) => headers.get(name.toLowerCase()) ?? null,
-          forEach: (cb: (value: string, key: string) => void) => {
-            for (const [key, value] of headers.entries()) cb(value, key);
-          },
-        },
-        async text() {
-          return '';
-        },
-        async arrayBuffer() {
-          return Buffer.alloc(0);
-        },
-      };
-    };
+    const result = await (controller as any).executeSingle(
+      {
+        id: 'redir',
+        method: 'GET',
+        url: '/odata/Redirect',
+      },
+      undefined,
+      requestStub('application/json'),
+    );
 
-    try {
-      const result = await (controller as any).executeSingle(
-        {
-          id: 'redir',
-          method: 'GET',
-          url: '/odata/Redirect',
-        },
-        undefined,
-        requestStub('application/json'),
-      );
-
-      assert.equal(result.status, 302);
-      assert.equal(callCount, 1);
-    } finally {
-      (global as any).fetch = originalFetch;
-    }
+    assert.equal(result.status, 302);
+    assert.equal(callCount, 1);
   });
 
   it('follows same-origin redirects for GET requests', async () => {
+    let callCount = 0;
     const controller = new ODataBatchController(
-      { handleRequest: async () => undefined } as any,
+      {
+        handleRequest: async (_req: unknown, res: any) => {
+          callCount++;
+          if (callCount === 1) {
+            res.statusCode = 302;
+            res.setHeader('Location', '/odata/next');
+            res.end();
+            return;
+          }
+          res.statusCode = 200;
+          res.setHeader('Content-Type', 'application/json');
+          res.end('{"value":42}');
+        },
+      } as any,
       'http://localhost',
       createRequestContextStub(),
       { get: async () => undefined } as any,
@@ -373,43 +453,33 @@ describe('$batch controller', () => {
       defaultConfig,
     );
 
-    const originalFetch = (global as any).fetch;
-    const responses = [
-      createFetchResponse({ status: 302, headers: { location: '/odata/next' } }),
-      createFetchResponse({
-        status: 200,
-        body: '{"value":42}',
-        headers: { 'content-type': 'application/json' },
-      }),
-    ];
-    (global as any).fetch = async () => {
-      const next = responses.shift();
-      if (!next) throw new Error('Unexpected fetch');
-      return next;
-    };
+    const result = await (controller as any).executeSingle(
+      {
+        id: 'redir',
+        method: 'GET',
+        url: '/odata/Redirect',
+      },
+      undefined,
+      requestStub('application/json'),
+    );
 
-    try {
-      const result = await (controller as any).executeSingle(
-        {
-          id: 'redir',
-          method: 'GET',
-          url: '/odata/Redirect',
-        },
-        undefined,
-        requestStub('application/json'),
-      );
-
-      assert.equal(result.status, 200);
-      assert.deepStrictEqual(result.body, { value: 42 });
-      assert.equal(responses.length, 0);
-    } finally {
-      (global as any).fetch = originalFetch;
-    }
+    assert.equal(result.status, 200);
+    assert.deepStrictEqual(result.body, { value: 42 });
+    assert.equal(callCount, 2);
   });
 
-  it('preserves binary payloads returned via fetch()', async () => {
+  it('preserves binary payloads for standalone requests', async () => {
+    const blob = Buffer.from([0x00, 0xff, 0x10]);
+    let callCount = 0;
     const controller = new ODataBatchController(
-      { handleRequest: async () => undefined } as any,
+      {
+        handleRequest: async (_req: unknown, res: any) => {
+          callCount++;
+          res.statusCode = 200;
+          res.setHeader('Content-Type', 'application/octet-stream');
+          res.end(blob);
+        },
+      } as any,
       'http://localhost',
       createRequestContextStub(),
       { get: async () => undefined } as any,
@@ -418,35 +488,20 @@ describe('$batch controller', () => {
       defaultConfig,
     );
 
-    const originalFetch = (global as any).fetch;
-    const blob = Buffer.from([0x00, 0xff, 0x10]);
-    (global as any).fetch = async () =>
-      createFetchResponse({
-        status: 200,
-        body: blob,
-        headers: {
-          'content-type': 'application/octet-stream',
-          'content-length': String(blob.length),
-        },
-      });
+    const result = await (controller as any).executeSingle(
+      {
+        id: 'bin',
+        method: 'GET',
+        url: '/odata/Binary',
+      },
+      undefined,
+      requestStub('multipart/mixed'),
+    );
 
-    try {
-      const result = await (controller as any).executeSingle(
-        {
-          id: 'bin',
-          method: 'GET',
-          url: '/odata/Binary',
-        },
-        undefined,
-        requestStub('multipart/mixed'),
-      );
-
-      assert.equal(result.status, 200);
-      assert.equal(Buffer.isBuffer(result.body), true);
-      assert.equal((result.body as Buffer).equals(blob), true);
-    } finally {
-      (global as any).fetch = originalFetch;
-    }
+    assert.equal(result.status, 200);
+    assert.equal(Buffer.isBuffer(result.body), true);
+    assert.equal((result.body as Buffer).equals(blob), true);
+    assert.equal(callCount, 1);
   });
 
   it('preserves binary payloads returned via in-process handler', async () => {
