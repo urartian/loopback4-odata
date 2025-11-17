@@ -5,6 +5,7 @@ import { EntitySetRegistry } from '../registry/entityset-registry';
 import { ODataConfig } from '../types';
 import { ODATA_VERSION } from '../constants';
 import { markUndocumentedOperation } from '../util/openapi';
+import { acceptsAnyMediaType } from '../util/accept';
 
 const SERVICE_DOCUMENT_OPERATION_SPEC = markUndocumentedOperation({
   responses: {
@@ -74,12 +75,7 @@ export class ODataServiceDocumentController {
     if (this.config?.strict) {
       const accept = request.get('Accept') ?? (request.headers?.['accept'] as string | undefined);
       if (accept?.trim()) {
-        const lower = accept.toLowerCase();
-        const ok =
-          lower.includes('application/json') ||
-          lower.includes('*/*') ||
-          /application\s*\/\s*\*/.test(lower);
-        if (!ok) {
+        if (!acceptsAnyMediaType(accept, ['application/json'])) {
           const err: any = new Error('NotAcceptable');
           err.statusCode = 406;
           err.code = 'NotAcceptable';

@@ -107,4 +107,11 @@ describe('CRUD controller $count Accept negotiation', () => {
       'Accept header must allow one of: application/json, text/plain.',
     );
   });
+
+  it('rejects Accept headers that assign q=0 to supported types', async () => {
+    const { controller } = createController('application/json;q=0, text/plain;q=0');
+    await expect(controller.count()).to.be.rejectedWith(
+      'Accept header must allow one of: application/json, text/plain.',
+    );
+  });
 });

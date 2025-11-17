@@ -63,4 +63,50 @@ describe('CRUD controller $apply fallback', () => {
       /\$apply result exceeds/,
     );
   });
+
+  it('rejects $apply requests when capability is disabled', async () => {
+    const Controller = defineODataCrudController({
+      ...baseDef,
+      capabilities: { applySupported: false },
+    });
+    const repo = {
+      find: async () => [],
+      count: async () => ({ count: 0 }),
+    };
+    const request = {
+      query: { $apply: 'aggregate(id with sum as Total)' },
+      get: () => undefined,
+      headers: {},
+    };
+    const response = {
+      headersSent: false,
+      set() {},
+      getHeader() {
+        return undefined;
+      },
+      type() {
+        return this;
+      },
+      status() {
+        return this;
+      },
+      end() {},
+      once() {},
+    };
+    const controller = new Controller(
+      repo as any,
+      request as any,
+      response as any,
+      {} as any,
+      {},
+      {} as any,
+      noopLogger,
+      {
+        check: async () => undefined,
+        release: () => undefined,
+      } as ODataTenantThrottler,
+    );
+
+    await expect(controller.list()).to.be.rejectedWith('$apply is disabled for this entity set.');
+  });
 });
