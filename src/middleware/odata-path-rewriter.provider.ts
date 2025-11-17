@@ -19,6 +19,7 @@ export class OdataPathRewriterProvider implements Provider<Middleware> {
     const middleware: Middleware = async (ctx, next) => {
       const originalUrl = ctx.request.url ?? '';
       let basePathRewritten = false;
+      let targetsODataRoute = false;
 
       if (needsRewrite) {
         const url = ctx.request.url || '';
@@ -28,14 +29,21 @@ export class OdataPathRewriterProvider implements Provider<Middleware> {
         }
       }
 
-      const afterBaseRewrite = ctx.request.url ?? '';
-      const rewritten = rewriteODataUrl(afterBaseRewrite, {
-        namespace: this.cfg?.namespace,
-        namespaceAlias: this.cfg?.namespaceAlias,
-      });
-      const keyRewritten = rewritten !== afterBaseRewrite;
-      if (keyRewritten) {
-        ctx.request.url = rewritten;
+      const normalizedUrl = ctx.request.url || '';
+      if (this.pathMatches(normalizedUrl, '/odata')) {
+        targetsODataRoute = true;
+      }
+
+      let keyRewritten = false;
+      if (targetsODataRoute) {
+        const rewritten = rewriteODataUrl(normalizedUrl, {
+          namespace: this.cfg?.namespace,
+          namespaceAlias: this.cfg?.namespaceAlias,
+        });
+        keyRewritten = rewritten !== normalizedUrl;
+        if (keyRewritten) {
+          ctx.request.url = rewritten;
+        }
       }
 
       if (basePathRewritten || keyRewritten) {

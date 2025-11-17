@@ -229,9 +229,15 @@ export function decodeDeltaToken(
     throw new TokenVerificationError('Invalid delta token format.', 'invalid');
   }
   if (token.startsWith(JSON_PREFIX)) {
+    if (!options.allowLegacyUnsigned) {
+      throw new TokenVerificationError('Legacy delta tokens are not allowed.', 'legacy-denied');
+    }
     return decodeJsonToken(token);
   }
   if (token.startsWith(LEGACY_PREFIX)) {
+    if (!options.allowLegacyUnsigned) {
+      throw new TokenVerificationError('Legacy delta tokens are not allowed.', 'legacy-denied');
+    }
     return decodeLegacyToken(token);
   }
   const payload = verifyDeltaToken<DeltaTokenPayload>(

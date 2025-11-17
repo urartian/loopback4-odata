@@ -204,7 +204,7 @@ function mergeCapabilities(
     hasStream: overrides?.hasStream ?? defaults?.hasStream,
     aggregation: overrides?.aggregation ?? defaults?.aggregation,
     aggregationMethods: overrides?.aggregationMethods ?? defaults?.aggregationMethods,
-    applySupported: overrides?.applySupported ?? defaults?.applySupported,
+    applySupported: overrides?.applySupported ?? defaults?.applySupported ?? true,
     insertRestrictions: mergeInsertRestrictions(
       defaults?.insertRestrictions,
       overrides?.insertRestrictions,
@@ -860,8 +860,6 @@ export class CsdlGenerator {
 
     for (const set of entitySets) {
       const capabilities = mergeCapabilities(defaultCapabilities, set.capabilities);
-      capabilities.applySupported =
-        capabilities.applySupported !== false && Boolean(set.applyPushdown);
       const hasStream = Boolean(set.hasStream ?? capabilities.hasStream);
       const entityType = buildEntityType(set, namespace, setLookup, context, hasStream);
       if (!entityType) continue;

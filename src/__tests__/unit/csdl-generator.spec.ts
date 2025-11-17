@@ -263,6 +263,12 @@ describe('CsdlGenerator', () => {
   });
 
   it('produces aligned JSON CSDL', () => {
+    const widgetsSet = registry.findByName('Widgets');
+    expect(widgetsSet).to.be.ok();
+    if (widgetsSet) {
+      widgetsSet.applyPushdown = false;
+    }
+
     const jsonDoc = generator.generate('json');
     const parsed = JSON.parse(jsonDoc);
 
@@ -367,6 +373,9 @@ describe('CsdlGenerator', () => {
     expect(
       container.Widgets['@Org.OData.Capabilities.V1.SearchRestrictions'].UnsupportedExpressions,
     ).to.containEql('Org.OData.Capabilities.V1.SearchExpressions/Not');
+    expect(container.Widgets['@Org.OData.Capabilities.V1.ApplySupported'].ApplySupported).to.equal(
+      true,
+    );
     expect(container.Gadgets.$Type).to.equal('Catalog.Gadget');
     expect(container.AdvancedWidgets.$Type).to.equal('Catalog.AdvancedWidget');
     expect(container.ping.$Function).to.equal('Catalog.ping');

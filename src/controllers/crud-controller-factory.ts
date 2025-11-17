@@ -5280,19 +5280,49 @@ export function defineODataCrudController(def: EntitySetDef) {
       throw err;
     }
 
-    ensureAcceptsJson() {
+    ensureAcceptsJson(additionalTypes?: string[]) {
       if (this.formatOverridden) return;
       if (!this.cfg?.strict) return;
       const accept =
         this.request.get('Accept') ?? (this.request.headers?.['accept'] as string | undefined);
       if (!accept?.trim()) return; // no Accept means accept anything
       const lower = accept.toLowerCase();
-      const ok =
-        lower.includes('application/json') ||
-        lower.includes('*/*') ||
-        /application\s*\/\s*\*/.test(lower);
-      if (!ok) {
-        const err = new HttpErrors.NotAcceptable('Accept header must allow application/json.');
+      const extras =
+        additionalTypes?.map((type) => type?.trim().toLowerCase()).filter(Boolean) ?? [];
+      const allowedTypes = ['application/json', ...extras];
+      const parseMediaType = (value: string): { type: string; subtype: string } | undefined => {
+        const trimmed = value.trim();
+        if (!trimmed) return undefined;
+        const [typeSubtype] = trimmed.split(';');
+        if (!typeSubtype?.includes('/')) return undefined;
+        const [type, subtype] = typeSubtype.split('/');
+        const normalizedType = type?.trim();
+        const normalizedSubtype = subtype?.trim();
+        if (!normalizedType || !normalizedSubtype) return undefined;
+        return { type: normalizedType, subtype: normalizedSubtype };
+      };
+      const allowedMedia = allowedTypes
+        .map((type) => parseMediaType(type))
+        .filter((item): item is { type: string; subtype: string } => Boolean(item));
+      const mediaRanges = lower
+        .split(',')
+        .map((segment) => segment.trim())
+        .filter(Boolean);
+      const acceptsAllowedType = mediaRanges.some((range) => {
+        const parsed = parseMediaType(range);
+        if (!parsed) return false;
+        if (parsed.type === '*' && parsed.subtype === '*') return true;
+        return allowedMedia.some((allowed) => {
+          const typeMatches = parsed.type === allowed.type || parsed.type === '*';
+          if (!typeMatches) return false;
+          if (parsed.subtype === '*' || allowed.subtype === '*') return true;
+          return parsed.subtype === allowed.subtype;
+        });
+      });
+      if (!acceptsAllowedType) {
+        const err = new HttpErrors.NotAcceptable(
+          `Accept header must allow one of: ${allowedTypes.join(', ')}.`,
+        );
         (err as any).code = 'NotAcceptable';
         throw err;
       }
@@ -6617,7 +6647,8 @@ export function defineODataCrudController(def: EntitySetDef) {
         throw new HttpErrors.BadRequest(message);
       }
 
-      this.ensureAcceptsJson();
+      this.ensureAcceptsJson(['text/plain']);
+      this.response.type('text/plain');
       this.validateFieldsStrict(baseFilter);
 
       const op: CrudOperation = 'READ';
