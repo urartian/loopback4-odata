@@ -73,7 +73,8 @@ export class ODataServiceDocumentController {
     @inject(RestBindings.Http.REQUEST) request: Request,
   ): ServiceDocumentPayload {
     if (this.config?.strict) {
-      const accept = request.get('Accept') ?? (request.headers?.['accept'] as string | undefined);
+      const acceptHeader = request.get('Accept') ?? request.headers?.['accept'];
+      const accept = Array.isArray(acceptHeader) ? acceptHeader.join(',') : acceptHeader;
       if (accept?.trim()) {
         if (!acceptsAnyMediaType(accept, ['application/json'])) {
           const err: any = new Error('NotAcceptable');

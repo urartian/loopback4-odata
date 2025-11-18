@@ -5284,8 +5284,8 @@ export function defineODataCrudController(def: EntitySetDef) {
     ensureAcceptsJson(additionalTypes?: string[]) {
       if (this.formatOverridden) return;
       if (!this.cfg?.strict) return;
-      const accept =
-        this.request.get('Accept') ?? (this.request.headers?.['accept'] as string | undefined);
+      const acceptHeader = this.request.get('Accept') ?? this.request.headers?.['accept'];
+      const accept = Array.isArray(acceptHeader) ? acceptHeader.join(',') : acceptHeader;
       if (!accept?.trim()) return; // no Accept means accept anything
       const extras =
         additionalTypes?.map((type) => type?.split(';')[0]?.trim().toLowerCase()).filter(Boolean) ??
@@ -5327,6 +5327,100 @@ export function defineODataCrudController(def: EntitySetDef) {
       if (parsed?.apply || parsed?.applyPipeline) {
         throw new HttpErrors.NotImplemented('$apply is disabled for this entity set.');
       }
+    }
+
+    async enforceTenantLimit(operation?: CrudOperation, scope?: CrudScope) {
+      if (!this.throttler) return;
+      if (!this.tenantQuotasEnabled()) return;
+      if (this._throttleApplied) return;
+      const resolver = this.cfg?.tenantResolver;
+      let tenantId = 'default';
+      if (resolver) {
+        try {
+          tenantId = resolver(this.request) ?? 'default';
+        } catch {
+          tenantId = 'default';
+        }
+      }
+      let released = false;
+      const release = () => {
+        if (released) return;
+        released = true;
+        this.throttler?.release(tenantId);
+        this._throttleApplied = false;
+      };
+      this.response.once('finish', release);
+      this.response.once('close', release);
+      try {
+        const telemetryState = this.getRequestTelemetryState();
+        const correlationId = telemetryState?.correlationId;
+        const requestId =
+          this.request.get('x-request-id') ??
+          (this.request.headers?.['x-request-id'] as string | undefined) ??
+          ((this.request as AnyObject).id as string | undefined);
+        const rawUrl = (this.request as AnyObject).originalUrl ?? this.request.url;
+        await this.throttler.check(tenantId, {
+          entitySet: setName,
+          operation,
+          scope,
+          method: this.request.method,
+          url: rawUrl,
+          requestId,
+          correlationId,
+        });
+        this._throttleApplied = true;
+        this.emitTelemetry({
+          category: 'throttle',
+          event: 'tenant-throttle-check',
+          level: 'debug',
+          context: {
+            tenantId,
+            operation,
+            scope,
+            method: this.request.method,
+            url: rawUrl,
+            result: 'allowed',
+          },
+        });
+      } catch (error) {
+        release();
+        const message = (error as Error).message;
+        this.emitTelemetry({
+          category: 'throttle',
+          event: 'tenant-throttle-check',
+          level: 'warn',
+          context: {
+            tenantId,
+            operation,
+            scope,
+            method: this.request.method,
+            url: (this.request as AnyObject).originalUrl ?? this.request.url,
+            result: 'rejected',
+            reason: message,
+          },
+          requireSample: false,
+        });
+        if (message === 'tenant-rate-limit-exceeded') {
+          throw new HttpErrors.TooManyRequests(
+            'Tenant request rate exceeded. Retry after a short delay.',
+          );
+        }
+        if (message === 'tenant-concurrent-limit-exceeded') {
+          throw new HttpErrors.TooManyRequests(
+            'Tenant concurrent request limit exceeded. Retry after a short delay.',
+          );
+        }
+        throw error;
+      }
+    }
+
+    tenantQuotasEnabled(): boolean {
+      const quotas = this.cfg?.tenantQuotas;
+      if (!quotas) return false;
+      if (quotas.maxConcurrentRequests || quotas.maxRequestsPerMinute) return true;
+      return Object.values(quotas.overrides ?? {}).some((override) =>
+        Boolean(override?.maxConcurrentRequests || override?.maxRequestsPerMinute),
+      );
     }
 
     buildIdWhere(id: unknown): Filter<CrudEntity>['where'] {
@@ -5548,90 +5642,6 @@ export function defineODataCrudController(def: EntitySetDef) {
         filter: (base as any).filter,
         result: undefined,
       } as CrudHookContext;
-    }
-
-    async enforceTenantLimit(operation?: CrudOperation, scope?: CrudScope) {
-      if (!this.throttler) return;
-      if (this._throttleApplied) return;
-      const resolver = this.cfg?.tenantResolver;
-      let tenantId = 'default';
-      if (resolver) {
-        try {
-          tenantId = resolver(this.request) ?? 'default';
-        } catch {
-          tenantId = 'default';
-        }
-      }
-      let released = false;
-      const release = () => {
-        if (released) return;
-        released = true;
-        this.throttler?.release(tenantId);
-        this._throttleApplied = false;
-      };
-      this.response.once('finish', release);
-      this.response.once('close', release);
-      try {
-        const telemetryState = this.getRequestTelemetryState();
-        const correlationId = telemetryState?.correlationId;
-        const requestId =
-          this.request.get('x-request-id') ??
-          (this.request.headers?.['x-request-id'] as string | undefined) ??
-          ((this.request as AnyObject).id as string | undefined);
-        const rawUrl = (this.request as AnyObject).originalUrl ?? this.request.url;
-        await this.throttler.check(tenantId, {
-          entitySet: setName,
-          operation,
-          scope,
-          method: this.request.method,
-          url: rawUrl,
-          requestId,
-          correlationId,
-        });
-        this._throttleApplied = true;
-        this.emitTelemetry({
-          category: 'throttle',
-          event: 'tenant-throttle-check',
-          level: 'debug',
-          context: {
-            tenantId,
-            operation,
-            scope,
-            method: this.request.method,
-            url: rawUrl,
-            result: 'allowed',
-          },
-        });
-      } catch (error) {
-        release();
-        const message = (error as Error).message;
-        this.emitTelemetry({
-          category: 'throttle',
-          event: 'tenant-throttle-check',
-          level: 'warn',
-          context: {
-            tenantId,
-            operation,
-            scope,
-            method: this.request.method,
-            url: (this.request as AnyObject).originalUrl ?? this.request.url,
-            result: 'rejected',
-            reason: message,
-          },
-          requireSample: false,
-        });
-        if (message === 'tenant-rate-limit-exceeded') {
-          throw new HttpErrors.TooManyRequests(
-            'Tenant request rate exceeded. Retry after a short delay.',
-          );
-        }
-        if (message === 'tenant-concurrent-limit-exceeded') {
-          throw new HttpErrors.TooManyRequests(
-            'Tenant concurrent request limit exceeded. Retry after a short delay.',
-          );
-        }
-        throw error;
-      }
     }
 
     buildOnContext(ctx: CrudHookContext, helpers: CrudOnContext['helpers']): CrudOnContext {
