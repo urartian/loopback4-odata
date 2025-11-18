@@ -106,6 +106,7 @@ import {
   StatisticsUpdate,
   TelemetryEventOptions,
 } from '../util/telemetry';
+import { acceptsAnyMediaType } from '../util/accept';
 type CrudEntity = Entity & { [key: string]: unknown };
 type CrudRepo = DefaultCrudRepository<CrudEntity, unknown>;
 type NormalizedInclusion = Exclude<InclusionFilter, string>;
@@ -127,6 +128,22 @@ const DB_METHODS: ReadonlySet<string> = new Set([
   'execute',
   'save',
 ]);
+
+class ApplyResultLimitExceededError extends HttpErrors.BadRequest {
+  constructor(
+    public readonly limit: number,
+    public readonly currentSize: number,
+  ) {
+    super(
+      `$apply result exceeds the server limit of ${limit} records. Refine the query or increase maxApplyResultSize.`,
+    );
+    this.name = 'ApplyResultLimitExceededError';
+  }
+}
+
+interface ApplyFallbackOptions {
+  maxRows?: number;
+}
 
 type SearchAst =
   | { kind: 'term'; value: string }
@@ -2642,10 +2659,11 @@ export function defineODataCrudController(def: EntitySetDef) {
     runApplyPlanFallback(
       plan: ApplyExecutionPlan,
       input: AnyObject[],
+      options?: ApplyFallbackOptions,
     ): { rows: AnyObject[]; lastStageOrdered: boolean; branchSegments?: AnyObject[][] } {
       const stageCount = Math.max(this.countApplyPlanStages(plan), 1);
       const cursor = { value: 0 };
-      return this.executeApplyPlanBranch(plan, input, stageCount, cursor);
+      return this.executeApplyPlanBranch(plan, input, stageCount, cursor, options);
     }
 
     executeApplyPlanBranch(
@@ -2653,11 +2671,13 @@ export function defineODataCrudController(def: EntitySetDef) {
       input: AnyObject[],
       stageCount: number,
       cursor: { value: number },
+      options?: ApplyFallbackOptions,
     ): { rows: AnyObject[]; lastStageOrdered: boolean; branchSegments?: AnyObject[][] } {
       let working = input;
       if (plan.preAggregationFilters.length) {
         working = this.applyPostFilters(working, plan.preAggregationFilters);
       }
+      this.ensureApplyFallbackLimit(working.length, options?.maxRows);
 
       let lastStageOrdered = false;
       let branchSegments: AnyObject[][] | undefined;
@@ -2667,6 +2687,7 @@ export function defineODataCrudController(def: EntitySetDef) {
         if (stage.postAggregationFilters.length) {
           working = this.applyPostFilters(working, stage.postAggregationFilters);
         }
+        this.ensureApplyFallbackLimit(working.length, options?.maxRows);
         if (stage.orderBy?.length) {
           const clauses = stage.orderBy.map(
             (item) => `${item.field} ${item.direction.toUpperCase()}`,
@@ -2679,6 +2700,7 @@ export function defineODataCrudController(def: EntitySetDef) {
         if (stage.skip !== undefined || stage.top !== undefined) {
           working = this.sliceResults(working, stage.skip, stage.top);
         }
+        this.ensureApplyFallbackLimit(working.length, options?.maxRows);
         this.emitApplyTelemetry('fallback', cursor.value, stageCount, {
           rows: working.length,
           joinCount: stage.navigationPaths?.length,
@@ -2690,12 +2712,19 @@ export function defineODataCrudController(def: EntitySetDef) {
         const branchResults: AnyObject[] = [];
         const segments: AnyObject[][] = [];
         for (const branch of plan.concat) {
-          const branchOutcome = this.executeApplyPlanBranch(branch, working, stageCount, cursor);
+          const branchOutcome = this.executeApplyPlanBranch(
+            branch,
+            working,
+            stageCount,
+            cursor,
+            options,
+          );
           branchResults.push(...branchOutcome.rows);
+          this.ensureApplyFallbackLimit(branchResults.length, options?.maxRows);
           if (branchOutcome.branchSegments?.length) {
             segments.push(...branchOutcome.branchSegments);
           } else {
-            segments.push([...branchOutcome.rows]);
+            segments.push(branchOutcome.rows);
           }
         }
         working = branchResults;
@@ -2714,6 +2743,7 @@ export function defineODataCrudController(def: EntitySetDef) {
           working = this.applyPostFilters(working, filters);
         }
       }
+      this.ensureApplyFallbackLimit(working.length, options?.maxRows);
 
       if (plan.postOrderBy?.length) {
         const clauses = plan.postOrderBy.map(
@@ -2727,13 +2757,22 @@ export function defineODataCrudController(def: EntitySetDef) {
         }
         lastStageOrdered = true;
       }
+      this.ensureApplyFallbackLimit(working.length, options?.maxRows);
 
       if (plan.postSkip !== undefined || plan.postTop !== undefined) {
         working = this.sliceResults(working, plan.postSkip, plan.postTop);
         branchSegments = undefined;
       }
+      this.ensureApplyFallbackLimit(working.length, options?.maxRows);
 
       return { rows: working, lastStageOrdered, branchSegments };
+    }
+
+    ensureApplyFallbackLimit(count: number, limit?: number) {
+      if (typeof limit !== 'number' || limit <= 0) return;
+      if (count > limit) {
+        throw new ApplyResultLimitExceededError(limit, count);
+      }
     }
 
     getValueAtPath(source: AnyObject, path: string): unknown {
@@ -5242,19 +5281,20 @@ export function defineODataCrudController(def: EntitySetDef) {
       throw err;
     }
 
-    ensureAcceptsJson() {
+    ensureAcceptsJson(additionalTypes?: string[]) {
       if (this.formatOverridden) return;
       if (!this.cfg?.strict) return;
-      const accept =
-        this.request.get('Accept') ?? (this.request.headers?.['accept'] as string | undefined);
+      const acceptHeader = this.request.get('Accept') ?? this.request.headers?.['accept'];
+      const accept = Array.isArray(acceptHeader) ? acceptHeader.join(',') : acceptHeader;
       if (!accept?.trim()) return; // no Accept means accept anything
-      const lower = accept.toLowerCase();
-      const ok =
-        lower.includes('application/json') ||
-        lower.includes('*/*') ||
-        /application\s*\/\s*\*/.test(lower);
-      if (!ok) {
-        const err = new HttpErrors.NotAcceptable('Accept header must allow application/json.');
+      const extras =
+        additionalTypes?.map((type) => type?.split(';')[0]?.trim().toLowerCase()).filter(Boolean) ??
+        [];
+      const allowedTypes = ['application/json', ...extras];
+      if (!acceptsAnyMediaType(accept, allowedTypes)) {
+        const err = new HttpErrors.NotAcceptable(
+          `Accept header must allow one of: ${allowedTypes.join(', ')}.`,
+        );
         (err as any).code = 'NotAcceptable';
         throw err;
       }
@@ -5273,6 +5313,114 @@ export function defineODataCrudController(def: EntitySetDef) {
         (err as any).code = 'UnsupportedMediaType';
         throw err;
       }
+    }
+
+    isApplyEnabled(): boolean {
+      return def.capabilities?.applySupported ?? this.cfg?.capabilities?.applySupported ?? true;
+    }
+
+    enforceApplyCapability(
+      applyAllowed: boolean,
+      parsed: { apply?: AggregationSpec; applyPipeline?: ApplyPipeline } | undefined,
+    ) {
+      if (applyAllowed) return;
+      if (parsed?.apply || parsed?.applyPipeline) {
+        throw new HttpErrors.NotImplemented('$apply is disabled for this entity set.');
+      }
+    }
+
+    async enforceTenantLimit(operation?: CrudOperation, scope?: CrudScope) {
+      if (!this.throttler) return;
+      if (!this.tenantQuotasEnabled()) return;
+      if (this._throttleApplied) return;
+      const resolver = this.cfg?.tenantResolver;
+      let tenantId = 'default';
+      if (resolver) {
+        try {
+          tenantId = resolver(this.request) ?? 'default';
+        } catch {
+          tenantId = 'default';
+        }
+      }
+      let released = false;
+      const release = () => {
+        if (released) return;
+        released = true;
+        this.throttler?.release(tenantId);
+        this._throttleApplied = false;
+      };
+      this.response.once('finish', release);
+      this.response.once('close', release);
+      try {
+        const telemetryState = this.getRequestTelemetryState();
+        const correlationId = telemetryState?.correlationId;
+        const requestId =
+          this.request.get('x-request-id') ??
+          (this.request.headers?.['x-request-id'] as string | undefined) ??
+          ((this.request as AnyObject).id as string | undefined);
+        const rawUrl = (this.request as AnyObject).originalUrl ?? this.request.url;
+        await this.throttler.check(tenantId, {
+          entitySet: setName,
+          operation,
+          scope,
+          method: this.request.method,
+          url: rawUrl,
+          requestId,
+          correlationId,
+        });
+        this._throttleApplied = true;
+        this.emitTelemetry({
+          category: 'throttle',
+          event: 'tenant-throttle-check',
+          level: 'debug',
+          context: {
+            tenantId,
+            operation,
+            scope,
+            method: this.request.method,
+            url: rawUrl,
+            result: 'allowed',
+          },
+        });
+      } catch (error) {
+        release();
+        const message = (error as Error).message;
+        this.emitTelemetry({
+          category: 'throttle',
+          event: 'tenant-throttle-check',
+          level: 'warn',
+          context: {
+            tenantId,
+            operation,
+            scope,
+            method: this.request.method,
+            url: (this.request as AnyObject).originalUrl ?? this.request.url,
+            result: 'rejected',
+            reason: message,
+          },
+          requireSample: false,
+        });
+        if (message === 'tenant-rate-limit-exceeded') {
+          throw new HttpErrors.TooManyRequests(
+            'Tenant request rate exceeded. Retry after a short delay.',
+          );
+        }
+        if (message === 'tenant-concurrent-limit-exceeded') {
+          throw new HttpErrors.TooManyRequests(
+            'Tenant concurrent request limit exceeded. Retry after a short delay.',
+          );
+        }
+        throw error;
+      }
+    }
+
+    tenantQuotasEnabled(): boolean {
+      const quotas = this.cfg?.tenantQuotas;
+      if (!quotas) return false;
+      if (quotas.maxConcurrentRequests || quotas.maxRequestsPerMinute) return true;
+      return Object.values(quotas.overrides ?? {}).some((override) =>
+        Boolean(override?.maxConcurrentRequests || override?.maxRequestsPerMinute),
+      );
     }
 
     buildIdWhere(id: unknown): Filter<CrudEntity>['where'] {
@@ -5496,90 +5644,6 @@ export function defineODataCrudController(def: EntitySetDef) {
       } as CrudHookContext;
     }
 
-    async enforceTenantLimit(operation?: CrudOperation, scope?: CrudScope) {
-      if (!this.throttler) return;
-      if (this._throttleApplied) return;
-      const resolver = this.cfg?.tenantResolver;
-      let tenantId = 'default';
-      if (resolver) {
-        try {
-          tenantId = resolver(this.request) ?? 'default';
-        } catch {
-          tenantId = 'default';
-        }
-      }
-      let released = false;
-      const release = () => {
-        if (released) return;
-        released = true;
-        this.throttler?.release(tenantId);
-        this._throttleApplied = false;
-      };
-      this.response.once('finish', release);
-      this.response.once('close', release);
-      try {
-        const telemetryState = this.getRequestTelemetryState();
-        const correlationId = telemetryState?.correlationId;
-        const requestId =
-          this.request.get('x-request-id') ??
-          (this.request.headers?.['x-request-id'] as string | undefined) ??
-          ((this.request as AnyObject).id as string | undefined);
-        const rawUrl = (this.request as AnyObject).originalUrl ?? this.request.url;
-        await this.throttler.check(tenantId, {
-          entitySet: setName,
-          operation,
-          scope,
-          method: this.request.method,
-          url: rawUrl,
-          requestId,
-          correlationId,
-        });
-        this._throttleApplied = true;
-        this.emitTelemetry({
-          category: 'throttle',
-          event: 'tenant-throttle-check',
-          level: 'debug',
-          context: {
-            tenantId,
-            operation,
-            scope,
-            method: this.request.method,
-            url: rawUrl,
-            result: 'allowed',
-          },
-        });
-      } catch (error) {
-        release();
-        const message = (error as Error).message;
-        this.emitTelemetry({
-          category: 'throttle',
-          event: 'tenant-throttle-check',
-          level: 'warn',
-          context: {
-            tenantId,
-            operation,
-            scope,
-            method: this.request.method,
-            url: (this.request as AnyObject).originalUrl ?? this.request.url,
-            result: 'rejected',
-            reason: message,
-          },
-          requireSample: false,
-        });
-        if (message === 'tenant-rate-limit-exceeded') {
-          throw new HttpErrors.TooManyRequests(
-            'Tenant request rate exceeded. Retry after a short delay.',
-          );
-        }
-        if (message === 'tenant-concurrent-limit-exceeded') {
-          throw new HttpErrors.TooManyRequests(
-            'Tenant concurrent request limit exceeded. Retry after a short delay.',
-          );
-        }
-        throw error;
-      }
-    }
-
     buildOnContext(ctx: CrudHookContext, helpers: CrudOnContext['helpers']): CrudOnContext {
       return Object.assign({} as CrudOnContext, ctx, { helpers });
     }
@@ -5706,6 +5770,7 @@ export function defineODataCrudController(def: EntitySetDef) {
       if (preferences.respondAsync) this.throwPreferenceNotSupported('respond-async');
 
       const baseFilter: Filter<CrudEntity> = filter ? { ...filter } : {};
+      const applySupported = this.isApplyEnabled();
       const aggregationEnabled = Boolean(
         def.capabilities?.aggregation ?? this.cfg?.capabilities?.aggregation,
       );
@@ -5736,6 +5801,7 @@ export function defineODataCrudController(def: EntitySetDef) {
         const externalOrder = Array.isArray(parsed.order) ? [...parsed.order] : parsed.order;
         deltaTokenValue = parsed.deltaToken;
         applyPipeline = parsed.applyPipeline;
+        this.enforceApplyCapability(applySupported, parsed);
         if (applyPipeline) {
           applyPlan = buildApplyExecutionPlan(applyPipeline, {
             strict: Boolean(this.cfg?.strict),
@@ -6187,6 +6253,7 @@ export function defineODataCrudController(def: EntitySetDef) {
           let working = plainEntities;
           let lastStageHasOrder = false;
           let branchSegments: AnyObject[][] | undefined;
+          const maxApplySize = this.cfg?.maxApplyResultSize;
 
           let planForFallback: ApplyExecutionPlan | undefined = applyPlan;
           if (!planForFallback && aggregationSpec) {
@@ -6212,10 +6279,28 @@ export function defineODataCrudController(def: EntitySetDef) {
           }
 
           if (planForFallback) {
-            const fallbackOutcome = this.runApplyPlanFallback(planForFallback, working);
-            working = fallbackOutcome.rows;
-            lastStageHasOrder = fallbackOutcome.lastStageOrdered;
-            branchSegments = fallbackOutcome.branchSegments;
+            try {
+              const fallbackOutcome = this.runApplyPlanFallback(planForFallback, working, {
+                maxRows: maxApplySize,
+              });
+              working = fallbackOutcome.rows;
+              lastStageHasOrder = fallbackOutcome.lastStageOrdered;
+              branchSegments = fallbackOutcome.branchSegments;
+            } catch (error) {
+              if (error instanceof ApplyResultLimitExceededError) {
+                this.logApplyFallback(
+                  'limit-exceeded',
+                  {
+                    entitySet: setName,
+                    transformations: applyPipeline?.transformations.length ?? 0,
+                    rows: error.currentSize,
+                    limit: error.limit,
+                  },
+                  planForFallback,
+                );
+              }
+              throw error;
+            }
           }
 
           if (postFilterExpr) {
@@ -6232,7 +6317,6 @@ export function defineODataCrudController(def: EntitySetDef) {
             },
             planForFallback,
           );
-          const maxApplySize = this.cfg?.maxApplyResultSize;
           if (
             typeof maxApplySize === 'number' &&
             maxApplySize > 0 &&
@@ -6261,11 +6345,7 @@ export function defineODataCrudController(def: EntitySetDef) {
           let nextLinkToken: string | undefined;
 
           if (planIncludesConcat && branchSegments?.length) {
-            const preservedSegments = branchSegments.slice(
-              0,
-              Math.max(branchSegments.length - 1, 0),
-            );
-            const preservedRows = preservedSegments.flat();
+            const preservedCount = Math.max(branchSegments.length - 1, 0);
             let detailRows = branchSegments[branchSegments.length - 1] ?? [];
 
             if (!lastStageHasOrder && baseFilter.order) {
@@ -6284,7 +6364,16 @@ export function defineODataCrudController(def: EntitySetDef) {
               applyPageSize,
             );
             const pagedDetail = pagination.items;
-            paged = preservedRows.length ? [...preservedRows, ...pagedDetail] : pagedDetail;
+            if (preservedCount > 0) {
+              const combined: AnyObject[] = [];
+              for (let i = 0; i < preservedCount; i++) {
+                combined.push(...branchSegments[i]);
+              }
+              combined.push(...pagedDetail);
+              paged = combined;
+            } else {
+              paged = pagedDetail;
+            }
             nextLinkToken = pagination.token;
           } else {
             let ordered = working;
@@ -6373,10 +6462,34 @@ export function defineODataCrudController(def: EntitySetDef) {
         }
 
         const results = await this.repository.find(baseFilter, options);
-        const plainResults = results.map((entity) => this.toPlainEntity(entity) ?? {});
+        let workingResults = results.map((entity) => this.toPlainEntity(entity) ?? {});
+
+        if (applyPlan && !aggregationSpec) {
+          try {
+            const outcome = this.runApplyPlanFallback(applyPlan, workingResults, {
+              maxRows: this.cfg?.maxApplyResultSize,
+            });
+            workingResults = outcome.rows;
+          } catch (error) {
+            if (error instanceof ApplyResultLimitExceededError) {
+              this.logApplyFallback(
+                'limit-exceeded',
+                {
+                  entitySet: setName,
+                  transformations: applyPipeline?.transformations.length ?? 0,
+                  rows: error.currentSize,
+                  limit: error.limit,
+                },
+                applyPlan,
+              );
+            }
+            throw error;
+          }
+        }
+
         const filteredResults = requiresPostFilter
-          ? this.applyPostFilter(plainResults, postFilterExpr)
-          : plainResults;
+          ? this.applyPostFilter(workingResults, postFilterExpr)
+          : workingResults;
         this.applyComputeExpressions(filteredResults, computeExpressions);
         let totalCount: number | undefined;
         const tombstoneKeys = deltaPayload?.pageKeys?.length
@@ -6490,6 +6603,7 @@ export function defineODataCrudController(def: EntitySetDef) {
       }
 
       const baseFilter: Filter<CrudEntity> = {};
+      const applySupported = this.isApplyEnabled();
       let postFilterExpr: ParsedExpression | undefined;
       let unsupportedFunctions: string[] = [];
 
@@ -6498,6 +6612,7 @@ export function defineODataCrudController(def: EntitySetDef) {
           this.request.query as Record<string, string | string[] | undefined>,
           { relations: modelRelations, strict: Boolean(this.cfg?.strict) },
         );
+        this.enforceApplyCapability(applySupported, parsed);
         if (parsed.format) {
           const err = new HttpErrors.NotAcceptable(
             '$format is not supported for $count responses.',
@@ -6532,7 +6647,8 @@ export function defineODataCrudController(def: EntitySetDef) {
         throw new HttpErrors.BadRequest(message);
       }
 
-      this.ensureAcceptsJson();
+      this.ensureAcceptsJson(['text/plain']);
+      this.response.type('text/plain');
       this.validateFieldsStrict(baseFilter);
 
       const op: CrudOperation = 'READ';
@@ -6596,6 +6712,7 @@ export function defineODataCrudController(def: EntitySetDef) {
       if (preferences.respondAsync) this.throwPreferenceNotSupported('respond-async');
 
       const baseFilter: FilterExcludingWhere<CrudEntity> = filter ? { ...filter } : {};
+      const applySupported = this.isApplyEnabled();
       const options = this.repositoryOptions();
       this.ensureEtagField(baseFilter as Filter<CrudEntity>);
       const ifNoneMatch = this.parseIfNoneMatchHeader();
@@ -6608,6 +6725,7 @@ export function defineODataCrudController(def: EntitySetDef) {
           this.request.query as Record<string, string | string[] | undefined>,
           { relations: modelRelations, strict: Boolean(this.cfg?.strict) },
         );
+        this.enforceApplyCapability(applySupported, parsed);
         this.applyFormatPreference(parsed.format);
         computeExpressions = parsed.compute;
         postFilterExpr = parsed.postFilter;

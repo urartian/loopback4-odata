@@ -203,18 +203,154 @@ export class RequestLoggingProvider implements Provider<Middleware> {
 
   private maskRequestBody(body: any, maskPaths: string[]): any {
     if (!body || typeof body !== 'object') return body;
-    const clone = Array.isArray(body) ? [...body] : { ...body };
+    const clone = this.cloneValue(body);
     for (const path of maskPaths) {
-      if (!path) continue;
-      if (Array.isArray(clone)) {
-        const index = Number(path);
-        if (!Number.isNaN(index) && index >= 0 && index < clone.length) {
-          clone[index] = '***';
-        }
-      } else if (typeof clone === 'object' && path in clone) {
-        clone[path] = '***';
-      }
+      const segments = this.parseMaskPath(path);
+      if (!segments || !segments.length) continue;
+      this.applyMaskAtPath(clone, segments);
     }
     return clone;
+  }
+
+  private parseMaskPath(path: string | undefined): Array<string | number> | undefined {
+    if (!path || typeof path !== 'string') return undefined;
+    const trimmed = path.trim();
+    if (!trimmed) return undefined;
+    const segments: Array<string | number> = [];
+    let buffer = '';
+    let index = 0;
+
+    while (index < trimmed.length) {
+      const char = trimmed[index];
+      if (char === '.') {
+        if (buffer) {
+          const cleaned = buffer.trim();
+          if (cleaned) segments.push(cleaned);
+          buffer = '';
+        }
+        index += 1;
+        continue;
+      }
+      if (char === '[') {
+        if (buffer) {
+          segments.push(buffer);
+          buffer = '';
+        }
+        index += 1;
+        let bracket = '';
+        let closed = false;
+        while (index < trimmed.length) {
+          const next = trimmed[index];
+          if (next === ']') {
+            closed = true;
+            index += 1;
+            break;
+          }
+          bracket += next;
+          index += 1;
+        }
+        if (!closed) return undefined;
+        const token = bracket.trim();
+        if (!token) return undefined;
+        const unquoted =
+          (token.startsWith('"') && token.endsWith('"')) ||
+          (token.startsWith("'") && token.endsWith("'"))
+            ? token.slice(1, -1)
+            : token;
+        if (/^-?\d+$/.test(unquoted)) {
+          segments.push(Number(unquoted));
+        } else {
+          segments.push(unquoted);
+        }
+        continue;
+      }
+      buffer += char;
+      index += 1;
+    }
+
+    if (buffer) {
+      const cleaned = buffer.trim();
+      if (cleaned) segments.push(cleaned);
+    }
+
+    return segments;
+  }
+
+  private applyMaskAtPath(target: unknown, segments: Array<string | number>): void {
+    if (!segments.length) return;
+    let current: unknown = target;
+    for (let i = 0; i < segments.length; i++) {
+      const segment = segments[i];
+      const isLast = i === segments.length - 1;
+      if (isLast) {
+        if (Array.isArray(current)) {
+          const index = this.normalizeArrayIndex(segment);
+          if (index === undefined || index < 0 || index >= current.length) return;
+          current[index] = '***';
+          return;
+        }
+        if (current && typeof current === 'object') {
+          const key =
+            typeof segment === 'number'
+              ? String(segment)
+              : typeof segment === 'string'
+                ? segment
+                : undefined;
+          if (!key) return;
+          if (Object.prototype.hasOwnProperty.call(current, key)) {
+            (current as Record<string, unknown>)[key] = '***';
+          }
+        }
+        return;
+      }
+
+      if (Array.isArray(current)) {
+        const indexValue = this.normalizeArrayIndex(segment);
+        if (indexValue === undefined || indexValue < 0 || indexValue >= current.length) return;
+        current = current[indexValue];
+        if (current === undefined || current === null) return;
+        continue;
+      }
+
+      if (current && typeof current === 'object') {
+        const key =
+          typeof segment === 'number'
+            ? String(segment)
+            : typeof segment === 'string'
+              ? segment
+              : undefined;
+        if (!key || !Object.prototype.hasOwnProperty.call(current, key)) return;
+        current = (current as Record<string, unknown>)[key];
+        if (current === undefined || current === null) return;
+        continue;
+      }
+
+      return;
+    }
+  }
+
+  private normalizeArrayIndex(segment: string | number): number | undefined {
+    if (typeof segment === 'number') {
+      return Number.isInteger(segment) ? segment : undefined;
+    }
+    if (typeof segment === 'string' && /^\d+$/.test(segment.trim())) {
+      const parsed = Number(segment);
+      return Number.isInteger(parsed) ? parsed : undefined;
+    }
+    return undefined;
+  }
+
+  private cloneValue(value: unknown): any {
+    if (Array.isArray(value)) {
+      return value.map((entry) => this.cloneValue(entry));
+    }
+    if (value && typeof value === 'object') {
+      const result: Record<string, unknown> = {};
+      for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+        result[key] = this.cloneValue(entry);
+      }
+      return result;
+    }
+    return value;
   }
 }

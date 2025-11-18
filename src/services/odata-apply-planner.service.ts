@@ -57,6 +57,8 @@ export function buildApplyExecutionPlan(
     throw new Error('Empty $apply pipeline.');
   }
 
+  const requiresAggregation = !allowNonAggregate && pipelineContainsAggregation(pipeline);
+
   let pushdownWhere: Where<AnyObject> | undefined;
   const preAggregationFilters: ParsedExpression[] = [];
   const stages: ApplyAggregationStage[] = [];
@@ -115,7 +117,6 @@ export function buildApplyExecutionPlan(
         break;
       }
       case 'orderby': {
-        const planHasResults = stages.length > 0 || concatBranches.length > 0;
         if (currentStage) {
           if (currentStage.orderBy?.length) {
             throw new Error(
@@ -128,7 +129,7 @@ export function buildApplyExecutionPlan(
           }));
         } else {
           const hasPlanResults = stages.length > 0 || concatBranches.length > 0;
-          if (!allowNonAggregate && !hasPlanResults) {
+          if (requiresAggregation && !hasPlanResults) {
             throw new Error(
               'orderby() transformation requires a preceding groupby() or aggregate().',
             );
@@ -153,7 +154,7 @@ export function buildApplyExecutionPlan(
           currentStage.skip = transformation.count;
         } else {
           const hasPlanResults = stages.length > 0 || concatBranches.length > 0;
-          if (!allowNonAggregate && !hasPlanResults) {
+          if (requiresAggregation && !hasPlanResults) {
             throw new Error('skip() transformation requires a preceding groupby() or aggregate().');
           }
           if (planSkip !== undefined) {
@@ -171,7 +172,7 @@ export function buildApplyExecutionPlan(
           currentStage.top = transformation.count;
         } else {
           const hasPlanResults = stages.length > 0 || concatBranches.length > 0;
-          if (!allowNonAggregate && !hasPlanResults) {
+          if (requiresAggregation && !hasPlanResults) {
             throw new Error('top() transformation requires a preceding groupby() or aggregate().');
           }
           if (planTop !== undefined) {
@@ -200,7 +201,7 @@ export function buildApplyExecutionPlan(
   });
 
   const hasAggregation = stages.length > 0 || concatBranches.some(planHasAggregation);
-  if (!hasAggregation && !allowNonAggregate) {
+  if (!hasAggregation && requiresAggregation) {
     throw new Error('groupby() or aggregate() transformation is required in the $apply pipeline.');
   }
 
@@ -252,6 +253,20 @@ function planHasAggregation(plan: ApplyExecutionPlan): boolean {
   if (plan.stages.length > 0) return true;
   if (!plan.concat?.length) return false;
   return plan.concat.some((child) => planHasAggregation(child));
+}
+
+function pipelineContainsAggregation(pipeline: ApplyPipeline): boolean {
+  for (const transformation of pipeline.transformations) {
+    if (transformation.type === 'groupby' || transformation.type === 'aggregate') {
+      return true;
+    }
+    if (transformation.type === 'concat') {
+      if (transformation.pipelines.some((branch) => pipelineContainsAggregation(branch))) {
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 function populatePlanNavigationPaths(

@@ -63,10 +63,25 @@ describe('OData $apply planner', () => {
     assert.equal(plan.stages[0].skip, 1);
   });
 
-  it('requires a groupby() or aggregate() transformation', () => {
+  it('builds a plan for filter-only pipelines', () => {
     const pipeline = parseApplyPipeline('filter(price gt 100)');
 
-    assert.throws(() => buildApplyExecutionPlan(pipeline), /groupby\(\) or aggregate\(\)/i);
+    const plan = buildApplyExecutionPlan(pipeline);
+
+    assert(plan.pushdownWhere);
+    assert.deepStrictEqual(plan.pushdownWhere, { price: { gt: 100 } });
+    assert.equal(plan.stages.length, 0);
+  });
+
+  it('captures paging stages for non-aggregate pipelines', () => {
+    const pipeline = parseApplyPipeline('filter(price gt 100)/top(5)/skip(2)');
+
+    const plan = buildApplyExecutionPlan(pipeline);
+
+    assert.equal(plan.stages.length, 0);
+    assert.equal(plan.postTop, 5);
+    assert.equal(plan.postSkip, 2);
+    assert(plan.pushdownWhere);
   });
 
   it('supports aggregate() without groupby()', () => {

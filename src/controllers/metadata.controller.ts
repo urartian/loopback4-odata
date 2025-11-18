@@ -4,6 +4,7 @@ import { ODATA_BINDINGS } from '../keys';
 import { CsdlGenerator } from '../metadata/csdl-generator';
 import { ODataConfig } from '../types';
 import { markUndocumentedOperation } from '../util/openapi';
+import { acceptsAnyMediaType } from '../util/accept';
 
 const METADATA_OPERATION_SPEC = markUndocumentedOperation({
   responses: {
@@ -29,17 +30,11 @@ export class ODataMetadataController {
     @inject(RestBindings.Http.REQUEST) req: any,
   ): Response {
     if (this.cfg?.strict) {
-      const accept = (req?.get?.('Accept') ?? req?.headers?.['accept'] ?? '')
-        .toString()
-        .toLowerCase();
+      const accept = (req?.get?.('Accept') ?? req?.headers?.['accept'] ?? '').toString();
       if (accept?.trim()) {
         const desired =
           (this.cfg?.csdlFormat ?? 'xml') === 'json' ? 'application/json' : 'application/xml';
-        const ok =
-          accept.includes(desired) ||
-          accept.includes('*/*') ||
-          /application\s*\/\s*\*/.test(accept);
-        if (!ok) {
+        if (!acceptsAnyMediaType(accept, [desired])) {
           const err = new Error('NotAcceptable');
           (err as any).statusCode = 406;
           (err as any).code = 'NotAcceptable';

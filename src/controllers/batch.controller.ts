@@ -308,6 +308,7 @@ export class ODataBatchController {
         this.enforceJsonPayloadSize(jsonPayload, limits);
         requests = jsonRequests;
         this.validateJsonDependsOn(requests);
+        this.enforceJsonPartBodySize(requests, limits);
       }
 
       this.enforceOperationLimit(requests.length, limits);
@@ -469,6 +470,23 @@ export class ODataBatchController {
         error: (error as Error).message ?? error,
       });
     }
+  }
+
+  private enforceJsonPartBodySize(requests: BatchRequest[], limits: NormalizedBatchLimits) {
+    const maxPartBodyBytes = limits.maxPartBodyBytes;
+    if (!maxPartBodyBytes || maxPartBodyBytes <= 0) return;
+    requests.forEach((request, index) => {
+      const bodyBuffer = this.resolveRequestBodyBuffer(request);
+      if (bodyBuffer.length > maxPartBodyBytes) {
+        this.warn('Batch request body exceeds configured per-part limit.', {
+          requestId: request.id,
+          requestIndex: index,
+          bytes: bodyBuffer.length,
+          maxPartBodyBytes,
+        });
+        throw new HttpErrors.PayloadTooLarge('Batch part exceeds the configured size limit.');
+      }
+    });
   }
 
   private enforceOperationLimit(count: number, limits: NormalizedBatchLimits) {
@@ -1550,7 +1568,7 @@ export class ODataBatchController {
 
   private async executeWithHandler(
     request: BatchRequest,
-    context: AtomicityGroupContext,
+    context: AtomicityGroupContext | undefined,
     parentRequest: Request,
   ): Promise<BatchResponseEntry> {
     const url = this.sanitizeUrl(request.url, true);
@@ -1705,7 +1723,7 @@ export class ODataBatchController {
       (req as any).user = (parentRequest as any).user;
     }
 
-    context.applyTo(req);
+    context?.applyTo(req);
     const handlerPromise = this.httpHandler
       .handleRequest(req as any, res as any)
       .catch(() => undefined);
@@ -1744,65 +1762,7 @@ export class ODataBatchController {
       if (timeoutHandle) {
         clearTimeout(timeoutHandle);
       }
-      context.clearFrom(req);
-    }
-  }
-
-  private async executeViaFetch(
-    request: BatchRequest,
-    parentRequest?: Request,
-  ): Promise<BatchResponseEntry> {
-    const parentContentTypeRaw =
-      typeof (parentRequest as any)?.get === 'function'
-        ? ((parentRequest as any).get('content-type') as string | undefined)
-        : ((parentRequest as any)?.headers?.['content-type'] as string | undefined);
-    const parentContentType = parentContentTypeRaw ?? '';
-    const allowRelative =
-      /multipart\/mixed/i.test(parentContentType) || /application\/json/i.test(parentContentType);
-    const path = this.sanitizeUrl(request.url, allowRelative);
-    if (!path) {
-      return {
-        id: request.id,
-        status: 400,
-        body: this.odataError('InvalidUrl', `Invalid request URL: ${request.url}`),
-      };
-    }
-    const method = request.method?.toUpperCase();
-    if (!method) {
-      return {
-        id: request.id,
-        status: 400,
-        body: this.odataError('InvalidMethod', 'Batch request method is required.'),
-      };
-    }
-    try {
-      const target = new URL(path, this.serverUrl).toString();
-      const headers = this.buildHeadersForRequest(request, parentRequest);
-      const bodyBuffer = this.resolveRequestBodyBuffer(request);
-      const body = bodyBuffer.length ? bodyBuffer : undefined;
-      if (bodyBuffer.length) {
-        headers['content-length'] = String(bodyBuffer.length);
-        if (this.shouldDefaultJsonContentType(request) && !headers['content-type']) {
-          headers['content-type'] = 'application/json';
-        }
-      }
-      const resp = await this.fetchWithRedirects(target, { method, headers, body });
-      const payloadBuffer = Buffer.from(await resp.arrayBuffer());
-      const outHeaders: Record<string, string> = {};
-      resp.headers.forEach((v, k) => {
-        outHeaders[k] = v;
-      });
-      const bodyPayload = this.decodeBufferedBody(payloadBuffer, outHeaders);
-      return { id: request.id, status: resp.status, headers: outHeaders, body: bodyPayload };
-    } catch (err) {
-      return {
-        id: request.id,
-        status: 500,
-        body: this.odataError(
-          'BatchExecutionError',
-          (err as Error).message ?? 'Failed to execute request.',
-        ),
-      };
+      context?.clearFrom(req);
     }
   }
 
@@ -1811,8 +1771,50 @@ export class ODataBatchController {
     context: AtomicityGroupContext | undefined,
     parentRequest: Request,
   ): Promise<BatchResponseEntry> {
-    if (context) return this.executeWithHandler(request, context, parentRequest);
-    return this.executeViaFetch(request, parentRequest);
+    return this.executeWithRedirects(request, context, parentRequest);
+  }
+
+  private async executeWithRedirects(
+    request: BatchRequest,
+    context: AtomicityGroupContext | undefined,
+    parentRequest: Request,
+  ): Promise<BatchResponseEntry> {
+    const MAX_REDIRECTS = 3;
+    let remainingRedirects = MAX_REDIRECTS;
+    let current: BatchRequest = { ...request };
+
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
+      const response = await this.executeWithHandler(current, context, parentRequest);
+      if (!this.isRedirectStatus(response.status)) {
+        return response;
+      }
+      const method = (current.method ?? '').toUpperCase();
+      if (method !== 'GET' && method !== 'HEAD') {
+        return response;
+      }
+      const location = this.getHeaderCaseInsensitive(response.headers, 'location');
+      if (!location) {
+        return response;
+      }
+      const nextPath = this.resolveRedirectPath(location);
+      if (!nextPath) {
+        return response;
+      }
+      if (remainingRedirects <= 0) {
+        this.warn('Batch sub-request exceeded redirect limits.', {
+          requestId: current.id,
+          method,
+        });
+        return {
+          id: current.id,
+          status: 400,
+          body: this.odataError('TooManyRedirects', 'Batch sub-request exceeded redirect limits.'),
+        };
+      }
+      remainingRedirects -= 1;
+      current = { ...current, url: nextPath };
+    }
   }
 
   private sanitizeUrl(rawUrl: string, allowRelative = false): string | undefined {
@@ -1838,6 +1840,32 @@ export class ODataBatchController {
     }
     // Otherwise, treat relative URLs as invalid in JSON $batch
     return undefined;
+  }
+
+  private resolveRedirectPath(location: string | undefined): string | undefined {
+    if (!location) return undefined;
+    const trimmed = location.trim();
+    if (!trimmed) return undefined;
+    if (/^https?:\/\//i.test(trimmed)) {
+      try {
+        const candidate = new URL(trimmed);
+        const base = new URL(this.serverUrl);
+        if (candidate.origin !== base.origin) {
+          return undefined;
+        }
+        return candidate.pathname + candidate.search;
+      } catch {
+        return undefined;
+      }
+    }
+    const sanitized = this.sanitizeUrl(trimmed, true);
+    if (!sanitized) return undefined;
+    try {
+      const target = new URL(sanitized, this.serverUrl);
+      return target.pathname + target.search;
+    } catch {
+      return undefined;
+    }
   }
 
   private buildServiceRelativePath(rawUrl: string): string | undefined {
@@ -2014,74 +2042,6 @@ export class ODataBatchController {
     return !request.rawBody && request.body !== undefined && typeof request.body !== 'string';
   }
 
-  private async fetchWithRedirects(
-    initialTarget: string,
-    init: { method: string; headers: Record<string, string>; body?: Buffer },
-  ): Promise<globalThis.Response> {
-    const MAX_REDIRECTS = 3;
-    let target = initialTarget;
-    let remaining = MAX_REDIRECTS;
-
-    while (remaining >= 0) {
-      const response = await fetch(target, {
-        method: init.method,
-        headers: init.headers,
-        body: init.body,
-        redirect: 'manual',
-      } as any);
-
-      if (!this.isRedirectResponse(response)) {
-        return response;
-      }
-
-      if (!['GET', 'HEAD'].includes(init.method)) {
-        return response;
-      }
-
-      if (remaining === 0) {
-        throw new HttpErrors.BadRequest('Batch sub-request exceeded redirect limits.');
-      }
-
-      const nextTarget = this.resolveRedirectLocation(response.headers.get('location'));
-      if (!nextTarget) {
-        return response;
-      }
-      remaining -= 1;
-      target = nextTarget;
-    }
-
-    throw new HttpErrors.InternalServerError('Failed to resolve redirect target.');
-  }
-
-  private isRedirectResponse(response: globalThis.Response): boolean {
-    return [301, 302, 303, 307, 308].includes(response.status);
-  }
-
-  private resolveRedirectLocation(location: string | null): string | undefined {
-    if (!location) return undefined;
-    const trimmed = location.trim();
-    if (!trimmed) return undefined;
-    if (/^https?:\/\//i.test(trimmed)) {
-      try {
-        const candidate = new URL(trimmed);
-        const base = new URL(this.serverUrl);
-        if (candidate.origin !== base.origin) {
-          return undefined;
-        }
-        return candidate.toString();
-      } catch {
-        return undefined;
-      }
-    }
-    const sanitized = this.sanitizeUrl(trimmed, true);
-    if (!sanitized) return undefined;
-    try {
-      return new URL(sanitized, this.serverUrl).toString();
-    } catch {
-      return undefined;
-    }
-  }
-
   private isBatchValidationError(error: unknown): boolean {
     if (error instanceof HttpErrors.HttpError) {
       const candidate = error as { statusCode?: number; status?: number };
@@ -2098,6 +2058,10 @@ export class ODataBatchController {
       if (typeof status === 'number' && !Number.isNaN(status)) return status;
     }
     return fallback;
+  }
+
+  private isRedirectStatus(status: number): boolean {
+    return [301, 302, 303, 307, 308].includes(status);
   }
 
   private odataError(code: string, message: string) {
