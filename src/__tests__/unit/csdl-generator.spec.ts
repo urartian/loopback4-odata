@@ -1,6 +1,14 @@
 import 'reflect-metadata';
-import { expect } from '@loopback/testlab';
-import { Entity, Model, model, property, hasMany, belongsTo } from '@loopback/repository';
+import { expect, sinon } from '@loopback/testlab';
+import {
+  AnyObject,
+  Entity,
+  Model,
+  model,
+  property,
+  hasMany,
+  belongsTo,
+} from '@loopback/repository';
 import { CsdlGenerator } from '../../metadata/csdl-generator';
 import { EntitySetRegistry, EntitySetDef } from '../../registry/entityset-registry';
 import { odataSearchable } from '../../decorators/search.decorators';
@@ -384,5 +392,28 @@ describe('CsdlGenerator', () => {
   it('reports MIME types', () => {
     expect(generator.contentType('xml')).to.equal('application/xml');
     expect(generator.contentType('json')).to.equal('application/json');
+  });
+
+  it('caches generated schemas per format and invalidates when the registry changes', () => {
+    const generatorInternals = generator as unknown as AnyObject;
+    const normalizeSpy = sinon.spy(generatorInternals, 'normalizeNamespace');
+    try {
+      const firstXml = generator.generate('xml');
+      const secondXml = generator.generate('xml');
+      expect(secondXml).to.equal(firstXml);
+      expect(normalizeSpy.callCount).to.equal(1);
+
+      const firstJson = generator.generate('json');
+      const secondJson = generator.generate('json');
+      expect(secondJson).to.equal(firstJson);
+      expect(normalizeSpy.callCount).to.equal(2); // xml + json builds
+
+      registry.register({ name: 'Widgets', modelCtor: Widget });
+      const thirdXml = generator.generate('xml');
+      expect(thirdXml).to.be.a.String();
+      expect(normalizeSpy.callCount).to.equal(3);
+    } finally {
+      normalizeSpy.restore();
+    }
   });
 });

@@ -799,6 +799,8 @@ function resolveBaseEntityCtor(ctor: typeof Entity): typeof Entity | undefined {
 
 @injectable({ scope: BindingScope.SINGLETON })
 export class CsdlGenerator {
+  private readonly cache = new Map<'xml' | 'json', { version: number; body: string }>();
+
   constructor(
     @inject(ODATA_BINDINGS.ENTITY_SET_REGISTRY)
     private readonly registry: EntitySetRegistry,
@@ -811,6 +813,12 @@ export class CsdlGenerator {
   }
 
   generate(format: 'xml' | 'json' = 'xml'): string {
+    const registryVersion = this.registry.getVersion();
+    const cached = this.cache.get(format);
+    if (cached?.version === registryVersion) {
+      return cached.body;
+    }
+
     const entitySets = this.registry.list();
     const entityTypesXml: string[] = [];
     const complexTypesXml: string[] = [];
@@ -1525,7 +1533,7 @@ export class CsdlGenerator {
     };
 
     if (format === 'json') {
-      return this.buildJsonDocument(
+      const body = this.buildJsonDocument(
         namespace,
         namespaceAlias,
         containerName,
@@ -1540,13 +1548,15 @@ export class CsdlGenerator {
         jsonComplexTypes,
         jsonEnumTypes,
       );
+      this.cache.set(format, { version: registryVersion, body });
+      return body;
     }
 
     const schemaOpenTag = namespaceAlias
       ? `    <Schema Namespace="${namespace}" Alias="${xmlEscape(namespaceAlias)}" xmlns="${EDM_NAMESPACE}">`
       : `    <Schema Namespace="${namespace}" xmlns="${EDM_NAMESPACE}">`;
 
-    return [
+    const body = [
       '<?xml version="1.0" encoding="UTF-8"?>',
       `<edmx:Edmx Version="4.0" xmlns:edmx="${EDMX_NAMESPACE}">`,
       ...referenceXml,
@@ -1567,6 +1577,8 @@ export class CsdlGenerator {
       '  </edmx:DataServices>',
       '</edmx:Edmx>',
     ].join('\n');
+    this.cache.set(format, { version: registryVersion, body });
+    return body;
   }
 
   private normalizeNamespace(ns?: string): string {

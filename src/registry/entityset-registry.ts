@@ -51,6 +51,15 @@ export interface EntitySetDef<T extends Entity = Entity> {
 @injectable({ scope: BindingScope.SINGLETON })
 export class EntitySetRegistry {
   private readonly sets = new Map<typeof Entity, EntitySetDef>();
+  private version = 0;
+
+  private bumpVersion(): void {
+    this.version++;
+  }
+
+  getVersion(): number {
+    return this.version;
+  }
 
   register<T extends Entity>(def: EntitySetDef<T>): EntitySetDef<T> {
     const existing = this.sets.get(def.modelCtor);
@@ -105,6 +114,7 @@ export class EntitySetRegistry {
     }
     validatePaginationLimits(`EntitySet "${next.name}".pagination`, next.pagination);
     this.sets.set(def.modelCtor, next);
+    this.bumpVersion();
     return next as EntitySetDef<T>;
   }
 
@@ -117,6 +127,7 @@ export class EntitySetRegistry {
     }
     def.repositoryBindingKey = bindingKey;
     def.repositoryCtor = repositoryCtor;
+    this.bumpVersion();
   }
 
   get(modelCtor: typeof Entity): EntitySetDef | undefined {
