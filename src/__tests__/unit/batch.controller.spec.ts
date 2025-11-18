@@ -579,16 +579,39 @@ describe('$batch controller', () => {
     assert.equal(binaryEntry.status, 200);
     assert.deepStrictEqual(binaryEntry.headers, {
       'Content-Type': 'application/pdf',
+      'Content-Transfer-Encoding': 'binary',
       'x-custom': 'keep-me',
     });
-    const body = binaryEntry.body as any;
-    assert.deepStrictEqual(body, {
-      encoding: 'base64',
-      contentType: 'application/pdf',
-      value: blob.toString('base64'),
-    });
+    assert.equal(typeof binaryEntry.body, 'string');
+    assert.equal(binaryEntry.body, blob.toString('base64'));
     assert.equal(jsonEntry.id, 'txt');
     assert.deepStrictEqual(jsonEntry.body, { value: 1 });
+  });
+
+  it('defaults content type for binary responses when header is missing', async () => {
+    const blob = Buffer.from([0xaa]);
+    const controller = createController({
+      bin: {
+        status: 200,
+        body: blob,
+      },
+    });
+
+    const batchResult = (await controller.handleBatch(
+      {
+        requests: [{ id: 'bin', method: 'GET', url: '/odata/Binary' }],
+      },
+      responseStub,
+      requestStub('application/json'),
+    )) as BatchResponsePayload;
+
+    assert.equal(batchResult.responses.length, 1);
+    const [binaryEntry] = batchResult.responses;
+    assert.deepStrictEqual(binaryEntry.headers, {
+      'Content-Type': 'application/octet-stream',
+      'Content-Transfer-Encoding': 'binary',
+    });
+    assert.equal(binaryEntry.body, blob.toString('base64'));
   });
 
   it('commits transactional group when all requests succeed', async () => {
