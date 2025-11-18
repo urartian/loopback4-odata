@@ -2017,19 +2017,68 @@ export function defineODataCrudController(def: EntitySetDef) {
     }
 
     parseODataIdReference(reference: string): { entitySet: string; keyExpression: string } {
-      let path = reference;
-      try {
-        const base = `${this.request.protocol}://${this.request.headers.host ?? ''}`;
-        const url = new URL(reference, base);
-        path = url.pathname;
-      } catch {
-        // ignore, treat as relative path
-      }
+      const path = this.normalizeReferencePath(reference);
       const match = /\/([^/]+)\((.+)\)/.exec(path);
       if (!match) {
         throw new HttpErrors.BadRequest(`Invalid @odata.id value: ${reference}`);
       }
-      return { entitySet: match[1], keyExpression: match[2] };
+      const entitySet = this.stripNamespacePrefix(match[1]);
+      return { entitySet, keyExpression: match[2] };
+    }
+
+    normalizeReferencePath(reference: string): string {
+      const trimmed = (reference ?? '').trim();
+      let path = trimmed;
+      try {
+        const base = `${this.request.protocol}://${this.request.headers.host ?? ''}`;
+        const url = new URL(trimmed, base);
+        path = url.pathname || '';
+      } catch {
+        // ignore, treat as relative path
+      }
+      if (!path.startsWith('/')) {
+        path = `/${path}`;
+      }
+      path = path.replace(/^\/+/g, '/');
+      path = this.stripBasePath(path, this.normalizeConfiguredBasePath(this.cfg?.basePath));
+      path = this.stripBasePath(path, '/odata');
+      if (!path.startsWith('/')) {
+        path = `/${path}`;
+      }
+      return path;
+    }
+
+    stripBasePath(path: string, basePath: string): string {
+      if (!basePath || basePath === '/') return path;
+      const normalizedPath = path.toLowerCase();
+      const normalizedBase = basePath.toLowerCase();
+      if (normalizedPath === normalizedBase) return '/';
+      if (normalizedPath.startsWith(`${normalizedBase}/`)) {
+        return path.slice(basePath.length);
+      }
+      return path;
+    }
+
+    normalizeConfiguredBasePath(configured?: string): string {
+      let basePath = configured?.trim();
+      if (!basePath) return '/odata';
+      if (!basePath.startsWith('/')) basePath = `/${basePath}`;
+      if (basePath.length > 1 && basePath.endsWith('/')) {
+        basePath = basePath.slice(0, -1);
+      }
+      return basePath || '/';
+    }
+
+    stripNamespacePrefix(entitySet: string): string {
+      const prefixes = [this.cfg?.namespace, this.cfg?.namespaceAlias]
+        .filter((value): value is string => Boolean(value))
+        .map((value) => `${value}.`);
+      for (const prefix of prefixes) {
+        if (entitySet.startsWith(prefix)) {
+          return entitySet.slice(prefix.length);
+        }
+      }
+      return entitySet;
     }
 
     parseKeyLiteral(raw: string): string {

@@ -390,6 +390,26 @@ describe('OData config plumbing acceptance', () => {
       .expect(204);
   });
 
+  it('links navigation references when @odata.id uses the configured basePath', async () => {
+    const newOrder = await client.post('/api/odata/Orders').send({ total: 0 }).expect(200);
+    const newOrderId = newOrder.body.id;
+    expect(newOrderId).to.be.a.Number();
+
+    const orderItemsRes = await client.get('/api/odata/OrderItems').expect(200);
+    const targetItem = orderItemsRes.body.value[0];
+    expect(targetItem).to.be.Object();
+    const originalOrderId = targetItem.orderId;
+
+    const payload = { '@odata.id': `/api/odata/OrderItems(${targetItem.id})` };
+
+    await client.post(`/api/odata/Orders(${newOrderId})/items/$ref`).send(payload).expect(204);
+
+    const updated = await client.get(`/api/odata/OrderItems(${targetItem.id})`).expect(200);
+    expect(updated.body.orderId).to.equal(newOrderId);
+
+    await client.post(`/api/odata/Orders(${originalOrderId})/items/$ref`).send(payload).expect(204);
+  });
+
   it('emits structured tenant throttle events via onLog', async function (this: any) {
     const events: ODataLogEntry[] = [];
     await replaceApp(this, {
