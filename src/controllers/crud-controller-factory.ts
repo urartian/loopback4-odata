@@ -115,7 +115,6 @@ type CrudWhere = Where<CrudEntity>;
 type SearchComparisonStrategy = {
   positive: 'like' | 'ilike';
   negative: 'nlike' | 'nilike';
-  patternMode: 'like' | 'regex';
 };
 
 const DB_METHODS: ReadonlySet<string> = new Set([
@@ -4113,13 +4112,8 @@ export function defineODataCrudController(def: EntitySetDef) {
       const normalized = connectorName.toLowerCase();
       if (normalized.includes('postgres')) return true;
       if (normalized.includes('cockroach')) return true;
+      if (normalized.includes('memory')) return true;
       return false;
-    }
-
-    connectorUsesRegexLike(connectorName?: string): boolean {
-      if (!connectorName) return false;
-      const normalized = connectorName.toLowerCase();
-      return normalized.includes('memory');
     }
 
     getSearchComparisonStrategy(): SearchComparisonStrategy {
@@ -4129,22 +4123,12 @@ export function defineODataCrudController(def: EntitySetDef) {
         this.searchComparisonStrategy = {
           positive: 'ilike',
           negative: 'nilike',
-          patternMode: 'like',
-        };
-        return this.searchComparisonStrategy;
-      }
-      if (this.connectorUsesRegexLike(connector)) {
-        this.searchComparisonStrategy = {
-          positive: 'like',
-          negative: 'nlike',
-          patternMode: 'regex',
         };
         return this.searchComparisonStrategy;
       }
       this.searchComparisonStrategy = {
         positive: 'like',
         negative: 'nlike',
-        patternMode: 'like',
       };
       return this.searchComparisonStrategy;
     }
@@ -4384,7 +4368,7 @@ export function defineODataCrudController(def: EntitySetDef) {
 
     buildTermClause(term: string, fields: string[]): CrudWhere | undefined {
       const strategy = this.getSearchComparisonStrategy();
-      const pattern = this.buildSearchPattern(term, strategy.patternMode);
+      const pattern = `%${this.escapeSearchTerm(term)}%`;
       const operator = strategy.positive;
       const clauses = fields.map((field) => {
         return {
@@ -4398,7 +4382,7 @@ export function defineODataCrudController(def: EntitySetDef) {
 
     buildNegatedTermClause(term: string, fields: string[]): CrudWhere | undefined {
       const strategy = this.getSearchComparisonStrategy();
-      const pattern = this.buildSearchPattern(term, strategy.patternMode);
+      const pattern = `%${this.escapeSearchTerm(term)}%`;
       const operator = strategy.negative;
       const clauses = fields.map((field) => {
         // To properly handle NOT LIKE with NULL values,
@@ -4413,24 +4397,8 @@ export function defineODataCrudController(def: EntitySetDef) {
       return this.combineWithAnd(clauses) ?? clauses[0];
     }
 
-    buildSearchPattern(term: string, mode: SearchComparisonStrategy['patternMode']) {
-      if (mode === 'regex') {
-        return this.buildRegexPattern(term);
-      }
-      return `%${this.escapeSearchTerm(term)}%`;
-    }
-
     escapeSearchTerm(term: string): string {
       return term.replace(/[%_]/g, (ch) => `\\${ch}`);
-    }
-
-    escapeSearchRegexTerm(term: string): string {
-      return term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    }
-
-    buildRegexPattern(term: string): RegExp {
-      const escaped = this.escapeSearchRegexTerm(term);
-      return new RegExp(escaped, 'i');
     }
 
     combineWithAnd(parts: (CrudWhere | undefined)[]): CrudWhere | undefined {
