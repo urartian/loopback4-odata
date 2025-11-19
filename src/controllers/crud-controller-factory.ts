@@ -28,6 +28,7 @@ import {
   AnyObject,
   ModelDefinition,
   EntityNotFoundError,
+  juggler,
 } from '@loopback/repository';
 import { EntitySetDef } from '../registry/entityset-registry';
 import {
@@ -111,6 +112,11 @@ type CrudEntity = Entity & { [key: string]: unknown };
 type CrudRepo = DefaultCrudRepository<CrudEntity, unknown>;
 type NormalizedInclusion = Exclude<InclusionFilter, string>;
 type CrudWhere = Where<CrudEntity>;
+type SearchComparisonStrategy = {
+  positive: 'like' | 'ilike';
+  negative: 'nlike' | 'nilike';
+  patternMode: 'like' | 'regex';
+};
 
 const DB_METHODS: ReadonlySet<string> = new Set([
   'find',
@@ -580,6 +586,7 @@ export function defineODataCrudController(def: EntitySetDef) {
     readonly entityCtor = modelCtor as typeof Entity;
     _throttleApplied = false;
     requestStateCache?: ODataRequestState | null;
+    searchComparisonStrategy?: SearchComparisonStrategy;
 
     constructor(
       @inject(repoBindingKey)
@@ -4082,6 +4089,66 @@ export function defineODataCrudController(def: EntitySetDef) {
       }
     }
 
+    getRepositoryConnectorName(): string | undefined {
+      const dataSource = (
+        this.repository as CrudRepo & {
+          dataSource?: juggler.DataSource;
+        }
+      ).dataSource;
+      if (!dataSource) return undefined;
+      const fromConnector = (dataSource.connector as { name?: string } | undefined)?.name;
+      if (typeof fromConnector === 'string' && fromConnector.length > 0) {
+        return fromConnector;
+      }
+      const connectorSetting = (dataSource.settings as { connector?: string } | undefined)
+        ?.connector;
+      if (typeof connectorSetting === 'string' && connectorSetting.length > 0) {
+        return connectorSetting;
+      }
+      return undefined;
+    }
+
+    connectorSupportsIlike(connectorName?: string): boolean {
+      if (!connectorName) return false;
+      const normalized = connectorName.toLowerCase();
+      if (normalized.includes('postgres')) return true;
+      if (normalized.includes('cockroach')) return true;
+      return false;
+    }
+
+    connectorUsesRegexLike(connectorName?: string): boolean {
+      if (!connectorName) return false;
+      const normalized = connectorName.toLowerCase();
+      return normalized.includes('memory');
+    }
+
+    getSearchComparisonStrategy(): SearchComparisonStrategy {
+      if (this.searchComparisonStrategy) return this.searchComparisonStrategy;
+      const connector = this.getRepositoryConnectorName();
+      if (this.connectorSupportsIlike(connector)) {
+        this.searchComparisonStrategy = {
+          positive: 'ilike',
+          negative: 'nilike',
+          patternMode: 'like',
+        };
+        return this.searchComparisonStrategy;
+      }
+      if (this.connectorUsesRegexLike(connector)) {
+        this.searchComparisonStrategy = {
+          positive: 'like',
+          negative: 'nlike',
+          patternMode: 'regex',
+        };
+        return this.searchComparisonStrategy;
+      }
+      this.searchComparisonStrategy = {
+        positive: 'like',
+        negative: 'nlike',
+        patternMode: 'like',
+      };
+      return this.searchComparisonStrategy;
+    }
+
     parseSearchExpression(text: string): SearchParseResult | undefined {
       const tokens = this.scanSearchTokens(text);
       if (!tokens.length) return undefined;
@@ -4316,10 +4383,12 @@ export function defineODataCrudController(def: EntitySetDef) {
     }
 
     buildTermClause(term: string, fields: string[]): CrudWhere | undefined {
-      const pattern = `%${this.escapeSearchTerm(term)}%`;
+      const strategy = this.getSearchComparisonStrategy();
+      const pattern = this.buildSearchPattern(term, strategy.patternMode);
+      const operator = strategy.positive;
       const clauses = fields.map((field) => {
         return {
-          [field]: { ilike: pattern },
+          [field]: { [operator]: pattern },
         } as unknown as CrudWhere;
       });
       if (!clauses.length) return undefined;
@@ -4328,13 +4397,15 @@ export function defineODataCrudController(def: EntitySetDef) {
     }
 
     buildNegatedTermClause(term: string, fields: string[]): CrudWhere | undefined {
-      const pattern = `%${this.escapeSearchTerm(term)}%`;
+      const strategy = this.getSearchComparisonStrategy();
+      const pattern = this.buildSearchPattern(term, strategy.patternMode);
+      const operator = strategy.negative;
       const clauses = fields.map((field) => {
         // To properly handle NOT LIKE with NULL values,
         // we need: (field NOT LIKE 'pattern' OR field IS NULL)
         // This ensures that NULL fields don't cause the condition to fail
         return {
-          or: [{ [field]: { nilike: pattern } }, { [field]: null }],
+          or: [{ [field]: { [operator]: pattern } }, { [field]: null }],
         } as unknown as CrudWhere;
       });
       if (!clauses.length) return undefined;
@@ -4342,8 +4413,24 @@ export function defineODataCrudController(def: EntitySetDef) {
       return this.combineWithAnd(clauses) ?? clauses[0];
     }
 
+    buildSearchPattern(term: string, mode: SearchComparisonStrategy['patternMode']) {
+      if (mode === 'regex') {
+        return this.buildRegexPattern(term);
+      }
+      return `%${this.escapeSearchTerm(term)}%`;
+    }
+
     escapeSearchTerm(term: string): string {
       return term.replace(/[%_]/g, (ch) => `\\${ch}`);
+    }
+
+    escapeSearchRegexTerm(term: string): string {
+      return term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    }
+
+    buildRegexPattern(term: string): RegExp {
+      const escaped = this.escapeSearchRegexTerm(term);
+      return new RegExp(escaped, 'i');
     }
 
     combineWithAnd(parts: (CrudWhere | undefined)[]): CrudWhere | undefined {
