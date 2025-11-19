@@ -1,6 +1,14 @@
 import 'reflect-metadata';
-import { expect } from '@loopback/testlab';
-import { Entity, Model, model, property, hasMany, belongsTo } from '@loopback/repository';
+import { expect, sinon } from '@loopback/testlab';
+import {
+  AnyObject,
+  Entity,
+  Model,
+  model,
+  property,
+  hasMany,
+  belongsTo,
+} from '@loopback/repository';
 import { CsdlGenerator } from '../../metadata/csdl-generator';
 import { EntitySetRegistry, EntitySetDef } from '../../registry/entityset-registry';
 import { odataSearchable } from '../../decorators/search.decorators';
@@ -384,5 +392,37 @@ describe('CsdlGenerator', () => {
   it('reports MIME types', () => {
     expect(generator.contentType('xml')).to.equal('application/xml');
     expect(generator.contentType('json')).to.equal('application/json');
+  });
+
+  it('caches generated schemas per format and invalidates when the registry changes', () => {
+    const generatorInternals = generator as unknown as AnyObject;
+    const buildSpy = sinon.spy(generatorInternals, 'buildJsonDocument');
+    try {
+      const firstXml = generator.generate('xml');
+      const secondXml = generator.generate('xml');
+      expect(secondXml).to.equal(firstXml);
+      expect(buildSpy.callCount).to.equal(0);
+
+      const firstJson = generator.generate('json');
+      const secondJson = generator.generate('json');
+      expect(secondJson).to.equal(firstJson);
+      expect(buildSpy.callCount).to.equal(1); // only JSON build invoked
+
+      registry.register({ name: 'Widgets', modelCtor: Widget });
+      const thirdJson = generator.generate('json');
+      expect(thirdJson).to.be.a.String();
+      expect(buildSpy.callCount).to.equal(2);
+    } finally {
+      buildSpy.restore();
+    }
+  });
+
+  it('invalidates cached schemas when configuration changes', () => {
+    const initial = generator.generate('xml');
+    const internals = generator as unknown as AnyObject;
+    internals.cfg.namespace = 'CatalogV2';
+    const updated = generator.generate('xml');
+    expect(updated).to.not.equal(initial);
+    expect(updated.includes('Namespace="CatalogV2"')).to.be.true();
   });
 });

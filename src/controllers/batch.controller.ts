@@ -2011,16 +2011,22 @@ export class ODataBatchController {
   private normalizeJsonBatchResponses(responses: BatchResponseEntry[]): BatchResponseEntry[] {
     return responses.map((entry) => {
       if (!Buffer.isBuffer(entry.body)) return entry;
-      const headers = this.sanitizeHeadersForJsonBatchBody(entry.headers) ?? {};
-      const contentType = this.getHeaderCaseInsensitive(headers, 'content-type');
+      const headers = {
+        ...(this.sanitizeHeadersForJsonBatchBody(entry.headers) ?? entry.headers ?? {}),
+      };
+      const contentType =
+        this.getHeaderCaseInsensitive(headers, 'content-type') ?? 'application/octet-stream';
+      for (const key of Object.keys(headers)) {
+        if (key.toLowerCase() === 'content-type') {
+          delete headers[key];
+        }
+      }
+      headers['Content-Type'] = contentType;
+      headers['Content-Transfer-Encoding'] = 'base64';
       return {
         ...entry,
         headers,
-        body: {
-          encoding: 'base64',
-          contentType: contentType ?? 'application/octet-stream',
-          value: (entry.body as Buffer).toString('base64'),
-        },
+        body: entry.body.toString('base64'),
       };
     });
   }

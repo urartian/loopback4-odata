@@ -26,6 +26,7 @@ import {
   ODataSearchExpression,
 } from '../types';
 import { getODataSearchableProps } from '../decorators/search.decorators';
+import { stableStringify } from '../util/token-signing';
 
 const EDM_NAMESPACE = 'http://docs.oasis-open.org/odata/ns/edm';
 const EDMX_NAMESPACE = 'http://docs.oasis-open.org/odata/ns/edmx';
@@ -799,6 +800,11 @@ function resolveBaseEntityCtor(ctor: typeof Entity): typeof Entity | undefined {
 
 @injectable({ scope: BindingScope.SINGLETON })
 export class CsdlGenerator {
+  private readonly cache = new Map<
+    'xml' | 'json',
+    { version: number; config: string; body: string }
+  >();
+
   constructor(
     @inject(ODATA_BINDINGS.ENTITY_SET_REGISTRY)
     private readonly registry: EntitySetRegistry,
@@ -811,6 +817,16 @@ export class CsdlGenerator {
   }
 
   generate(format: 'xml' | 'json' = 'xml'): string {
+    const registryVersion = this.registry.getVersion();
+    const cached = this.cache.get(format);
+    const namespace = this.normalizeNamespace(this.cfg?.namespace);
+    const namespaceAlias = this.cfg?.namespaceAlias?.trim();
+    const containerName = this.normalizeContainerName(this.cfg?.entityContainerName);
+    const configSignature = this.buildConfigSignature(namespace, namespaceAlias, containerName);
+    if (cached?.version === registryVersion && cached.config === configSignature) {
+      return cached.body;
+    }
+
     const entitySets = this.registry.list();
     const entityTypesXml: string[] = [];
     const complexTypesXml: string[] = [];
@@ -834,9 +850,6 @@ export class CsdlGenerator {
     const referenceXml = buildVocabularyReferencesXml();
     const referenceJson = buildVocabularyReferencesJson();
 
-    const namespace = this.normalizeNamespace(this.cfg?.namespace);
-    const namespaceAlias = this.cfg?.namespaceAlias?.trim();
-    const containerName = this.normalizeContainerName(this.cfg?.entityContainerName);
     const defaultCapabilities = this.cfg?.capabilities;
 
     const context: SchemaBuildContext = {
@@ -1525,7 +1538,7 @@ export class CsdlGenerator {
     };
 
     if (format === 'json') {
-      return this.buildJsonDocument(
+      const body = this.buildJsonDocument(
         namespace,
         namespaceAlias,
         containerName,
@@ -1540,13 +1553,15 @@ export class CsdlGenerator {
         jsonComplexTypes,
         jsonEnumTypes,
       );
+      this.cache.set(format, { version: registryVersion, config: configSignature, body });
+      return body;
     }
 
     const schemaOpenTag = namespaceAlias
       ? `    <Schema Namespace="${namespace}" Alias="${xmlEscape(namespaceAlias)}" xmlns="${EDM_NAMESPACE}">`
       : `    <Schema Namespace="${namespace}" xmlns="${EDM_NAMESPACE}">`;
 
-    return [
+    const body = [
       '<?xml version="1.0" encoding="UTF-8"?>',
       `<edmx:Edmx Version="4.0" xmlns:edmx="${EDMX_NAMESPACE}">`,
       ...referenceXml,
@@ -1567,6 +1582,8 @@ export class CsdlGenerator {
       '  </edmx:DataServices>',
       '</edmx:Edmx>',
     ].join('\n');
+    this.cache.set(format, { version: registryVersion, config: configSignature, body });
+    return body;
   }
 
   private normalizeNamespace(ns?: string): string {
@@ -1698,6 +1715,22 @@ export class CsdlGenerator {
       doc.$Reference = references;
     }
     return JSON.stringify(doc, null, 2);
+  }
+
+  private buildConfigSignature(
+    namespace: string,
+    namespaceAlias: string | undefined,
+    containerName: string,
+  ): string {
+    return stableStringify({
+      namespace,
+      namespaceAlias,
+      containerName,
+      capabilities: this.cfg?.capabilities,
+      enableDeepInsert: this.cfg?.enableDeepInsert,
+      searchMode: this.cfg?.searchMode,
+      searchFields: this.cfg?.searchFields,
+    });
   }
 
   private buildOperationSchema(

@@ -28,6 +28,7 @@ import {
   AnyObject,
   ModelDefinition,
   EntityNotFoundError,
+  juggler,
 } from '@loopback/repository';
 import { EntitySetDef } from '../registry/entityset-registry';
 import {
@@ -79,7 +80,11 @@ import { ODataConfig, ODataApplyTelemetryEvent, ODataRequestState } from '../typ
 import { getODataSearchableProps } from '../decorators/search.decorators';
 import { ensureModelDefinitionWithRelations } from '../util/model-definition';
 import { ensureNavigationTargetKey } from '../util/relation-metadata';
-import { ResolvedNavigationPath } from '../util/navigation-path';
+import {
+  ResolvedNavigationPath,
+  resolveNavigationPath,
+  NavigationPathError,
+} from '../util/navigation-path';
 import {
   ApplyExecutionPlan,
   ApplyAggregationStage,
@@ -111,6 +116,10 @@ type CrudEntity = Entity & { [key: string]: unknown };
 type CrudRepo = DefaultCrudRepository<CrudEntity, unknown>;
 type NormalizedInclusion = Exclude<InclusionFilter, string>;
 type CrudWhere = Where<CrudEntity>;
+type SearchComparisonStrategy = {
+  positive: 'like' | 'ilike';
+  negative: 'nlike' | 'nilike';
+};
 
 const DB_METHODS: ReadonlySet<string> = new Set([
   'find',
@@ -580,6 +589,8 @@ export function defineODataCrudController(def: EntitySetDef) {
     readonly entityCtor = modelCtor as typeof Entity;
     _throttleApplied = false;
     requestStateCache?: ODataRequestState | null;
+    searchComparisonStrategy?: SearchComparisonStrategy;
+    modelPropertyCache = new WeakMap<typeof Entity, Set<string>>();
 
     constructor(
       @inject(repoBindingKey)
@@ -2017,19 +2028,69 @@ export function defineODataCrudController(def: EntitySetDef) {
     }
 
     parseODataIdReference(reference: string): { entitySet: string; keyExpression: string } {
-      let path = reference;
-      try {
-        const base = `${this.request.protocol}://${this.request.headers.host ?? ''}`;
-        const url = new URL(reference, base);
-        path = url.pathname;
-      } catch {
-        // ignore, treat as relative path
-      }
+      const path = this.normalizeReferencePath(reference);
       const match = /\/([^/]+)\((.+)\)/.exec(path);
       if (!match) {
         throw new HttpErrors.BadRequest(`Invalid @odata.id value: ${reference}`);
       }
-      return { entitySet: match[1], keyExpression: match[2] };
+      const entitySet = this.stripNamespacePrefix(match[1]);
+      return { entitySet, keyExpression: match[2] };
+    }
+
+    normalizeReferencePath(reference: string): string {
+      const trimmed = (reference ?? '').trim();
+      let path = trimmed;
+      try {
+        const base = `${this.request.protocol}://${this.request.headers.host ?? ''}`;
+        const url = new URL(trimmed, base);
+        path = url.pathname || '';
+      } catch {
+        // ignore, treat as relative path
+      }
+      if (!path.startsWith('/')) {
+        path = `/${path}`;
+      }
+      path = path.split('?')[0]?.split('#')[0] ?? path;
+      path = path.replace(/^\/+/g, '/');
+      path = this.stripBasePath(path, this.normalizeConfiguredBasePath(this.cfg?.basePath));
+      path = this.stripBasePath(path, '/odata');
+      if (!path.startsWith('/')) {
+        path = `/${path}`;
+      }
+      return path;
+    }
+
+    stripBasePath(path: string, basePath: string): string {
+      if (!basePath || basePath === '/') return path;
+      const normalizedPath = path.toLowerCase();
+      const normalizedBase = basePath.toLowerCase();
+      if (normalizedPath === normalizedBase) return '/';
+      if (normalizedPath.startsWith(`${normalizedBase}/`)) {
+        return path.slice(basePath.length);
+      }
+      return path;
+    }
+
+    normalizeConfiguredBasePath(configured?: string): string {
+      let basePath = configured?.trim();
+      if (!basePath) return '/odata';
+      if (!basePath.startsWith('/')) basePath = `/${basePath}`;
+      if (basePath.length > 1 && basePath.endsWith('/')) {
+        basePath = basePath.slice(0, -1);
+      }
+      return basePath || '/';
+    }
+
+    stripNamespacePrefix(entitySet: string): string {
+      const prefixes = [this.cfg?.namespace, this.cfg?.namespaceAlias]
+        .filter((value): value is string => Boolean(value))
+        .map((value) => `${value}.`);
+      for (const prefix of prefixes) {
+        if (entitySet.startsWith(prefix)) {
+          return entitySet.slice(prefix.length);
+        }
+      }
+      return entitySet;
     }
 
     parseKeyLiteral(raw: string): string {
@@ -3649,6 +3710,49 @@ export function defineODataCrudController(def: EntitySetDef) {
       return { props, relations };
     }
 
+    getModelPropertySet(modelCtor: typeof Entity): Set<string> {
+      if (!modelCtor) return new Set<string>();
+      const cached = this.modelPropertyCache.get(modelCtor);
+      if (cached) return cached;
+      const definition =
+        ensureModelDefinitionWithRelations(modelCtor) ?? this.getModelDefinition(modelCtor);
+      const props = new Set<string>(Object.keys(definition?.properties ?? {}));
+      this.modelPropertyCache.set(modelCtor, props);
+      return props;
+    }
+
+    isNavigationFieldAllowed(field: string, options: { requireProperty: boolean }): boolean {
+      if (!field || typeof field !== 'string' || !field.includes('/')) return false;
+      try {
+        const resolved = resolveNavigationPath(this.entityCtor, field, {
+          maxDepth: this.cfg?.maxExpandDepth ?? 5,
+        });
+        if (!resolved.joins.length) {
+          return false;
+        }
+        if (resolved.joins.some((join) => join.relationType === 'hasMany')) {
+          return false;
+        }
+        const propertyPath = resolved.propertyPath;
+        if (!propertyPath) {
+          return !options.requireProperty;
+        }
+        const propertySegments = propertyPath.split('/').filter(Boolean);
+        if (propertySegments.length !== 1) {
+          return false;
+        }
+        const [propertyName] = propertySegments;
+        if (!propertyName) return false;
+        const props = this.getModelPropertySet(resolved.targetModel);
+        return props.has(propertyName);
+      } catch (error) {
+        if (error instanceof NavigationPathError) {
+          return false;
+        }
+        throw error;
+      }
+    }
+
     classifyPrimitiveProperty(
       definition: PropertyDefinition | undefined,
     ): PrimitivePropertyKind | undefined {
@@ -4033,6 +4137,51 @@ export function defineODataCrudController(def: EntitySetDef) {
       }
     }
 
+    getRepositoryConnectorName(): string | undefined {
+      const dataSource = (
+        this.repository as CrudRepo & {
+          dataSource?: juggler.DataSource;
+        }
+      ).dataSource;
+      if (!dataSource) return undefined;
+      const fromConnector = (dataSource.connector as { name?: string } | undefined)?.name;
+      if (typeof fromConnector === 'string' && fromConnector.length > 0) {
+        return fromConnector;
+      }
+      const connectorSetting = (dataSource.settings as { connector?: string } | undefined)
+        ?.connector;
+      if (typeof connectorSetting === 'string' && connectorSetting.length > 0) {
+        return connectorSetting;
+      }
+      return undefined;
+    }
+
+    connectorSupportsIlike(connectorName?: string): boolean {
+      if (!connectorName) return false;
+      const normalized = connectorName.toLowerCase();
+      if (normalized.includes('postgres')) return true;
+      if (normalized.includes('cockroach')) return true;
+      if (normalized.includes('memory')) return true;
+      return false;
+    }
+
+    getSearchComparisonStrategy(): SearchComparisonStrategy {
+      if (this.searchComparisonStrategy) return this.searchComparisonStrategy;
+      const connector = this.getRepositoryConnectorName();
+      if (this.connectorSupportsIlike(connector)) {
+        this.searchComparisonStrategy = {
+          positive: 'ilike',
+          negative: 'nilike',
+        };
+        return this.searchComparisonStrategy;
+      }
+      this.searchComparisonStrategy = {
+        positive: 'like',
+        negative: 'nlike',
+      };
+      return this.searchComparisonStrategy;
+    }
+
     parseSearchExpression(text: string): SearchParseResult | undefined {
       const tokens = this.scanSearchTokens(text);
       if (!tokens.length) return undefined;
@@ -4267,10 +4416,12 @@ export function defineODataCrudController(def: EntitySetDef) {
     }
 
     buildTermClause(term: string, fields: string[]): CrudWhere | undefined {
+      const strategy = this.getSearchComparisonStrategy();
       const pattern = `%${this.escapeSearchTerm(term)}%`;
+      const operator = strategy.positive;
       const clauses = fields.map((field) => {
         return {
-          [field]: { ilike: pattern },
+          [field]: { [operator]: pattern },
         } as unknown as CrudWhere;
       });
       if (!clauses.length) return undefined;
@@ -4279,13 +4430,15 @@ export function defineODataCrudController(def: EntitySetDef) {
     }
 
     buildNegatedTermClause(term: string, fields: string[]): CrudWhere | undefined {
+      const strategy = this.getSearchComparisonStrategy();
       const pattern = `%${this.escapeSearchTerm(term)}%`;
+      const operator = strategy.negative;
       const clauses = fields.map((field) => {
         // To properly handle NOT LIKE with NULL values,
         // we need: (field NOT LIKE 'pattern' OR field IS NULL)
         // This ensures that NULL fields don't cause the condition to fail
         return {
-          or: [{ [field]: { nilike: pattern } }, { [field]: null }],
+          or: [{ [field]: { [operator]: pattern } }, { [field]: null }],
         } as unknown as CrudWhere;
       });
       if (!clauses.length) return undefined;
@@ -5196,6 +5349,7 @@ export function defineODataCrudController(def: EntitySetDef) {
       if (filter.fields && typeof filter.fields === 'object' && !Array.isArray(filter.fields)) {
         for (const key of Object.keys(filter.fields as AnyObject)) {
           if (!props.has(key) && !relations.has(key)) {
+            if (this.isNavigationFieldAllowed(key, { requireProperty: true })) continue;
             throw new HttpErrors.BadRequest(`Unknown property in $select: ${key}`);
           }
         }
@@ -5206,6 +5360,7 @@ export function defineODataCrudController(def: EntitySetDef) {
         this.collectWhereFields(filter.where as AnyObject, used);
         for (const field of used) {
           if (!props.has(field)) {
+            if (this.isNavigationFieldAllowed(field, { requireProperty: true })) continue;
             throw new HttpErrors.BadRequest(`Unknown property in $filter: ${field}`);
           }
         }
@@ -5221,6 +5376,7 @@ export function defineODataCrudController(def: EntitySetDef) {
         if (!raw) continue;
         const field = raw.split(/\s+/)[0];
         if (field && !props.has(field)) {
+          if (this.isNavigationFieldAllowed(field, { requireProperty: true })) continue;
           throw new HttpErrors.BadRequest(`Unknown property in $orderby: ${field}`);
         }
       }
