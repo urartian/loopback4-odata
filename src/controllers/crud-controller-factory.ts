@@ -80,7 +80,11 @@ import { ODataConfig, ODataApplyTelemetryEvent, ODataRequestState } from '../typ
 import { getODataSearchableProps } from '../decorators/search.decorators';
 import { ensureModelDefinitionWithRelations } from '../util/model-definition';
 import { ensureNavigationTargetKey } from '../util/relation-metadata';
-import { ResolvedNavigationPath } from '../util/navigation-path';
+import {
+  ResolvedNavigationPath,
+  resolveNavigationPath,
+  NavigationPathError,
+} from '../util/navigation-path';
 import {
   ApplyExecutionPlan,
   ApplyAggregationStage,
@@ -586,6 +590,7 @@ export function defineODataCrudController(def: EntitySetDef) {
     _throttleApplied = false;
     requestStateCache?: ODataRequestState | null;
     searchComparisonStrategy?: SearchComparisonStrategy;
+    modelPropertyCache = new WeakMap<typeof Entity, Set<string>>();
 
     constructor(
       @inject(repoBindingKey)
@@ -3705,6 +3710,49 @@ export function defineODataCrudController(def: EntitySetDef) {
       return { props, relations };
     }
 
+    getModelPropertySet(modelCtor: typeof Entity): Set<string> {
+      if (!modelCtor) return new Set<string>();
+      const cached = this.modelPropertyCache.get(modelCtor);
+      if (cached) return cached;
+      const definition =
+        ensureModelDefinitionWithRelations(modelCtor) ?? this.getModelDefinition(modelCtor);
+      const props = new Set<string>(Object.keys(definition?.properties ?? {}));
+      this.modelPropertyCache.set(modelCtor, props);
+      return props;
+    }
+
+    isNavigationFieldAllowed(field: string, options: { requireProperty: boolean }): boolean {
+      if (!field || typeof field !== 'string' || !field.includes('/')) return false;
+      try {
+        const resolved = resolveNavigationPath(this.entityCtor, field, {
+          maxDepth: this.cfg?.maxExpandDepth ?? 5,
+        });
+        if (!resolved.joins.length) {
+          return false;
+        }
+        if (resolved.joins.some((join) => join.relationType === 'hasMany')) {
+          return false;
+        }
+        const propertyPath = resolved.propertyPath;
+        if (!propertyPath) {
+          return !options.requireProperty;
+        }
+        const propertySegments = propertyPath.split('/').filter(Boolean);
+        if (propertySegments.length !== 1) {
+          return false;
+        }
+        const [propertyName] = propertySegments;
+        if (!propertyName) return false;
+        const props = this.getModelPropertySet(resolved.targetModel);
+        return props.has(propertyName);
+      } catch (error) {
+        if (error instanceof NavigationPathError) {
+          return false;
+        }
+        throw error;
+      }
+    }
+
     classifyPrimitiveProperty(
       definition: PropertyDefinition | undefined,
     ): PrimitivePropertyKind | undefined {
@@ -5301,6 +5349,7 @@ export function defineODataCrudController(def: EntitySetDef) {
       if (filter.fields && typeof filter.fields === 'object' && !Array.isArray(filter.fields)) {
         for (const key of Object.keys(filter.fields as AnyObject)) {
           if (!props.has(key) && !relations.has(key)) {
+            if (this.isNavigationFieldAllowed(key, { requireProperty: true })) continue;
             throw new HttpErrors.BadRequest(`Unknown property in $select: ${key}`);
           }
         }
@@ -5311,6 +5360,7 @@ export function defineODataCrudController(def: EntitySetDef) {
         this.collectWhereFields(filter.where as AnyObject, used);
         for (const field of used) {
           if (!props.has(field)) {
+            if (this.isNavigationFieldAllowed(field, { requireProperty: true })) continue;
             throw new HttpErrors.BadRequest(`Unknown property in $filter: ${field}`);
           }
         }
@@ -5326,6 +5376,7 @@ export function defineODataCrudController(def: EntitySetDef) {
         if (!raw) continue;
         const field = raw.split(/\s+/)[0];
         if (field && !props.has(field)) {
+          if (this.isNavigationFieldAllowed(field, { requireProperty: true })) continue;
           throw new HttpErrors.BadRequest(`Unknown property in $orderby: ${field}`);
         }
       }
