@@ -2022,7 +2022,7 @@ export class ODataBatchController {
         }
       }
       headers['Content-Type'] = contentType;
-      headers['Content-Transfer-Encoding'] = 'binary';
+      headers['Content-Transfer-Encoding'] = 'base64';
       return {
         ...entry,
         headers,

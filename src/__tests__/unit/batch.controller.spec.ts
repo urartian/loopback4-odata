@@ -579,7 +579,7 @@ describe('$batch controller', () => {
     assert.equal(binaryEntry.status, 200);
     assert.deepStrictEqual(binaryEntry.headers, {
       'Content-Type': 'application/pdf',
-      'Content-Transfer-Encoding': 'binary',
+      'Content-Transfer-Encoding': 'base64',
       'x-custom': 'keep-me',
     });
     assert.equal(typeof binaryEntry.body, 'string');
@@ -609,7 +609,7 @@ describe('$batch controller', () => {
     const [binaryEntry] = batchResult.responses;
     assert.deepStrictEqual(binaryEntry.headers, {
       'Content-Type': 'application/octet-stream',
-      'Content-Transfer-Encoding': 'binary',
+      'Content-Transfer-Encoding': 'base64',
     });
     assert.equal(binaryEntry.body, blob.toString('base64'));
   });
