@@ -2045,6 +2045,7 @@ export function defineODataCrudController(def: EntitySetDef) {
       if (!path.startsWith('/')) {
         path = `/${path}`;
       }
+      path = path.split('?')[0]?.split('#')[0] ?? path;
       path = path.replace(/^\/+/g, '/');
       path = this.stripBasePath(path, this.normalizeConfiguredBasePath(this.cfg?.basePath));
       path = this.stripBasePath(path, '/odata');

@@ -101,4 +101,16 @@ describe('CRUD controller navigation reference parsing', () => {
     );
     expect(result).to.deepEqual({ entitySet: 'Products', keyExpression: '99' });
   });
+
+  it('strips query strings from @odata.id references', () => {
+    const controller = createController();
+    const result = (controller as any).parseODataIdReference('/odata/Products(5)?$select=Id');
+    expect(result).to.deepEqual({ entitySet: 'Products', keyExpression: '5' });
+  });
+
+  it('strips fragments from @odata.id references', () => {
+    const controller = createController();
+    const result = (controller as any).parseODataIdReference('/odata/Products(6)#foo');
+    expect(result).to.deepEqual({ entitySet: 'Products', keyExpression: '6' });
+  });
 });
