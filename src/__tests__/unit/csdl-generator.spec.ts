@@ -396,24 +396,33 @@ describe('CsdlGenerator', () => {
 
   it('caches generated schemas per format and invalidates when the registry changes', () => {
     const generatorInternals = generator as unknown as AnyObject;
-    const normalizeSpy = sinon.spy(generatorInternals, 'normalizeNamespace');
+    const buildSpy = sinon.spy(generatorInternals, 'buildJsonDocument');
     try {
       const firstXml = generator.generate('xml');
       const secondXml = generator.generate('xml');
       expect(secondXml).to.equal(firstXml);
-      expect(normalizeSpy.callCount).to.equal(1);
+      expect(buildSpy.callCount).to.equal(0);
 
       const firstJson = generator.generate('json');
       const secondJson = generator.generate('json');
       expect(secondJson).to.equal(firstJson);
-      expect(normalizeSpy.callCount).to.equal(2); // xml + json builds
+      expect(buildSpy.callCount).to.equal(1); // only JSON build invoked
 
       registry.register({ name: 'Widgets', modelCtor: Widget });
-      const thirdXml = generator.generate('xml');
-      expect(thirdXml).to.be.a.String();
-      expect(normalizeSpy.callCount).to.equal(3);
+      const thirdJson = generator.generate('json');
+      expect(thirdJson).to.be.a.String();
+      expect(buildSpy.callCount).to.equal(2);
     } finally {
-      normalizeSpy.restore();
+      buildSpy.restore();
     }
+  });
+
+  it('invalidates cached schemas when configuration changes', () => {
+    const initial = generator.generate('xml');
+    const internals = generator as unknown as AnyObject;
+    internals.cfg.namespace = 'CatalogV2';
+    const updated = generator.generate('xml');
+    expect(updated).to.not.equal(initial);
+    expect(updated.includes('Namespace="CatalogV2"')).to.be.true();
   });
 });

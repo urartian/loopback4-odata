@@ -26,6 +26,7 @@ import {
   ODataSearchExpression,
 } from '../types';
 import { getODataSearchableProps } from '../decorators/search.decorators';
+import { stableStringify } from '../util/token-signing';
 
 const EDM_NAMESPACE = 'http://docs.oasis-open.org/odata/ns/edm';
 const EDMX_NAMESPACE = 'http://docs.oasis-open.org/odata/ns/edmx';
@@ -799,7 +800,10 @@ function resolveBaseEntityCtor(ctor: typeof Entity): typeof Entity | undefined {
 
 @injectable({ scope: BindingScope.SINGLETON })
 export class CsdlGenerator {
-  private readonly cache = new Map<'xml' | 'json', { version: number; body: string }>();
+  private readonly cache = new Map<
+    'xml' | 'json',
+    { version: number; config: string; body: string }
+  >();
 
   constructor(
     @inject(ODATA_BINDINGS.ENTITY_SET_REGISTRY)
@@ -815,7 +819,11 @@ export class CsdlGenerator {
   generate(format: 'xml' | 'json' = 'xml'): string {
     const registryVersion = this.registry.getVersion();
     const cached = this.cache.get(format);
-    if (cached?.version === registryVersion) {
+    const namespace = this.normalizeNamespace(this.cfg?.namespace);
+    const namespaceAlias = this.cfg?.namespaceAlias?.trim();
+    const containerName = this.normalizeContainerName(this.cfg?.entityContainerName);
+    const configSignature = this.buildConfigSignature(namespace, namespaceAlias, containerName);
+    if (cached?.version === registryVersion && cached.config === configSignature) {
       return cached.body;
     }
 
@@ -842,9 +850,6 @@ export class CsdlGenerator {
     const referenceXml = buildVocabularyReferencesXml();
     const referenceJson = buildVocabularyReferencesJson();
 
-    const namespace = this.normalizeNamespace(this.cfg?.namespace);
-    const namespaceAlias = this.cfg?.namespaceAlias?.trim();
-    const containerName = this.normalizeContainerName(this.cfg?.entityContainerName);
     const defaultCapabilities = this.cfg?.capabilities;
 
     const context: SchemaBuildContext = {
@@ -1548,7 +1553,7 @@ export class CsdlGenerator {
         jsonComplexTypes,
         jsonEnumTypes,
       );
-      this.cache.set(format, { version: registryVersion, body });
+      this.cache.set(format, { version: registryVersion, config: configSignature, body });
       return body;
     }
 
@@ -1577,7 +1582,7 @@ export class CsdlGenerator {
       '  </edmx:DataServices>',
       '</edmx:Edmx>',
     ].join('\n');
-    this.cache.set(format, { version: registryVersion, body });
+    this.cache.set(format, { version: registryVersion, config: configSignature, body });
     return body;
   }
 
@@ -1710,6 +1715,22 @@ export class CsdlGenerator {
       doc.$Reference = references;
     }
     return JSON.stringify(doc, null, 2);
+  }
+
+  private buildConfigSignature(
+    namespace: string,
+    namespaceAlias: string | undefined,
+    containerName: string,
+  ): string {
+    return stableStringify({
+      namespace,
+      namespaceAlias,
+      containerName,
+      capabilities: this.cfg?.capabilities,
+      enableDeepInsert: this.cfg?.enableDeepInsert,
+      searchMode: this.cfg?.searchMode,
+      searchFields: this.cfg?.searchFields,
+    });
   }
 
   private buildOperationSchema(
