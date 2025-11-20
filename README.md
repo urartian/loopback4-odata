@@ -1085,7 +1085,7 @@ Any custom store only needs to implement the `TenantThrottleStore` interface (al
   - Requires `If-Match` on `PATCH`/`DELETE` when ETags are enabled (428 if missing).
   - If `maxTop` is set, `$top` above the cap returns `400 Bad Request` instead of being clamped.
   - Rejects unknown system query options (e.g., `$levels`, `$apply`) with `400 Bad Request`.
-  - Validates `$select`, `$orderby`, `$filter` fields against model properties; navigation paths traverse declared relations so predicates like `Customer/Address/City` stay valid while unknown members still return `400 Bad Request`.
+  - Validates `$select`, `$orderby`, `$filter` fields against model properties. Navigation segments still traverse declared relations and now structured (complex) properties are resolved segment-by-segment, so expressions such as `Customer/PrimaryAddress/City` stay valid while unknown members return `400 Bad Request`. Structured paths currently pass validation even though most connectors evaluate them in memory; SQL pushdown for nested properties will arrive in a future release.
   - Enforces content negotiation: `Accept` must allow `application/json` for CRUD; `$metadata` must allow `application/xml` (or JSON if configured); non‑JSON `Content-Type` on writes returns `415`.
   - Limits & safety: `maxExpandDepth` always enforces a hard ceiling (400 when exceeded); `maxSkip` still caps offsets and escalates from clamp to 400 when strict mode is enabled.
   - Search:

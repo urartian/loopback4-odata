@@ -10,6 +10,7 @@ import {
   Entity,
   HasManyRepositoryFactory,
   HasManyThroughRepositoryFactory,
+  Model,
   Options,
   RepositoryMixin,
   belongsTo,
@@ -44,6 +45,15 @@ export class TestApplication extends BootMixin(RepositoryMixin(RestApplication))
   }
 }
 
+@model()
+export class ProductDimensions extends Model {
+  @property({ type: 'number' })
+  width?: number;
+
+  @property({ type: 'number' })
+  height?: number;
+}
+
 @odataModel({ etag: 'updatedAt' })
 @model()
 export class Product extends Entity {
@@ -59,6 +69,9 @@ export class Product extends Entity {
 
   @property({ type: 'date', required: true, defaultFn: 'now' })
   updatedAt!: Date;
+
+  @property({ type: () => ProductDimensions })
+  dimensions?: ProductDimensions;
 
   @hasMany(() => OrderItem)
   orderItems?: OrderItem[];
@@ -442,13 +455,13 @@ export async function seedExampleData(app: TestApplication) {
   if (existingProducts.count > 0) return;
 
   const [laptop, phone, monitor, coffeeGrinder, coffeeBeans] = await productRepo.createAll([
-    { name: 'Laptop', price: 1299 },
-    { name: 'Phone', price: 799 },
-    { name: 'Monitor', price: 349 },
-    { name: 'Coffee Grinder', price: 249 },
-    { name: 'Coffee Beans', price: 24 },
-    { name: 'Decaf Coffee Beans', price: 26 },
-    { name: 'Espresso Machine', price: 899 },
+    { name: 'Laptop', price: 1299, dimensions: { width: 320, height: 20 } },
+    { name: 'Phone', price: 799, dimensions: { width: 75, height: 8 } },
+    { name: 'Monitor', price: 349, dimensions: { width: 610, height: 50 } },
+    { name: 'Coffee Grinder', price: 249, dimensions: { width: 160, height: 300 } },
+    { name: 'Coffee Beans', price: 24, dimensions: { width: 80, height: 120 } },
+    { name: 'Decaf Coffee Beans', price: 26, dimensions: { width: 90, height: 120 } },
+    { name: 'Espresso Machine', price: 899, dimensions: { width: 300, height: 380 } },
   ]);
 
   const [orderOne, orderTwo] = await orderRepo.createAll([{ total: 0 }, { total: 0 }]);

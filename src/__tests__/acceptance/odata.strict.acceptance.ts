@@ -118,6 +118,10 @@ describe('OData strict mode acceptance', () => {
     await client.get('/odata/Products').query({ $filter: 'month(updatedAt) eq 1' }).expect(400);
   });
 
+  it('rejects hasMany navigation filters outside lambdas even after post-filter splitting', async () => {
+    await client.get('/odata/OrderItems').query({ $filter: "notes/text eq 'foo'" }).expect(400);
+  });
+
   it('rejects unsupported indexof comparator in strict mode', async function () {
     // default strict app from beforeEach
     await client.get('/odata/Products').query({ $filter: "indexof(name,'Lap') eq 2" }).expect(400);

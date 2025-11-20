@@ -2309,6 +2309,7 @@ export interface ParsedODataQuery extends Filter<AnyObject> {
   apply?: AggregationSpec;
   lambda?: LambdaExpression;
   postFilter?: ParsedExpression;
+  whereExpression?: ParsedExpression;
   unsupportedFunctions?: string[];
   skipToken?: string;
   deltaToken?: string;
@@ -2358,6 +2359,7 @@ export function parseODataQuery(query: QueryObject, options: ParseOptions = {}):
         };
       }
       if (predicate) {
+        filter.whereExpression = predicate;
         try {
           filter.where = buildWhere(predicate);
         } catch (err) {

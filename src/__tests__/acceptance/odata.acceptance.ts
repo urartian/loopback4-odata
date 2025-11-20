@@ -178,6 +178,28 @@ describe('OData component acceptance', () => {
     expect(res.body.value.length <= res.body['@odata.count']).to.be.true();
   });
 
+  it('supports filtering on structured properties', async () => {
+    const res = await client
+      .get('/odata/Products')
+      .query({ $filter: 'dimensions/width gt 300' })
+      .expect(200);
+
+    const names = res.body.value.map((item: AnyObject) => item.name);
+    expect(names).to.containEql('Laptop');
+    expect(names).to.containEql('Monitor');
+  });
+
+  it('allows selecting structured properties without enumerating children', async () => {
+    const res = await client.get('/odata/Products').query({ $select: 'id,dimensions' }).expect(200);
+
+    expect(res.body.value).to.be.Array();
+    expect(
+      res.body.value.every(
+        (item: AnyObject) => item.dimensions && typeof item.dimensions === 'object',
+      ),
+    ).to.be.true();
+  });
+
   it('returns @odata.nextLink with $skiptoken for server-driven paging', async () => {
     const current = app.getSync(ODATA_BINDINGS.CONFIG) as ODataConfig;
     app.bind(ODATA_BINDINGS.CONFIG).to({
