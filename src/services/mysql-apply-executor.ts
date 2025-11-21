@@ -970,6 +970,8 @@ class NavigationJoinManager {
 
     const propertyPath = resolved.propertyPath;
     if (!propertyPath || propertyPath.includes('/')) {
+      // TODO: Structured property paths currently validate under strict mode but are not pushed
+      //       down to SQL. Add pushdown support once translation logic understands nested paths.
       return undefined;
     }
 

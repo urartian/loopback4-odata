@@ -18,6 +18,7 @@ import {
 import {
   DefaultCrudRepository,
   Entity,
+  Model,
   Filter,
   FilterExcludingWhere,
   InclusionFilter,
@@ -39,6 +40,8 @@ import {
   LambdaExpression,
   ParsedExpression,
   FunctionArg,
+  buildWhereFromParsedExpression,
+  UnsupportedFilterError,
   ApplyPipeline,
   ComputeExpression,
   ComputeNode,
@@ -120,6 +123,21 @@ type SearchComparisonStrategy = {
   positive: 'like' | 'ilike';
   negative: 'nlike' | 'nilike';
 };
+
+interface StructuredPropertyNode {
+  primitiveProps: Set<string>;
+  structuredProps: Map<string, StructuredPropertyNode>;
+}
+
+interface StructuredBuildContext {
+  modelCtors: Set<Function>;
+  schemaObjects: Set<object>;
+}
+
+interface ResolvedJsonSchema {
+  schema: AnyObject;
+  definitions: Record<string, AnyObject>;
+}
 
 const DB_METHODS: ReadonlySet<string> = new Set([
   'find',
@@ -591,6 +609,7 @@ export function defineODataCrudController(def: EntitySetDef) {
     requestStateCache?: ODataRequestState | null;
     searchComparisonStrategy?: SearchComparisonStrategy;
     modelPropertyCache = new WeakMap<typeof Entity, Set<string>>();
+    structuredPropertyCache = new WeakMap<typeof Entity, Map<string, StructuredPropertyNode>>();
 
     constructor(
       @inject(repoBindingKey)
@@ -3721,16 +3740,30 @@ export function defineODataCrudController(def: EntitySetDef) {
       return props;
     }
 
-    isNavigationFieldAllowed(field: string, options: { requireProperty: boolean }): boolean {
+    getModelPropertyDefinition(
+      modelCtor: typeof Entity,
+      propertyName: string,
+    ): PropertyDefinition | undefined {
+      if (!modelCtor || !propertyName) return undefined;
+      const definition =
+        ensureModelDefinitionWithRelations(modelCtor) ?? this.getModelDefinition(modelCtor);
+      return definition?.properties?.[propertyName] as PropertyDefinition | undefined;
+    }
+
+    isPrimitiveModelProperty(modelCtor: typeof Entity, propertyName: string): boolean {
+      const propDef = this.getModelPropertyDefinition(modelCtor, propertyName);
+      if (!propDef) return false;
+      return Boolean(this.classifyPrimitiveProperty(propDef));
+    }
+
+    isStructuredPathAllowed(field: string, options: { requireProperty: boolean }): boolean {
       if (!field || typeof field !== 'string' || !field.includes('/')) return false;
       try {
         const resolved = resolveNavigationPath(this.entityCtor, field, {
           maxDepth: this.cfg?.maxExpandDepth ?? 5,
         });
-        if (!resolved.joins.length) {
-          return false;
-        }
-        if (resolved.joins.some((join) => join.relationType === 'hasMany')) {
+        const hasNavigation = resolved.joins.length > 0;
+        if (hasNavigation && resolved.joins.some((join) => join.relationType === 'hasMany')) {
           return false;
         }
         const propertyPath = resolved.propertyPath;
@@ -3738,13 +3771,11 @@ export function defineODataCrudController(def: EntitySetDef) {
           return !options.requireProperty;
         }
         const propertySegments = propertyPath.split('/').filter(Boolean);
-        if (propertySegments.length !== 1) {
-          return false;
+        if (!propertySegments.length) {
+          return !options.requireProperty;
         }
-        const [propertyName] = propertySegments;
-        if (!propertyName) return false;
-        const props = this.getModelPropertySet(resolved.targetModel);
-        return props.has(propertyName);
+        const baseModel = hasNavigation ? resolved.targetModel : this.entityCtor;
+        return this.validateStructuredPropertyPath(baseModel, propertySegments);
       } catch (error) {
         if (error instanceof NavigationPathError) {
           return false;
@@ -3808,6 +3839,444 @@ export function defineODataCrudController(def: EntitySetDef) {
       if (typeof Buffer !== 'undefined' && rawType === Buffer) return 'buffer';
 
       return undefined;
+    }
+
+    validateStructuredPropertyPath(modelCtor: typeof Entity, segments: string[]): boolean {
+      if (!modelCtor || !segments.length) return false;
+      const [current, ...rest] = segments;
+      if (!current) return false;
+      const definition = this.getModelPropertyDefinition(modelCtor, current);
+      if (!definition) return false;
+      const primitiveKind = this.classifyPrimitiveProperty(definition);
+      if (!rest.length) {
+        return Boolean(primitiveKind);
+      }
+      if (primitiveKind) return false;
+      const structured = this.getStructuredPropertyMetadata(modelCtor).get(current);
+      if (!structured) return false;
+      return this.validateStructuredNodePath(structured, rest);
+    }
+
+    validateStructuredNodePath(node: StructuredPropertyNode, segments: string[]): boolean {
+      let currentNode: StructuredPropertyNode | undefined = node;
+      for (let i = 0; i < segments.length; i++) {
+        const segment = segments[i];
+        if (!segment) return false;
+        const isLast = i === segments.length - 1;
+        if (isLast) {
+          return currentNode?.primitiveProps.has(segment) ?? false;
+        }
+        currentNode = currentNode?.structuredProps.get(segment);
+        if (!currentNode) return false;
+      }
+      return false;
+    }
+
+    getStructuredPropertyMetadata(modelCtor: typeof Entity): Map<string, StructuredPropertyNode> {
+      if (!modelCtor) return new Map<string, StructuredPropertyNode>();
+      const cached = this.structuredPropertyCache.get(modelCtor);
+      if (cached) return cached;
+      const metadata = this.buildStructuredPropertyMetadata(modelCtor);
+      this.structuredPropertyCache.set(modelCtor, metadata);
+      return metadata;
+    }
+
+    buildStructuredPropertyMetadata(modelCtor: typeof Entity): Map<string, StructuredPropertyNode> {
+      const metadata = new Map<string, StructuredPropertyNode>();
+      const definition =
+        ensureModelDefinitionWithRelations(modelCtor) ?? this.getModelDefinition(modelCtor);
+      if (!definition) return metadata;
+      const ctx = this.createStructuredBuildContext();
+      for (const [name, propDef] of Object.entries(definition.properties ?? {})) {
+        const node = this.buildStructuredPropertyNode(
+          propDef as PropertyDefinition | undefined,
+          ctx,
+        );
+        if (node) {
+          metadata.set(name, node);
+        }
+      }
+      return metadata;
+    }
+
+    createStructuredBuildContext(): StructuredBuildContext {
+      return {
+        modelCtors: new Set<Function>(),
+        schemaObjects: new Set<object>(),
+      };
+    }
+
+    buildStructuredPropertyNode(
+      propDef: PropertyDefinition | undefined,
+      ctx: StructuredBuildContext,
+    ): StructuredPropertyNode | undefined {
+      if (!propDef) return undefined;
+      if (this.classifyPrimitiveProperty(propDef)) return undefined;
+      if (this.isArrayPropertyDefinition(propDef)) return undefined;
+      const structuredCtor = this.resolveStructuredPropertyCtor(propDef);
+      if (structuredCtor) {
+        return this.buildStructuredNodeFromModelCtor(structuredCtor, ctx);
+      }
+      const schema = (propDef as AnyObject)?.jsonSchema;
+      if (schema && typeof schema === 'object') {
+        return this.buildStructuredNodeFromJsonSchema(schema as AnyObject, ctx);
+      }
+      return undefined;
+    }
+
+    resolveStructuredPropertyCtor(
+      propDef: PropertyDefinition | undefined,
+    ): typeof Model | undefined {
+      if (!propDef) return undefined;
+      const rawType = (propDef as AnyObject)?.type;
+      return this.resolveStructuredCtor(rawType);
+    }
+
+    resolveStructuredCtor(candidate: unknown): typeof Model | undefined {
+      if (!candidate) return undefined;
+      if (this.isStructuredModelCtor(candidate)) {
+        return candidate as typeof Model;
+      }
+      if (typeof candidate === 'function') {
+        try {
+          const resolved = (candidate as () => unknown)();
+          if (this.isStructuredModelCtor(resolved)) {
+            return resolved as typeof Model;
+          }
+        } catch {
+          return undefined;
+        }
+      }
+      return undefined;
+    }
+
+    isStructuredModelCtor(value: unknown): value is typeof Model {
+      return typeof value === 'function' && value.prototype instanceof Model;
+    }
+
+    isArrayPropertyDefinition(definition: PropertyDefinition | undefined): boolean {
+      if (!definition) return false;
+      const rawType = (definition as AnyObject)?.type;
+      if (rawType === Array) return true;
+      if (typeof rawType === 'string' && rawType.toLowerCase() === 'array') {
+        return true;
+      }
+      const schemaType = (definition as AnyObject)?.jsonSchema?.type;
+      return typeof schemaType === 'string' && schemaType.toLowerCase() === 'array';
+    }
+
+    buildStructuredNodeFromModelCtor(
+      ctor: typeof Model,
+      ctx: StructuredBuildContext,
+    ): StructuredPropertyNode | undefined {
+      if (!ctor || ctx.modelCtors.has(ctor)) return undefined;
+      ctx.modelCtors.add(ctor);
+      try {
+        const definition =
+          ensureModelDefinitionWithRelations(ctor as unknown as typeof Entity) ??
+          this.getModelDefinition(ctor as unknown as typeof Entity);
+        return this.buildStructuredNodeFromDefinition(definition, ctx);
+      } finally {
+        ctx.modelCtors.delete(ctor);
+      }
+    }
+
+    buildStructuredNodeFromDefinition(
+      definition: ModelDefinition | undefined,
+      ctx: StructuredBuildContext,
+    ): StructuredPropertyNode | undefined {
+      if (!definition) return undefined;
+      const node: StructuredPropertyNode = {
+        primitiveProps: new Set<string>(),
+        structuredProps: new Map<string, StructuredPropertyNode>(),
+      };
+      for (const [name, propDef] of Object.entries(definition.properties ?? {})) {
+        const primitiveKind = this.classifyPrimitiveProperty(
+          propDef as PropertyDefinition | undefined,
+        );
+        if (primitiveKind) {
+          node.primitiveProps.add(name);
+          continue;
+        }
+        const childNode = this.buildStructuredPropertyNode(
+          propDef as PropertyDefinition | undefined,
+          ctx,
+        );
+        if (childNode) {
+          node.structuredProps.set(name, childNode);
+        }
+      }
+      if (!node.primitiveProps.size && !node.structuredProps.size) return undefined;
+      return node;
+    }
+
+    buildStructuredNodeFromJsonSchema(
+      schemaInput: AnyObject,
+      ctx: StructuredBuildContext,
+      inheritedDefinitions?: Record<string, AnyObject>,
+    ): StructuredPropertyNode | undefined {
+      const resolved = this.resolveJsonSchemaWithRefs(schemaInput, inheritedDefinitions);
+      if (!resolved) return undefined;
+      const schema = resolved.schema;
+      if (!schema || typeof schema !== 'object') return undefined;
+      const properties = (schema as AnyObject).properties;
+      if (!properties || typeof properties !== 'object') return undefined;
+      if (ctx.schemaObjects.has(schema)) return undefined;
+      ctx.schemaObjects.add(schema);
+      const node: StructuredPropertyNode = {
+        primitiveProps: new Set<string>(),
+        structuredProps: new Map<string, StructuredPropertyNode>(),
+      };
+      for (const [name, propSchemaRaw] of Object.entries(properties as Record<string, AnyObject>)) {
+        if (!propSchemaRaw || typeof propSchemaRaw !== 'object') continue;
+        const propResolved = this.resolveJsonSchemaWithRefs(
+          propSchemaRaw as AnyObject,
+          resolved.definitions,
+        );
+        if (!propResolved) continue;
+        const pseudoDefinition = { jsonSchema: propResolved.schema } as PropertyDefinition;
+        const primitiveKind = this.classifyPrimitiveProperty(pseudoDefinition);
+        if (primitiveKind) {
+          node.primitiveProps.add(name);
+          continue;
+        }
+        if (!this.schemaRepresentsStructured(propResolved.schema)) continue;
+        const childNode = this.buildStructuredNodeFromJsonSchema(
+          propResolved.schema,
+          ctx,
+          propResolved.definitions,
+        );
+        if (childNode) {
+          node.structuredProps.set(name, childNode);
+        }
+      }
+      ctx.schemaObjects.delete(schema);
+      if (!node.primitiveProps.size && !node.structuredProps.size) return undefined;
+      return node;
+    }
+
+    resolveJsonSchemaWithRefs(
+      schemaInput: AnyObject,
+      inheritedDefinitions?: Record<string, AnyObject>,
+    ): ResolvedJsonSchema | undefined {
+      if (!schemaInput || typeof schemaInput !== 'object') return undefined;
+      const visited = new Set<string>();
+      let current = schemaInput;
+      let definitions: Record<string, AnyObject> = { ...(inheritedDefinitions ?? {}) };
+      const collectDefinitions = (candidate?: AnyObject) => {
+        const local = candidate?.definitions;
+        if (local && typeof local === 'object') {
+          definitions = { ...definitions, ...(local as Record<string, AnyObject>) };
+        }
+      };
+      collectDefinitions(current);
+      while (typeof current.$ref === 'string') {
+        const ref = current.$ref as string;
+        if (!ref.startsWith('#/definitions/')) return undefined;
+        if (visited.has(ref)) return undefined;
+        visited.add(ref);
+        const key = ref.slice('#/definitions/'.length);
+        const target = definitions[key];
+        if (!target || typeof target !== 'object') {
+          return undefined;
+        }
+        current = target as AnyObject;
+        collectDefinitions(current);
+      }
+      return { schema: current as AnyObject, definitions };
+    }
+
+    schemaRepresentsStructured(schema: AnyObject): boolean {
+      if (!schema || typeof schema !== 'object') return false;
+      const schemaType = typeof schema.type === 'string' ? schema.type.toLowerCase() : undefined;
+      if (schemaType === 'object') return true;
+      if (schema.properties && typeof schema.properties === 'object') return true;
+      return false;
+    }
+
+    isStructuredFieldPath(field: string): boolean {
+      if (!field || typeof field !== 'string' || !field.includes('/')) return false;
+      try {
+        const resolved = resolveNavigationPath(this.entityCtor, field, {
+          maxDepth: this.cfg?.maxExpandDepth ?? 5,
+        });
+        const propertySegments = resolved.propertyPath?.split('/').filter(Boolean) ?? [];
+        if (!propertySegments.length) return false;
+        const baseModel = resolved.joins.length ? resolved.targetModel : this.entityCtor;
+        return this.pathRequiresStructuredLookup(baseModel, propertySegments);
+      } catch (error) {
+        if (error instanceof NavigationPathError) {
+          const segments = field.split('/').filter(Boolean);
+          if (segments.length <= 1) return false;
+          return this.pathRequiresStructuredLookup(this.entityCtor, segments);
+        }
+        throw error;
+      }
+    }
+
+    pathRequiresStructuredLookup(modelCtor: typeof Entity, segments: string[]): boolean {
+      if (!modelCtor || !segments.length) return false;
+      const [current, ...rest] = segments;
+      if (!current || !rest.length) return false;
+      const definition = this.getModelPropertyDefinition(modelCtor, current);
+      if (!definition) return false;
+      const primitiveKind = this.classifyPrimitiveProperty(definition);
+      if (primitiveKind) return false;
+      const node = this.getStructuredPropertyMetadata(modelCtor).get(current);
+      if (!node) return false;
+      return this.pathRequiresStructuredLookupNode(node, rest);
+    }
+
+    pathRequiresStructuredLookupNode(node: StructuredPropertyNode, segments: string[]): boolean {
+      if (!segments.length) return false;
+      const [current, ...rest] = segments;
+      if (!current) return false;
+      if (!rest.length) {
+        return node.primitiveProps.has(current);
+      }
+      const child = node.structuredProps.get(current);
+      if (!child) return false;
+      return this.pathRequiresStructuredLookupNode(child, rest);
+    }
+
+    combinePostFilterExpressions(
+      left: ParsedExpression | undefined,
+      right: ParsedExpression | undefined,
+    ): ParsedExpression | undefined {
+      if (!left) return right;
+      if (!right) return left;
+      return { operator: 'logical', type: 'and', expressions: [left, right] };
+    }
+
+    splitWhereExpression(expr: ParsedExpression | undefined): {
+      repoExpr?: ParsedExpression;
+      structuredExpr?: ParsedExpression;
+    } {
+      if (!expr) return {};
+      return this.splitParsedExpression(expr);
+    }
+
+    splitParsedExpression(expr: ParsedExpression): {
+      repoExpr?: ParsedExpression;
+      structuredExpr?: ParsedExpression;
+    } {
+      switch (expr.operator) {
+        case 'comparison':
+          return this.isStructuredFieldPath(expr.field)
+            ? { structuredExpr: expr }
+            : { repoExpr: expr };
+        case 'logical':
+          if (expr.type === 'and') {
+            const repoChildren: ParsedExpression[] = [];
+            const structuredChildren: ParsedExpression[] = [];
+            for (const child of expr.expressions) {
+              const split = this.splitParsedExpression(child);
+              if (split.repoExpr) repoChildren.push(split.repoExpr);
+              if (split.structuredExpr) structuredChildren.push(split.structuredExpr);
+            }
+            return {
+              repoExpr: this.combineParsedExpressions('and', repoChildren),
+              structuredExpr: this.combineParsedExpressions('and', structuredChildren),
+            };
+          }
+          if (expr.type === 'or') {
+            const childSplits = expr.expressions.map((child) => this.splitParsedExpression(child));
+            const canPushdown = childSplits.every(
+              (split) => !split.structuredExpr && Boolean(split.repoExpr),
+            );
+            if (!canPushdown) {
+              return { structuredExpr: expr };
+            }
+            const repoChildren = childSplits
+              .map((split) => split.repoExpr)
+              .filter((child): child is ParsedExpression => Boolean(child));
+            return { repoExpr: this.combineParsedExpressions('or', repoChildren) };
+          }
+          return {};
+        case 'not': {
+          const childSplit = this.splitParsedExpression(expr.expr);
+          if (!childSplit.repoExpr || childSplit.structuredExpr) {
+            return { structuredExpr: expr };
+          }
+          return { repoExpr: { operator: 'not', expr: childSplit.repoExpr } };
+        }
+        default: {
+          const fields = this.extractExpressionFields(expr);
+          if (fields.some((field) => this.isStructuredFieldPath(field))) {
+            return { structuredExpr: expr };
+          }
+          return { repoExpr: expr };
+        }
+      }
+    }
+
+    combineParsedExpressions(
+      type: 'and' | 'or',
+      expressions: ParsedExpression[],
+    ): ParsedExpression | undefined {
+      if (!expressions.length) return undefined;
+      if (expressions.length === 1) return expressions[0];
+      return { operator: 'logical', type, expressions };
+    }
+
+    extractExpressionFields(expr: ParsedExpression): string[] {
+      switch (expr.operator) {
+        case 'function':
+        case 'fncmp':
+        case 'datepart':
+        case 'indexofcmp':
+        case 'substrcmp':
+        case 'lengthcmp':
+          return [expr.field];
+        case 'stringfncmp':
+          return expr.args
+            .filter((arg): arg is FunctionArg & { kind: 'field' } => arg.kind === 'field')
+            .map((arg) => arg.name);
+        default:
+          return [];
+      }
+    }
+
+    validateParsedExpressionFields(expr: ParsedExpression, clause: string) {
+      switch (expr.operator) {
+        case 'comparison': {
+          this.ensureFieldAllowedStrict(expr.field, clause);
+          return;
+        }
+        case 'logical': {
+          for (const child of expr.expressions) {
+            this.validateParsedExpressionFields(child, clause);
+          }
+          return;
+        }
+        case 'not': {
+          this.validateParsedExpressionFields(expr.expr, clause);
+          return;
+        }
+        case 'function':
+        case 'fncmp':
+        case 'datepart':
+        case 'indexofcmp':
+        case 'substrcmp':
+        case 'lengthcmp': {
+          this.ensureFieldAllowedStrict(expr.field, clause);
+          return;
+        }
+        case 'stringfncmp': {
+          for (const arg of expr.args) {
+            if (arg.kind === 'field') {
+              this.ensureFieldAllowedStrict(arg.name, clause);
+            }
+          }
+          return;
+        }
+        case 'lambda': {
+          this.validateParsedExpressionFields(expr.predicate, clause);
+          return;
+        }
+        default:
+          return;
+      }
     }
 
     serializePrimitiveValue(
@@ -5344,14 +5813,12 @@ export function defineODataCrudController(def: EntitySetDef) {
     validateFieldsStrict(filter: Filter<CrudEntity>) {
       this.validateOrderByFields(filter);
       if (!this.cfg?.strict) return;
-      const { props, relations } = this.allowedProperties();
+      const { relations } = this.allowedProperties();
 
       if (filter.fields && typeof filter.fields === 'object' && !Array.isArray(filter.fields)) {
         for (const key of Object.keys(filter.fields as AnyObject)) {
-          if (!props.has(key) && !relations.has(key)) {
-            if (this.isNavigationFieldAllowed(key, { requireProperty: true })) continue;
-            throw new HttpErrors.BadRequest(`Unknown property in $select: ${key}`);
-          }
+          if (relations.has(key)) continue;
+          this.ensureFieldAllowedStrict(key, '$select', { allowStructuredLeaf: true });
         }
       }
 
@@ -5359,27 +5826,41 @@ export function defineODataCrudController(def: EntitySetDef) {
         const used = new Set<string>();
         this.collectWhereFields(filter.where as AnyObject, used);
         for (const field of used) {
-          if (!props.has(field)) {
-            if (this.isNavigationFieldAllowed(field, { requireProperty: true })) continue;
-            throw new HttpErrors.BadRequest(`Unknown property in $filter: ${field}`);
-          }
+          this.ensureFieldAllowedStrict(field, '$filter');
         }
       }
     }
 
     validateOrderByFields(filter: Filter<CrudEntity>) {
       if (!filter?.order) return;
-      const { props } = this.allowedProperties();
       const list = Array.isArray(filter.order) ? filter.order : [filter.order];
       for (const item of list) {
         const raw = String(item ?? '').trim();
         if (!raw) continue;
         const field = raw.split(/\s+/)[0];
-        if (field && !props.has(field)) {
-          if (this.isNavigationFieldAllowed(field, { requireProperty: true })) continue;
-          throw new HttpErrors.BadRequest(`Unknown property in $orderby: ${field}`);
+        if (field) {
+          this.ensureFieldAllowedStrict(field, '$orderby');
         }
       }
+    }
+
+    ensureFieldAllowedStrict(
+      field: string,
+      clause: string,
+      options?: { allowStructuredLeaf?: boolean },
+    ) {
+      if (!field) {
+        throw new HttpErrors.BadRequest(`Unknown property in ${clause}: ${field}`);
+      }
+      if (this.isPrimitiveModelProperty(this.entityCtor, field)) return;
+      if (field.includes('/')) {
+        if (this.isStructuredPathAllowed(field, { requireProperty: true })) return;
+      } else {
+        const def = this.getModelPropertyDefinition(this.entityCtor, field);
+        const primitive = this.classifyPrimitiveProperty(def);
+        if (!primitive && options?.allowStructuredLeaf && def) return;
+      }
+      throw new HttpErrors.BadRequest(`Unknown property in ${clause}: ${field}`);
     }
 
     computeIncludeDepth(includes?: InclusionFilter[]): number {
@@ -6014,6 +6495,36 @@ export function defineODataCrudController(def: EntitySetDef) {
             `Unsupported filter functions in strict mode: ${unsupportedFunctions.join(', ')}`,
           );
         }
+        const splitWhere = this.splitWhereExpression(parsed.whereExpression);
+        if (splitWhere.structuredExpr) {
+          if (this.cfg?.strict) {
+            this.validateParsedExpressionFields(splitWhere.structuredExpr, '$filter');
+          }
+          postFilterExpr = this.combinePostFilterExpressions(
+            postFilterExpr,
+            splitWhere.structuredExpr,
+          );
+        }
+        if (splitWhere.repoExpr) {
+          try {
+            parsed.where = buildWhereFromParsedExpression(splitWhere.repoExpr) as CrudWhere;
+          } catch (error) {
+            if (error instanceof UnsupportedFilterError) {
+              postFilterExpr = this.combinePostFilterExpressions(
+                postFilterExpr,
+                splitWhere.repoExpr,
+              );
+              const combined = [...(unsupportedFunctions ?? []), ...(error.functions ?? [])];
+              unsupportedFunctions = Array.from(new Set(combined));
+              delete parsed.where;
+            } else {
+              throw error;
+            }
+          }
+        } else {
+          delete parsed.where;
+        }
+        delete (parsed as { whereExpression?: ParsedExpression }).whereExpression;
         const parsedFilter = { ...parsed } as Filter<CrudEntity> & {
           inlineCount?: boolean;
           apply?: AggregationSpec;
@@ -6779,6 +7290,36 @@ export function defineODataCrudController(def: EntitySetDef) {
         if (parsed.compute?.length) {
           throw new HttpErrors.BadRequest('$compute is not supported for $count responses.');
         }
+        const splitWhere = this.splitWhereExpression(parsed.whereExpression);
+        if (splitWhere.structuredExpr) {
+          if (this.cfg?.strict) {
+            this.validateParsedExpressionFields(splitWhere.structuredExpr, '$filter');
+          }
+          postFilterExpr = this.combinePostFilterExpressions(
+            postFilterExpr,
+            splitWhere.structuredExpr,
+          );
+        }
+        if (splitWhere.repoExpr) {
+          try {
+            parsed.where = buildWhereFromParsedExpression(splitWhere.repoExpr) as CrudWhere;
+          } catch (error) {
+            if (error instanceof UnsupportedFilterError) {
+              postFilterExpr = this.combinePostFilterExpressions(
+                postFilterExpr,
+                splitWhere.repoExpr,
+              );
+              const combined = [...(unsupportedFunctions ?? []), ...(error.functions ?? [])];
+              unsupportedFunctions = Array.from(new Set(combined));
+              delete parsed.where;
+            } else {
+              throw error;
+            }
+          }
+        } else {
+          delete parsed.where;
+        }
+        delete (parsed as { whereExpression?: ParsedExpression }).whereExpression;
         const parsedFilter = { ...parsed } as Filter<CrudEntity> & { inlineCount?: boolean };
         delete (parsedFilter as { inlineCount?: boolean }).inlineCount;
         postFilterExpr = parsed.postFilter;

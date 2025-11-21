@@ -1,5 +1,13 @@
 import 'reflect-metadata';
-import { AnyObject, Entity, belongsTo, hasMany, model, property } from '@loopback/repository';
+import {
+  AnyObject,
+  Entity,
+  Model,
+  belongsTo,
+  hasMany,
+  model,
+  property,
+} from '@loopback/repository';
 import { expect } from '@loopback/testlab';
 import { HttpErrors } from '@loopback/rest';
 import { defineODataCrudController } from '../../controllers/crud-controller-factory';
@@ -9,12 +17,45 @@ import { ODataConfig } from '../../types';
 
 describe('CRUD controller navigation path validation', () => {
   @model()
+  class StatusContact extends Model {
+    @property({ type: 'string' })
+    email?: string;
+  }
+
+  @model()
+  class StatusDetails extends Model {
+    @property({ type: 'string' })
+    label?: string;
+
+    @property({ type: () => StatusContact })
+    contact?: StatusContact;
+  }
+
+  @model()
+  class IncidentRegion extends Model {
+    @property({ type: 'string' })
+    name?: string;
+  }
+
+  @model()
+  class IncidentAddress extends Model {
+    @property({ type: 'string' })
+    city?: string;
+
+    @property({ type: () => IncidentRegion })
+    region?: IncidentRegion;
+  }
+
+  @model()
   class Status extends Entity {
     @property({ id: true })
     code!: string;
 
     @property()
     name?: string;
+
+    @property({ type: () => StatusDetails })
+    details?: StatusDetails;
   }
 
   @model()
@@ -36,6 +77,34 @@ describe('CRUD controller navigation path validation', () => {
 
     @property()
     title?: string;
+
+    @property({ type: () => IncidentAddress })
+    location?: IncidentAddress;
+
+    @property({
+      jsonSchema: {
+        type: 'object',
+        properties: {
+          severity: { type: 'string' },
+          reporter: { $ref: '#/definitions/ReporterDetails' },
+        },
+        definitions: {
+          ReporterDetails: {
+            type: 'object',
+            properties: {
+              name: { type: 'string' },
+              organization: {
+                type: 'object',
+                properties: {
+                  name: { type: 'string' },
+                },
+              },
+            },
+          },
+        },
+      },
+    })
+    metadata?: AnyObject;
 
     @belongsTo(() => Status, { name: 'status' })
     statusCode!: string;
@@ -112,6 +181,41 @@ describe('CRUD controller navigation path validation', () => {
     expect(() => (controller as any).validateFieldsStrict(filter)).to.not.throw();
   });
 
+  it('allows filtering on structured properties in strict mode', () => {
+    const controller = createController({ strict: true });
+    const filter: AnyObject = { where: { 'location/region/name': 'EMEA' } };
+
+    expect(() => (controller as any).validateFieldsStrict(filter)).to.not.throw();
+  });
+
+  it('allows selecting structured properties defined via jsonSchema references', () => {
+    const controller = createController({ strict: true });
+    const filter: AnyObject = { fields: { 'metadata/reporter/organization/name': true } };
+
+    expect(() => (controller as any).validateFieldsStrict(filter)).to.not.throw();
+  });
+
+  it('allows selecting entire structured properties without specifying child fields', () => {
+    const controller = createController({ strict: true });
+    const filter: AnyObject = { fields: { location: true, metadata: true } };
+
+    expect(() => (controller as any).validateFieldsStrict(filter)).to.not.throw();
+  });
+
+  it('allows ordering by structured properties', () => {
+    const controller = createController({ strict: true });
+    const filter: AnyObject = { order: ['location/city DESC'] };
+
+    expect(() => (controller as any).validateFieldsStrict(filter)).to.not.throw();
+  });
+
+  it('allows navigation followed by structured property hops', () => {
+    const controller = createController({ strict: true });
+    const filter: AnyObject = { where: { 'status/details/contact/email': 'ops@example.com' } };
+
+    expect(() => (controller as any).validateFieldsStrict(filter)).to.not.throw();
+  });
+
   it('rejects filters with stray property segments containing slashes', () => {
     const controller = createController({ strict: true });
     const filter: AnyObject = { where: { 'title/foo': 'bar' } };
@@ -129,6 +233,36 @@ describe('CRUD controller navigation path validation', () => {
     expect(() => (controller as any).validateFieldsStrict(filter)).to.throw(
       HttpErrors.BadRequest,
       /Unknown property in \$filter: notes\/descr/i,
+    );
+  });
+
+  it('rejects structured paths that do not end on a scalar', () => {
+    const controller = createController({ strict: true });
+    const filter: AnyObject = { where: { 'location/region': 'EMEA' } };
+
+    expect(() => (controller as any).validateFieldsStrict(filter)).to.throw(
+      HttpErrors.BadRequest,
+      /Unknown property in \$filter: location\/region/i,
+    );
+  });
+
+  it('rejects structured paths referencing unknown members', () => {
+    const controller = createController({ strict: true });
+    const filter: AnyObject = { where: { 'metadata/reporter/department/name': 'Support' } };
+
+    expect(() => (controller as any).validateFieldsStrict(filter)).to.throw(
+      HttpErrors.BadRequest,
+      /Unknown property in \$filter: metadata\/reporter\/department\/name/i,
+    );
+  });
+
+  it('rejects hasMany navigation segments combined with structured members', () => {
+    const controller = createController({ strict: true });
+    const filter: AnyObject = { where: { 'notes/location/city': 'Paris' } };
+
+    expect(() => (controller as any).validateFieldsStrict(filter)).to.throw(
+      HttpErrors.BadRequest,
+      /Unknown property in \$filter: notes\/location\/city/i,
     );
   });
 });
