@@ -1,5 +1,6 @@
 /// <reference path="../../types/testing.globals.d.ts" />
 
+import { Entity, ModelDefinition } from '@loopback/repository';
 import { expect } from '@loopback/testlab';
 import 'reflect-metadata';
 import { NavigationPathError, resolveNavigationPath } from '../../util/navigation-path';
@@ -40,5 +41,29 @@ describe('Navigation path resolver', () => {
     expect(() =>
       resolveNavigationPath(Product, 'orderItems/order/product', { maxDepth: 2 }),
     ).to.throw(NavigationPathError);
+  });
+
+  it('throws a descriptive error when encountering composite primary keys', () => {
+    class CompositeParent extends Entity {}
+    class CompositeChild extends Entity {}
+
+    const childDefinition = new ModelDefinition('CompositeChild');
+    childDefinition.addProperty('id', { type: 'number', id: true });
+    childDefinition.addProperty('parentId', { type: 'number' });
+    CompositeChild.definition = childDefinition;
+
+    const parentDefinition = new ModelDefinition('CompositeParent');
+    parentDefinition.addProperty('firstId', { type: 'number', id: true });
+    parentDefinition.addProperty('secondId', { type: 'number', id: true });
+    parentDefinition.hasMany('children', {
+      source: CompositeParent,
+      target: () => CompositeChild,
+      keyTo: 'parentId',
+    });
+    CompositeParent.definition = parentDefinition;
+
+    expect(() => resolveNavigationPath(CompositeParent, 'children')).to.throw(
+      /composite primary key/i,
+    );
   });
 });

@@ -215,14 +215,28 @@ function buildJoinSegment(
 }
 
 function getPrimaryKey(definition: ModelDefinition): string {
-  const idProps = definition.idProperties?.();
+  const modelName = definition.name ?? '[anonymous model]';
+  const idProps = definition.idProperties?.() ?? [];
   if (Array.isArray(idProps) && idProps.length) {
-    return idProps[0];
+    return selectSingleKey(modelName, idProps);
   }
   // Fallback to looking for a property flagged as id
-  const entries = Object.entries(definition.properties ?? {});
-  for (const [name, meta] of entries) {
-    if ((meta as AnyObject)?.id === true) return name;
+  const flagged = Object.entries(definition.properties ?? {})
+    .filter(([, meta]) => (meta as AnyObject)?.id === true)
+    .map(([name]) => name);
+  if (flagged.length) {
+    return selectSingleKey(modelName, flagged);
   }
-  throw new NavigationPathError(`Model ${definition.name} does not define an id property.`);
+  throw new NavigationPathError(`Model ${modelName} does not define an id property.`);
+}
+
+function selectSingleKey(modelName: string, keys: string[]): string {
+  if (keys.length === 1) return keys[0];
+  if (keys.length > 1) {
+    const joined = keys.join(', ');
+    throw new NavigationPathError(
+      `Model ${modelName} defines a composite primary key (${joined}), which is not supported for navigation path resolution.`,
+    );
+  }
+  throw new NavigationPathError(`Model ${modelName} does not define an id property.`);
 }
