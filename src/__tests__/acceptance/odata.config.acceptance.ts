@@ -105,6 +105,21 @@ describe('OData config plumbing acceptance', () => {
     await client.get('/Products').expect(200);
   });
 
+  it('honors custom basePath when the Rest server is mounted under the same prefix', async function (this: any) {
+    await replaceApp(this, {}, async (freshApp) => {
+      freshApp.basePath('/api/odata');
+    });
+
+    const serviceDoc = await client.get('/api/odata').expect(200);
+    expect(serviceDoc.headers['odata-version']).to.equal('4.0');
+    expect(serviceDoc.body['@odata.context']).to.equal('/api/odata/$metadata');
+
+    const metadata = await client.get('/api/odata/$metadata').expect(200);
+    expect(metadata.text ?? metadata.body).to.be.ok();
+
+    await client.get('/api/odata/Products').expect(200);
+  });
+
   it('clamps $top according to maxTop when strict=false', async () => {
     const res = await client.get('/api/odata/Products').query({ $top: '5' }).expect(200);
     expect(res.body.value).to.be.Array();

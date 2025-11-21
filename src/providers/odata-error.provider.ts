@@ -5,6 +5,7 @@ import { ErrorWriterOptions, writeErrorToResponse } from 'strong-error-handler';
 import { ODATA_VERSION } from '../constants';
 import { ODATA_BINDINGS } from '../keys';
 import { ODataConfig } from '../types';
+import { gatherRequestUrls, normalizeBasePath, pathMatches } from '../util/base-path';
 
 type ExtendedHttpError = HttpError & {
   statusCode?: number;
@@ -27,16 +28,12 @@ export class ODataErrorProvider implements Provider<Reject> {
 
   value(): Reject {
     return ({ request, response }, err: Error) => {
-      const url = request.originalUrl ?? request.url ?? '';
-      const normalizeBasePath = (configured?: string): string => {
-        let basePath = configured?.trim() ?? '';
-        if (!basePath) return '/odata';
-        if (!basePath.startsWith('/')) basePath = `/${basePath}`;
-        if (basePath.length > 1 && basePath.endsWith('/')) basePath = basePath.slice(0, -1);
-        return basePath || '/';
-      };
       const basePath = normalizeBasePath(this.cfg?.basePath);
-      if (!url.startsWith('/odata') && !url.startsWith(basePath)) {
+      const urls = gatherRequestUrls(request);
+      const targetsOData = urls.some(
+        (url) => pathMatches(url, '/odata') || pathMatches(url, basePath),
+      );
+      if (!targetsOData) {
         writeErrorToResponse(err, request, response, this.options);
         return;
       }

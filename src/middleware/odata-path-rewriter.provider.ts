@@ -5,6 +5,12 @@ import { ODATA_BINDINGS, ODataLogger } from '../keys';
 import { ODataConfig, ODataRequestState } from '../types';
 import { emitTelemetryEvent } from '../util/telemetry';
 import { RequestContext } from '@loopback/rest';
+import {
+  findMatchingRequestUrl,
+  normalizeBasePath,
+  pathMatches,
+  stripBasePath,
+} from '../util/base-path';
 
 export class OdataPathRewriterProvider implements Provider<Middleware> {
   constructor(
@@ -13,24 +19,28 @@ export class OdataPathRewriterProvider implements Provider<Middleware> {
   ) {}
 
   value(): Middleware {
-    const basePath = this.normalizeBasePath(this.cfg?.basePath);
+    const basePath = normalizeBasePath(this.cfg?.basePath);
     const needsRewrite = basePath !== '/odata';
 
     const middleware: Middleware = async (ctx, next) => {
-      const originalUrl = ctx.request.url ?? '';
+      const originalUrl = ctx.request.originalUrl ?? ctx.request.url ?? '';
       let basePathRewritten = false;
       let targetsODataRoute = false;
 
       if (needsRewrite) {
-        const url = ctx.request.url || '';
-        if (this.pathMatches(url, basePath)) {
-          ctx.request.url = '/odata' + this.stripBasePath(url, basePath);
-          basePathRewritten = true;
+        const currentUrl = ctx.request.url || '';
+        const alreadyCanonical = pathMatches(currentUrl, '/odata');
+        if (!alreadyCanonical) {
+          const match = findMatchingRequestUrl(ctx.request, basePath);
+          if (match) {
+            ctx.request.url = '/odata' + stripBasePath(match, basePath);
+            basePathRewritten = true;
+          }
         }
       }
 
       const normalizedUrl = ctx.request.url || '';
-      if (this.pathMatches(normalizedUrl, '/odata')) {
+      if (pathMatches(normalizedUrl, '/odata')) {
         targetsODataRoute = true;
       }
 
@@ -60,41 +70,6 @@ export class OdataPathRewriterProvider implements Provider<Middleware> {
     };
 
     return middleware;
-  }
-
-  private normalizeBasePath(configured?: string): string {
-    let basePath = configured?.trim() ?? '';
-    if (!basePath) return '/odata';
-    if (!basePath.startsWith('/')) basePath = `/${basePath}`;
-    if (basePath.length > 1 && basePath.endsWith('/')) {
-      basePath = basePath.slice(0, -1);
-    }
-    return basePath || '/';
-  }
-
-  private pathMatches(url: string, basePath: string): boolean {
-    if (!basePath) return false;
-    if (basePath === '/') {
-      return url.startsWith('/');
-    }
-    if (url === basePath) return true;
-    if (url.startsWith(basePath + '/')) return true;
-    if (url.startsWith(basePath + '?')) return true;
-    if (url.startsWith(basePath + '#')) return true;
-    return false;
-  }
-
-  private stripBasePath(url: string, basePath: string): string {
-    if (basePath === '/') {
-      const remainder = url.slice(1);
-      if (!remainder) return '';
-      if (remainder.startsWith('?') || remainder.startsWith('#')) {
-        return remainder;
-      }
-      return `/${remainder}`;
-    }
-    const remainder = url.substring(basePath.length);
-    return remainder || '/';
   }
 
   private emitRewriteTelemetry(ctx: MiddlewareContext, context: Record<string, unknown>) {
