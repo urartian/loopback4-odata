@@ -26,10 +26,15 @@ import {
   NavigationPathError,
   ResolvedNavigationPath,
 } from '../util/navigation-path';
+import {
+  PrimitivePropertyKind,
+  resolveStructuredPropertySegments,
+} from '../util/structured-metadata';
 
 interface ColumnResolution {
   column: string;
   rawColumn: string;
+  primitiveKind?: PrimitivePropertyKind;
 }
 
 interface StageSource {
@@ -39,6 +44,8 @@ interface StageSource {
   getJoinClauses?(): string[];
   getJoinCount?(): number;
   availableColumns?: Set<string>;
+  consumeLastError?(): string | undefined;
+  noteDeclineReason?(reason?: string): void;
 }
 
 interface StageSqlBuildResult {
@@ -78,13 +85,20 @@ export class MySqlApplyExecutor implements ODataApplyExecutor {
     return normalized.includes('mysql') || normalized.includes('mariadb');
   }
 
-  async execute(ctx: ODataApplyExecutorContext): Promise<ODataApplyExecutorResult | undefined> {
+  async execute(
+    ctx: ODataApplyExecutorContext,
+  ): Promise<ODataApplyExecutorResult | { declineReason: string } | undefined> {
     const { repository, plan, fetchFilter, entitySet } = ctx;
 
     const dataSource = (repository as { dataSource?: juggler.DataSource }).dataSource;
     if (!dataSource || typeof dataSource.execute !== 'function') {
       return undefined;
     }
+    let declineReason: string | undefined;
+    const noteDeclineReason = (reason?: string) => {
+      if (declineReason || !reason) return;
+      declineReason = reason;
+    };
 
     if (fetchFilter.include && Array.isArray(fetchFilter.include) && fetchFilter.include.length) {
       return undefined;
@@ -134,6 +148,8 @@ export class MySqlApplyExecutor implements ODataApplyExecutor {
       resolveField: (field) => joinManager.resolveField(field),
       getJoinClauses: () => joinManager.getJoinClauses(),
       getJoinCount: () => joinManager.joinCount,
+      consumeLastError: () => joinManager.consumeLastErrorReason(),
+      noteDeclineReason,
     };
 
     const stageResults: StageSqlBuildResult[] = [];
@@ -149,6 +165,8 @@ export class MySqlApplyExecutor implements ODataApplyExecutor {
       const stageName = `stage${stageIndex}`;
       const isFinalStage = stageIndex === stages.length - 1;
 
+      declineReason = undefined;
+
       const stageResult = this.buildStageSql(stageItem, {
         stageIndex,
         stageName,
@@ -158,7 +176,7 @@ export class MySqlApplyExecutor implements ODataApplyExecutor {
         where: stageIndex === 0 ? fetchWhere : undefined,
       });
       if (!stageResult) {
-        return undefined;
+        return declineReason ? { declineReason } : undefined;
       }
 
       stageResults.push(stageResult);
@@ -303,7 +321,10 @@ export class MySqlApplyExecutor implements ODataApplyExecutor {
 
     for (const field of stage.spec.groupBy ?? []) {
       const resolved = source.resolveField(field);
-      if (!resolved) return undefined;
+      if (!resolved) {
+        source.noteDeclineReason?.(source.consumeLastError?.() ?? 'field-resolution');
+        return undefined;
+      }
       selectParts.push(`${resolved.column} AS ${quoteIdentifier(field)}`);
       groupByParts.push(resolved.column);
       outputColumns.add(field);
@@ -312,7 +333,10 @@ export class MySqlApplyExecutor implements ODataApplyExecutor {
     for (const expr of stage.spec.aggregates) {
       if (!SUPPORTED_AGGREGATES.has(expr.operator)) return undefined;
       const resolved = expr.field ? source.resolveField(expr.field) : undefined;
-      if (expr.field && !resolved) return undefined;
+      if (expr.field && !resolved) {
+        source.noteDeclineReason?.(source.consumeLastError?.() ?? 'field-resolution');
+        return undefined;
+      }
       const fragment = this.buildAggregateFragment(expr.operator, resolved?.column);
       if (!fragment) return undefined;
       const alias = expr.alias || `${expr.operator}`;
@@ -330,11 +354,7 @@ export class MySqlApplyExecutor implements ODataApplyExecutor {
     sqlParts.push(...joinClauses);
 
     if (where) {
-      const whereClause = this.buildWhereClause(
-        where,
-        (field) => source.resolveField(field),
-        params,
-      );
+      const whereClause = this.buildWhereClause(where, source, params);
       if (whereClause === null) return undefined;
       if (whereClause) {
         sqlParts.push(`WHERE ${whereClause}`);
@@ -349,7 +369,7 @@ export class MySqlApplyExecutor implements ODataApplyExecutor {
 
     const havingClause = this.buildHavingClause(
       stage.postAggregationFilters,
-      (field) => source.resolveField(field),
+      source,
       stage.spec,
       params,
     );
@@ -547,7 +567,7 @@ export class MySqlApplyExecutor implements ODataApplyExecutor {
 
   private buildHavingClause(
     filters: ParsedExpression[] | undefined,
-    resolver: (field: string) => ColumnResolution | undefined,
+    source: StageSource,
     stageSpec: AggregationSpec,
     params: unknown[],
   ): string | null | undefined {
@@ -556,7 +576,7 @@ export class MySqlApplyExecutor implements ODataApplyExecutor {
     const clauses: string[] = [];
 
     for (const expr of filters) {
-      const translated = this.translateHavingExpression(expr, resolver, stageSpec, params);
+      const translated = this.translateHavingExpression(expr, source, stageSpec, params);
       if (!translated) {
         params.length = start;
         return null;
@@ -574,7 +594,7 @@ export class MySqlApplyExecutor implements ODataApplyExecutor {
 
   private translateHavingExpression(
     expr: ParsedExpression,
-    resolver: (field: string) => ColumnResolution | undefined,
+    source: StageSource,
     stageSpec: AggregationSpec,
     params: unknown[],
   ): string | undefined {
@@ -585,14 +605,14 @@ export class MySqlApplyExecutor implements ODataApplyExecutor {
           expr.field,
           expr.comparator,
           expr.value,
-          resolver,
+          source,
           stageSpec,
           params,
         );
       case 'logical': {
         const parts: string[] = [];
         for (const child of expr.expressions) {
-          const translated = this.translateHavingExpression(child, resolver, stageSpec, params);
+          const translated = this.translateHavingExpression(child, source, stageSpec, params);
           if (!translated) {
             params.length = start;
             return undefined;
@@ -608,7 +628,7 @@ export class MySqlApplyExecutor implements ODataApplyExecutor {
           : parts.map((p) => `(${p})`).join(` ${expr.type.toUpperCase()} `);
       }
       case 'not': {
-        const inner = this.translateHavingExpression(expr.expr, resolver, stageSpec, params);
+        const inner = this.translateHavingExpression(expr.expr, source, stageSpec, params);
         if (!inner) {
           params.length = start;
           return undefined;
@@ -625,30 +645,30 @@ export class MySqlApplyExecutor implements ODataApplyExecutor {
     field: string,
     comparator: string,
     value: unknown,
-    resolver: (field: string) => ColumnResolution | undefined,
+    source: StageSource,
     stageSpec: AggregationSpec,
     params: unknown[],
   ): string | undefined {
-    const columnSql = this.resolveHavingField(field, resolver, stageSpec);
-    if (!columnSql) return undefined;
+    const resolution = this.resolveHavingField(field, source, stageSpec);
+    if (!resolution) return undefined;
     const start = params.length;
 
     switch (comparator) {
       case 'eq':
-        if (value === null) return `${columnSql} IS NULL`;
-        params.push(value);
-        return `${columnSql} = ?`;
+        if (value === null) return `${resolution.column} IS NULL`;
+        params.push(this.normalizePrimitiveParam(resolution.primitiveKind, value));
+        return `${resolution.column} = ?`;
       case 'neq':
-        if (value === null) return `${columnSql} IS NOT NULL`;
-        params.push(value);
-        return `${columnSql} <> ?`;
+        if (value === null) return `${resolution.column} IS NOT NULL`;
+        params.push(this.normalizePrimitiveParam(resolution.primitiveKind, value));
+        return `${resolution.column} <> ?`;
       case 'gt':
       case 'ge':
       case 'lt':
       case 'le': {
-        params.push(value);
+        params.push(this.normalizePrimitiveParam(resolution.primitiveKind, value));
         const map: Record<string, string> = { gt: '>', ge: '>=', lt: '<', le: '<=' };
-        return `${columnSql} ${map[comparator]} ?`;
+        return `${resolution.column} ${map[comparator]} ?`;
       }
       default:
         params.length = start;
@@ -658,26 +678,26 @@ export class MySqlApplyExecutor implements ODataApplyExecutor {
 
   private resolveHavingField(
     field: string,
-    resolver: (field: string) => ColumnResolution | undefined,
+    source: StageSource,
     stageSpec: AggregationSpec,
-  ): string | undefined {
+  ): ColumnResolution | undefined {
     if (!field) return undefined;
     const aggregateMatch = stageSpec.aggregates.find((a) => a.alias === field);
     if (aggregateMatch) {
-      return quoteIdentifier(field);
+      const quoted = quoteIdentifier(field);
+      return { column: quoted, rawColumn: quoted };
     }
-    if (stageSpec.groupBy.includes(field)) {
-      const resolved = resolver(field);
-      return resolved?.column;
+    const resolved = source.resolveField(field);
+    if (!resolved) {
+      source.noteDeclineReason?.(source.consumeLastError?.() ?? 'field-resolution');
     }
-    const resolved = resolver(field);
-    if (resolved) return resolved.column;
-    // Allow matching by alias even when alias is lower/upper variations
+    if (resolved) return resolved;
     const aggregateInsensitive = stageSpec.aggregates.find(
       (a) => (a.alias ?? '').toLowerCase() === field.toLowerCase(),
     );
     if (aggregateInsensitive) {
-      return quoteIdentifier(aggregateInsensitive.alias);
+      const quoted = quoteIdentifier(aggregateInsensitive.alias ?? '');
+      return { column: quoted, rawColumn: quoted };
     }
     return undefined;
   }
@@ -715,12 +735,12 @@ export class MySqlApplyExecutor implements ODataApplyExecutor {
 
   private buildWhereClause(
     where: Where<DataObject<AnyObject>> | undefined,
-    resolver: (field: string) => ColumnResolution | undefined,
+    source: StageSource,
     params: unknown[],
   ): string | null | undefined {
     if (!where || !Object.keys(where).length) return undefined;
     const start = params.length;
-    const clause = this.visitWhereNode(where as AnyObject, resolver, params);
+    const clause = this.visitWhereNode(where as AnyObject, source, params);
     if (!clause) {
       params.length = start;
       return null;
@@ -730,14 +750,14 @@ export class MySqlApplyExecutor implements ODataApplyExecutor {
 
   private visitWhereNode(
     node: AnyObject,
-    resolver: (field: string) => ColumnResolution | undefined,
+    source: StageSource,
     params: unknown[],
   ): string | undefined {
     const startLength = params.length;
     if (Array.isArray(node)) {
       const parts: string[] = [];
       for (const entry of node) {
-        const part = this.visitWhereNode(entry, resolver, params);
+        const part = this.visitWhereNode(entry, source, params);
         if (!part) {
           params.length = startLength;
           return undefined;
@@ -757,7 +777,7 @@ export class MySqlApplyExecutor implements ODataApplyExecutor {
         if (!arrayVal.length) continue;
         const subParts: string[] = [];
         for (const entry of arrayVal) {
-          const sub = this.visitWhereNode(entry as AnyObject, resolver, params);
+          const sub = this.visitWhereNode(entry as AnyObject, source, params);
           if (!sub) {
             params.length = startLength;
             return undefined;
@@ -770,12 +790,13 @@ export class MySqlApplyExecutor implements ODataApplyExecutor {
         clauses.push(joined);
         continue;
       }
-      const resolved = resolver(key);
+      const resolved = source.resolveField(key);
       if (!resolved) {
         params.length = startLength;
+        source.noteDeclineReason?.(source.consumeLastError?.() ?? 'field-resolution');
         return undefined;
       }
-      const condition = this.buildPropertyCondition(resolved.column, value, params);
+      const condition = this.buildPropertyCondition(resolved, value, params);
       if (!condition) {
         params.length = startLength;
         return undefined;
@@ -790,16 +811,19 @@ export class MySqlApplyExecutor implements ODataApplyExecutor {
   }
 
   private buildPropertyCondition(
-    column: string,
+    resolution: ColumnResolution,
     value: unknown,
     params: unknown[],
   ): string | undefined {
+    const column = resolution.column;
     const startLength = params.length;
+    const normalizeParam = (input: unknown) =>
+      this.normalizePrimitiveParam(resolution.primitiveKind, input);
     if (value == null || typeof value !== 'object' || value instanceof Date) {
       if (value === null) {
         return `${column} IS NULL`;
       }
-      params.push(value);
+      params.push(normalizeParam(value));
       return `${column} = ?`;
     }
 
@@ -811,7 +835,7 @@ export class MySqlApplyExecutor implements ODataApplyExecutor {
             fragments.push(`${column} IS NULL`);
             break;
           }
-          params.push(operand);
+          params.push(normalizeParam(operand));
           fragments.push(`${column} = ?`);
           break;
         }
@@ -820,7 +844,7 @@ export class MySqlApplyExecutor implements ODataApplyExecutor {
             fragments.push(`${column} IS NOT NULL`);
             break;
           }
-          params.push(operand);
+          params.push(normalizeParam(operand));
           fragments.push(`${column} <> ?`);
           break;
         }
@@ -828,7 +852,7 @@ export class MySqlApplyExecutor implements ODataApplyExecutor {
         case 'gte':
         case 'lt':
         case 'lte': {
-          params.push(operand);
+          params.push(normalizeParam(operand));
           const opMap: Record<string, string> = { gt: '>', gte: '>=', lt: '<', lte: '<=' };
           fragments.push(`${column} ${opMap[operator]} ?`);
           break;
@@ -841,7 +865,7 @@ export class MySqlApplyExecutor implements ODataApplyExecutor {
           }
           const placeholders: string[] = [];
           for (const entry of operand) {
-            params.push(entry);
+            params.push(normalizeParam(entry));
             placeholders.push(`?`);
           }
           const keyword = operator === 'inq' ? 'IN' : 'NOT IN';
@@ -885,6 +909,20 @@ export class MySqlApplyExecutor implements ODataApplyExecutor {
       return undefined;
     }
     return fragments.length === 1 ? fragments[0] : `(${fragments.join(' AND ')})`;
+  }
+
+  private normalizePrimitiveParam(
+    kind: PrimitivePropertyKind | undefined,
+    value: unknown,
+  ): unknown {
+    if (value === null || value === undefined) return value;
+    if (kind === 'boolean') {
+      if (typeof value === 'string') {
+        return value.toLowerCase() === 'true' ? 'true' : 'false';
+      }
+      return value ? 'true' : 'false';
+    }
+    return value;
   }
 
   private getBaseSqlMetadata(
@@ -934,6 +972,7 @@ class NavigationJoinManager {
   private readonly joinOrder: string[] = [];
   private aliasCounter = 0;
   private readonly navigationMap: Map<string, ResolvedNavigationPath>;
+  private lastErrorReason?: string;
 
   constructor(
     private readonly baseModel: typeof Entity,
@@ -947,6 +986,7 @@ class NavigationJoinManager {
   }
 
   resolveField(field: string): ColumnResolution | undefined {
+    this.lastErrorReason = undefined;
     if (!field) return undefined;
     if (!field.includes('/')) {
       const metadata = this.metadataProvider(this.baseModel);
@@ -961,27 +1001,54 @@ class NavigationJoinManager {
     }
 
     const resolved = this.navigationMap.get(field) ?? this.tryResolvePath(field);
-    if (!resolved?.joins.length) {
+    if (!resolved) {
       return undefined;
     }
 
-    const chain = this.ensureJoinChain(resolved);
-    if (!chain) return undefined;
+    const hasNavigation = resolved.joins.length > 0;
+    let targetAlias = this.baseAlias;
+    let targetModel = this.baseModel;
+    if (hasNavigation) {
+      const chain = this.ensureJoinChain(resolved);
+      if (!chain) return undefined;
+      targetAlias = chain.alias;
+      targetModel = chain.targetModel;
+    }
 
     const propertyPath = resolved.propertyPath;
-    if (!propertyPath || propertyPath.includes('/')) {
-      // TODO: Structured property paths currently validate under strict mode but are not pushed
-      //       down to SQL. Add pushdown support once translation logic understands nested paths.
+    if (!propertyPath) {
       return undefined;
     }
 
-    const metadata = this.metadataProvider(chain.targetModel);
+    const propertySegments = propertyPath.split('/').filter(Boolean);
+    if (!propertySegments.length) {
+      return undefined;
+    }
+
+    const metadata = this.metadataProvider(targetModel);
     if (!metadata) return undefined;
-    const columnName = this.resolveColumnName(metadata, propertyPath);
+
+    if (propertySegments.length > 1) {
+      const structured = resolveStructuredPropertySegments(targetModel, propertySegments);
+      if (!structured) {
+        this.lastErrorReason = 'structured-path-unsupported';
+        return undefined;
+      }
+      const columnName = this.resolveColumnName(metadata, structured.rootProperty);
+      if (!columnName) return undefined;
+      return this.buildStructuredColumnResolution(
+        targetAlias,
+        columnName,
+        structured.jsonPath,
+        structured.primitiveKind,
+      );
+    }
+
+    const columnName = this.resolveColumnName(metadata, propertySegments[0]);
     if (!columnName) return undefined;
     const quoted = quoteIdentifier(columnName);
     return {
-      column: `${chain.alias}.${quoted}`,
+      column: `${targetAlias}.${quoted}`,
       rawColumn: quoted,
     };
   }
@@ -995,6 +1062,12 @@ class NavigationJoinManager {
 
   get joinCount(): number {
     return this.joinOrder.length;
+  }
+
+  consumeLastErrorReason(): string | undefined {
+    const reason = this.lastErrorReason;
+    this.lastErrorReason = undefined;
+    return reason;
   }
 
   private nextAlias(): string {
@@ -1012,6 +1085,23 @@ class NavigationJoinManager {
     const map = metadata.columnMap ?? {};
     const candidate = map[property] ?? property;
     return candidate;
+  }
+
+  private buildStructuredColumnResolution(
+    alias: string,
+    columnName: string,
+    jsonSegments: string[],
+    primitiveKind: PrimitivePropertyKind,
+  ): ColumnResolution {
+    const baseRef = `${alias}.${quoteIdentifier(columnName)}`;
+    const pathLiteral = buildMysqlJsonPathLiteral(jsonSegments);
+    const extractor = `JSON_EXTRACT(${baseRef}, ${pathLiteral})`;
+    const typedExpression = castMysqlJsonValue(extractor, primitiveKind);
+    return {
+      column: typedExpression,
+      rawColumn: quoteIdentifier(columnName),
+      primitiveKind,
+    };
   }
 
   private tryResolvePath(field: string): ResolvedNavigationPath | undefined {
@@ -1059,6 +1149,34 @@ class NavigationJoinManager {
     }
 
     return { alias: currentAlias, targetModel: currentModel };
+  }
+}
+
+function buildMysqlJsonPathLiteral(segments: string[]): string {
+  let path = '$';
+  for (const segment of segments) {
+    if (/^[A-Za-z0-9_]+$/.test(segment)) {
+      path += `.${segment}`;
+    } else {
+      const escaped = segment.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+      path += `."${escaped}"`;
+    }
+  }
+  const escapedPath = path.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+  return `'${escapedPath}'`;
+}
+
+function castMysqlJsonValue(extractor: string, kind: PrimitivePropertyKind): string {
+  switch (kind) {
+    case 'number':
+      return `CAST(JSON_UNQUOTE(${extractor}) AS DECIMAL(65,30))`;
+    case 'date':
+      return `CAST(JSON_UNQUOTE(${extractor}) AS DATETIME)`;
+    case 'boolean':
+    case 'buffer':
+    case 'string':
+    default:
+      return `JSON_UNQUOTE(${extractor})`;
   }
 }
 
