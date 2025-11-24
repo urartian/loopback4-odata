@@ -1,5 +1,5 @@
 import { inject, Provider } from '@loopback/core';
-import { Middleware, MiddlewareContext } from '@loopback/rest';
+import { Middleware, MiddlewareContext, Request } from '@loopback/rest';
 import { ODATA_BINDINGS, ODataLogger } from '../keys';
 import {
   ODataConfig,
@@ -8,6 +8,7 @@ import {
   ODataTelemetryState,
 } from '../types';
 import { emitTelemetryEvent } from '../util/telemetry';
+import { gatherRequestUrls, normalizeBasePath, pathMatches } from '../util/base-path';
 
 interface CapturedPayload {
   body?: unknown;
@@ -21,10 +22,10 @@ export class RequestLoggingProvider implements Provider<Middleware> {
   ) {}
 
   value(): Middleware {
-    const basePath = this.normalizeBasePath(this.cfg?.basePath);
+    const basePath = normalizeBasePath(this.cfg?.basePath);
 
     return async (ctx, next) => {
-      if (!this.isODataRequest(ctx.request.url ?? '', basePath)) {
+      if (!this.isODataRequest(ctx.request, basePath)) {
         return next();
       }
 
@@ -77,30 +78,13 @@ export class RequestLoggingProvider implements Provider<Middleware> {
     };
   }
 
-  private normalizeBasePath(configured?: string): string {
-    let basePath = configured?.trim() ?? '';
-    if (!basePath) return '/odata';
-    if (!basePath.startsWith('/')) basePath = `/${basePath}`;
-    if (basePath.length > 1 && basePath.endsWith('/')) {
-      basePath = basePath.slice(0, -1);
+  private isODataRequest(request: Request, configuredBasePath: string): boolean {
+    const urls = gatherRequestUrls(request);
+    for (const url of urls) {
+      if (pathMatches(url, '/odata') || pathMatches(url, configuredBasePath)) {
+        return true;
+      }
     }
-    return basePath || '/';
-  }
-
-  private isODataRequest(url: string, configuredBasePath: string): boolean {
-    if (!url) return false;
-    return this.pathMatches(url, '/odata') || this.pathMatches(url, configuredBasePath);
-  }
-
-  private pathMatches(path: string, base: string): boolean {
-    if (!base) return false;
-    if (base === '/') {
-      return path.startsWith('/');
-    }
-    if (path === base) return true;
-    if (path.startsWith(`${base}/`)) return true;
-    if (path.startsWith(`${base}?`)) return true;
-    if (path.startsWith(`${base}#`)) return true;
     return false;
   }
 

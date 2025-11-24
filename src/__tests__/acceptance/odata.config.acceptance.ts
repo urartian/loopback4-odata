@@ -105,6 +105,43 @@ describe('OData config plumbing acceptance', () => {
     await client.get('/Products').expect(200);
   });
 
+  it('honors custom basePath when the Rest server is mounted under the same prefix', async function (this: any) {
+    await replaceApp(this, {}, async (freshApp) => {
+      freshApp.basePath('/api/odata');
+    });
+
+    const serviceDoc = await client.get('/api/odata').expect(200);
+    expect(serviceDoc.headers['odata-version']).to.equal('4.0');
+    expect(serviceDoc.body['@odata.context']).to.equal('/api/odata/$metadata');
+
+    const metadata = await client.get('/api/odata/$metadata').expect(200);
+    expect(metadata.text ?? metadata.body).to.be.ok();
+
+    await client.get('/api/odata/Products').expect(200);
+  });
+
+  it('executes $batch requests that use the configured basePath', async () => {
+    const res = await client
+      .post('/api/odata/$batch')
+      .send({
+        requests: [
+          { id: 'lookup', method: 'GET', url: '/api/odata/Products(1)' },
+          { id: 'list', method: 'GET', url: '/api/odata/Products?$top=1' },
+        ],
+      })
+      .expect(200);
+
+    const responses = res.body.responses as Array<{ id?: string; status: number; body: any }>;
+    expect(responses).to.be.Array();
+    const lookup = responses.find((entry) => entry.id === 'lookup');
+    const list = responses.find((entry) => entry.id === 'list');
+    expect(lookup?.status).to.equal(200);
+    expect(lookup?.body?.id).to.equal(1);
+    expect(list?.status).to.equal(200);
+    expect(Array.isArray(list?.body?.value)).to.be.true();
+    expect(list?.body?.value).to.have.lengthOf(1);
+  });
+
   it('clamps $top according to maxTop when strict=false', async () => {
     const res = await client.get('/api/odata/Products').query({ $top: '5' }).expect(200);
     expect(res.body.value).to.be.Array();

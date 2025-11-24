@@ -48,16 +48,16 @@ describe('root basePath middleware handling', () => {
 
   it('treats root basePath as matching any absolute path in request-context provider', () => {
     const provider = new ODataRequestContextProvider({ basePath: '/' } as any);
-    const pathMatches = (provider as any).pathMatches.bind(provider);
-    assert.equal(pathMatches('/Products', '/'), true);
-    assert.equal(pathMatches('/?foo=1', '/'), true);
+    const isODataRequest = (provider as any).isODataRequest.bind(provider);
+    assert.equal(isODataRequest({ url: '/Products' }, '/'), true);
+    assert.equal(isODataRequest({ url: '/?foo=1' }, '/'), true);
   });
 
   it('treats root basePath as matching any absolute path in request-logging provider', () => {
     const provider = new RequestLoggingProvider({ basePath: '/' } as any, noopLogger);
-    const pathMatches = (provider as any).pathMatches.bind(provider);
-    assert.equal(pathMatches('/Orders', '/'), true);
-    assert.equal(pathMatches('/#fragment', '/'), true);
+    const isODataRequest = (provider as any).isODataRequest.bind(provider);
+    assert.equal(isODataRequest({ url: '/Orders' }, '/'), true);
+    assert.equal(isODataRequest({ url: '/#fragment' }, '/'), true);
   });
 
   it('does not rewrite non-OData routes containing parentheses', async () => {
@@ -98,5 +98,16 @@ describe('root basePath middleware handling', () => {
     await middleware(ctx, async () => undefined);
 
     assert.equal(ctx.request.url, '/odata/Products/Key%3DXYZ');
+  });
+
+  it('uses originalUrl when Express strips the mounted basePath segment', async () => {
+    const provider = new OdataPathRewriterProvider({ basePath: '/api/odata' } as any, noopLogger);
+    const middleware = provider.value();
+    const ctx = createMiddlewareContext('/');
+    (ctx.request as any).originalUrl = '/api/odata';
+
+    await middleware(ctx, async () => undefined);
+
+    assert.equal(ctx.request.url, '/odata/');
   });
 });

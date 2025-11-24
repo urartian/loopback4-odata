@@ -1577,6 +1577,7 @@ Telemetry respects LoopBack’s logging pipeline—you can forward the enriched 
 - [ ] Draft workflow for deep updates
 - [ ] Additional `$apply` pushdown adapters (MSSQL, Mongo aggregation)
 - [ ] Deep update / draft handling for composition hierarchies
+- [ ] Opt-in cascade delete for composition-style relations (hook/transaction-aware)
 - [ ] Rich lambda grammar with nested `any` / `all` and mixed logical operators
 - [ ] Virtual/calculated field exposure with CSDL annotations
 - [ ] Media stream and attachment handling via `$value` routes and `HasStream` entity sets

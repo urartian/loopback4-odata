@@ -6,6 +6,7 @@ import { ODataConfig } from '../types';
 import { ODATA_VERSION } from '../constants';
 import { markUndocumentedOperation } from '../util/openapi';
 import { acceptsAnyMediaType } from '../util/accept';
+import { normalizeBasePath } from '../util/base-path';
 
 const SERVICE_DOCUMENT_OPERATION_SPEC = markUndocumentedOperation({
   responses: {
@@ -47,16 +48,6 @@ interface ServiceDocumentEntry {
 interface ServiceDocumentPayload {
   '@odata.context': string;
   value: ServiceDocumentEntry[];
-}
-
-function normalizeBasePath(configured?: string): string {
-  let basePath = configured?.trim() ?? '';
-  if (!basePath) return '/odata';
-  if (!basePath.startsWith('/')) basePath = `/${basePath}`;
-  if (basePath.length > 1 && basePath.endsWith('/')) {
-    basePath = basePath.slice(0, -1);
-  }
-  return basePath || '/';
 }
 
 export class ODataServiceDocumentController {

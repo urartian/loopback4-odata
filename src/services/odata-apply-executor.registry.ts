@@ -9,6 +9,7 @@ export interface ApplyExecutorTelemetryPayload {
   rows?: number;
   joinCount?: number;
   executorId?: string;
+  reason?: string;
 }
 
 export interface ApplyOrderDescriptor {
@@ -50,6 +51,11 @@ export interface ODataApplyExecutorResult {
   nextSkipTokenValues?: string[];
 }
 
+/** Indicates the executor declined pushdown with a recorded reason. */
+export interface ODataApplyExecutorDecline {
+  declineReason: string;
+}
+
 export interface ODataApplyExecutor {
   readonly id: string;
   readonly capabilities?: {
@@ -66,7 +72,9 @@ export interface ODataApplyExecutor {
    * Execute the $apply pipeline using pushdown semantics. Return `undefined`
    * to signal the caller to fall back to the in-memory implementation.
    */
-  execute(ctx: ODataApplyExecutorContext): Promise<ODataApplyExecutorResult | undefined>;
+  execute(
+    ctx: ODataApplyExecutorContext,
+  ): Promise<ODataApplyExecutorResult | ODataApplyExecutorDecline | undefined>;
 }
 
 @injectable({ scope: BindingScope.SINGLETON })

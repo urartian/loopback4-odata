@@ -18,7 +18,6 @@ import {
 import {
   DefaultCrudRepository,
   Entity,
-  Model,
   Filter,
   FilterExcludingWhere,
   InclusionFilter,
@@ -89,6 +88,11 @@ import {
   NavigationPathError,
 } from '../util/navigation-path';
 import {
+  PrimitivePropertyKind,
+  classifyPrimitiveProperty,
+  resolveStructuredPropertySegments,
+} from '../util/structured-metadata';
+import {
   ApplyExecutionPlan,
   ApplyAggregationStage,
   buildApplyExecutionPlan,
@@ -123,21 +127,6 @@ type SearchComparisonStrategy = {
   positive: 'like' | 'ilike';
   negative: 'nlike' | 'nilike';
 };
-
-interface StructuredPropertyNode {
-  primitiveProps: Set<string>;
-  structuredProps: Map<string, StructuredPropertyNode>;
-}
-
-interface StructuredBuildContext {
-  modelCtors: Set<Function>;
-  schemaObjects: Set<object>;
-}
-
-interface ResolvedJsonSchema {
-  schema: AnyObject;
-  definitions: Record<string, AnyObject>;
-}
 
 const DB_METHODS: ReadonlySet<string> = new Set([
   'find',
@@ -204,8 +193,6 @@ interface OrderDescriptor {
   field: string;
   direction: 'ASC' | 'DESC';
 }
-
-type PrimitivePropertyKind = 'string' | 'number' | 'boolean' | 'date' | 'buffer';
 
 interface PropertyNormalizationPlan {
   kind: 'datetimeoffset' | 'date' | 'timeOfDay' | 'duration' | 'int64' | 'decimal';
@@ -609,7 +596,6 @@ export function defineODataCrudController(def: EntitySetDef) {
     requestStateCache?: ODataRequestState | null;
     searchComparisonStrategy?: SearchComparisonStrategy;
     modelPropertyCache = new WeakMap<typeof Entity, Set<string>>();
-    structuredPropertyCache = new WeakMap<typeof Entity, Map<string, StructuredPropertyNode>>();
 
     constructor(
       @inject(repoBindingKey)
@@ -3201,13 +3187,14 @@ export function defineODataCrudController(def: EntitySetDef) {
       };
 
       try {
-        const execResult = await executor.execute(context);
-        if (!execResult) {
+        const execOutcome = await executor.execute(context);
+        if (!execOutcome) {
+          const reason = 'executor-declined';
           this.emitApplyTelemetry('pushdown', stageIndex, planStages.length, {
-            reason: 'executor-declined',
+            reason,
           });
           this.logApplyFallback(
-            'executor-declined',
+            reason,
             {
               entitySet: setName,
               transformations: effectivePipeline.transformations.length,
@@ -3217,6 +3204,22 @@ export function defineODataCrudController(def: EntitySetDef) {
           );
           return undefined;
         }
+        if ('declineReason' in execOutcome) {
+          this.emitApplyTelemetry('pushdown', stageIndex, planStages.length, {
+            reason: execOutcome.declineReason,
+          });
+          this.logApplyFallback(
+            execOutcome.declineReason,
+            {
+              entitySet: setName,
+              transformations: effectivePipeline.transformations.length,
+              rows: 0,
+            },
+            executionPlan,
+          );
+          return undefined;
+        }
+        const execResult = execOutcome;
 
         let working = execResult.rows ?? [];
 
@@ -3753,7 +3756,7 @@ export function defineODataCrudController(def: EntitySetDef) {
     isPrimitiveModelProperty(modelCtor: typeof Entity, propertyName: string): boolean {
       const propDef = this.getModelPropertyDefinition(modelCtor, propertyName);
       if (!propDef) return false;
-      return Boolean(this.classifyPrimitiveProperty(propDef));
+      return Boolean(classifyPrimitiveProperty(propDef));
     }
 
     isStructuredPathAllowed(field: string, options: { requireProperty: boolean }): boolean {
@@ -3784,314 +3787,10 @@ export function defineODataCrudController(def: EntitySetDef) {
       }
     }
 
-    classifyPrimitiveProperty(
-      definition: PropertyDefinition | undefined,
-    ): PrimitivePropertyKind | undefined {
-      if (!definition) return undefined;
-      const jsonSchema = (definition as AnyObject)?.jsonSchema ?? {};
-      const schemaType =
-        typeof jsonSchema.type === 'string' ? jsonSchema.type.toLowerCase() : undefined;
-      const schemaFormat =
-        typeof jsonSchema.format === 'string' ? jsonSchema.format.toLowerCase() : undefined;
-      const rawType = (definition as AnyObject)?.type;
-      const normalizedType =
-        typeof rawType === 'function'
-          ? rawType.name.toLowerCase()
-          : typeof rawType === 'string'
-            ? rawType.toLowerCase()
-            : undefined;
-
-      const candidates = [
-        normalizedType,
-        schemaType,
-        schemaFormat === 'binary' || schemaFormat === 'base64' || schemaFormat === 'byte'
-          ? 'buffer'
-          : undefined,
-      ].filter(Boolean) as string[];
-
-      const candidate = candidates[0];
-      if (candidate === 'string') return 'string';
-      if (
-        candidate === 'number' ||
-        candidate === 'float' ||
-        candidate === 'double' ||
-        candidate === 'decimal' ||
-        candidate === 'integer'
-      ) {
-        return 'number';
-      }
-      if (candidate === 'boolean') return 'boolean';
-      if (
-        candidate === 'date' ||
-        candidate === 'datetime' ||
-        candidate === 'datetimeoffset' ||
-        schemaFormat === 'date-time' ||
-        schemaFormat === 'date'
-      ) {
-        return 'date';
-      }
-      if (candidate === 'buffer' || candidate === 'binary') return 'buffer';
-
-      if (rawType === String) return 'string';
-      if (rawType === Number) return 'number';
-      if (rawType === Boolean) return 'boolean';
-      if (rawType === Date) return 'date';
-      if (typeof Buffer !== 'undefined' && rawType === Buffer) return 'buffer';
-
-      return undefined;
-    }
-
     validateStructuredPropertyPath(modelCtor: typeof Entity, segments: string[]): boolean {
       if (!modelCtor || !segments.length) return false;
-      const [current, ...rest] = segments;
-      if (!current) return false;
-      const definition = this.getModelPropertyDefinition(modelCtor, current);
-      if (!definition) return false;
-      const primitiveKind = this.classifyPrimitiveProperty(definition);
-      if (!rest.length) {
-        return Boolean(primitiveKind);
-      }
-      if (primitiveKind) return false;
-      const structured = this.getStructuredPropertyMetadata(modelCtor).get(current);
-      if (!structured) return false;
-      return this.validateStructuredNodePath(structured, rest);
-    }
-
-    validateStructuredNodePath(node: StructuredPropertyNode, segments: string[]): boolean {
-      let currentNode: StructuredPropertyNode | undefined = node;
-      for (let i = 0; i < segments.length; i++) {
-        const segment = segments[i];
-        if (!segment) return false;
-        const isLast = i === segments.length - 1;
-        if (isLast) {
-          return currentNode?.primitiveProps.has(segment) ?? false;
-        }
-        currentNode = currentNode?.structuredProps.get(segment);
-        if (!currentNode) return false;
-      }
-      return false;
-    }
-
-    getStructuredPropertyMetadata(modelCtor: typeof Entity): Map<string, StructuredPropertyNode> {
-      if (!modelCtor) return new Map<string, StructuredPropertyNode>();
-      const cached = this.structuredPropertyCache.get(modelCtor);
-      if (cached) return cached;
-      const metadata = this.buildStructuredPropertyMetadata(modelCtor);
-      this.structuredPropertyCache.set(modelCtor, metadata);
-      return metadata;
-    }
-
-    buildStructuredPropertyMetadata(modelCtor: typeof Entity): Map<string, StructuredPropertyNode> {
-      const metadata = new Map<string, StructuredPropertyNode>();
-      const definition =
-        ensureModelDefinitionWithRelations(modelCtor) ?? this.getModelDefinition(modelCtor);
-      if (!definition) return metadata;
-      const ctx = this.createStructuredBuildContext();
-      for (const [name, propDef] of Object.entries(definition.properties ?? {})) {
-        const node = this.buildStructuredPropertyNode(
-          propDef as PropertyDefinition | undefined,
-          ctx,
-        );
-        if (node) {
-          metadata.set(name, node);
-        }
-      }
-      return metadata;
-    }
-
-    createStructuredBuildContext(): StructuredBuildContext {
-      return {
-        modelCtors: new Set<Function>(),
-        schemaObjects: new Set<object>(),
-      };
-    }
-
-    buildStructuredPropertyNode(
-      propDef: PropertyDefinition | undefined,
-      ctx: StructuredBuildContext,
-    ): StructuredPropertyNode | undefined {
-      if (!propDef) return undefined;
-      if (this.classifyPrimitiveProperty(propDef)) return undefined;
-      if (this.isArrayPropertyDefinition(propDef)) return undefined;
-      const structuredCtor = this.resolveStructuredPropertyCtor(propDef);
-      if (structuredCtor) {
-        return this.buildStructuredNodeFromModelCtor(structuredCtor, ctx);
-      }
-      const schema = (propDef as AnyObject)?.jsonSchema;
-      if (schema && typeof schema === 'object') {
-        return this.buildStructuredNodeFromJsonSchema(schema as AnyObject, ctx);
-      }
-      return undefined;
-    }
-
-    resolveStructuredPropertyCtor(
-      propDef: PropertyDefinition | undefined,
-    ): typeof Model | undefined {
-      if (!propDef) return undefined;
-      const rawType = (propDef as AnyObject)?.type;
-      return this.resolveStructuredCtor(rawType);
-    }
-
-    resolveStructuredCtor(candidate: unknown): typeof Model | undefined {
-      if (!candidate) return undefined;
-      if (this.isStructuredModelCtor(candidate)) {
-        return candidate as typeof Model;
-      }
-      if (typeof candidate === 'function') {
-        try {
-          const resolved = (candidate as () => unknown)();
-          if (this.isStructuredModelCtor(resolved)) {
-            return resolved as typeof Model;
-          }
-        } catch {
-          return undefined;
-        }
-      }
-      return undefined;
-    }
-
-    isStructuredModelCtor(value: unknown): value is typeof Model {
-      return typeof value === 'function' && value.prototype instanceof Model;
-    }
-
-    isArrayPropertyDefinition(definition: PropertyDefinition | undefined): boolean {
-      if (!definition) return false;
-      const rawType = (definition as AnyObject)?.type;
-      if (rawType === Array) return true;
-      if (typeof rawType === 'string' && rawType.toLowerCase() === 'array') {
-        return true;
-      }
-      const schemaType = (definition as AnyObject)?.jsonSchema?.type;
-      return typeof schemaType === 'string' && schemaType.toLowerCase() === 'array';
-    }
-
-    buildStructuredNodeFromModelCtor(
-      ctor: typeof Model,
-      ctx: StructuredBuildContext,
-    ): StructuredPropertyNode | undefined {
-      if (!ctor || ctx.modelCtors.has(ctor)) return undefined;
-      ctx.modelCtors.add(ctor);
-      try {
-        const definition =
-          ensureModelDefinitionWithRelations(ctor as unknown as typeof Entity) ??
-          this.getModelDefinition(ctor as unknown as typeof Entity);
-        return this.buildStructuredNodeFromDefinition(definition, ctx);
-      } finally {
-        ctx.modelCtors.delete(ctor);
-      }
-    }
-
-    buildStructuredNodeFromDefinition(
-      definition: ModelDefinition | undefined,
-      ctx: StructuredBuildContext,
-    ): StructuredPropertyNode | undefined {
-      if (!definition) return undefined;
-      const node: StructuredPropertyNode = {
-        primitiveProps: new Set<string>(),
-        structuredProps: new Map<string, StructuredPropertyNode>(),
-      };
-      for (const [name, propDef] of Object.entries(definition.properties ?? {})) {
-        const primitiveKind = this.classifyPrimitiveProperty(
-          propDef as PropertyDefinition | undefined,
-        );
-        if (primitiveKind) {
-          node.primitiveProps.add(name);
-          continue;
-        }
-        const childNode = this.buildStructuredPropertyNode(
-          propDef as PropertyDefinition | undefined,
-          ctx,
-        );
-        if (childNode) {
-          node.structuredProps.set(name, childNode);
-        }
-      }
-      if (!node.primitiveProps.size && !node.structuredProps.size) return undefined;
-      return node;
-    }
-
-    buildStructuredNodeFromJsonSchema(
-      schemaInput: AnyObject,
-      ctx: StructuredBuildContext,
-      inheritedDefinitions?: Record<string, AnyObject>,
-    ): StructuredPropertyNode | undefined {
-      const resolved = this.resolveJsonSchemaWithRefs(schemaInput, inheritedDefinitions);
-      if (!resolved) return undefined;
-      const schema = resolved.schema;
-      if (!schema || typeof schema !== 'object') return undefined;
-      const properties = (schema as AnyObject).properties;
-      if (!properties || typeof properties !== 'object') return undefined;
-      if (ctx.schemaObjects.has(schema)) return undefined;
-      ctx.schemaObjects.add(schema);
-      const node: StructuredPropertyNode = {
-        primitiveProps: new Set<string>(),
-        structuredProps: new Map<string, StructuredPropertyNode>(),
-      };
-      for (const [name, propSchemaRaw] of Object.entries(properties as Record<string, AnyObject>)) {
-        if (!propSchemaRaw || typeof propSchemaRaw !== 'object') continue;
-        const propResolved = this.resolveJsonSchemaWithRefs(
-          propSchemaRaw as AnyObject,
-          resolved.definitions,
-        );
-        if (!propResolved) continue;
-        const pseudoDefinition = { jsonSchema: propResolved.schema } as PropertyDefinition;
-        const primitiveKind = this.classifyPrimitiveProperty(pseudoDefinition);
-        if (primitiveKind) {
-          node.primitiveProps.add(name);
-          continue;
-        }
-        if (!this.schemaRepresentsStructured(propResolved.schema)) continue;
-        const childNode = this.buildStructuredNodeFromJsonSchema(
-          propResolved.schema,
-          ctx,
-          propResolved.definitions,
-        );
-        if (childNode) {
-          node.structuredProps.set(name, childNode);
-        }
-      }
-      ctx.schemaObjects.delete(schema);
-      if (!node.primitiveProps.size && !node.structuredProps.size) return undefined;
-      return node;
-    }
-
-    resolveJsonSchemaWithRefs(
-      schemaInput: AnyObject,
-      inheritedDefinitions?: Record<string, AnyObject>,
-    ): ResolvedJsonSchema | undefined {
-      if (!schemaInput || typeof schemaInput !== 'object') return undefined;
-      const visited = new Set<string>();
-      let current = schemaInput;
-      let definitions: Record<string, AnyObject> = { ...(inheritedDefinitions ?? {}) };
-      const collectDefinitions = (candidate?: AnyObject) => {
-        const local = candidate?.definitions;
-        if (local && typeof local === 'object') {
-          definitions = { ...definitions, ...(local as Record<string, AnyObject>) };
-        }
-      };
-      collectDefinitions(current);
-      while (typeof current.$ref === 'string') {
-        const ref = current.$ref as string;
-        if (!ref.startsWith('#/definitions/')) return undefined;
-        if (visited.has(ref)) return undefined;
-        visited.add(ref);
-        const key = ref.slice('#/definitions/'.length);
-        const target = definitions[key];
-        if (!target || typeof target !== 'object') {
-          return undefined;
-        }
-        current = target as AnyObject;
-        collectDefinitions(current);
-      }
-      return { schema: current as AnyObject, definitions };
-    }
-
-    schemaRepresentsStructured(schema: AnyObject): boolean {
-      if (!schema || typeof schema !== 'object') return false;
-      const schemaType = typeof schema.type === 'string' ? schema.type.toLowerCase() : undefined;
-      if (schemaType === 'object') return true;
-      if (schema.properties && typeof schema.properties === 'object') return true;
-      return false;
+      const resolution = resolveStructuredPropertySegments(modelCtor, segments);
+      return Boolean(resolution);
     }
 
     isStructuredFieldPath(field: string): boolean {
@@ -4115,28 +3814,9 @@ export function defineODataCrudController(def: EntitySetDef) {
     }
 
     pathRequiresStructuredLookup(modelCtor: typeof Entity, segments: string[]): boolean {
-      if (!modelCtor || !segments.length) return false;
-      const [current, ...rest] = segments;
-      if (!current || !rest.length) return false;
-      const definition = this.getModelPropertyDefinition(modelCtor, current);
-      if (!definition) return false;
-      const primitiveKind = this.classifyPrimitiveProperty(definition);
-      if (primitiveKind) return false;
-      const node = this.getStructuredPropertyMetadata(modelCtor).get(current);
-      if (!node) return false;
-      return this.pathRequiresStructuredLookupNode(node, rest);
-    }
-
-    pathRequiresStructuredLookupNode(node: StructuredPropertyNode, segments: string[]): boolean {
-      if (!segments.length) return false;
-      const [current, ...rest] = segments;
-      if (!current) return false;
-      if (!rest.length) {
-        return node.primitiveProps.has(current);
-      }
-      const child = node.structuredProps.get(current);
-      if (!child) return false;
-      return this.pathRequiresStructuredLookupNode(child, rest);
+      if (!modelCtor || segments.length <= 1) return false;
+      const resolution = resolveStructuredPropertySegments(modelCtor, segments);
+      return Boolean(resolution && resolution.jsonPath.length);
     }
 
     combinePostFilterExpressions(
@@ -5857,7 +5537,7 @@ export function defineODataCrudController(def: EntitySetDef) {
         if (this.isStructuredPathAllowed(field, { requireProperty: true })) return;
       } else {
         const def = this.getModelPropertyDefinition(this.entityCtor, field);
-        const primitive = this.classifyPrimitiveProperty(def);
+        const primitive = classifyPrimitiveProperty(def);
         if (!primitive && options?.allowStructuredLeaf && def) return;
       }
       throw new HttpErrors.BadRequest(`Unknown property in ${clause}: ${field}`);
@@ -7549,7 +7229,7 @@ export function defineODataCrudController(def: EntitySetDef) {
       if (!definition) {
         throw new HttpErrors.NotFound('Property not found.');
       }
-      const primitiveKind = this.classifyPrimitiveProperty(definition);
+      const primitiveKind = classifyPrimitiveProperty(definition);
       if (!primitiveKind) {
         throw new HttpErrors.NotFound('Property does not expose a scalar $value.');
       }

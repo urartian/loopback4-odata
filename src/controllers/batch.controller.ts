@@ -1611,9 +1611,19 @@ export class ODataBatchController {
     req.url = rewrittenUrl;
     const combinedHeaders = this.buildHeadersForRequest(request, parentRequest);
     (req as any).headers = combinedHeaders;
+
+    Object.defineProperty(req, 'path', {
+      enumerable: true,
+      configurable: true,
+      get() {
+        const currentUrl = (req as any).url ?? '';
+        if (typeof currentUrl !== 'string') return '';
+        const qIndex = currentUrl.indexOf('?');
+        return qIndex >= 0 ? currentUrl.slice(0, qIndex) : currentUrl;
+      },
+    });
+
     const queryIndex = rewrittenUrl.indexOf('?');
-    const pathOnly = queryIndex >= 0 ? rewrittenUrl.slice(0, queryIndex) : rewrittenUrl;
-    (req as any).path = pathOnly;
     (req as any).query =
       queryIndex >= 0 && queryIndex < rewrittenUrl.length - 1
         ? this.buildQueryObject(rewrittenUrl.slice(queryIndex + 1))
