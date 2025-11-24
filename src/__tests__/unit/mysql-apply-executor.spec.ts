@@ -269,12 +269,8 @@ describe('MySqlApplyExecutor (multi-stage)', () => {
     expect(execOutcome).to.not.have.property('declineReason');
     expect(executedParams).to.deepEqual(['true', 0]);
     expect(executedSql.includes("JSON_EXTRACT(t.`location`, '$.city')")).to.be.true();
-    expect(
-      executedSql.includes("JSON_EXTRACT(t.`location`, '$.coordinates.lat')"),
-    ).to.be.true();
-    expect(
-      executedSql.includes("JSON_EXTRACT(t.`location`, '$.coordinates.lon')"),
-    ).to.be.true();
+    expect(executedSql.includes("JSON_EXTRACT(t.`location`, '$.coordinates.lat')")).to.be.true();
+    expect(executedSql.includes("JSON_EXTRACT(t.`location`, '$.coordinates.lon')")).to.be.true();
     expect(executedSql.includes('JSON_UNQUOTE')).to.be.true();
   });
 
@@ -450,10 +446,8 @@ describe('MySqlApplyExecutor (multi-stage)', () => {
     const result = execOutcome as ODataApplyExecutorResult;
     expect(executedParams).to.deepEqual(['true']);
     expect(executedSql.includes("JSON_EXTRACT(t.`location`, '$.city')")).to.be.true();
-    expect(
-      executedSql.includes("JSON_EXTRACT(t.`location`, '$.coordinates.lat')"),
-    ).to.be.true();
-    expect(executedSql.includes('JSON_EXTRACT(t.`location`, \'$.isActive\')')).to.be.true();
+    expect(executedSql.includes("JSON_EXTRACT(t.`location`, '$.coordinates.lat')")).to.be.true();
+    expect(executedSql.includes("JSON_EXTRACT(t.`location`, '$.isActive')")).to.be.true();
     expect(executedSql.includes('JSON_UNQUOTE')).to.be.true();
   });
 });

@@ -74,9 +74,7 @@ export interface ODataApplyExecutor {
    */
   execute(
     ctx: ODataApplyExecutorContext,
-  ): Promise<
-    ODataApplyExecutorResult | ODataApplyExecutorDecline | undefined
-  >;
+  ): Promise<ODataApplyExecutorResult | ODataApplyExecutorDecline | undefined>;
 }
 
 @injectable({ scope: BindingScope.SINGLETON })
