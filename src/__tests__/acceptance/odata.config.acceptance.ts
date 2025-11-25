@@ -349,7 +349,7 @@ describe('OData config plumbing acceptance', () => {
       .post('/api/odata/Products')
       .set('x-tenant-id', 'writer')
       .send({ name: 'Rate Limited Gadget', price: 123 })
-      .expect(200);
+      .expect(201);
 
     await client
       .post('/api/odata/Products')
@@ -361,7 +361,7 @@ describe('OData config plumbing acceptance', () => {
       .post('/api/odata/Products')
       .set('x-tenant-id', 'writer-premium')
       .send({ name: 'Premium Gadget', price: 789 })
-      .expect(200);
+      .expect(201);
   });
 
   it('enforces tenant quotas on delete operations', async function (this: any) {
@@ -378,7 +378,7 @@ describe('OData config plumbing acceptance', () => {
     const created = await client
       .post('/api/odata/Products')
       .send({ name: 'Disposable Product', price: 9 })
-      .expect(200);
+      .expect(201);
 
     const productId = created.body.id;
     expect(productId).to.be.a.Number();
@@ -398,7 +398,7 @@ describe('OData config plumbing acceptance', () => {
       },
     });
 
-    const newOrder = await client.post('/api/odata/Orders').send({ total: 0 }).expect(200);
+    const newOrder = await client.post('/api/odata/Orders').send({ total: 0 }).expect(201);
     const newOrderId = newOrder.body.id;
     expect(newOrderId).to.be.a.Number();
 
@@ -428,7 +428,7 @@ describe('OData config plumbing acceptance', () => {
   });
 
   it('links navigation references when @odata.id uses the configured basePath', async () => {
-    const newOrder = await client.post('/api/odata/Orders').send({ total: 0 }).expect(200);
+    const newOrder = await client.post('/api/odata/Orders').send({ total: 0 }).expect(201);
     const newOrderId = newOrder.body.id;
     expect(newOrderId).to.be.a.Number();
 
@@ -572,7 +572,7 @@ describe('OData config plumbing acceptance', () => {
     await client
       .post('/api/odata/Products')
       .send({ name: 'Telemetry Gizmo', price: 42 })
-      .expect(200);
+      .expect(201);
 
     const beforeEvent = logEntries.find((entry) => entry.context?.telemetryEvent === 'hook.before');
     expect(beforeEvent).to.be.Object();
@@ -641,13 +641,13 @@ describe('OData config plumbing acceptance', () => {
       .post('/api/odata/Products')
       .set('Authorization', 'Basic secret')
       .send({ name: 'RequestLogTest', price: 99 })
-      .expect(200);
+      .expect(201);
 
     const requestLog = logEntries.find((entry) => entry.context?.telemetryEvent === 'request.log');
     expect(requestLog).to.be.Object();
     expect(requestLog?.context).to.containDeep({
       method: 'POST',
-      status: 200,
+      status: 201,
       telemetryCategory: 'requests',
     });
     const headers = requestLog?.context?.headers as Record<string, unknown>;

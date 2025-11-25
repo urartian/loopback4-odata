@@ -123,14 +123,16 @@ describe('OData controller hooks & overrides', () => {
       .post('/odata/HookItems')
       .set('x-use-hooks', '1')
       .send({ name: '  hello  ' })
-      .expect(200);
+      .expect(201);
 
     expect(res.body['@odata.context']).to.match(/HookItems/);
     expect(res.body.name).to.equal('HELLO');
+    expect(res.headers['location']).to.be.String();
+    expect(res.headers['odata-entityid']).to.equal(res.headers['location']);
   });
 
   it('allows @odata.on to override UPDATE flow', async () => {
-    const created = await client.post('/odata/HookItems').send({ name: 'orig' }).expect(200);
+    const created = await client.post('/odata/HookItems').send({ name: 'orig' }).expect(201);
     const id = created.body.id;
 
     const updated = await client
@@ -144,7 +146,7 @@ describe('OData controller hooks & overrides', () => {
   });
 
   it('runs @odata.after on READ entity', async () => {
-    const created = await client.post('/odata/HookItems').send({ name: 'after-test' }).expect(200);
+    const created = await client.post('/odata/HookItems').send({ name: 'after-test' }).expect(201);
     const id = created.body.id;
 
     const res = await client.get(`/odata/HookItems(${id})`).set('x-use-hooks', '1').expect(200);
@@ -153,8 +155,8 @@ describe('OData controller hooks & overrides', () => {
   });
 
   it('supports @odata.on override for READ collection', async () => {
-    await client.post('/odata/HookItems').send({ name: 'a' }).expect(200);
-    await client.post('/odata/HookItems').send({ name: 'b' }).expect(200);
+    await client.post('/odata/HookItems').send({ name: 'a' }).expect(201);
+    await client.post('/odata/HookItems').send({ name: 'b' }).expect(201);
 
     const res = await client.get('/odata/HookItems').set('x-override', '1').expect(200);
 
