@@ -700,17 +700,22 @@ async auditUnlink(ctx: CrudOnContext, next: () => Promise<unknown>) {
 #### Example: unbound action with a raw response
 
 ```ts
-@odataAction({name: 'resetInventory', binding: 'unbound', params: [{name: 'confirm', type: 'Edm.Boolean'}], rawResponse: true})
-async resetInventory(body: {confirm?: boolean}) {
+@odataAction({
+  name: 'resetInventoryRaw',
+  binding: 'unbound',
+  params: [{ name: 'confirm', type: 'Edm.Boolean' }],
+  rawResponse: true,
+})
+async resetInventoryRaw(body: { confirm?: boolean }) {
   if (!body?.confirm) {
     throw new HttpErrors.BadRequest('Pass {"confirm": true} to reset inventory');
   }
-  await this.products.updateAll({quantityOnHand: 0});
-  return {status: 'ok'};
+  await this.products.updateAll({ quantityOnHand: 0 });
+  return { status: 'ok' };
 }
 ```
 
-This action is exposed as `POST /odata/resetInventory`, surfaces in `$metadata` as an unbound action, and because `rawResponse` is set, the controller controls the full payload.
+This action is exposed as `POST /odata/resetInventoryRaw`, surfaces in `$metadata` as an unbound action, and because `rawResponse` is set, the controller controls the full payload. The sample application also includes a `resetInventory` action without `rawResponse` to illustrate the default OData envelope (payload returned under `value` with `@odata.context`).
 
 #### Example: virtual/computed properties
 

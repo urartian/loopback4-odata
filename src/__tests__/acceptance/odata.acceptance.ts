@@ -147,7 +147,7 @@ describe('OData component acceptance', () => {
       .expect(200);
 
     expect(response.body.value.price).to.be.a.Number();
-    expect(response.body['@odata.context']).to.match(/Products$/);
+    expect(response.body['@odata.context']).to.equal('/odata/$metadata#Products/Default.discount');
   });
   it('exposes collection-bound functions with query parameters', async () => {
     const res = await client
@@ -157,6 +157,9 @@ describe('OData component acceptance', () => {
 
     expect(res.body.value).to.be.Array();
     expect(res.body.value.every((item: { price: number }) => item.price >= 1000)).to.be.true();
+    expect(res.body['@odata.context']).to.equal(
+      '/odata/$metadata#Products/Default.premiumProducts',
+    );
   });
 
   it('invokes collection-bound functions using canonical syntax', async () => {
@@ -166,6 +169,17 @@ describe('OData component acceptance', () => {
 
     expect(res.body.value).to.be.Array();
     expect(res.body.value.every((item: { price: number }) => item.price >= 1000)).to.be.true();
+    expect(res.body['@odata.context']).to.equal(
+      '/odata/$metadata#Products/Default.premiumProducts',
+    );
+  });
+
+  it('emits @odata.context fragments for unbound actions', async () => {
+    const res = await client.post('/odata/resetInventory').send({ confirm: true }).expect(200);
+
+    expect(res.body['@odata.context']).to.equal('/odata/$metadata#Default.resetInventory');
+    expect(res.body.value.status).to.equal('ok');
+    expect(res.body.value.total).to.be.a.Number();
   });
 
   it('supports inline $count with filters', async () => {
@@ -1433,7 +1447,10 @@ describe('OData component acceptance', () => {
   });
 
   it('executes unbound actions with raw responses', async () => {
-    const result = await client.post('/odata/resetInventory').send({ confirm: true }).expect(200);
+    const result = await client
+      .post('/odata/resetInventoryRaw')
+      .send({ confirm: true })
+      .expect(200);
 
     expect(result.body.status).to.equal('ok');
     expect(result.body.total).to.be.a.Number();

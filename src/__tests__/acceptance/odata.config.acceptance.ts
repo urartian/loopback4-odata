@@ -97,6 +97,19 @@ describe('OData config plumbing acceptance', () => {
     expect(res.body['@odata.context']).to.equal('/api/odata/$metadata');
   });
 
+  it('emits the configured basePath in @odata.context for bound operation results', async () => {
+    const products = await client.get('/api/odata/Products').expect(200);
+    const firstId = products.body.value?.[0]?.id;
+    expect(firstId).to.be.a.Number();
+
+    const res = await client
+      .post(`/api/odata/Products(${firstId})/discount`)
+      .send({ percent: 0 })
+      .expect(200);
+
+    expect(res.body['@odata.context']).to.equal('/api/odata/$metadata#Products/Default.discount');
+  });
+
   it('supports root basePath configuration', async function (this: any) {
     await replaceApp(this, { basePath: '/' });
     const res = await client.get('/').expect(200);
