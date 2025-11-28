@@ -2045,20 +2045,40 @@ export function defineODataCrudController(def: EntitySetDef) {
 
     normalizeReferencePath(reference: string): string {
       const trimmed = (reference ?? '').trim();
+      const normalizedBasePath = this.normalizeConfiguredBasePath(this.cfg?.basePath);
+      const requestOrigin = this.getRequestOrigin();
+      const serviceRoot =
+        requestOrigin && normalizedBasePath && normalizedBasePath !== '/'
+          ? `${requestOrigin}${normalizedBasePath}`
+          : requestOrigin;
+      const absolutePattern = /^[a-z][a-z0-9+.-]*:/i;
+      const isAbsolute =
+        Boolean(trimmed) && (absolutePattern.test(trimmed) || trimmed.startsWith('//'));
       let path = trimmed;
-      try {
-        const base = `${this.request.protocol}://${this.request.headers.host ?? ''}`;
-        const url = new URL(trimmed, base);
+
+      if (isAbsolute) {
+        const baseForParsing = serviceRoot ?? requestOrigin ?? 'http://localhost';
+        let url: URL;
+        try {
+          url = new URL(trimmed, baseForParsing);
+        } catch {
+          throw new HttpErrors.BadRequest(`Invalid @odata.id value: ${reference}`);
+        }
+        if (!requestOrigin || url.origin !== requestOrigin) {
+          throw new HttpErrors.BadRequest(`Invalid @odata.id value: ${reference}`);
+        }
+        if (!this.matchesServiceRootPrefix(url.pathname, normalizedBasePath)) {
+          throw new HttpErrors.BadRequest(`Invalid @odata.id value: ${reference}`);
+        }
         path = url.pathname || '';
-      } catch {
-        // ignore, treat as relative path
       }
+
       if (!path.startsWith('/')) {
         path = `/${path}`;
       }
       path = path.split('?')[0]?.split('#')[0] ?? path;
       path = path.replace(/^\/+/g, '/');
-      path = this.stripBasePath(path, this.normalizeConfiguredBasePath(this.cfg?.basePath));
+      path = this.stripBasePath(path, normalizedBasePath);
       path = this.stripBasePath(path, '/odata');
       if (!path.startsWith('/')) {
         path = `/${path}`;
@@ -2097,6 +2117,190 @@ export function defineODataCrudController(def: EntitySetDef) {
         }
       }
       return entitySet;
+    }
+
+    matchesServiceRootPrefix(path: string, basePath: string): boolean {
+      if (!path || !path.startsWith('/')) return false;
+      if (!basePath || basePath === '/') return true;
+      const normalizedPath = path.toLowerCase();
+      const normalizedBase = basePath.toLowerCase();
+      if (normalizedPath === normalizedBase) return true;
+      return normalizedPath.startsWith(`${normalizedBase}/`);
+    }
+
+    getRequestOrigin(): string | undefined {
+      const host = this.getEffectiveHost();
+      if (!host) return undefined;
+      const protocol = this.getEffectiveProtocol() ?? 'http';
+      return `${protocol}://${host}`;
+    }
+
+    getEffectiveProtocol(): string | undefined {
+      const trustProxy = this.shouldTrustProxyHeaders();
+      if (trustProxy) {
+        const forwarded = this.parseForwardedHeader();
+        const forwardedProto = this.normalizeProtocol(forwarded?.proto);
+        if (forwardedProto) return forwardedProto;
+        const headerProto = this.normalizeProtocol(
+          this.getCommaSeparatedHeaderValue(this.getRequestHeader('x-forwarded-proto')),
+        );
+        if (headerProto) return headerProto;
+      }
+      const rawProtocol =
+        typeof this.request.protocol === 'string' ? this.request.protocol.trim() : undefined;
+      const normalized = this.normalizeProtocol(rawProtocol);
+      if (normalized) {
+        return normalized;
+      }
+      const secure = (this.request as AnyObject)?.secure;
+      if (secure === true) {
+        return 'https';
+      }
+      return undefined;
+    }
+
+    getEffectiveHost(): string | undefined {
+      const trustProxy = this.shouldTrustProxyHeaders();
+      if (trustProxy) {
+        const forwarded = this.parseForwardedHeader();
+        const forwardedHost = this.normalizeHost(forwarded?.host);
+        if (forwardedHost) return forwardedHost;
+        const headerHost = this.normalizeHost(
+          this.getCommaSeparatedHeaderValue(this.getRequestHeader('x-forwarded-host')),
+        );
+        if (headerHost) return headerHost;
+      }
+      const hostHeader = this.normalizeHost(this.getRequestHeader('host'));
+      if (hostHeader) return hostHeader;
+      const authority = this.normalizeHost(this.getRequestHeader(':authority'));
+      if (authority) return authority;
+      return undefined;
+    }
+
+    parseForwardedHeader(): { host?: string; proto?: string } | undefined {
+      const header = this.getRequestHeader('forwarded');
+      if (!header) return undefined;
+      const firstEntry = header.split(',')[0];
+      if (!firstEntry) return undefined;
+      const directives = firstEntry.split(';');
+      const result: { host?: string; proto?: string } = {};
+      for (const directive of directives) {
+        const [rawKey, rawValue] = directive.split('=');
+        if (!rawKey || !rawValue) continue;
+        const key = rawKey.trim().toLowerCase();
+        if (!key) continue;
+        const value = rawValue.trim().replace(/^\"(.*)\"$/, '$1');
+        if (key === 'host' && !result.host) {
+          result.host = value;
+        } else if (key === 'proto' && !result.proto) {
+          result.proto = value;
+        }
+      }
+      if (!result.host && !result.proto) {
+        return undefined;
+      }
+      return result;
+    }
+
+    getCommaSeparatedHeaderValue(value: string | undefined): string | undefined {
+      if (!value) return undefined;
+      const first = value.split(',')[0]?.trim();
+      if (!first) return undefined;
+      return first;
+    }
+
+    getRequestHeader(name: string): string | undefined {
+      if (!name) return undefined;
+      const getter =
+        typeof this.request.get === 'function'
+          ? this.request.get.bind(this.request)
+          : typeof (this.request as AnyObject).header === 'function'
+            ? (this.request as AnyObject).header.bind(this.request)
+            : undefined;
+      if (getter) {
+        const value = getter(name);
+        if (typeof value === 'string') {
+          const trimmed = value.trim();
+          if (trimmed) return trimmed;
+        } else if (value != null) {
+          const cast = String(value).trim();
+          if (cast) return cast;
+        }
+      }
+      const headers = (this.request.headers ?? {}) as AnyObject;
+      const normalized = name.toLowerCase();
+      const direct = headers[normalized] ?? headers[name];
+      if (Array.isArray(direct)) {
+        for (const candidate of direct) {
+          if (typeof candidate === 'string' && candidate.trim()) {
+            return candidate.trim();
+          }
+        }
+        return undefined;
+      }
+      if (direct == null) return undefined;
+      const raw = typeof direct === 'string' ? direct : String(direct);
+      const trimmed = raw.trim();
+      return trimmed || undefined;
+    }
+
+    shouldTrustProxyHeaders(): boolean {
+      const configured = this.cfg?.trustProxyHeaders;
+      if (configured === true) return true;
+      if (configured === false) return false;
+
+      const app = (this.request as AnyObject)?.app as
+        | {
+            enabled?: (setting: string) => boolean;
+            get?: (name: string) => unknown;
+          }
+        | undefined;
+      if (!app) return false;
+      if (typeof app.enabled === 'function') {
+        try {
+          if (app.enabled('trust proxy')) return true;
+        } catch {
+          /* ignore */
+        }
+      }
+      if (typeof app.get === 'function') {
+        try {
+          const value = app.get('trust proxy');
+          if (value) return true;
+        } catch {
+          /* ignore */
+        }
+      }
+      return false;
+    }
+
+    normalizeProtocol(value: string | undefined): string | undefined {
+      if (!value) return undefined;
+      const trimmed = value.trim();
+      if (!trimmed) return undefined;
+      return trimmed.replace(/:$/, '').toLowerCase();
+    }
+
+    normalizeHost(value: string | undefined): string | undefined {
+      if (!value) return undefined;
+      const trimmed = value.trim();
+      if (!trimmed) return undefined;
+      if (trimmed.startsWith('[')) {
+        const closingBracket = trimmed.indexOf(']');
+        if (closingBracket >= 0) {
+          const address = trimmed.slice(0, closingBracket + 1).toLowerCase();
+          const remainder = trimmed.slice(closingBracket + 1);
+          return `${address}${remainder}`;
+        }
+        return trimmed.toLowerCase();
+      }
+      const colonIndex = trimmed.indexOf(':');
+      if (colonIndex >= 0) {
+        const host = trimmed.slice(0, colonIndex).toLowerCase();
+        const port = trimmed.slice(colonIndex);
+        return `${host}${port}`;
+      }
+      return trimmed.toLowerCase();
     }
 
     parseKeyLiteral(raw: string): string {
@@ -2211,12 +2415,8 @@ export function defineODataCrudController(def: EntitySetDef) {
       const basePath = normalizeBasePath(this.cfg?.basePath);
       const prefix = basePath === '/' ? '' : basePath;
       const relativePath = `${prefix}/${setName}${keyLiteral}`;
-      const host =
-        this.request.get('host') ?? (this.request.headers?.['host'] as string | undefined);
-      const protocol =
-        typeof this.request.protocol === 'string' && this.request.protocol
-          ? this.request.protocol
-          : undefined;
+      const host = this.getEffectiveHost();
+      const protocol = this.getEffectiveProtocol();
       if (host) {
         const scheme = protocol ?? 'http';
         return `${scheme}://${host}${relativePath}`;
