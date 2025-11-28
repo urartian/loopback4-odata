@@ -1837,13 +1837,16 @@ export class ODataBatchController {
     if (/^https?:\/\//i.test(trimmed)) {
       try {
         const parsed = new URL(trimmed);
-        return parsed.pathname + parsed.search;
+        const normalized = parsed.pathname + parsed.search;
+        return this.ensureWithinServiceRoot(normalized);
       } catch {
         return undefined;
       }
     }
-    // Accept absolute app paths as-is
-    if (trimmed.startsWith('/')) return trimmed;
+    // Accept absolute app paths that belong to the service root
+    if (trimmed.startsWith('/')) {
+      return this.ensureWithinServiceRoot(trimmed);
+    }
     // Optionally resolve relative OData paths (e.g. "Books", "Books(1)?$select=...")
     if (allowRelative) {
       return this.buildServiceRelativePath(trimmed);
@@ -1876,6 +1879,18 @@ export class ODataBatchController {
     } catch {
       return undefined;
     }
+  }
+
+  private ensureWithinServiceRoot(url: string): string | undefined {
+    if (!url || !url.startsWith('/')) return undefined;
+    const root = this.serviceRootPath === '/' ? '/' : this.serviceRootPath;
+    if (root === '/') return url;
+    const question = url.indexOf('?');
+    const pathOnly = question >= 0 ? url.slice(0, question) : url;
+    const normalizedPath = pathOnly.length > 1 ? pathOnly.replace(/\/+$/, '') || '/' : pathOnly;
+    if (normalizedPath === root) return url;
+    if (normalizedPath.startsWith(`${root}/`)) return url;
+    return undefined;
   }
 
   private buildServiceRelativePath(rawUrl: string): string | undefined {

@@ -395,6 +395,100 @@ describe('$batch controller', () => {
     assert.equal((result.body as any)?.error?.code, 'InvalidUrl');
   });
 
+  it('rejects JSON batch requests that target paths outside the service root', async () => {
+    let callCount = 0;
+    const controller = new ODataBatchController(
+      {
+        handleRequest: async () => {
+          callCount++;
+        },
+      } as any,
+      'http://localhost',
+      createRequestContextStub(),
+      { get: async () => undefined } as any,
+      { findByName: () => undefined } as any,
+      noopLogger,
+      defaultConfig,
+    );
+
+    const result = await (controller as any).executeSingle(
+      {
+        id: 'forbidden',
+        method: 'GET',
+        url: '/internal/admin/reset',
+      },
+      undefined,
+      requestStub('application/json'),
+    );
+
+    assert.equal(result.status, 400);
+    assert.equal((result.body as any)?.error?.code, 'InvalidUrl');
+    assert.equal(callCount, 0);
+  });
+
+  it('rejects absolute URLs with hosts when they fall outside the service root', async () => {
+    let callCount = 0;
+    const controller = new ODataBatchController(
+      {
+        handleRequest: async () => {
+          callCount++;
+        },
+      } as any,
+      'http://localhost',
+      createRequestContextStub(),
+      { get: async () => undefined } as any,
+      { findByName: () => undefined } as any,
+      noopLogger,
+      defaultConfig,
+    );
+
+    const result = await (controller as any).executeSingle(
+      {
+        id: 'hosted',
+        method: 'GET',
+        url: 'https://example.com/internal/admin',
+      },
+      undefined,
+      requestStub('application/json'),
+    );
+
+    assert.equal(result.status, 400);
+    assert.equal((result.body as any)?.error?.code, 'InvalidUrl');
+    assert.equal(callCount, 0);
+  });
+
+  it('allows absolute URLs that remain inside the service root', async () => {
+    let callCount = 0;
+    const controller = new ODataBatchController(
+      {
+        handleRequest: async (_req: unknown, res: any) => {
+          callCount++;
+          res.statusCode = 204;
+          res.end();
+        },
+      } as any,
+      'http://localhost',
+      createRequestContextStub(),
+      { get: async () => undefined } as any,
+      { findByName: () => undefined } as any,
+      noopLogger,
+      defaultConfig,
+    );
+
+    const result = await (controller as any).executeSingle(
+      {
+        id: 'allowed',
+        method: 'GET',
+        url: 'https://example.com/odata/Products?$top=1',
+      },
+      undefined,
+      requestStub('application/json'),
+    );
+
+    assert.equal(result.status, 204);
+    assert.equal(callCount, 1);
+  });
+
   it('does not follow redirects that point outside the service root', async () => {
     let callCount = 0;
     const controller = new ODataBatchController(
