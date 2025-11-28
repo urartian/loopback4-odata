@@ -782,6 +782,91 @@ describe('$batch controller', () => {
     );
   });
 
+  it('rejects JSON changesets whose aggregate response size exceeds the configured payload limit', async () => {
+    const controller = createController(
+      {
+        c1: { status: 200, body: Buffer.alloc(2048) },
+        c2: { status: 200, body: Buffer.alloc(2048) },
+      },
+      {
+        ...defaultConfig,
+        batch: {
+          ...defaultConfig.batch,
+          maxResponsePayloadBytes: 3000,
+        },
+      },
+    );
+
+    await assert.rejects(
+      controller.handleBatch(
+        {
+          requests: [
+            { id: 'c1', method: 'POST', url: '/odata/Products', atomicityGroup: 'changeset-1' },
+            { id: 'c2', method: 'POST', url: '/odata/Products', atomicityGroup: 'changeset-1' },
+          ],
+        },
+        responseStub,
+        requestStub('application/json'),
+      ),
+      (err: unknown) => err instanceof HttpErrors.PayloadTooLarge,
+    );
+  });
+
+  it('rejects multipart changesets whose aggregate response size exceeds the configured payload limit', async () => {
+    const controller = createController(
+      {
+        '1': { status: 200, body: Buffer.alloc(2048) },
+        '2': { status: 200, body: Buffer.alloc(2048) },
+      },
+      {
+        ...defaultConfig,
+        batch: {
+          ...defaultConfig.batch,
+          maxResponsePayloadBytes: 4000,
+        },
+      },
+    );
+
+    const boundary = 'batch_cs_limit';
+    const changesetBoundary = 'changeset_cs_limit';
+    const body = [
+      `--${boundary}`,
+      `Content-Type: multipart/mixed; boundary=${changesetBoundary}`,
+      '',
+      `--${changesetBoundary}`,
+      'Content-Type: application/http',
+      'Content-Transfer-Encoding: binary',
+      'Content-ID: 1',
+      '',
+      'POST /odata/Products HTTP/1.1',
+      '',
+      '',
+      `--${changesetBoundary}`,
+      'Content-Type: application/http',
+      'Content-Transfer-Encoding: binary',
+      'Content-ID: 2',
+      '',
+      'POST /odata/Products HTTP/1.1',
+      '',
+      '',
+      `--${changesetBoundary}--`,
+      `--${boundary}--`,
+      '',
+    ].join('\r\n');
+    const stream = Readable.from(body);
+
+    await assert.rejects(
+      controller.handleBatch(
+        stream as any,
+        responseStub,
+        requestStub('multipart/mixed', {
+          headers: { 'content-type': `multipart/mixed; boundary=${boundary}` },
+        }),
+      ),
+      (err: unknown) => err instanceof HttpErrors.PayloadTooLarge,
+    );
+  });
+
   it('encodes binary responses when returning JSON batch payloads', async () => {
     const blob = Buffer.from([0xde, 0xad, 0xbe, 0xef]);
     const controller = createController({

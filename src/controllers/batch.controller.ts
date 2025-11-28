@@ -370,6 +370,7 @@ export class ODataBatchController {
                 dependencyResults,
                 requestOrder,
                 limits,
+                responseSizeTracker,
                 contentIdMap,
                 contentIdEtags,
               );
@@ -393,7 +394,6 @@ export class ODataBatchController {
           }
           const next = pending.shift();
           if (next) {
-            this.trackResponseSize(responseSizeTracker, next);
             responses.push(next);
           }
           continue;
@@ -406,14 +406,12 @@ export class ODataBatchController {
           dependencyResults,
           requestOrder,
           limits,
+          responseSizeTracker,
           false,
           contentIdMap,
           contentIdEtags,
         );
-        for (const entry of entries) {
-          this.trackResponseSize(responseSizeTracker, entry);
-          responses.push(entry);
-        }
+        responses.push(...entries);
       }
 
       this.finalizeResponseSizeTracker(responseSizeTracker);
@@ -759,6 +757,7 @@ export class ODataBatchController {
     dependencyResults: Map<string, BatchResponseEntry>,
     requestOrder: Map<BatchRequest, number>,
     limits: NormalizedBatchLimits,
+    tracker: ResponseSizeTracker | undefined,
     abortOnFailure: boolean,
     contentIdMap?: Map<string, string>,
     contentIdEtags?: Map<string, string>,
@@ -770,6 +769,9 @@ export class ODataBatchController {
       }
       const dependencyFailure = this.evaluateDependsOn(request, dependencyResults);
       if (dependencyFailure) {
+        if (tracker) {
+          this.trackResponseSize(tracker, dependencyFailure);
+        }
         entries.push(dependencyFailure);
         if (request.id) dependencyResults.set(request.id, dependencyFailure);
         if (abortOnFailure) break;
@@ -782,6 +784,9 @@ export class ODataBatchController {
         this.ensureEtagPreconditions(prepared, contentIdEtags);
       }
       const entry = await this.executeSingle(prepared, context, parentRequest, limits);
+      if (tracker) {
+        this.trackResponseSize(tracker, entry);
+      }
       entries.push(entry);
       if (request.id) dependencyResults.set(request.id, entry);
       if (contentIdMap) {
@@ -1300,6 +1305,7 @@ export class ODataBatchController {
     dependencyResults: Map<string, BatchResponseEntry>,
     requestOrder: Map<BatchRequest, number>,
     limits: NormalizedBatchLimits,
+    tracker: ResponseSizeTracker,
     sharedContentIds: Map<string, string>,
     sharedContentIdEtags: Map<string, string>,
   ): Promise<BatchResponseEntry[]> {
@@ -1315,6 +1321,7 @@ export class ODataBatchController {
         dependencyResults,
         requestOrder,
         limits,
+        tracker,
         true,
         contentIdMap,
         contentIdEtags,
@@ -1333,6 +1340,7 @@ export class ODataBatchController {
                 'Request not executed due to prior failure in changeset.',
               ),
             };
+            this.trackResponseSize(tracker, synthetic);
             entries.push(synthetic);
             if (req.id) dependencyResults.set(req.id, synthetic);
           }
