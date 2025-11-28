@@ -24,6 +24,7 @@ const defaultConfig: ODataConfig = {
     maxDepth: 3,
     maxPartBodyBytes: 512 * 1024,
     maxResponseBodyBytes: 512 * 1024,
+    maxResponsePayloadBytes: 4 * 1024 * 1024,
   },
 };
 
@@ -699,6 +700,86 @@ describe('$batch controller', () => {
 
     assert.equal(result.status, 413);
     assert.equal((result.body as any)?.error?.code, 'ResponseTooLarge');
+  });
+
+  it('rejects JSON batches whose aggregate response size exceeds the configured payload limit', async () => {
+    const controller = createController(
+      {
+        first: { status: 200, body: Buffer.alloc(1024) },
+        second: { status: 200, body: Buffer.alloc(1024) },
+      },
+      {
+        ...defaultConfig,
+        batch: {
+          ...defaultConfig.batch,
+          maxResponsePayloadBytes: 1500,
+        },
+      },
+    );
+
+    await assert.rejects(
+      controller.handleBatch(
+        {
+          requests: [
+            { id: 'first', method: 'GET', url: '/odata/Products' },
+            { id: 'second', method: 'GET', url: '/odata/Products' },
+          ],
+        },
+        responseStub,
+        requestStub('application/json'),
+      ),
+      (err: unknown) => err instanceof HttpErrors.PayloadTooLarge,
+    );
+  });
+
+  it('rejects multipart batches whose aggregate response size exceeds the configured payload limit', async () => {
+    const controller = createController(
+      {
+        '1': { status: 200, body: Buffer.alloc(1024) },
+        '2': { status: 200, body: Buffer.alloc(1024) },
+      },
+      {
+        ...defaultConfig,
+        batch: {
+          ...defaultConfig.batch,
+          maxResponsePayloadBytes: 2500,
+        },
+      },
+    );
+
+    const boundary = 'batch_multi_limit';
+    const body = [
+      `--${boundary}`,
+      'Content-Type: application/http',
+      'Content-Transfer-Encoding: binary',
+      'Content-ID: 1',
+      '',
+      'GET /odata/Products HTTP/1.1',
+      '',
+      '',
+      `--${boundary}`,
+      'Content-Type: application/http',
+      'Content-Transfer-Encoding: binary',
+      'Content-ID: 2',
+      '',
+      'GET /odata/Products HTTP/1.1',
+      '',
+      '',
+      `--${boundary}--`,
+      '',
+    ].join('\r\n');
+    const stream = Readable.from(body);
+
+    await assert.rejects(
+      controller.handleBatch(
+        stream as any,
+        responseStub,
+        requestStub('multipart/mixed', {
+          headers: { 'content-type': `multipart/mixed; boundary=${boundary}` },
+        }),
+      ),
+      (err: unknown) => err instanceof HttpErrors.PayloadTooLarge,
+    );
   });
 
   it('encodes binary responses when returning JSON batch payloads', async () => {

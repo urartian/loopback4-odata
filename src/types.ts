@@ -195,6 +195,7 @@ export interface ODataBatchConfig {
   maxDepth?: number; // maximum multipart nesting depth
   maxPartBodyBytes?: number; // maximum body size for an individual part
   maxResponseBodyBytes?: number; // maximum bytes allowed in a single batch sub-response
+  maxResponsePayloadBytes?: number; // maximum aggregate bytes buffered + serialized for the full batch response
 }
 
 export interface ODataPaginationConfig {

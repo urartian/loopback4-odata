@@ -935,6 +935,7 @@ this.bind(ODATA_BINDINGS.CONFIG).to({
     maxChangesetOperations: 50, // per-changeset limit
     maxPartBodyBytes: 4 * 1024 * 1024, // individual part payload limit
     maxResponseBodyBytes: 4 * 1024 * 1024, // per-sub-response buffering limit
+    maxResponsePayloadBytes: 32 * 1024 * 1024, // aggregate buffered + serialized response limit
   },
   onLog(entry) {
     myTelemetryClient.trackEvent({
@@ -1000,8 +1001,9 @@ const ProductsSet: EntitySetDef<Product> = {
 - `skipTokenTtl`: Lifetime (in seconds) for issued `$skiptoken` links. Defaults to `900` (15 minutes). Expired tokens return `400 Invalid $skiptoken`.
 - `deltaTokenTtl`: Optional lifetime (seconds) for `$deltatoken` links. When omitted, delta tokens remain valid until you rotate the secret or prune their backing store.
 - `allowLegacyUnsignedTokens`: Set to `true` only while migrating from the unsigned (v1/v2) token format. New deployments should leave this `false` to reject tampered tokens outright.
-- `batch`: Guardrails for `$batch` requests. Provide `maxPayloadBytes` (default `16 MB`), `maxOperations` (100 operations), `maxChangesetOperations` (50 per changeset), `maxPartBodyBytes` (4 MB), `maxResponseBodyBytes` (4 MB per sub-response), and `maxDepth` (2 levels) to cap payload size, total operations, changeset nesting, and the amount of memory each buffered sub-response may consume.
+- `batch`: Guardrails for `$batch` requests. Provide `maxPayloadBytes` (default `16 MB`), `maxOperations` (100 operations), `maxChangesetOperations` (50 per changeset), `maxPartBodyBytes` (4 MB), `maxResponseBodyBytes` (4 MB per sub-response), `maxResponsePayloadBytes` (32 MB aggregate), and `maxDepth` (2 levels) to cap payload size, total operations, changeset nesting, and the amount of memory each buffered/serialized response may consume.
 - Sub-responses that exceed `maxResponseBodyBytes` are aborted in-process and return `413 ResponseTooLarge` so a single oversized entry cannot exhaust server memory even when the handler streams a large binary payload.
+- When the combined buffered responses and the serialized JSON/multipart payload would exceed `maxResponsePayloadBytes`, the controller rejects the entire batch with `413 Payload Too Large` before serialization begins, preventing attackers from flooding the process with many near-limit responses in a single request.
 - `$batch` limits are enforced while parsing the stream: once the cumulative payload or a single part exceeds the configured budget the server aborts immediately with `413 Payload Too Large`.
 - `$batch` atomicity detection is connector-aware: entity sets backed by datasources that expose `beginTransaction` (for example PostgreSQL or MySQL) are marked as transactional after the first successful changeset, while datasources without transactions (such as the in-memory connector) are marked as non-transactional and future atomicity groups targeting them are rejected immediately with `501 Not Implemented`. The generated CSDL advertises the service-wide capability (per spec) on the EntityContainer via `Org.OData.Capabilities.V1.BatchSupported/ChangeSetsSupported`, which flips to `true` only when every registered entity set is backed by a transactional datasource, and emits per-entity-set annotations under `LoopBack.V1.BatchCapabilities.ChangeSetsSupported` so tools can decide which entity sets allow change sets.
 - `onDeltaTokenInvalid(event)`: Optional callback fired whenever a client supplies an expired, tampered, or mismatched `$deltatoken`. Useful for alerting/telemetry when secrets rotate.

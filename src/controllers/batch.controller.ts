@@ -9,7 +9,7 @@ import {
   RequestContext,
 } from '@loopback/rest';
 import { HttpHandler } from '@loopback/rest/dist/http-handler';
-import { IncomingMessage, ServerResponse } from 'http';
+import { IncomingMessage, ServerResponse, STATUS_CODES } from 'http';
 import { PassThrough } from 'stream';
 import {
   AnyObject,
@@ -108,7 +108,20 @@ interface NormalizedBatchLimits {
   maxDepth?: number;
   maxPartBodyBytes?: number;
   maxResponseBodyBytes?: number;
+  maxResponsePayloadBytes?: number;
 }
+
+interface ResponseSizeTracker {
+  limit?: number;
+  isMultipart: boolean;
+  bufferedBytes: number;
+  serializedBytes: number;
+  responsesCount: number;
+  activeChangesetId?: string;
+}
+
+const ESTIMATED_BATCH_BOUNDARY = 'batch_boundary';
+const ESTIMATED_CHANGESET_BOUNDARY = 'changeset_boundary';
 
 interface ContentIdTokenMatch {
   token: string;
@@ -323,6 +336,7 @@ export class ODataBatchController {
       const contentIdMap = new Map<string, string>();
       const contentIdEtags = new Map<string, string>();
       const responses: BatchResponseEntry[] = [];
+      const responseSizeTracker = this.createResponseSizeTracker(isMultipart, limits);
 
       const maxChangesetOps = limits.maxChangesetOperations;
       if (maxChangesetOps && maxChangesetOps > 0) {
@@ -379,6 +393,7 @@ export class ODataBatchController {
           }
           const next = pending.shift();
           if (next) {
+            this.trackResponseSize(responseSizeTracker, next);
             responses.push(next);
           }
           continue;
@@ -395,9 +410,13 @@ export class ODataBatchController {
           contentIdMap,
           contentIdEtags,
         );
-        responses.push(...entries);
+        for (const entry of entries) {
+          this.trackResponseSize(responseSizeTracker, entry);
+          responses.push(entry);
+        }
       }
 
+      this.finalizeResponseSizeTracker(responseSizeTracker);
       response.set('OData-Version', ODATA_VERSION);
 
       let result: BatchResponsePayload | void = { responses };
@@ -441,6 +460,7 @@ export class ODataBatchController {
       maxDepth: cfgBatch.maxDepth ?? 2,
       maxPartBodyBytes: cfgBatch.maxPartBodyBytes ?? 4 * 1024 * 1024,
       maxResponseBodyBytes: cfgBatch.maxResponseBodyBytes ?? 4 * 1024 * 1024,
+      maxResponsePayloadBytes: cfgBatch.maxResponsePayloadBytes ?? 32 * 1024 * 1024,
     };
   }
 
@@ -2119,6 +2139,229 @@ export class ODataBatchController {
         body: entry.body.toString('base64'),
       };
     });
+  }
+
+  private createResponseSizeTracker(
+    isMultipart: boolean,
+    limits: NormalizedBatchLimits,
+  ): ResponseSizeTracker {
+    return {
+      isMultipart,
+      limit: limits.maxResponsePayloadBytes,
+      bufferedBytes: 0,
+      serializedBytes: 0,
+      responsesCount: 0,
+      activeChangesetId: undefined,
+    };
+  }
+
+  private trackResponseSize(tracker: ResponseSizeTracker, entry: BatchResponseEntry): void {
+    tracker.responsesCount += 1;
+    if (!tracker.limit || tracker.limit <= 0) {
+      if (!tracker.isMultipart) {
+        return;
+      }
+      if (!entry.atomicityGroup && tracker.activeChangesetId) {
+        tracker.activeChangesetId = undefined;
+      } else if (entry.atomicityGroup) {
+        tracker.activeChangesetId = entry.atomicityGroup;
+      }
+      return;
+    }
+
+    let serializedIncrement = 0;
+    if (tracker.isMultipart) {
+      serializedIncrement += this.prepareMultipartTrackerState(tracker, entry);
+      serializedIncrement += entry.atomicityGroup
+        ? this.estimateChangesetEntryBytes(entry)
+        : this.estimateMultipartSingleEntryBytes(entry);
+    } else {
+      serializedIncrement += this.estimateJsonResponseBytes(entry);
+    }
+
+    const bufferedIncrement = this.estimateBufferedResponseBytes(entry);
+    tracker.bufferedBytes += bufferedIncrement;
+    tracker.serializedBytes += serializedIncrement;
+    this.enforceResponsePayloadLimit(tracker, entry.id);
+  }
+
+  private finalizeResponseSizeTracker(tracker: ResponseSizeTracker): void {
+    if (!tracker.limit || tracker.limit <= 0) {
+      return;
+    }
+    if (tracker.isMultipart) {
+      if (tracker.activeChangesetId) {
+        tracker.serializedBytes += this.estimateChangesetClosingBytes();
+        tracker.activeChangesetId = undefined;
+      }
+      tracker.serializedBytes += this.estimateBatchClosingBytes();
+    } else {
+      tracker.serializedBytes += this.estimateJsonEnvelopeBytes(tracker.responsesCount);
+    }
+    this.enforceResponsePayloadLimit(tracker);
+  }
+
+  private prepareMultipartTrackerState(
+    tracker: ResponseSizeTracker,
+    entry: BatchResponseEntry,
+  ): number {
+    let addition = 0;
+    if (entry.atomicityGroup) {
+      if (tracker.activeChangesetId && tracker.activeChangesetId !== entry.atomicityGroup) {
+        addition += this.estimateChangesetClosingBytes();
+        tracker.activeChangesetId = undefined;
+      }
+      if (tracker.activeChangesetId !== entry.atomicityGroup) {
+        addition += this.estimateChangesetStartBytes();
+        tracker.activeChangesetId = entry.atomicityGroup;
+      }
+    } else if (tracker.activeChangesetId) {
+      addition += this.estimateChangesetClosingBytes();
+      tracker.activeChangesetId = undefined;
+    }
+    return addition;
+  }
+
+  private enforceResponsePayloadLimit(tracker: ResponseSizeTracker, requestId?: string): void {
+    if (!tracker.limit || tracker.limit <= 0) return;
+    const projected = tracker.bufferedBytes + tracker.serializedBytes;
+    if (projected <= tracker.limit) return;
+    this.warn('Batch responses exceeded the configured aggregate size limit.', {
+      limitBytes: tracker.limit,
+      bufferedBytes: tracker.bufferedBytes,
+      serializedBytes: tracker.serializedBytes,
+      requestId,
+    });
+    throw new HttpErrors.PayloadTooLarge('Batch responses exceeded the configured size limit.');
+  }
+
+  private estimateBufferedResponseBytes(entry: BatchResponseEntry): number {
+    const body = entry.body;
+    if (body === undefined || body === null) return 0;
+    if (Buffer.isBuffer(body)) return body.length;
+    if (typeof body === 'string') return Buffer.byteLength(body);
+    try {
+      return Buffer.byteLength(JSON.stringify(body));
+    } catch {
+      return Buffer.byteLength(String(body));
+    }
+  }
+
+  private estimateJsonResponseBytes(entry: BatchResponseEntry): number {
+    try {
+      const normalized = this.normalizeJsonBatchResponses([entry])[0] ?? entry;
+      return Buffer.byteLength(JSON.stringify(normalized));
+    } catch {
+      return Buffer.byteLength('{}');
+    }
+  }
+
+  private estimateMultipartSingleEntryBytes(entry: BatchResponseEntry): number {
+    const partHeaders = this.buildMultipartPartHeaders(entry);
+    const prefix = `--${ESTIMATED_BATCH_BOUNDARY}\r\n${partHeaders}\r\n\r\n`;
+    const formatted = prefix.replace(/\\r\\n/g, '\r\n');
+    const httpLength = this.estimateHttpResponseLength(entry);
+    return Buffer.byteLength(formatted, 'utf-8') + httpLength + Buffer.byteLength('\r\n');
+  }
+
+  private estimateChangesetStartBytes(): number {
+    const header = `--${ESTIMATED_BATCH_BOUNDARY}\r\nContent-Type: multipart/mixed; boundary=${ESTIMATED_CHANGESET_BOUNDARY}\r\n\r\n`;
+    return Buffer.byteLength(header.replace(/\\r\\n/g, '\r\n'), 'utf-8');
+  }
+
+  private estimateChangesetEntryBytes(entry: BatchResponseEntry): number {
+    const partHeaders = this.buildMultipartPartHeaders(entry);
+    const prefix = `--${ESTIMATED_CHANGESET_BOUNDARY}\r\n${partHeaders}\r\n\r\n`;
+    const formatted = prefix.replace(/\\r\\n/g, '\r\n');
+    const httpLength = this.estimateHttpResponseLength(entry);
+    return Buffer.byteLength(formatted, 'utf-8') + httpLength + Buffer.byteLength('\r\n');
+  }
+
+  private estimateChangesetClosingBytes(): number {
+    return Buffer.byteLength(
+      `--${ESTIMATED_CHANGESET_BOUNDARY}--\r\n`.replace(/\\r\\n/g, '\r\n'),
+      'utf-8',
+    );
+  }
+
+  private estimateBatchClosingBytes(): number {
+    return Buffer.byteLength(
+      `--${ESTIMATED_BATCH_BOUNDARY}--\r\n`.replace(/\\r\\n/g, '\r\n'),
+      'utf-8',
+    );
+  }
+
+  private estimateJsonEnvelopeBytes(count: number): number {
+    const base = Buffer.byteLength('{"responses":', 'utf-8') + Buffer.byteLength('}', 'utf-8');
+    if (count <= 0) {
+      return base + Buffer.byteLength('[]', 'utf-8');
+    }
+    const brackets = Buffer.byteLength('[', 'utf-8') + Buffer.byteLength(']', 'utf-8');
+    const commas = count > 1 ? count - 1 : 0;
+    return base + brackets + commas;
+  }
+
+  private buildMultipartPartHeaders(entry: BatchResponseEntry): string {
+    const lines: string[] = [];
+    if (entry.id) {
+      lines.push(`Content-ID: ${entry.id}`);
+    }
+    lines.push('Content-Type: application/http');
+    lines.push('Content-Transfer-Encoding: binary');
+    return lines.join('\r\n');
+  }
+
+  private estimateHttpResponseLength(entry: BatchResponseEntry): number {
+    const reason = STATUS_CODES[entry.status] ?? '';
+    const headers = this.normalizeHeadersForLength(entry.headers ?? {});
+    const bodyLength = this.estimateSerializedBodyLength(entry.body, headers);
+    if (bodyLength > 0 && !headers['content-length']) {
+      headers['content-length'] = bodyLength.toString();
+    }
+    const headerLines = Object.entries(headers).map(
+      ([key, value]) => `${this.formatHeaderNameForLength(key)}: ${value}`,
+    );
+    let responseHead = `HTTP/1.1 ${entry.status} ${reason}`;
+    if (headerLines.length) {
+      responseHead += `\r\n${headerLines.join('\r\n')}`;
+    }
+    responseHead += '\r\n\r\n';
+    return Buffer.byteLength(responseHead, 'utf-8') + bodyLength;
+  }
+
+  private normalizeHeadersForLength(headers: Record<string, string>): Record<string, string> {
+    const normalized: Record<string, string> = {};
+    for (const [key, value] of Object.entries(headers)) {
+      if (value == null) continue;
+      normalized[key.toLowerCase()] = value;
+    }
+    return normalized;
+  }
+
+  private estimateSerializedBodyLength(body: unknown, headers: Record<string, string>): number {
+    if (body === undefined || body === null) return 0;
+    if (Buffer.isBuffer(body)) return body.length;
+    if (typeof body === 'string') {
+      return Buffer.byteLength(body);
+    }
+    if (typeof body === 'number' || typeof body === 'boolean' || typeof body === 'object') {
+      if (!headers['content-type']) {
+        headers['content-type'] = 'application/json; charset=utf-8';
+      }
+      try {
+        return Buffer.byteLength(JSON.stringify(body));
+      } catch {
+        return Buffer.byteLength(String(body));
+      }
+    }
+    return Buffer.byteLength(String(body));
+  }
+
+  private formatHeaderNameForLength(name: string): string {
+    return name
+      .split('-')
+      .map((part) => part.charAt(0).toUpperCase() + part.slice(1).toLowerCase())
+      .join('-');
   }
 
   private resolveRequestBodyBuffer(request: BatchRequest): Buffer {
