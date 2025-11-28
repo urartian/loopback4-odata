@@ -51,6 +51,7 @@ export class ODataComponent implements Component {
         maxChangesetOperations: 50,
         maxDepth: 2,
         maxPartBodyBytes: 4 * 1024 * 1024,
+        maxResponseBodyBytes: 4 * 1024 * 1024,
       },
       pagination: {
         maxPageSize: 200,

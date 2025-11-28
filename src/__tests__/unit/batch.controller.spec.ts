@@ -23,6 +23,7 @@ const defaultConfig: ODataConfig = {
     maxChangesetOperations: 100,
     maxDepth: 3,
     maxPartBodyBytes: 512 * 1024,
+    maxResponseBodyBytes: 512 * 1024,
   },
 };
 
@@ -339,11 +340,17 @@ describe('$batch controller', () => {
       defaultConfig,
     );
 
-    const result = await (controller as any).executeSingle({
-      id: 'bad',
-      method: 'GET',
-      url: '',
-    });
+    const limits = (controller as any).getBatchLimits();
+    const result = await (controller as any).executeSingle(
+      {
+        id: 'bad',
+        method: 'GET',
+        url: '',
+      },
+      undefined,
+      requestStub('application/json'),
+      limits,
+    );
 
     assert.equal(result.status, 400);
     assert.equal((result.body as any)?.error?.code, 'InvalidUrl');
@@ -360,11 +367,17 @@ describe('$batch controller', () => {
       defaultConfig,
     );
 
-    const result = await (controller as any).executeSingle({
-      id: 'bad',
-      method: undefined,
-      url: '/odata/Products',
-    });
+    const limits = (controller as any).getBatchLimits();
+    const result = await (controller as any).executeSingle(
+      {
+        id: 'bad',
+        method: undefined,
+        url: '/odata/Products',
+      },
+      undefined,
+      requestStub('application/json'),
+      limits,
+    );
 
     assert.equal(result.status, 400);
     assert.equal((result.body as any)?.error?.code, 'InvalidMethod');
@@ -381,6 +394,7 @@ describe('$batch controller', () => {
       defaultConfig,
     );
 
+    const limits = (controller as any).getBatchLimits();
     const result = await (controller as any).executeSingle(
       {
         id: 'ssrf',
@@ -389,6 +403,7 @@ describe('$batch controller', () => {
       },
       undefined,
       requestStub('application/json'),
+      limits,
     );
 
     assert.equal(result.status, 400);
@@ -411,6 +426,7 @@ describe('$batch controller', () => {
       defaultConfig,
     );
 
+    const limits = (controller as any).getBatchLimits();
     const result = await (controller as any).executeSingle(
       {
         id: 'forbidden',
@@ -419,6 +435,7 @@ describe('$batch controller', () => {
       },
       undefined,
       requestStub('application/json'),
+      limits,
     );
 
     assert.equal(result.status, 400);
@@ -442,6 +459,7 @@ describe('$batch controller', () => {
       defaultConfig,
     );
 
+    const limits = (controller as any).getBatchLimits();
     const result = await (controller as any).executeSingle(
       {
         id: 'hosted',
@@ -450,6 +468,7 @@ describe('$batch controller', () => {
       },
       undefined,
       requestStub('application/json'),
+      limits,
     );
 
     assert.equal(result.status, 400);
@@ -475,6 +494,7 @@ describe('$batch controller', () => {
       defaultConfig,
     );
 
+    const limits = (controller as any).getBatchLimits();
     const result = await (controller as any).executeSingle(
       {
         id: 'allowed',
@@ -483,6 +503,7 @@ describe('$batch controller', () => {
       },
       undefined,
       requestStub('application/json'),
+      limits,
     );
 
     assert.equal(result.status, 204);
@@ -508,6 +529,7 @@ describe('$batch controller', () => {
       defaultConfig,
     );
 
+    const limits = (controller as any).getBatchLimits();
     const result = await (controller as any).executeSingle(
       {
         id: 'redir',
@@ -516,6 +538,7 @@ describe('$batch controller', () => {
       },
       undefined,
       requestStub('application/json'),
+      limits,
     );
 
     assert.equal(result.status, 302);
@@ -547,6 +570,7 @@ describe('$batch controller', () => {
       defaultConfig,
     );
 
+    const limits = (controller as any).getBatchLimits();
     const result = await (controller as any).executeSingle(
       {
         id: 'redir',
@@ -555,6 +579,7 @@ describe('$batch controller', () => {
       },
       undefined,
       requestStub('application/json'),
+      limits,
     );
 
     assert.equal(result.status, 200);
@@ -582,6 +607,7 @@ describe('$batch controller', () => {
       defaultConfig,
     );
 
+    const limits = (controller as any).getBatchLimits();
     const result = await (controller as any).executeSingle(
       {
         id: 'bin',
@@ -590,6 +616,7 @@ describe('$batch controller', () => {
       },
       undefined,
       requestStub('multipart/mixed'),
+      limits,
     );
 
     assert.equal(result.status, 200);
@@ -620,6 +647,8 @@ describe('$batch controller', () => {
       clearFrom: () => undefined,
     };
 
+    const limits = (controller as any).getBatchLimits();
+
     const result = await (controller as any).executeWithHandler(
       {
         id: 'bin',
@@ -628,11 +657,48 @@ describe('$batch controller', () => {
       },
       contextStub,
       requestStub('multipart/mixed'),
+      limits,
     );
 
     assert.equal(result.status, 200);
     assert.equal(Buffer.isBuffer(result.body), true);
     assert.equal((result.body as Buffer).equals(blob), true);
+  });
+
+  it('rejects sub-responses that exceed the configured response size limit', async () => {
+    const controller = new ODataBatchController(
+      {
+        handleRequest: async (_req: unknown, res: any) => {
+          res.setHeader('Content-Type', 'application/octet-stream');
+          res.end(Buffer.alloc(128));
+        },
+      } as any,
+      'http://localhost',
+      createRequestContextStub(),
+      { get: async () => undefined } as any,
+      { findByName: () => undefined } as any,
+      noopLogger,
+      {
+        ...defaultConfig,
+        batch: { ...defaultConfig.batch, maxResponseBodyBytes: 64 },
+      },
+    );
+
+    const limits = (controller as any).getBatchLimits();
+
+    const result = await (controller as any).executeWithHandler(
+      {
+        id: 'overflow',
+        method: 'GET',
+        url: '/odata/Binary',
+      },
+      undefined,
+      requestStub('application/json'),
+      limits,
+    );
+
+    assert.equal(result.status, 413);
+    assert.equal((result.body as any)?.error?.code, 'ResponseTooLarge');
   });
 
   it('encodes binary responses when returning JSON batch payloads', async () => {

@@ -107,6 +107,7 @@ interface NormalizedBatchLimits {
   maxChangesetOperations?: number;
   maxDepth?: number;
   maxPartBodyBytes?: number;
+  maxResponseBodyBytes?: number;
 }
 
 interface ContentIdTokenMatch {
@@ -354,6 +355,7 @@ export class ODataBatchController {
                 request,
                 dependencyResults,
                 requestOrder,
+                limits,
                 contentIdMap,
                 contentIdEtags,
               );
@@ -388,6 +390,7 @@ export class ODataBatchController {
           request,
           dependencyResults,
           requestOrder,
+          limits,
           false,
           contentIdMap,
           contentIdEtags,
@@ -437,6 +440,7 @@ export class ODataBatchController {
       maxChangesetOperations: cfgBatch.maxChangesetOperations ?? 50,
       maxDepth: cfgBatch.maxDepth ?? 2,
       maxPartBodyBytes: cfgBatch.maxPartBodyBytes ?? 4 * 1024 * 1024,
+      maxResponseBodyBytes: cfgBatch.maxResponseBodyBytes ?? 4 * 1024 * 1024,
     };
   }
 
@@ -734,6 +738,7 @@ export class ODataBatchController {
     parentRequest: Request,
     dependencyResults: Map<string, BatchResponseEntry>,
     requestOrder: Map<BatchRequest, number>,
+    limits: NormalizedBatchLimits,
     abortOnFailure: boolean,
     contentIdMap?: Map<string, string>,
     contentIdEtags?: Map<string, string>,
@@ -756,7 +761,7 @@ export class ODataBatchController {
       if (contentIdEtags) {
         this.ensureEtagPreconditions(prepared, contentIdEtags);
       }
-      const entry = await this.executeSingle(prepared, context, parentRequest);
+      const entry = await this.executeSingle(prepared, context, parentRequest, limits);
       entries.push(entry);
       if (request.id) dependencyResults.set(request.id, entry);
       if (contentIdMap) {
@@ -1274,6 +1279,7 @@ export class ODataBatchController {
     parentRequest: Request,
     dependencyResults: Map<string, BatchResponseEntry>,
     requestOrder: Map<BatchRequest, number>,
+    limits: NormalizedBatchLimits,
     sharedContentIds: Map<string, string>,
     sharedContentIdEtags: Map<string, string>,
   ): Promise<BatchResponseEntry[]> {
@@ -1288,6 +1294,7 @@ export class ODataBatchController {
         parentRequest,
         dependencyResults,
         requestOrder,
+        limits,
         true,
         contentIdMap,
         contentIdEtags,
@@ -1570,6 +1577,7 @@ export class ODataBatchController {
     request: BatchRequest,
     context: AtomicityGroupContext | undefined,
     parentRequest: Request,
+    limits: NormalizedBatchLimits,
   ): Promise<BatchResponseEntry> {
     const url = this.sanitizeUrl(request.url, true);
     if (!url) {
@@ -1652,11 +1660,59 @@ export class ODataBatchController {
     res.assignSocket?.(socket);
     const chunks: Buffer[] = [];
     let resolved = false;
+    const responseLimit = limits.maxResponseBodyBytes ?? 0;
+    const enforceResponseLimit = typeof responseLimit === 'number' && responseLimit > 0;
+    let capturedResponseBytes = 0;
+    let responseLimitExceeded = false;
+    let responseLimitExceededBytes: number | undefined;
+
+    const captureChunk = (chunk: any, encoding?: BufferEncoding) => {
+      if (!chunk || responseLimitExceeded) return;
+      const bufferChunk = Buffer.isBuffer(chunk)
+        ? chunk
+        : typeof chunk === 'string'
+          ? Buffer.from(chunk, encoding)
+          : Buffer.from(chunk);
+      if (enforceResponseLimit) {
+        capturedResponseBytes += bufferChunk.length;
+        if (capturedResponseBytes > responseLimit) {
+          responseLimitExceeded = true;
+          responseLimitExceededBytes = capturedResponseBytes;
+          chunks.length = 0;
+          this.warn('Batch sub-response exceeded configured size limit.', {
+            requestId: request.id,
+            method,
+            url,
+            limitBytes: responseLimit,
+            observedBytes: responseLimitExceededBytes,
+          });
+          const overflowError = new HttpErrors.PayloadTooLarge(
+            'Batch sub-response exceeded the configured size limit.',
+          );
+          res.destroy(overflowError);
+          socket.destroy?.(overflowError);
+          res.emit('close');
+          return;
+        }
+      }
+      chunks.push(bufferChunk);
+    };
 
     const finishPromise = new Promise<BatchResponseEntry>((resolve, reject) => {
       const finalize = () => {
         if (resolved) return;
         resolved = true;
+        if (responseLimitExceeded) {
+          const limitMessage = enforceResponseLimit
+            ? `Batch sub-response exceeded the configured size limit of ${responseLimit} bytes.`
+            : 'Batch sub-response exceeded the configured size limit.';
+          resolve({
+            id: request.id,
+            status: 413,
+            body: this.odataError('ResponseTooLarge', limitMessage),
+          });
+          return;
+        }
         const payloadBuffer = Buffer.concat(chunks);
         const headers: Record<string, string> = {};
         for (const [key, value] of Object.entries(res.getHeaders())) {
@@ -1674,13 +1730,20 @@ export class ODataBatchController {
 
     const write = res.write.bind(res);
     res.write = function (chunk: any, ...args: any[]) {
-      if (chunk) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+      if (responseLimitExceeded) return false;
+      const encoding = typeof args[0] === 'string' ? (args[0] as BufferEncoding) : undefined;
+      captureChunk(chunk, encoding);
+      if (responseLimitExceeded) return false;
       return write(chunk, ...args);
     } as any;
 
     const end = res.end.bind(res);
     res.end = function (chunk?: any, ...args: any[]) {
-      if (chunk) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+      if (!responseLimitExceeded && chunk) {
+        const encoding = typeof args[0] === 'string' ? (args[0] as BufferEncoding) : undefined;
+        captureChunk(chunk, encoding);
+      }
+      if (responseLimitExceeded) return res;
       return end(chunk, ...args);
     } as any;
 
@@ -1780,14 +1843,16 @@ export class ODataBatchController {
     request: BatchRequest,
     context: AtomicityGroupContext | undefined,
     parentRequest: Request,
+    limits: NormalizedBatchLimits,
   ): Promise<BatchResponseEntry> {
-    return this.executeWithRedirects(request, context, parentRequest);
+    return this.executeWithRedirects(request, context, parentRequest, limits);
   }
 
   private async executeWithRedirects(
     request: BatchRequest,
     context: AtomicityGroupContext | undefined,
     parentRequest: Request,
+    limits: NormalizedBatchLimits,
   ): Promise<BatchResponseEntry> {
     const MAX_REDIRECTS = 3;
     let remainingRedirects = MAX_REDIRECTS;
@@ -1795,7 +1860,7 @@ export class ODataBatchController {
 
     // eslint-disable-next-line no-constant-condition
     while (true) {
-      const response = await this.executeWithHandler(current, context, parentRequest);
+      const response = await this.executeWithHandler(current, context, parentRequest, limits);
       if (!this.isRedirectStatus(response.status)) {
         return response;
       }

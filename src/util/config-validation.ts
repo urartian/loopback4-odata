@@ -57,6 +57,7 @@ export function validateODataConfig(config: ODataConfig): void {
     assignPositive(batch, 'maxChangesetOperations', 'ODataConfig.batch');
     assignPositive(batch, 'maxDepth', 'ODataConfig.batch');
     assignPositive(batch, 'maxPartBodyBytes', 'ODataConfig.batch');
+    assignPositive(batch, 'maxResponseBodyBytes', 'ODataConfig.batch');
   }
   if (config.telemetry) {
     validateTelemetryConfig(config.telemetry);
