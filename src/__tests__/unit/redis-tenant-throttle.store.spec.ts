@@ -2,14 +2,20 @@ import { expect } from '@loopback/testlab';
 import {
   CONCURRENCY_SCRIPT,
   RATE_SCRIPT,
+  REFRESH_SCRIPT,
   RELEASE_SCRIPT,
   RedisScriptExecutor,
   RedisTenantThrottleStore,
 } from '../../services/redis-tenant-throttle.store';
 
-type ScriptType = 'rate' | 'concurrent' | 'release';
+type ScriptType = 'rate' | 'concurrent' | 'release' | 'refresh';
 
-type StoredState = { windowStart: number; hits: number; concurrent: number; ttl: number | null };
+type StoredState = {
+  windowStart: number;
+  hits: number;
+  concurrent: number;
+  ttl: number | null;
+};
 
 class FakeRedisClient implements RedisScriptExecutor {
   private readonly storage = new Map<string, StoredState>();
@@ -60,6 +66,7 @@ class FakeRedisClient implements RedisScriptExecutor {
     if (normalized === RATE_SCRIPT.trim()) return 'rate';
     if (normalized === CONCURRENCY_SCRIPT.trim()) return 'concurrent';
     if (normalized === RELEASE_SCRIPT.trim()) return 'release';
+    if (normalized === REFRESH_SCRIPT.trim()) return 'refresh';
     throw new Error('Unknown script');
   }
 
@@ -74,7 +81,7 @@ class FakeRedisClient implements RedisScriptExecutor {
       }
       const nextHits = state.hits + 1;
       if (limit > 0 && nextHits > limit) {
-        this.applyTtl(state, ttl);
+        state.ttl = ttl;
         return [
           state.hits,
           state.windowStart,
@@ -84,7 +91,7 @@ class FakeRedisClient implements RedisScriptExecutor {
         ];
       }
       state.hits = nextHits;
-      this.applyTtl(state, ttl);
+      state.ttl = ttl;
       return [
         state.hits,
         state.windowStart,
@@ -97,28 +104,27 @@ class FakeRedisClient implements RedisScriptExecutor {
       const [limit, ttl, now] = args;
       if (state.windowStart === 0) state.windowStart = now;
       if (limit > 0 && state.concurrent >= limit) {
-        this.applyTtl(state, ttl);
+        state.ttl = ttl;
         return [state.windowStart, state.hits, state.concurrent, 1];
       }
       state.concurrent += 1;
-      this.applyTtl(state, ttl);
+      state.ttl = ttl;
       return [state.windowStart, state.hits, state.concurrent, 0];
     }
     if (type === 'release') {
       const [ttl] = args;
       state.concurrent = Math.max(0, state.concurrent - 1);
-      this.applyTtl(state, ttl);
+      state.ttl = ttl;
+      return [state.concurrent];
+    }
+    if (type === 'refresh') {
+      const [ttl] = args;
+      if (state.concurrent > 0) {
+        state.ttl = ttl;
+      }
       return [state.concurrent];
     }
     throw new Error('Unknown script type');
-  }
-
-  private applyTtl(state: StoredState, ttl: number) {
-    if (state.concurrent > 0) {
-      state.ttl = null;
-    } else {
-      state.ttl = ttl;
-    }
   }
 }
 
@@ -150,9 +156,9 @@ describe('RedisTenantThrottleStore', () => {
     const store = new RedisTenantThrottleStore(client, { minTtlMs: ttlMs });
     await store.acquireConcurrent('tenant', 2);
     const key = 'odata:tenant-throttle:tenant';
-    expect(client.getState(key)?.ttl).to.equal(null);
+    expect(client.getState(key)?.ttl).to.equal(ttlMs);
     await store.incrementRate('tenant', 60_000, 10);
-    expect(client.getState(key)?.ttl).to.equal(null);
+    expect(client.getState(key)?.ttl).to.equal(60_000);
     await store.releaseConcurrent('tenant');
     expect(client.getState(key)?.ttl).to.equal(ttlMs);
   });
@@ -165,8 +171,19 @@ describe('RedisTenantThrottleStore', () => {
     await store.acquireConcurrent('tenant', 2);
     const key = 'odata:tenant-throttle:tenant';
     await store.releaseConcurrent('tenant');
-    expect(client.getState(key)?.ttl).to.equal(null);
+    expect(client.getState(key)?.ttl).to.equal(ttlMs);
     await store.releaseConcurrent('tenant');
+    expect(client.getState(key)?.ttl).to.equal(ttlMs);
+  });
+
+  it('refreshes the concurrency lease on demand', async () => {
+    const client = new FakeRedisClient();
+    const ttlMs = 1500;
+    const store = new RedisTenantThrottleStore(client, { minTtlMs: ttlMs });
+    await store.acquireConcurrent('tenant', 1);
+    const key = 'odata:tenant-throttle:tenant';
+    expect(client.getState(key)?.ttl).to.equal(ttlMs);
+    await store.refreshConcurrentLease('tenant');
     expect(client.getState(key)?.ttl).to.equal(ttlMs);
   });
 });
