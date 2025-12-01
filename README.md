@@ -700,17 +700,22 @@ async auditUnlink(ctx: CrudOnContext, next: () => Promise<unknown>) {
 #### Example: unbound action with a raw response
 
 ```ts
-@odataAction({name: 'resetInventory', binding: 'unbound', params: [{name: 'confirm', type: 'Edm.Boolean'}], rawResponse: true})
-async resetInventory(body: {confirm?: boolean}) {
+@odataAction({
+  name: 'resetInventoryRaw',
+  binding: 'unbound',
+  params: [{ name: 'confirm', type: 'Edm.Boolean' }],
+  rawResponse: true,
+})
+async resetInventoryRaw(body: { confirm?: boolean }) {
   if (!body?.confirm) {
     throw new HttpErrors.BadRequest('Pass {"confirm": true} to reset inventory');
   }
-  await this.products.updateAll({quantityOnHand: 0});
-  return {status: 'ok'};
+  await this.products.updateAll({ quantityOnHand: 0 });
+  return { status: 'ok' };
 }
 ```
 
-This action is exposed as `POST /odata/resetInventory`, surfaces in `$metadata` as an unbound action, and because `rawResponse` is set, the controller controls the full payload.
+This action is exposed as `POST /odata/resetInventoryRaw`, surfaces in `$metadata` as an unbound action, and because `rawResponse` is set, the controller controls the full payload. The sample application also includes a `resetInventory` action without `rawResponse` to illustrate the default OData envelope (payload returned under `value` with `@odata.context`).
 
 #### Example: virtual/computed properties
 
@@ -929,6 +934,8 @@ this.bind(ODATA_BINDINGS.CONFIG).to({
     maxOperations: 100, // total requests allowed per batch
     maxChangesetOperations: 50, // per-changeset limit
     maxPartBodyBytes: 4 * 1024 * 1024, // individual part payload limit
+    maxResponseBodyBytes: 4 * 1024 * 1024, // per-sub-response buffering limit
+    maxResponsePayloadBytes: 32 * 1024 * 1024, // aggregate buffered + serialized response limit
   },
   onLog(entry) {
     myTelemetryClient.trackEvent({
@@ -981,6 +988,7 @@ const ProductsSet: EntitySetDef<Product> = {
 > **Validation:** Guardrail values must be positive integers. Invalid settings (for example, `pagination.maxPageSize: 0` or `skipTokenTtl: -5`) cause startup to fail fast so configuration issues surface immediately.
 
 - `basePath`: Externally visible service root. All OData routes are served under this path (via middleware rewrite) while internal routes remain at `/odata`. Response metadata (`@odata.context`) uses this value.
+- `trustProxyHeaders`: Controls whether `Forwarded` / `X-Forwarded-*` headers participate in host/protocol detection. Set to `true` to always trust them, `false` to ignore them even when Express' `trust proxy` is enabled, or omit the flag to piggy-back on `RestServer.config.trustProxy` / Express' `app.enable('trust proxy')`. When disabled, the controller only considers the immediate request's `Host` and `protocol` values, preventing spoofed headers from bypassing origin scoping.
 - `pagination.maxTop`: Caps `$top` for collection reads. When `strict=true` requests above the cap return `400 Bad Request`; otherwise the server clamps the value. Legacy `config.maxTop` is still honored but the nested value takes precedence.
 - `pagination.maxSkip`: Maximum allowed `$skip`. Requests above the cap are clamped when `strict=false` and rejected when `strict=true`. Legacy `config.maxSkip` remains available for backward compatibility.
 - `pagination.maxPageSize`: Upper bound for server-driven paging on collection endpoints. The service never emits more than this many entities in a single page even when clients omit `$top`.
@@ -993,11 +1001,13 @@ const ProductsSet: EntitySetDef<Product> = {
 - `skipTokenTtl`: Lifetime (in seconds) for issued `$skiptoken` links. Defaults to `900` (15 minutes). Expired tokens return `400 Invalid $skiptoken`.
 - `deltaTokenTtl`: Optional lifetime (seconds) for `$deltatoken` links. When omitted, delta tokens remain valid until you rotate the secret or prune their backing store.
 - `allowLegacyUnsignedTokens`: Set to `true` only while migrating from the unsigned (v1/v2) token format. New deployments should leave this `false` to reject tampered tokens outright.
-- `batch`: Guardrails for `$batch` requests. Provide `maxPayloadBytes` (default `16 MB`), `maxOperations` (100 operations), `maxChangesetOperations` (50 per changeset), `maxPartBodyBytes` (4 MB), and `maxDepth` (2 levels) to cap payload size, total operations, and changeset nesting.
+- `batch`: Guardrails for `$batch` requests. Provide `maxPayloadBytes` (default `16 MB`), `maxOperations` (100 operations), `maxChangesetOperations` (50 per changeset), `maxPartBodyBytes` (4 MB), `maxResponseBodyBytes` (4 MB per sub-response), `maxResponsePayloadBytes` (32 MB aggregate), and `maxDepth` (2 levels) to cap payload size, total operations, changeset nesting, and the amount of memory each buffered/serialized response may consume.
+- Sub-responses that exceed `maxResponseBodyBytes` are aborted in-process and return `413 ResponseTooLarge` so a single oversized entry cannot exhaust server memory even when the handler streams a large binary payload.
+- When the combined buffered responses and the serialized JSON/multipart payload would exceed `maxResponsePayloadBytes`, the controller rejects the entire batch with `413 Payload Too Large` before serialization begins, preventing attackers from flooding the process with many near-limit responses in a single request.
 - `$batch` limits are enforced while parsing the stream: once the cumulative payload or a single part exceeds the configured budget the server aborts immediately with `413 Payload Too Large`.
 - `$batch` atomicity detection is connector-aware: entity sets backed by datasources that expose `beginTransaction` (for example PostgreSQL or MySQL) are marked as transactional after the first successful changeset, while datasources without transactions (such as the in-memory connector) are marked as non-transactional and future atomicity groups targeting them are rejected immediately with `501 Not Implemented`. The generated CSDL advertises the service-wide capability (per spec) on the EntityContainer via `Org.OData.Capabilities.V1.BatchSupported/ChangeSetsSupported`, which flips to `true` only when every registered entity set is backed by a transactional datasource, and emits per-entity-set annotations under `LoopBack.V1.BatchCapabilities.ChangeSetsSupported` so tools can decide which entity sets allow change sets.
 - `onDeltaTokenInvalid(event)`: Optional callback fired whenever a client supplies an expired, tampered, or mismatched `$deltatoken`. Useful for alerting/telemetry when secrets rotate.
-- `tenantResolver(request)`: Function that extracts a tenant/customer identifier from an incoming request (for example `req.user?.tenantId` or `req.get('x-tenant-id')`). When combined with `tenantQuotas`, the server enforces per-tenant throttling.
+- `tenantResolver(request)`: Function that extracts a tenant/customer identifier from an incoming request (for example `req.user?.tenantId` or `req.get('x-tenant-id')`). When combined with `tenantQuotas`, the server enforces per-tenant throttling. If the resolver throws, the request now fails fast with `400 TenantResolutionFailed` so malformed or malicious headers cannot fall back to the unrestricted default bucket.
 - `tenantQuotas`: `{ maxRequestsPerMinute?: number; maxConcurrentRequests?: number; overrides?: Record<string, { maxRequestsPerMinute?: number; maxConcurrentRequests?: number }> }`. Leave undefined to disable throttling or specify per-tenant overrides to grant premium customers higher limits.
 - `onLog(entry)`: Optional hook invoked for every log entry emitted by the OData component (`entry` includes `level`, `message`, `context`, and optional `error`). Use it to forward structured telemetry into your existing logging/monitoring pipeline. If you bind your own logger to `ODATA_BINDINGS.LOGGER` the hook still fires after the logger handles the entry.
 - `documentInOpenApiDefault`: Controls whether generated OData routes appear in the published OpenAPI spec. The default `'auto'` policy documents entity sets that are also decorated with LoopBack's `@model()` and hides OData-only models. Set to `true` to publish every generated controller or `false` to hide everything unless a model opts in via `@odataModel({documentInOpenApi: true})`.
@@ -1030,6 +1040,7 @@ With the snippet above every OData controller automatically throttles requests p
 - If a header is missing, traffic goes through the default bucket (`'default'`).
 - Premium tenants inherit the global limits unless an override is specified.
 - All operations (reads, writes, deletes, `$ref`) participate, and concurrency slots are released when the response finishes.
+- Resolver exceptions are surfaced to callers as `400 BadRequest` (code `TenantResolutionFailed`) instead of falling back to `'default'`, preserving tenant-specific quotas even when attackers spoof headers.
 - Keys inside `tenantQuotas.overrides` must match the string returned by your `tenantResolver`, so you can define arbitrary tiers such as `sandbox`, `enterprise`, or a specific tenant id like `tenant-42`.
 - Whenever throttling occurs the component logs a structured warning with `context.event === 'tenant-throttle'`. Hook into `config.onLog` to stream these events into your observability stack:
 
@@ -1526,7 +1537,7 @@ this.bind(ODATA_BINDINGS.CONFIG).to({
 
 - `telemetry.enabled` gates all instrumentation, while `categories` acts as a filter for noisy areas (`apply`, `rewrite`, `hooks`, `batch`, `throttle`, `tokens`, `requests`). `includeApplyPlanOnFallback` embeds the `$apply` plan when a pushdown falls back to in-memory execution, making it easier to diagnose regressions.
 - `sampleRate` allows high-volume services to trace only a slice of requests (0 disables, 1 traces every request).
-- When `telemetry.requestLogging.enabled = true`—or when clients send `Prefer: telemetry=request-log`—the component emits request logs (`telemetryEvent=request.log`) with method, URL, status, masked headers, and optionally bodies (bounded by `maxPayloadBytes`). Response bodies are included only when `includeResponseBody` is true.
+- When `telemetry.requestLogging.enabled = true`—or when `telemetry.requestLogging.allowClientOverride = true` and clients send `Prefer: telemetry=request-log`—the component emits request logs (`telemetryEvent=request.log`) with method, URL, status, masked headers, and optionally bodies (bounded by `maxPayloadBytes`). Response bodies are included only when `includeResponseBody` is true.
 - When `emitStatisticsHeader` is true, clients can opt in per request with `Prefer: telemetry=statistics`. Successful requests answer with `Preference-Applied: telemetry=statistics` and an `OData-Statistics` header such as `{"dbTime":21,"processingTime":12,"roundTrips":1,"rows":42}`.
 - The correlation block captures request IDs from headers (default `x-correlation-id`), optionally echoes them back on responses, and makes them available to repositories and telemetry emitters so your existing log aggregation or tracing tools can stitch events together.
 
@@ -1545,6 +1556,7 @@ Use `ODATA_BINDINGS.LOGGER` to plug in your preferred logger (e.g., Pino, Winsto
 | `telemetry.statisticsPrecision`                | Decimal precision for timing values in the stats header.                                                                                                              |
 | `telemetry.includeApplyPlanOnFallback`         | When true, `$apply` fallback events include the serialized execution plan in telemetry logs.                                                                          |
 | `telemetry.requestLogging.enabled`             | When true, every OData request is logged (`telemetryEvent=request.log`) with method/URL/status and masked headers/bodies.                                             |
+| `telemetry.requestLogging.allowClientOverride` | When true (default `false`), clients can request per-call logging via `Prefer: telemetry=request-log`.                                                                |
 | `telemetry.requestLogging.includeHeaders`      | Include request headers in the log (masked via `maskHeaders`). Defaults to `true`.                                                                                    |
 | `telemetry.requestLogging.includeResponseBody` | Include response payloads (respecting `maxPayloadBytes`). Defaults to `false`.                                                                                        |
 | `telemetry.requestLogging.maxPayloadBytes`     | Maximum number of bytes captured from request/response bodies before truncation (default 32768).                                                                      |

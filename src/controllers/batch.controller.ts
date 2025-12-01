@@ -9,7 +9,7 @@ import {
   RequestContext,
 } from '@loopback/rest';
 import { HttpHandler } from '@loopback/rest/dist/http-handler';
-import { IncomingMessage, ServerResponse } from 'http';
+import { IncomingMessage, ServerResponse, STATUS_CODES } from 'http';
 import { PassThrough } from 'stream';
 import {
   AnyObject,
@@ -107,7 +107,21 @@ interface NormalizedBatchLimits {
   maxChangesetOperations?: number;
   maxDepth?: number;
   maxPartBodyBytes?: number;
+  maxResponseBodyBytes?: number;
+  maxResponsePayloadBytes?: number;
 }
+
+interface ResponseSizeTracker {
+  limit?: number;
+  isMultipart: boolean;
+  bufferedBytes: number;
+  serializedBytes: number;
+  responsesCount: number;
+  activeChangesetId?: string;
+}
+
+const ESTIMATED_BATCH_BOUNDARY = 'batch_boundary';
+const ESTIMATED_CHANGESET_BOUNDARY = 'changeset_boundary';
 
 interface ContentIdTokenMatch {
   token: string;
@@ -322,6 +336,7 @@ export class ODataBatchController {
       const contentIdMap = new Map<string, string>();
       const contentIdEtags = new Map<string, string>();
       const responses: BatchResponseEntry[] = [];
+      const responseSizeTracker = this.createResponseSizeTracker(isMultipart, limits);
 
       const maxChangesetOps = limits.maxChangesetOperations;
       if (maxChangesetOps && maxChangesetOps > 0) {
@@ -354,6 +369,8 @@ export class ODataBatchController {
                 request,
                 dependencyResults,
                 requestOrder,
+                limits,
+                responseSizeTracker,
                 contentIdMap,
                 contentIdEtags,
               );
@@ -388,6 +405,8 @@ export class ODataBatchController {
           request,
           dependencyResults,
           requestOrder,
+          limits,
+          responseSizeTracker,
           false,
           contentIdMap,
           contentIdEtags,
@@ -395,6 +414,7 @@ export class ODataBatchController {
         responses.push(...entries);
       }
 
+      this.finalizeResponseSizeTracker(responseSizeTracker);
       response.set('OData-Version', ODATA_VERSION);
 
       let result: BatchResponsePayload | void = { responses };
@@ -437,6 +457,8 @@ export class ODataBatchController {
       maxChangesetOperations: cfgBatch.maxChangesetOperations ?? 50,
       maxDepth: cfgBatch.maxDepth ?? 2,
       maxPartBodyBytes: cfgBatch.maxPartBodyBytes ?? 4 * 1024 * 1024,
+      maxResponseBodyBytes: cfgBatch.maxResponseBodyBytes ?? 4 * 1024 * 1024,
+      maxResponsePayloadBytes: cfgBatch.maxResponsePayloadBytes ?? 32 * 1024 * 1024,
     };
   }
 
@@ -734,6 +756,8 @@ export class ODataBatchController {
     parentRequest: Request,
     dependencyResults: Map<string, BatchResponseEntry>,
     requestOrder: Map<BatchRequest, number>,
+    limits: NormalizedBatchLimits,
+    tracker: ResponseSizeTracker | undefined,
     abortOnFailure: boolean,
     contentIdMap?: Map<string, string>,
     contentIdEtags?: Map<string, string>,
@@ -745,6 +769,9 @@ export class ODataBatchController {
       }
       const dependencyFailure = this.evaluateDependsOn(request, dependencyResults);
       if (dependencyFailure) {
+        if (tracker) {
+          this.trackResponseSize(tracker, dependencyFailure);
+        }
         entries.push(dependencyFailure);
         if (request.id) dependencyResults.set(request.id, dependencyFailure);
         if (abortOnFailure) break;
@@ -756,7 +783,10 @@ export class ODataBatchController {
       if (contentIdEtags) {
         this.ensureEtagPreconditions(prepared, contentIdEtags);
       }
-      const entry = await this.executeSingle(prepared, context, parentRequest);
+      const entry = await this.executeSingle(prepared, context, parentRequest, limits);
+      if (tracker) {
+        this.trackResponseSize(tracker, entry);
+      }
       entries.push(entry);
       if (request.id) dependencyResults.set(request.id, entry);
       if (contentIdMap) {
@@ -1274,6 +1304,8 @@ export class ODataBatchController {
     parentRequest: Request,
     dependencyResults: Map<string, BatchResponseEntry>,
     requestOrder: Map<BatchRequest, number>,
+    limits: NormalizedBatchLimits,
+    tracker: ResponseSizeTracker,
     sharedContentIds: Map<string, string>,
     sharedContentIdEtags: Map<string, string>,
   ): Promise<BatchResponseEntry[]> {
@@ -1288,6 +1320,8 @@ export class ODataBatchController {
         parentRequest,
         dependencyResults,
         requestOrder,
+        limits,
+        tracker,
         true,
         contentIdMap,
         contentIdEtags,
@@ -1306,6 +1340,7 @@ export class ODataBatchController {
                 'Request not executed due to prior failure in changeset.',
               ),
             };
+            this.trackResponseSize(tracker, synthetic);
             entries.push(synthetic);
             if (req.id) dependencyResults.set(req.id, synthetic);
           }
@@ -1570,6 +1605,7 @@ export class ODataBatchController {
     request: BatchRequest,
     context: AtomicityGroupContext | undefined,
     parentRequest: Request,
+    limits: NormalizedBatchLimits,
   ): Promise<BatchResponseEntry> {
     const url = this.sanitizeUrl(request.url, true);
     if (!url) {
@@ -1611,6 +1647,11 @@ export class ODataBatchController {
     req.url = rewrittenUrl;
     const combinedHeaders = this.buildHeadersForRequest(request, parentRequest);
     (req as any).headers = combinedHeaders;
+    const { protocol: resolvedProtocol, secure: isSecure } =
+      this.resolveParentProtocolState(parentRequest);
+    (req as any).protocol = resolvedProtocol;
+    (req as any).secure = isSecure;
+    socket.encrypted = isSecure;
 
     Object.defineProperty(req, 'path', {
       enumerable: true,
@@ -1644,7 +1685,6 @@ export class ODataBatchController {
       return (req as any).headers?.[String(name).toLowerCase()] as string | undefined;
     };
     (req as any).header = (name: string) => (req as any).get(name);
-    (req as any).protocol = 'http';
     (req as any).baseUrl = '';
     (req as any).originalUrl = url;
 
@@ -1652,11 +1692,59 @@ export class ODataBatchController {
     res.assignSocket?.(socket);
     const chunks: Buffer[] = [];
     let resolved = false;
+    const responseLimit = limits.maxResponseBodyBytes ?? 0;
+    const enforceResponseLimit = typeof responseLimit === 'number' && responseLimit > 0;
+    let capturedResponseBytes = 0;
+    let responseLimitExceeded = false;
+    let responseLimitExceededBytes: number | undefined;
+
+    const captureChunk = (chunk: any, encoding?: BufferEncoding) => {
+      if (!chunk || responseLimitExceeded) return;
+      const bufferChunk = Buffer.isBuffer(chunk)
+        ? chunk
+        : typeof chunk === 'string'
+          ? Buffer.from(chunk, encoding)
+          : Buffer.from(chunk);
+      if (enforceResponseLimit) {
+        capturedResponseBytes += bufferChunk.length;
+        if (capturedResponseBytes > responseLimit) {
+          responseLimitExceeded = true;
+          responseLimitExceededBytes = capturedResponseBytes;
+          chunks.length = 0;
+          this.warn('Batch sub-response exceeded configured size limit.', {
+            requestId: request.id,
+            method,
+            url,
+            limitBytes: responseLimit,
+            observedBytes: responseLimitExceededBytes,
+          });
+          const overflowError = new HttpErrors.PayloadTooLarge(
+            'Batch sub-response exceeded the configured size limit.',
+          );
+          res.destroy(overflowError);
+          socket.destroy?.(overflowError);
+          res.emit('close');
+          return;
+        }
+      }
+      chunks.push(bufferChunk);
+    };
 
     const finishPromise = new Promise<BatchResponseEntry>((resolve, reject) => {
       const finalize = () => {
         if (resolved) return;
         resolved = true;
+        if (responseLimitExceeded) {
+          const limitMessage = enforceResponseLimit
+            ? `Batch sub-response exceeded the configured size limit of ${responseLimit} bytes.`
+            : 'Batch sub-response exceeded the configured size limit.';
+          resolve({
+            id: request.id,
+            status: 413,
+            body: this.odataError('ResponseTooLarge', limitMessage),
+          });
+          return;
+        }
         const payloadBuffer = Buffer.concat(chunks);
         const headers: Record<string, string> = {};
         for (const [key, value] of Object.entries(res.getHeaders())) {
@@ -1674,13 +1762,20 @@ export class ODataBatchController {
 
     const write = res.write.bind(res);
     res.write = function (chunk: any, ...args: any[]) {
-      if (chunk) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+      if (responseLimitExceeded) return false;
+      const encoding = typeof args[0] === 'string' ? (args[0] as BufferEncoding) : undefined;
+      captureChunk(chunk, encoding);
+      if (responseLimitExceeded) return false;
       return write(chunk, ...args);
     } as any;
 
     const end = res.end.bind(res);
     res.end = function (chunk?: any, ...args: any[]) {
-      if (chunk) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+      if (!responseLimitExceeded && chunk) {
+        const encoding = typeof args[0] === 'string' ? (args[0] as BufferEncoding) : undefined;
+        captureChunk(chunk, encoding);
+      }
+      if (responseLimitExceeded) return res;
       return end(chunk, ...args);
     } as any;
 
@@ -1780,14 +1875,16 @@ export class ODataBatchController {
     request: BatchRequest,
     context: AtomicityGroupContext | undefined,
     parentRequest: Request,
+    limits: NormalizedBatchLimits,
   ): Promise<BatchResponseEntry> {
-    return this.executeWithRedirects(request, context, parentRequest);
+    return this.executeWithRedirects(request, context, parentRequest, limits);
   }
 
   private async executeWithRedirects(
     request: BatchRequest,
     context: AtomicityGroupContext | undefined,
     parentRequest: Request,
+    limits: NormalizedBatchLimits,
   ): Promise<BatchResponseEntry> {
     const MAX_REDIRECTS = 3;
     let remainingRedirects = MAX_REDIRECTS;
@@ -1795,7 +1892,7 @@ export class ODataBatchController {
 
     // eslint-disable-next-line no-constant-condition
     while (true) {
-      const response = await this.executeWithHandler(current, context, parentRequest);
+      const response = await this.executeWithHandler(current, context, parentRequest, limits);
       if (!this.isRedirectStatus(response.status)) {
         return response;
       }
@@ -1837,13 +1934,16 @@ export class ODataBatchController {
     if (/^https?:\/\//i.test(trimmed)) {
       try {
         const parsed = new URL(trimmed);
-        return parsed.pathname + parsed.search;
+        const normalized = parsed.pathname + parsed.search;
+        return this.ensureWithinServiceRoot(normalized);
       } catch {
         return undefined;
       }
     }
-    // Accept absolute app paths as-is
-    if (trimmed.startsWith('/')) return trimmed;
+    // Accept absolute app paths that belong to the service root
+    if (trimmed.startsWith('/')) {
+      return this.ensureWithinServiceRoot(trimmed);
+    }
     // Optionally resolve relative OData paths (e.g. "Books", "Books(1)?$select=...")
     if (allowRelative) {
       return this.buildServiceRelativePath(trimmed);
@@ -1876,6 +1976,18 @@ export class ODataBatchController {
     } catch {
       return undefined;
     }
+  }
+
+  private ensureWithinServiceRoot(url: string): string | undefined {
+    if (!url || !url.startsWith('/')) return undefined;
+    const root = this.serviceRootPath === '/' ? '/' : this.serviceRootPath;
+    if (root === '/') return url;
+    const question = url.indexOf('?');
+    const pathOnly = question >= 0 ? url.slice(0, question) : url;
+    const normalizedPath = pathOnly.length > 1 ? pathOnly.replace(/\/+$/, '') || '/' : pathOnly;
+    if (normalizedPath === root) return url;
+    if (normalizedPath.startsWith(`${root}/`)) return url;
+    return undefined;
   }
 
   private buildServiceRelativePath(rawUrl: string): string | undefined {
@@ -1980,6 +2092,38 @@ export class ODataBatchController {
     return merged;
   }
 
+  private resolveParentProtocolState(parentRequest?: Request): {
+    protocol: string;
+    secure: boolean;
+  } {
+    const fallback = { protocol: 'http', secure: false };
+    if (!parentRequest) return fallback;
+    const rawProtocol =
+      typeof parentRequest.protocol === 'string' && parentRequest.protocol.trim().length
+        ? parentRequest.protocol.trim().toLowerCase()
+        : undefined;
+    const parentSecure =
+      ((parentRequest as AnyObject)?.secure === true ||
+        Boolean(
+          (parentRequest as AnyObject)?.connection?.encrypted ??
+            (parentRequest as AnyObject)?.socket?.encrypted,
+        )) ??
+      false;
+    if (rawProtocol === 'https') {
+      return { protocol: 'https', secure: true };
+    }
+    if (parentSecure) {
+      return { protocol: 'https', secure: true };
+    }
+    if (rawProtocol === 'http') {
+      return { protocol: 'http', secure: false };
+    }
+    if (rawProtocol) {
+      return { protocol: rawProtocol, secure: false };
+    }
+    return fallback;
+  }
+
   private decodeBufferedBody(bodyBuffer: Buffer, headers?: Record<string, string>): unknown {
     if (!bodyBuffer.length) return undefined;
     const contentType = this.getHeaderCaseInsensitive(headers, 'content-type');
@@ -2039,6 +2183,229 @@ export class ODataBatchController {
         body: entry.body.toString('base64'),
       };
     });
+  }
+
+  private createResponseSizeTracker(
+    isMultipart: boolean,
+    limits: NormalizedBatchLimits,
+  ): ResponseSizeTracker {
+    return {
+      isMultipart,
+      limit: limits.maxResponsePayloadBytes,
+      bufferedBytes: 0,
+      serializedBytes: 0,
+      responsesCount: 0,
+      activeChangesetId: undefined,
+    };
+  }
+
+  private trackResponseSize(tracker: ResponseSizeTracker, entry: BatchResponseEntry): void {
+    tracker.responsesCount += 1;
+    if (!tracker.limit || tracker.limit <= 0) {
+      if (!tracker.isMultipart) {
+        return;
+      }
+      if (!entry.atomicityGroup && tracker.activeChangesetId) {
+        tracker.activeChangesetId = undefined;
+      } else if (entry.atomicityGroup) {
+        tracker.activeChangesetId = entry.atomicityGroup;
+      }
+      return;
+    }
+
+    let serializedIncrement = 0;
+    if (tracker.isMultipart) {
+      serializedIncrement += this.prepareMultipartTrackerState(tracker, entry);
+      serializedIncrement += entry.atomicityGroup
+        ? this.estimateChangesetEntryBytes(entry)
+        : this.estimateMultipartSingleEntryBytes(entry);
+    } else {
+      serializedIncrement += this.estimateJsonResponseBytes(entry);
+    }
+
+    const bufferedIncrement = this.estimateBufferedResponseBytes(entry);
+    tracker.bufferedBytes += bufferedIncrement;
+    tracker.serializedBytes += serializedIncrement;
+    this.enforceResponsePayloadLimit(tracker, entry.id);
+  }
+
+  private finalizeResponseSizeTracker(tracker: ResponseSizeTracker): void {
+    if (!tracker.limit || tracker.limit <= 0) {
+      return;
+    }
+    if (tracker.isMultipart) {
+      if (tracker.activeChangesetId) {
+        tracker.serializedBytes += this.estimateChangesetClosingBytes();
+        tracker.activeChangesetId = undefined;
+      }
+      tracker.serializedBytes += this.estimateBatchClosingBytes();
+    } else {
+      tracker.serializedBytes += this.estimateJsonEnvelopeBytes(tracker.responsesCount);
+    }
+    this.enforceResponsePayloadLimit(tracker);
+  }
+
+  private prepareMultipartTrackerState(
+    tracker: ResponseSizeTracker,
+    entry: BatchResponseEntry,
+  ): number {
+    let addition = 0;
+    if (entry.atomicityGroup) {
+      if (tracker.activeChangesetId && tracker.activeChangesetId !== entry.atomicityGroup) {
+        addition += this.estimateChangesetClosingBytes();
+        tracker.activeChangesetId = undefined;
+      }
+      if (tracker.activeChangesetId !== entry.atomicityGroup) {
+        addition += this.estimateChangesetStartBytes();
+        tracker.activeChangesetId = entry.atomicityGroup;
+      }
+    } else if (tracker.activeChangesetId) {
+      addition += this.estimateChangesetClosingBytes();
+      tracker.activeChangesetId = undefined;
+    }
+    return addition;
+  }
+
+  private enforceResponsePayloadLimit(tracker: ResponseSizeTracker, requestId?: string): void {
+    if (!tracker.limit || tracker.limit <= 0) return;
+    const projected = tracker.bufferedBytes + tracker.serializedBytes;
+    if (projected <= tracker.limit) return;
+    this.warn('Batch responses exceeded the configured aggregate size limit.', {
+      limitBytes: tracker.limit,
+      bufferedBytes: tracker.bufferedBytes,
+      serializedBytes: tracker.serializedBytes,
+      requestId,
+    });
+    throw new HttpErrors.PayloadTooLarge('Batch responses exceeded the configured size limit.');
+  }
+
+  private estimateBufferedResponseBytes(entry: BatchResponseEntry): number {
+    const body = entry.body;
+    if (body === undefined || body === null) return 0;
+    if (Buffer.isBuffer(body)) return body.length;
+    if (typeof body === 'string') return Buffer.byteLength(body);
+    try {
+      return Buffer.byteLength(JSON.stringify(body));
+    } catch {
+      return Buffer.byteLength(String(body));
+    }
+  }
+
+  private estimateJsonResponseBytes(entry: BatchResponseEntry): number {
+    try {
+      const normalized = this.normalizeJsonBatchResponses([entry])[0] ?? entry;
+      return Buffer.byteLength(JSON.stringify(normalized));
+    } catch {
+      return Buffer.byteLength('{}');
+    }
+  }
+
+  private estimateMultipartSingleEntryBytes(entry: BatchResponseEntry): number {
+    const partHeaders = this.buildMultipartPartHeaders(entry);
+    const prefix = `--${ESTIMATED_BATCH_BOUNDARY}\r\n${partHeaders}\r\n\r\n`;
+    const formatted = prefix.replace(/\\r\\n/g, '\r\n');
+    const httpLength = this.estimateHttpResponseLength(entry);
+    return Buffer.byteLength(formatted, 'utf-8') + httpLength + Buffer.byteLength('\r\n');
+  }
+
+  private estimateChangesetStartBytes(): number {
+    const header = `--${ESTIMATED_BATCH_BOUNDARY}\r\nContent-Type: multipart/mixed; boundary=${ESTIMATED_CHANGESET_BOUNDARY}\r\n\r\n`;
+    return Buffer.byteLength(header.replace(/\\r\\n/g, '\r\n'), 'utf-8');
+  }
+
+  private estimateChangesetEntryBytes(entry: BatchResponseEntry): number {
+    const partHeaders = this.buildMultipartPartHeaders(entry);
+    const prefix = `--${ESTIMATED_CHANGESET_BOUNDARY}\r\n${partHeaders}\r\n\r\n`;
+    const formatted = prefix.replace(/\\r\\n/g, '\r\n');
+    const httpLength = this.estimateHttpResponseLength(entry);
+    return Buffer.byteLength(formatted, 'utf-8') + httpLength + Buffer.byteLength('\r\n');
+  }
+
+  private estimateChangesetClosingBytes(): number {
+    return Buffer.byteLength(
+      `--${ESTIMATED_CHANGESET_BOUNDARY}--\r\n`.replace(/\\r\\n/g, '\r\n'),
+      'utf-8',
+    );
+  }
+
+  private estimateBatchClosingBytes(): number {
+    return Buffer.byteLength(
+      `--${ESTIMATED_BATCH_BOUNDARY}--\r\n`.replace(/\\r\\n/g, '\r\n'),
+      'utf-8',
+    );
+  }
+
+  private estimateJsonEnvelopeBytes(count: number): number {
+    const base = Buffer.byteLength('{"responses":', 'utf-8') + Buffer.byteLength('}', 'utf-8');
+    if (count <= 0) {
+      return base + Buffer.byteLength('[]', 'utf-8');
+    }
+    const brackets = Buffer.byteLength('[', 'utf-8') + Buffer.byteLength(']', 'utf-8');
+    const commas = count > 1 ? count - 1 : 0;
+    return base + brackets + commas;
+  }
+
+  private buildMultipartPartHeaders(entry: BatchResponseEntry): string {
+    const lines: string[] = [];
+    if (entry.id) {
+      lines.push(`Content-ID: ${entry.id}`);
+    }
+    lines.push('Content-Type: application/http');
+    lines.push('Content-Transfer-Encoding: binary');
+    return lines.join('\r\n');
+  }
+
+  private estimateHttpResponseLength(entry: BatchResponseEntry): number {
+    const reason = STATUS_CODES[entry.status] ?? '';
+    const headers = this.normalizeHeadersForLength(entry.headers ?? {});
+    const bodyLength = this.estimateSerializedBodyLength(entry.body, headers);
+    if (bodyLength > 0 && !headers['content-length']) {
+      headers['content-length'] = bodyLength.toString();
+    }
+    const headerLines = Object.entries(headers).map(
+      ([key, value]) => `${this.formatHeaderNameForLength(key)}: ${value}`,
+    );
+    let responseHead = `HTTP/1.1 ${entry.status} ${reason}`;
+    if (headerLines.length) {
+      responseHead += `\r\n${headerLines.join('\r\n')}`;
+    }
+    responseHead += '\r\n\r\n';
+    return Buffer.byteLength(responseHead, 'utf-8') + bodyLength;
+  }
+
+  private normalizeHeadersForLength(headers: Record<string, string>): Record<string, string> {
+    const normalized: Record<string, string> = {};
+    for (const [key, value] of Object.entries(headers)) {
+      if (value == null) continue;
+      normalized[key.toLowerCase()] = value;
+    }
+    return normalized;
+  }
+
+  private estimateSerializedBodyLength(body: unknown, headers: Record<string, string>): number {
+    if (body === undefined || body === null) return 0;
+    if (Buffer.isBuffer(body)) return body.length;
+    if (typeof body === 'string') {
+      return Buffer.byteLength(body);
+    }
+    if (typeof body === 'number' || typeof body === 'boolean' || typeof body === 'object') {
+      if (!headers['content-type']) {
+        headers['content-type'] = 'application/json; charset=utf-8';
+      }
+      try {
+        return Buffer.byteLength(JSON.stringify(body));
+      } catch {
+        return Buffer.byteLength(String(body));
+      }
+    }
+    return Buffer.byteLength(String(body));
+  }
+
+  private formatHeaderNameForLength(name: string): string {
+    return name
+      .split('-')
+      .map((part) => part.charAt(0).toUpperCase() + part.slice(1).toLowerCase())
+      .join('-');
   }
 
   private resolveRequestBodyBuffer(request: BatchRequest): Buffer {

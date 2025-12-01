@@ -103,7 +103,8 @@ export class RequestLoggingProvider implements Provider<Middleware> {
     telemetry: ODataTelemetryState | undefined,
   ): ODataRequestLoggingConfig | undefined {
     const config = this.cfg?.telemetry?.requestLogging;
-    const preferenceEnabled = state?.telemetryPreferences?.has('request-log');
+    const allowOverrides = config?.allowClientOverride === true;
+    const preferenceEnabled = allowOverrides && state?.telemetryPreferences?.has('request-log');
     const globalEnabled = config?.enabled === true;
     if (!globalEnabled && !preferenceEnabled) return undefined;
 
@@ -123,6 +124,15 @@ export class RequestLoggingProvider implements Provider<Middleware> {
   ): CapturedPayload | undefined {
     if (payload == null) return undefined;
     const maxBytes = config.maxPayloadBytes ?? 32 * 1024;
+    if (Buffer.isBuffer(payload)) {
+      const truncated = payload.length > maxBytes;
+      return {
+        body: truncated
+          ? payload.slice(0, maxBytes).toString('base64')
+          : payload.toString('base64'),
+        truncated,
+      };
+    }
     if (typeof payload === 'string') {
       const truncated = Buffer.byteLength(payload, 'utf8') > maxBytes;
       return {
@@ -132,12 +142,12 @@ export class RequestLoggingProvider implements Provider<Middleware> {
     }
     if (typeof payload === 'object') {
       try {
-        const clone = JSON.parse(JSON.stringify(payload));
-        const masked = this.maskRequestBody(clone, config.maskBodyPaths ?? []);
-        const serialized = JSON.stringify(masked);
+        const serialized = JSON.stringify(payload);
         if (Buffer.byteLength(serialized, 'utf8') > maxBytes) {
           return { truncated: true };
         }
+        const clone = JSON.parse(serialized);
+        const masked = this.maskRequestBody(clone, config.maskBodyPaths ?? []);
         return { body: masked };
       } catch {
         return { body: '[unserializable]' };

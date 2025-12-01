@@ -34,6 +34,7 @@ end
 local nextHits = hits + 1
 if limit > 0 and nextHits > limit then
   local windowResetMs = math.max(0, windowStart + windowMs - now)
+  redis.call('PEXPIRE', key, expireMs)
   return {hits, windowStart, windowResetMs, concurrent, 1}
 end
 
@@ -68,13 +69,27 @@ return {windowStart, hits, concurrent, 0}
 
 export const RELEASE_SCRIPT = `
 local key = KEYS[1]
+local expireMs = tonumber(ARGV[1])
 local current = redis.call('HMGET', key, 'concurrent')
 local concurrent = tonumber(current[1]) or 0
 if concurrent <= 0 then
+  redis.call('HSET', key, 'concurrent', 0)
+  redis.call('PEXPIRE', key, expireMs)
   return 0
 end
 concurrent = math.max(0, concurrent - 1)
 redis.call('HSET', key, 'concurrent', concurrent)
+redis.call('PEXPIRE', key, expireMs)
+return concurrent
+`;
+
+export const REFRESH_SCRIPT = `
+local key = KEYS[1]
+local expireMs = tonumber(ARGV[1])
+local concurrent = tonumber(redis.call('HGET', key, 'concurrent')) or 0
+if concurrent > 0 then
+  redis.call('PEXPIRE', key, expireMs)
+end
 return concurrent
 `;
 
@@ -82,6 +97,7 @@ export class RedisTenantThrottleStore implements TenantThrottleStore {
   private rateSha?: string;
   private concurrentSha?: string;
   private releaseSha?: string;
+  private refreshSha?: string;
 
   constructor(
     private readonly client: RedisScriptExecutor,
@@ -110,7 +126,7 @@ export class RedisTenantThrottleStore implements TenantThrottleStore {
   }
 
   async acquireConcurrent(tenant: string, limit?: number): Promise<TenantThrottleConcurrentResult> {
-    const ttl = Math.max(this.options.minTtlMs ?? this.defaultTtl(), this.defaultTtl());
+    const ttl = this.concurrencyTtl();
     const limitValue = limit && limit > 0 ? limit : 0;
     const now = Date.now();
     const [, , concurrent, limited] = await this.execScript(
@@ -125,8 +141,18 @@ export class RedisTenantThrottleStore implements TenantThrottleStore {
   }
 
   async releaseConcurrent(tenant: string): Promise<number> {
-    const [concurrent] = await this.execScript('release', [this.key(tenant)], []);
+    const ttl = this.concurrencyTtl();
+    const [concurrent] = await this.execScript('release', [this.key(tenant)], [ttl]);
     return concurrent;
+  }
+
+  async refreshConcurrentLease(tenant: string): Promise<void> {
+    const ttl = this.concurrencyTtl();
+    await this.execScript('refresh', [this.key(tenant)], [ttl]);
+  }
+
+  getConcurrentLeaseDuration(): number {
+    return this.concurrencyTtl();
   }
 
   private key(tenant: string) {
@@ -137,8 +163,12 @@ export class RedisTenantThrottleStore implements TenantThrottleStore {
     return this.options.minTtlMs ?? 120_000;
   }
 
+  private concurrencyTtl() {
+    return this.defaultTtl();
+  }
+
   private async execScript(
-    type: 'rate' | 'concurrent' | 'release',
+    type: 'rate' | 'concurrent' | 'release' | 'refresh',
     keys: string[],
     args: Array<number>,
   ): Promise<[number, number, number, number, number?]> {
@@ -174,7 +204,7 @@ export class RedisTenantThrottleStore implements TenantThrottleStore {
     }
   }
 
-  private async ensureSha(type: 'rate' | 'concurrent' | 'release'): Promise<string> {
+  private async ensureSha(type: 'rate' | 'concurrent' | 'release' | 'refresh'): Promise<string> {
     const existing = this.getSha(type);
     if (existing) return existing;
     const script = this.getScript(type);
@@ -183,28 +213,32 @@ export class RedisTenantThrottleStore implements TenantThrottleStore {
     return sha;
   }
 
-  private getSha(type: 'rate' | 'concurrent' | 'release') {
+  private getSha(type: 'rate' | 'concurrent' | 'release' | 'refresh') {
     if (type === 'rate') return this.rateSha;
     if (type === 'concurrent') return this.concurrentSha;
-    return this.releaseSha;
+    if (type === 'release') return this.releaseSha;
+    return this.refreshSha;
   }
 
-  private storeSha(type: 'rate' | 'concurrent' | 'release', sha: string) {
+  private storeSha(type: 'rate' | 'concurrent' | 'release' | 'refresh', sha: string) {
     if (type === 'rate') this.rateSha = sha;
     else if (type === 'concurrent') this.concurrentSha = sha;
-    else this.releaseSha = sha;
+    else if (type === 'release') this.releaseSha = sha;
+    else this.refreshSha = sha;
   }
 
-  private clearSha(type: 'rate' | 'concurrent' | 'release') {
+  private clearSha(type: 'rate' | 'concurrent' | 'release' | 'refresh') {
     if (type === 'rate') this.rateSha = undefined;
     else if (type === 'concurrent') this.concurrentSha = undefined;
-    else this.releaseSha = undefined;
+    else if (type === 'release') this.releaseSha = undefined;
+    else this.refreshSha = undefined;
   }
 
-  private getScript(type: 'rate' | 'concurrent' | 'release') {
+  private getScript(type: 'rate' | 'concurrent' | 'release' | 'refresh') {
     if (type === 'rate') return RATE_SCRIPT;
     if (type === 'concurrent') return CONCURRENCY_SCRIPT;
-    return RELEASE_SCRIPT;
+    if (type === 'release') return RELEASE_SCRIPT;
+    return REFRESH_SCRIPT;
   }
 
   private isNoScriptError(error: unknown) {

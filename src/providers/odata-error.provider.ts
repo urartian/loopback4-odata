@@ -44,10 +44,7 @@ export class ODataErrorProvider implements Provider<Reject> {
         httpError.status ??
         (httpError.code ? this.mapCodeToStatus(httpError.code) : undefined) ??
         500;
-      const code =
-        httpError.code === 'PreferenceNotSupported'
-          ? 'PreferenceNotSupported'
-          : this.mapStatusToCode(statusCode);
+      const code = this.resolveErrorCode(httpError.code) ?? this.mapStatusToCode(statusCode);
       const message = httpError.message || this.defaultMessage(statusCode);
       const target = httpError.target ?? null;
       const details = this.normalizeDetails(httpError);
@@ -100,6 +97,16 @@ export class ODataErrorProvider implements Provider<Reject> {
     }
   }
 
+  private resolveErrorCode(code?: string): string | undefined {
+    switch (code) {
+      case 'PreferenceNotSupported':
+      case 'TenantResolutionFailed':
+        return code;
+      default:
+        return undefined;
+    }
+  }
+
   private mapCodeToStatus(code?: string): number | undefined {
     switch (code) {
       case 'ENTITY_NOT_FOUND':
@@ -109,6 +116,8 @@ export class ODataErrorProvider implements Provider<Reject> {
         return 400;
       case 'PreferenceNotSupported':
         return 501;
+      case 'TenantResolutionFailed':
+        return 400;
       case 'PreconditionFailed':
         return 412;
       case 'PreconditionRequired':

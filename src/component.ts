@@ -51,6 +51,8 @@ export class ODataComponent implements Component {
         maxChangesetOperations: 50,
         maxDepth: 2,
         maxPartBodyBytes: 4 * 1024 * 1024,
+        maxResponseBodyBytes: 4 * 1024 * 1024,
+        maxResponsePayloadBytes: 32 * 1024 * 1024,
       },
       pagination: {
         maxPageSize: 200,
@@ -68,6 +70,7 @@ export class ODataComponent implements Component {
         includeApplyPlanOnFallback: false,
         requestLogging: {
           enabled: false,
+          allowClientOverride: false,
           includeHeaders: true,
           includeResponseBody: false,
           maxPayloadBytes: 32 * 1024,

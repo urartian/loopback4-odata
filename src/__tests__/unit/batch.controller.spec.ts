@@ -23,6 +23,8 @@ const defaultConfig: ODataConfig = {
     maxChangesetOperations: 100,
     maxDepth: 3,
     maxPartBodyBytes: 512 * 1024,
+    maxResponseBodyBytes: 512 * 1024,
+    maxResponsePayloadBytes: 4 * 1024 * 1024,
   },
 };
 
@@ -339,11 +341,17 @@ describe('$batch controller', () => {
       defaultConfig,
     );
 
-    const result = await (controller as any).executeSingle({
-      id: 'bad',
-      method: 'GET',
-      url: '',
-    });
+    const limits = (controller as any).getBatchLimits();
+    const result = await (controller as any).executeSingle(
+      {
+        id: 'bad',
+        method: 'GET',
+        url: '',
+      },
+      undefined,
+      requestStub('application/json'),
+      limits,
+    );
 
     assert.equal(result.status, 400);
     assert.equal((result.body as any)?.error?.code, 'InvalidUrl');
@@ -360,11 +368,17 @@ describe('$batch controller', () => {
       defaultConfig,
     );
 
-    const result = await (controller as any).executeSingle({
-      id: 'bad',
-      method: undefined,
-      url: '/odata/Products',
-    });
+    const limits = (controller as any).getBatchLimits();
+    const result = await (controller as any).executeSingle(
+      {
+        id: 'bad',
+        method: undefined,
+        url: '/odata/Products',
+      },
+      undefined,
+      requestStub('application/json'),
+      limits,
+    );
 
     assert.equal(result.status, 400);
     assert.equal((result.body as any)?.error?.code, 'InvalidMethod');
@@ -381,6 +395,7 @@ describe('$batch controller', () => {
       defaultConfig,
     );
 
+    const limits = (controller as any).getBatchLimits();
     const result = await (controller as any).executeSingle(
       {
         id: 'ssrf',
@@ -389,10 +404,206 @@ describe('$batch controller', () => {
       },
       undefined,
       requestStub('application/json'),
+      limits,
     );
 
     assert.equal(result.status, 400);
     assert.equal((result.body as any)?.error?.code, 'InvalidUrl');
+  });
+
+  it('rejects JSON batch requests that target paths outside the service root', async () => {
+    let callCount = 0;
+    const controller = new ODataBatchController(
+      {
+        handleRequest: async () => {
+          callCount++;
+        },
+      } as any,
+      'http://localhost',
+      createRequestContextStub(),
+      { get: async () => undefined } as any,
+      { findByName: () => undefined } as any,
+      noopLogger,
+      defaultConfig,
+    );
+
+    const limits = (controller as any).getBatchLimits();
+    const result = await (controller as any).executeSingle(
+      {
+        id: 'forbidden',
+        method: 'GET',
+        url: '/internal/admin/reset',
+      },
+      undefined,
+      requestStub('application/json'),
+      limits,
+    );
+
+    assert.equal(result.status, 400);
+    assert.equal((result.body as any)?.error?.code, 'InvalidUrl');
+    assert.equal(callCount, 0);
+  });
+
+  it('rejects absolute URLs with hosts when they fall outside the service root', async () => {
+    let callCount = 0;
+    const controller = new ODataBatchController(
+      {
+        handleRequest: async () => {
+          callCount++;
+        },
+      } as any,
+      'http://localhost',
+      createRequestContextStub(),
+      { get: async () => undefined } as any,
+      { findByName: () => undefined } as any,
+      noopLogger,
+      defaultConfig,
+    );
+
+    const limits = (controller as any).getBatchLimits();
+    const result = await (controller as any).executeSingle(
+      {
+        id: 'hosted',
+        method: 'GET',
+        url: 'https://example.com/internal/admin',
+      },
+      undefined,
+      requestStub('application/json'),
+      limits,
+    );
+
+    assert.equal(result.status, 400);
+    assert.equal((result.body as any)?.error?.code, 'InvalidUrl');
+    assert.equal(callCount, 0);
+  });
+
+  it('allows absolute URLs that remain inside the service root', async () => {
+    let callCount = 0;
+    const controller = new ODataBatchController(
+      {
+        handleRequest: async (_req: unknown, res: any) => {
+          callCount++;
+          res.statusCode = 204;
+          res.end();
+        },
+      } as any,
+      'http://localhost',
+      createRequestContextStub(),
+      { get: async () => undefined } as any,
+      { findByName: () => undefined } as any,
+      noopLogger,
+      defaultConfig,
+    );
+
+    const limits = (controller as any).getBatchLimits();
+    const result = await (controller as any).executeSingle(
+      {
+        id: 'allowed',
+        method: 'GET',
+        url: 'https://example.com/odata/Products?$top=1',
+      },
+      undefined,
+      requestStub('application/json'),
+      limits,
+    );
+
+    assert.equal(result.status, 204);
+    assert.equal(callCount, 1);
+  });
+
+  it('propagates HTTPS protocol info from the parent request to sub-requests', async () => {
+    const observed: Array<{ protocol?: string; secure?: boolean; socketEncrypted?: boolean }> = [];
+    const controller = new ODataBatchController(
+      {
+        handleRequest: async (req: any, res: any) => {
+          observed.push({
+            protocol: req.protocol,
+            secure: req.secure,
+            socketEncrypted: req.socket?.encrypted,
+          });
+          res.statusCode = 204;
+          res.end();
+        },
+      } as any,
+      'http://localhost',
+      createRequestContextStub(),
+      { get: async () => undefined } as any,
+      { findByName: () => undefined } as any,
+      noopLogger,
+      defaultConfig,
+    );
+
+    const tlsSocket = { encrypted: true };
+    const parentRequest = requestStub('application/json', {
+      protocol: 'https',
+      secure: true,
+      socket: tlsSocket,
+      connection: tlsSocket,
+    });
+
+    const limits = (controller as any).getBatchLimits();
+    await (controller as any).executeSingle(
+      {
+        id: 'secure-subrequest',
+        method: 'GET',
+        url: '/odata/Products',
+      },
+      undefined,
+      parentRequest,
+      limits,
+    );
+
+    assert.equal(observed.length, 1);
+    assert.equal(observed[0].protocol, 'https');
+    assert.equal(observed[0].secure, true);
+    assert.equal(observed[0].socketEncrypted, true);
+  });
+
+  it('defaults sub-request protocol to http when parent is not secure', async () => {
+    const observed: Array<{ protocol?: string; secure?: boolean; socketEncrypted?: boolean }> = [];
+    const controller = new ODataBatchController(
+      {
+        handleRequest: async (req: any, res: any) => {
+          observed.push({
+            protocol: req.protocol,
+            secure: req.secure,
+            socketEncrypted: req.socket?.encrypted,
+          });
+          res.statusCode = 204;
+          res.end();
+        },
+      } as any,
+      'http://localhost',
+      createRequestContextStub(),
+      { get: async () => undefined } as any,
+      { findByName: () => undefined } as any,
+      noopLogger,
+      defaultConfig,
+    );
+
+    const parentRequest = requestStub('application/json', {
+      protocol: 'http',
+      secure: false,
+      socket: { encrypted: false },
+      connection: { encrypted: false },
+    });
+
+    const limits = (controller as any).getBatchLimits();
+    await (controller as any).executeSingle(
+      {
+        id: 'insecure-subrequest',
+        method: 'GET',
+        url: '/odata/Products',
+      },
+      undefined,
+      parentRequest,
+      limits,
+    );
+
+    assert.equal(observed.length, 1);
+    assert.equal(observed[0].protocol, 'http');
+    assert.equal(observed[0].secure, false);
+    assert.equal(observed[0].socketEncrypted, false);
   });
 
   it('does not follow redirects that point outside the service root', async () => {
@@ -414,6 +625,7 @@ describe('$batch controller', () => {
       defaultConfig,
     );
 
+    const limits = (controller as any).getBatchLimits();
     const result = await (controller as any).executeSingle(
       {
         id: 'redir',
@@ -422,6 +634,7 @@ describe('$batch controller', () => {
       },
       undefined,
       requestStub('application/json'),
+      limits,
     );
 
     assert.equal(result.status, 302);
@@ -453,6 +666,7 @@ describe('$batch controller', () => {
       defaultConfig,
     );
 
+    const limits = (controller as any).getBatchLimits();
     const result = await (controller as any).executeSingle(
       {
         id: 'redir',
@@ -461,6 +675,7 @@ describe('$batch controller', () => {
       },
       undefined,
       requestStub('application/json'),
+      limits,
     );
 
     assert.equal(result.status, 200);
@@ -488,6 +703,7 @@ describe('$batch controller', () => {
       defaultConfig,
     );
 
+    const limits = (controller as any).getBatchLimits();
     const result = await (controller as any).executeSingle(
       {
         id: 'bin',
@@ -496,6 +712,7 @@ describe('$batch controller', () => {
       },
       undefined,
       requestStub('multipart/mixed'),
+      limits,
     );
 
     assert.equal(result.status, 200);
@@ -526,6 +743,8 @@ describe('$batch controller', () => {
       clearFrom: () => undefined,
     };
 
+    const limits = (controller as any).getBatchLimits();
+
     const result = await (controller as any).executeWithHandler(
       {
         id: 'bin',
@@ -534,11 +753,213 @@ describe('$batch controller', () => {
       },
       contextStub,
       requestStub('multipart/mixed'),
+      limits,
     );
 
     assert.equal(result.status, 200);
     assert.equal(Buffer.isBuffer(result.body), true);
     assert.equal((result.body as Buffer).equals(blob), true);
+  });
+
+  it('rejects sub-responses that exceed the configured response size limit', async () => {
+    const controller = new ODataBatchController(
+      {
+        handleRequest: async (_req: unknown, res: any) => {
+          res.setHeader('Content-Type', 'application/octet-stream');
+          res.end(Buffer.alloc(128));
+        },
+      } as any,
+      'http://localhost',
+      createRequestContextStub(),
+      { get: async () => undefined } as any,
+      { findByName: () => undefined } as any,
+      noopLogger,
+      {
+        ...defaultConfig,
+        batch: { ...defaultConfig.batch, maxResponseBodyBytes: 64 },
+      },
+    );
+
+    const limits = (controller as any).getBatchLimits();
+
+    const result = await (controller as any).executeWithHandler(
+      {
+        id: 'overflow',
+        method: 'GET',
+        url: '/odata/Binary',
+      },
+      undefined,
+      requestStub('application/json'),
+      limits,
+    );
+
+    assert.equal(result.status, 413);
+    assert.equal((result.body as any)?.error?.code, 'ResponseTooLarge');
+  });
+
+  it('rejects JSON batches whose aggregate response size exceeds the configured payload limit', async () => {
+    const controller = createController(
+      {
+        first: { status: 200, body: Buffer.alloc(1024) },
+        second: { status: 200, body: Buffer.alloc(1024) },
+      },
+      {
+        ...defaultConfig,
+        batch: {
+          ...defaultConfig.batch,
+          maxResponsePayloadBytes: 1500,
+        },
+      },
+    );
+
+    await assert.rejects(
+      controller.handleBatch(
+        {
+          requests: [
+            { id: 'first', method: 'GET', url: '/odata/Products' },
+            { id: 'second', method: 'GET', url: '/odata/Products' },
+          ],
+        },
+        responseStub,
+        requestStub('application/json'),
+      ),
+      (err: unknown) => err instanceof HttpErrors.PayloadTooLarge,
+    );
+  });
+
+  it('rejects multipart batches whose aggregate response size exceeds the configured payload limit', async () => {
+    const controller = createController(
+      {
+        '1': { status: 200, body: Buffer.alloc(1024) },
+        '2': { status: 200, body: Buffer.alloc(1024) },
+      },
+      {
+        ...defaultConfig,
+        batch: {
+          ...defaultConfig.batch,
+          maxResponsePayloadBytes: 2500,
+        },
+      },
+    );
+
+    const boundary = 'batch_multi_limit';
+    const body = [
+      `--${boundary}`,
+      'Content-Type: application/http',
+      'Content-Transfer-Encoding: binary',
+      'Content-ID: 1',
+      '',
+      'GET /odata/Products HTTP/1.1',
+      '',
+      '',
+      `--${boundary}`,
+      'Content-Type: application/http',
+      'Content-Transfer-Encoding: binary',
+      'Content-ID: 2',
+      '',
+      'GET /odata/Products HTTP/1.1',
+      '',
+      '',
+      `--${boundary}--`,
+      '',
+    ].join('\r\n');
+    const stream = Readable.from(body);
+
+    await assert.rejects(
+      controller.handleBatch(
+        stream as any,
+        responseStub,
+        requestStub('multipart/mixed', {
+          headers: { 'content-type': `multipart/mixed; boundary=${boundary}` },
+        }),
+      ),
+      (err: unknown) => err instanceof HttpErrors.PayloadTooLarge,
+    );
+  });
+
+  it('rejects JSON changesets whose aggregate response size exceeds the configured payload limit', async () => {
+    const controller = createController(
+      {
+        c1: { status: 200, body: Buffer.alloc(2048) },
+        c2: { status: 200, body: Buffer.alloc(2048) },
+      },
+      {
+        ...defaultConfig,
+        batch: {
+          ...defaultConfig.batch,
+          maxResponsePayloadBytes: 3000,
+        },
+      },
+    );
+
+    await assert.rejects(
+      controller.handleBatch(
+        {
+          requests: [
+            { id: 'c1', method: 'POST', url: '/odata/Products', atomicityGroup: 'changeset-1' },
+            { id: 'c2', method: 'POST', url: '/odata/Products', atomicityGroup: 'changeset-1' },
+          ],
+        },
+        responseStub,
+        requestStub('application/json'),
+      ),
+      (err: unknown) => err instanceof HttpErrors.PayloadTooLarge,
+    );
+  });
+
+  it('rejects multipart changesets whose aggregate response size exceeds the configured payload limit', async () => {
+    const controller = createController(
+      {
+        '1': { status: 200, body: Buffer.alloc(2048) },
+        '2': { status: 200, body: Buffer.alloc(2048) },
+      },
+      {
+        ...defaultConfig,
+        batch: {
+          ...defaultConfig.batch,
+          maxResponsePayloadBytes: 4000,
+        },
+      },
+    );
+
+    const boundary = 'batch_cs_limit';
+    const changesetBoundary = 'changeset_cs_limit';
+    const body = [
+      `--${boundary}`,
+      `Content-Type: multipart/mixed; boundary=${changesetBoundary}`,
+      '',
+      `--${changesetBoundary}`,
+      'Content-Type: application/http',
+      'Content-Transfer-Encoding: binary',
+      'Content-ID: 1',
+      '',
+      'POST /odata/Products HTTP/1.1',
+      '',
+      '',
+      `--${changesetBoundary}`,
+      'Content-Type: application/http',
+      'Content-Transfer-Encoding: binary',
+      'Content-ID: 2',
+      '',
+      'POST /odata/Products HTTP/1.1',
+      '',
+      '',
+      `--${changesetBoundary}--`,
+      `--${boundary}--`,
+      '',
+    ].join('\r\n');
+    const stream = Readable.from(body);
+
+    await assert.rejects(
+      controller.handleBatch(
+        stream as any,
+        responseStub,
+        requestStub('multipart/mixed', {
+          headers: { 'content-type': `multipart/mixed; boundary=${boundary}` },
+        }),
+      ),
+      (err: unknown) => err instanceof HttpErrors.PayloadTooLarge,
+    );
   });
 
   it('encodes binary responses when returning JSON batch payloads', async () => {

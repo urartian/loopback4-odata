@@ -307,9 +307,19 @@ class ProductODataController {
   @odataAction({
     name: 'resetInventory',
     binding: 'unbound',
-    rawResponse: true,
   })
   async resetInventory(body: { confirm?: boolean } = {}) {
+    if (!body.confirm) return { status: 'skipped' };
+    const count = await this.products.count();
+    return { status: 'ok', total: count.count };
+  }
+
+  @odataAction({
+    name: 'resetInventoryRaw',
+    binding: 'unbound',
+    rawResponse: true,
+  })
+  async resetInventoryRaw(body: { confirm?: boolean } = {}) {
     if (!body.confirm) return { status: 'skipped' };
     const count = await this.products.count();
     return { status: 'ok', total: count.count };

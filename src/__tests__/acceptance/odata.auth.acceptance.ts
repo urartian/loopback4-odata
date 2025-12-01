@@ -185,7 +185,7 @@ describe('OData operations authentication integration', () => {
       .expect(200);
 
     expect(res.body.value).to.deepEqual({ userId: 'alice' });
-    expect(res.body['@odata.context']).to.equal('/odata/$metadata');
+    expect(res.body['@odata.context']).to.equal('/odata/$metadata#Default.methodProtected');
   });
 
   it('returns 403 when method-level scopes are missing', async () => {
@@ -214,7 +214,7 @@ describe('OData operations authentication integration', () => {
       .expect(200);
 
     expect(res.body.value).to.deepEqual({ userId: 'bob' });
-    expect(res.body['@odata.context']).to.equal('/odata/$metadata');
+    expect(res.body['@odata.context']).to.equal('/odata/$metadata#Default.classProtected');
   });
 
   describe('navigation reference endpoints', () => {

@@ -18,6 +18,8 @@ export interface TenantThrottleStore {
   ): Promise<TenantThrottleRateResult>;
   acquireConcurrent(tenant: string, limit?: number): Promise<TenantThrottleConcurrentResult>;
   releaseConcurrent(tenant: string): Promise<number>;
+  refreshConcurrentLease?(tenant: string): Promise<void>;
+  getConcurrentLeaseDuration?(): number | undefined;
 }
 
 interface TenantState {

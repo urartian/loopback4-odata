@@ -82,7 +82,8 @@ export class ODataRequestContextProvider implements Provider<Middleware> {
     preferences: Set<TelemetryPreference>,
     telemetry?: ODataTelemetryConfig,
   ): void {
-    const forcedRequestLogging = preferences.has('request-log');
+    const allowClientOverrides = telemetry?.requestLogging?.allowClientOverride === true;
+    const forcedRequestLogging = allowClientOverrides && preferences.has('request-log');
     const requestLoggingConfigured = telemetry?.requestLogging?.enabled === true;
     const telemetryEnabled = Boolean(telemetry?.enabled);
     const shouldEmitRequestLogs = requestLoggingConfigured || forcedRequestLogging;

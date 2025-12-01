@@ -9,6 +9,7 @@ import {
 export class TenantThrottlerProvider implements Provider<ODataTenantThrottler> {
   private readonly windowMs = 60_000;
   private readonly store: TenantThrottleStore;
+  private readonly activeTenants = new Map<string, { count: number; timer?: NodeJS.Timeout }>();
 
   constructor(
     @inject(ODATA_BINDINGS.CONFIG) private readonly config: ODataConfig,
@@ -83,10 +84,12 @@ export class TenantThrottlerProvider implements Provider<ODataTenantThrottler> {
       );
       throw new Error('tenant-concurrent-limit-exceeded');
     }
+    this.incrementActiveTenant(tenant);
   }
 
   private async releaseTenant(tenant: string) {
     await this.store.releaseConcurrent(tenant);
+    this.decrementActiveTenant(tenant);
   }
 
   private emitThrottleLog(
@@ -124,5 +127,50 @@ export class TenantThrottlerProvider implements Provider<ODataTenantThrottler> {
       },
       err,
     );
+  }
+
+  private incrementActiveTenant(tenant: string) {
+    if (typeof this.store.refreshConcurrentLease !== 'function') return;
+    const entry = this.activeTenants.get(tenant) ?? { count: 0 };
+    entry.count += 1;
+    if (entry.count === 1) {
+      entry.timer = this.startLeaseTimer(tenant);
+    }
+    this.activeTenants.set(tenant, entry);
+  }
+
+  private decrementActiveTenant(tenant: string) {
+    if (typeof this.store.refreshConcurrentLease !== 'function') return;
+    const entry = this.activeTenants.get(tenant);
+    if (!entry) return;
+    entry.count = Math.max(0, entry.count - 1);
+    if (entry.count === 0) {
+      if (entry.timer) {
+        clearInterval(entry.timer);
+      }
+      this.activeTenants.delete(tenant);
+    } else {
+      this.activeTenants.set(tenant, entry);
+    }
+  }
+
+  private startLeaseTimer(tenant: string): NodeJS.Timeout | undefined {
+    const refreshFn = this.store.refreshConcurrentLease;
+    if (typeof refreshFn !== 'function') return undefined;
+    const interval = this.getLeaseRefreshInterval();
+    const timer = setInterval(() => {
+      refreshFn
+        .call(this.store, tenant)
+        .catch((error: unknown) => this.logStoreError('refresh', tenant, error));
+    }, interval);
+    timer.unref?.();
+    return timer;
+  }
+
+  private getLeaseRefreshInterval(): number {
+    const ttl = this.store.getConcurrentLeaseDuration?.();
+    const base = ttl && ttl > 0 ? ttl : 120_000;
+    const half = Math.floor(base / 2);
+    return Math.max(5_000, Math.min(half, base - 1_000));
   }
 }

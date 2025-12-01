@@ -97,6 +97,19 @@ describe('OData config plumbing acceptance', () => {
     expect(res.body['@odata.context']).to.equal('/api/odata/$metadata');
   });
 
+  it('emits the configured basePath in @odata.context for bound operation results', async () => {
+    const products = await client.get('/api/odata/Products').expect(200);
+    const firstId = products.body.value?.[0]?.id;
+    expect(firstId).to.be.a.Number();
+
+    const res = await client
+      .post(`/api/odata/Products(${firstId})/discount`)
+      .send({ percent: 0 })
+      .expect(200);
+
+    expect(res.body['@odata.context']).to.equal('/api/odata/$metadata#Products/Default.discount');
+  });
+
   it('supports root basePath configuration', async function (this: any) {
     await replaceApp(this, { basePath: '/' });
     const res = await client.get('/').expect(200);
@@ -334,6 +347,28 @@ describe('OData config plumbing acceptance', () => {
     await client.get('/api/odata/Products').set('x-tenant-id', 'beta').expect(200);
   });
 
+  it('rejects requests when tenantResolver throws', async function (this: any) {
+    await replaceApp(this, {
+      tenantResolver: () => {
+        throw new Error('bad tenant header');
+      },
+      tenantQuotas: { maxRequestsPerMinute: 5 },
+    });
+
+    const res = await client.get('/api/odata/Products').expect(400);
+    expect(res.body?.error?.code).to.equal('TenantResolutionFailed');
+  });
+
+  it('falls back to the default tenant when resolver returns undefined', async function (this: any) {
+    await replaceApp(this, {
+      tenantResolver: (req) => req.get('x-tenant-id') || undefined,
+      tenantQuotas: { maxRequestsPerMinute: 1 },
+    });
+
+    await client.get('/api/odata/Products').expect(200);
+    await client.get('/api/odata/Products').expect(429);
+  });
+
   it('enforces tenant quotas on entity write operations', async function (this: any) {
     await replaceApp(this, {
       tenantResolver: (req) => req.get('x-tenant-id') ?? 'default',
@@ -349,7 +384,7 @@ describe('OData config plumbing acceptance', () => {
       .post('/api/odata/Products')
       .set('x-tenant-id', 'writer')
       .send({ name: 'Rate Limited Gadget', price: 123 })
-      .expect(200);
+      .expect(201);
 
     await client
       .post('/api/odata/Products')
@@ -361,7 +396,7 @@ describe('OData config plumbing acceptance', () => {
       .post('/api/odata/Products')
       .set('x-tenant-id', 'writer-premium')
       .send({ name: 'Premium Gadget', price: 789 })
-      .expect(200);
+      .expect(201);
   });
 
   it('enforces tenant quotas on delete operations', async function (this: any) {
@@ -378,7 +413,7 @@ describe('OData config plumbing acceptance', () => {
     const created = await client
       .post('/api/odata/Products')
       .send({ name: 'Disposable Product', price: 9 })
-      .expect(200);
+      .expect(201);
 
     const productId = created.body.id;
     expect(productId).to.be.a.Number();
@@ -398,7 +433,7 @@ describe('OData config plumbing acceptance', () => {
       },
     });
 
-    const newOrder = await client.post('/api/odata/Orders').send({ total: 0 }).expect(200);
+    const newOrder = await client.post('/api/odata/Orders').send({ total: 0 }).expect(201);
     const newOrderId = newOrder.body.id;
     expect(newOrderId).to.be.a.Number();
 
@@ -428,7 +463,7 @@ describe('OData config plumbing acceptance', () => {
   });
 
   it('links navigation references when @odata.id uses the configured basePath', async () => {
-    const newOrder = await client.post('/api/odata/Orders').send({ total: 0 }).expect(200);
+    const newOrder = await client.post('/api/odata/Orders').send({ total: 0 }).expect(201);
     const newOrderId = newOrder.body.id;
     expect(newOrderId).to.be.a.Number();
 
@@ -572,7 +607,7 @@ describe('OData config plumbing acceptance', () => {
     await client
       .post('/api/odata/Products')
       .send({ name: 'Telemetry Gizmo', price: 42 })
-      .expect(200);
+      .expect(201);
 
     const beforeEvent = logEntries.find((entry) => entry.context?.telemetryEvent === 'hook.before');
     expect(beforeEvent).to.be.Object();
@@ -641,13 +676,13 @@ describe('OData config plumbing acceptance', () => {
       .post('/api/odata/Products')
       .set('Authorization', 'Basic secret')
       .send({ name: 'RequestLogTest', price: 99 })
-      .expect(200);
+      .expect(201);
 
     const requestLog = logEntries.find((entry) => entry.context?.telemetryEvent === 'request.log');
     expect(requestLog).to.be.Object();
     expect(requestLog?.context).to.containDeep({
       method: 'POST',
-      status: 200,
+      status: 201,
       telemetryCategory: 'requests',
     });
     const headers = requestLog?.context?.headers as Record<string, unknown>;
@@ -657,7 +692,12 @@ describe('OData config plumbing acceptance', () => {
   it('logs requests when clients opt in via Prefer header', async function (this: any) {
     const logEntries: ODataLogEntry[] = [];
     await replaceApp(this, {
-      telemetry: { enabled: false },
+      telemetry: {
+        enabled: false,
+        requestLogging: {
+          allowClientOverride: true,
+        },
+      },
       onLog: (entry) => {
         if (entry.context?.telemetryEvent === 'request.log') {
           logEntries.push(entry);

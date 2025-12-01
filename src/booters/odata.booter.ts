@@ -50,6 +50,7 @@ import { ODataApplyExecutorRegistry } from '../services/odata-apply-executor.reg
 import { inferSqlMetadata } from '../util/sql-metadata';
 import { ODATA_VERSION } from '../constants';
 import { probeDataSourceTransactionalCapability } from '../util/datasource-transactions';
+import { normalizeBasePath } from '../util/base-path';
 
 @injectable({ tags: { booters: 'odata' } })
 export class ODataBooter implements Booter {
@@ -64,6 +65,8 @@ export class ODataBooter implements Booter {
   ) {}
 
   private readonly missingParamsWarnings = new Set<string>();
+  private metadataPath?: string;
+  private operationNamespace?: string;
 
   private identifyCompositionRelations(
     modelCtor: typeof Entity | undefined,
@@ -516,11 +519,15 @@ export class ODataBooter implements Booter {
     const visibility = def.documentInOpenApi === false ? 'undocumented' : 'documented';
 
     for (const action of actions) {
-      app.route(this.buildOperationRoute(action, controllerCtor, basePath, 'post', visibility));
+      app.route(
+        this.buildOperationRoute(action, controllerCtor, basePath, 'post', visibility, def.name),
+      );
     }
 
     for (const fn of functions) {
-      app.route(this.buildOperationRoute(fn, controllerCtor, basePath, 'get', visibility));
+      app.route(
+        this.buildOperationRoute(fn, controllerCtor, basePath, 'get', visibility, def.name),
+      );
     }
   }
 
@@ -629,6 +636,7 @@ export class ODataBooter implements Booter {
     basePath: string,
     verb: 'get' | 'post',
     visibility: 'documented' | 'undocumented',
+    entitySetName?: string,
   ): RouteEntry {
     let path = basePath;
     if (op.binding === 'entity') path += '/{id}';
@@ -665,17 +673,30 @@ export class ODataBooter implements Booter {
       tags: spec.tags ?? [controllerName],
     };
 
-    const setSegment = op.binding === 'unbound' ? undefined : (basePath.split('/').pop() ?? '');
+    const setSegment =
+      op.binding === 'unbound' ? undefined : (entitySetName ?? basePath.split('/').pop() ?? '');
+    const metadataPath = this.resolveMetadataPath();
+    const namespace = this.resolveOperationNamespace();
+    const qualifiedName = `${namespace}.${op.name}`;
 
-    return new ODataOperationRoute(
-      verb,
-      routePath,
-      decoratedSpec,
-      controllerCtor,
-      bindingKey,
-      op,
+    return new ODataOperationRoute(verb, routePath, decoratedSpec, controllerCtor, bindingKey, op, {
       setSegment,
-    );
+      metadataPath,
+      qualifiedName,
+    });
+  }
+
+  private resolveMetadataPath(): string {
+    if (this.metadataPath) return this.metadataPath;
+    const serviceRoot = normalizeBasePath(this.config?.basePath);
+    this.metadataPath = serviceRoot === '/' ? '/$metadata' : `${serviceRoot}/$metadata`;
+    return this.metadataPath;
+  }
+
+  private resolveOperationNamespace(): string {
+    if (this.operationNamespace) return this.operationNamespace;
+    this.operationNamespace = this.config?.namespace ?? this.config?.namespaceAlias ?? 'Default';
+    return this.operationNamespace;
   }
 
   private warnMissingOperationParameters(
@@ -710,6 +731,8 @@ class ODataOperationRoute extends ControllerRoute<object> {
   private readonly setSegment?: string;
   private readonly httpVerb: 'get' | 'post';
   private readonly controllerBindingKey: string;
+  private readonly metadataPath: string;
+  private readonly qualifiedName: string;
 
   constructor(
     verb: 'get' | 'post',
@@ -718,7 +741,7 @@ class ODataOperationRoute extends ControllerRoute<object> {
     controllerCtor: Function,
     controllerBindingKey: string,
     operation: OperationMeta,
-    setSegment?: string,
+    options: { setSegment?: string; metadataPath: string; qualifiedName: string },
   ) {
     super(
       verb,
@@ -729,9 +752,11 @@ class ODataOperationRoute extends ControllerRoute<object> {
       operation.methodName,
     );
     this.operation = operation;
-    this.setSegment = setSegment;
+    this.setSegment = options.setSegment;
     this.httpVerb = verb;
     this.controllerBindingKey = controllerBindingKey;
+    this.metadataPath = options.metadataPath;
+    this.qualifiedName = options.qualifiedName;
   }
 
   async invokeHandler(requestContext: RequestContext, args: unknown[]): Promise<unknown> {
@@ -790,7 +815,15 @@ class ODataOperationRoute extends ControllerRoute<object> {
       requestContext.response.set('OData-Version', ODATA_VERSION);
     }
     if (this.operation.rawResponse) return result;
-    const context = this.setSegment ? `/odata/$metadata#${this.setSegment}` : '/odata/$metadata';
+
+    let fragment: string | undefined;
+    if (this.operation.binding === 'unbound') {
+      fragment = this.qualifiedName;
+    } else if (this.setSegment) {
+      fragment = `${this.setSegment}/${this.qualifiedName}`;
+    }
+    const context = fragment ? `${this.metadataPath}#${fragment}` : this.metadataPath;
+
     return {
       '@odata.context': context,
       value: result,
