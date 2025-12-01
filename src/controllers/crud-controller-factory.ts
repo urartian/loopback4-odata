@@ -79,6 +79,7 @@ import {
 } from '../types/crud-hooks';
 import { ODATA_BINDINGS, ODataLogger, ODataTenantThrottler } from '../keys';
 import { ODataConfig, ODataApplyTelemetryEvent, ODataRequestState } from '../types';
+import * as ipaddr from 'ipaddr.js';
 import { getODataSearchableProps } from '../decorators/search.decorators';
 import { ensureModelDefinitionWithRelations } from '../util/model-definition';
 import { ensureNavigationTargetKey } from '../util/relation-metadata';
@@ -597,6 +598,7 @@ export function defineODataCrudController(def: EntitySetDef) {
     requestStateCache?: ODataRequestState | null;
     searchComparisonStrategy?: SearchComparisonStrategy;
     modelPropertyCache = new WeakMap<typeof Entity, Set<string>>();
+    _trustedProxyRanges?: Array<[ipaddr.IPv4 | ipaddr.IPv6, number]>;
 
     constructor(
       @inject(repoBindingKey)
@@ -2248,28 +2250,81 @@ export function defineODataCrudController(def: EntitySetDef) {
       const configured = this.cfg?.trustProxyHeaders;
       if (configured === true) return true;
       if (configured === false) return false;
+      if (!this.getTrustedProxyRanges().length) return false;
+      return this.isTrustedRemoteAddress(this.getRemoteAddress());
+    }
 
-      const app = (this.request as AnyObject)?.app as
-        | {
-            enabled?: (setting: string) => boolean;
-            get?: (name: string) => unknown;
-          }
-        | undefined;
-      if (!app) return false;
-      if (typeof app.enabled === 'function') {
+    getTrustedProxyRanges(): Array<[ipaddr.IPv4 | ipaddr.IPv6, number]> {
+      if (this._trustedProxyRanges) return this._trustedProxyRanges;
+      const configured = Array.isArray(this.cfg?.trustedProxySubnets)
+        ? (this.cfg?.trustedProxySubnets ?? [])
+        : [];
+      const parsed: Array<[ipaddr.IPv4 | ipaddr.IPv6, number]> = [];
+      for (const entry of configured) {
+        const raw = entry?.trim();
+        if (!raw) continue;
         try {
-          if (app.enabled('trust proxy')) return true;
+          const cidr = raw.includes('/') ? raw : raw.includes(':') ? `${raw}/128` : `${raw}/32`;
+          const [addr, prefix] = ipaddr.parseCIDR(cidr);
+          parsed.push([this.normalizeIpAddress(addr), prefix]);
         } catch {
-          /* ignore */
+          this.logger?.warn('Ignoring invalid trustedProxySubnets entry.', {
+            event: 'invalid-trusted-proxy-subnet',
+            subnet: raw,
+          });
         }
       }
-      if (typeof app.get === 'function') {
-        try {
-          const value = app.get('trust proxy');
-          if (value) return true;
-        } catch {
-          /* ignore */
+      this._trustedProxyRanges = parsed;
+      return parsed;
+    }
+
+    getRemoteAddress(): string | undefined {
+      const reqAny = this.request as AnyObject;
+      const socket =
+        reqAny?.socket ??
+        reqAny?.connection ??
+        (reqAny?.res && typeof reqAny.res === 'object'
+          ? (reqAny.res as AnyObject).connection
+          : undefined);
+      const remote = socket?.remoteAddress;
+      if (typeof remote === 'string' && remote.trim()) {
+        return remote.trim();
+      }
+      return undefined;
+    }
+
+    isTrustedRemoteAddress(address: string | undefined): boolean {
+      if (!address) return false;
+      const ranges = this.getTrustedProxyRanges();
+      if (!ranges.length) return false;
+      try {
+        const parsed = this.normalizeIpAddress(ipaddr.parse(address));
+        return ranges.some((range) => this.matchIpAddress(parsed, range));
+      } catch {
+        return false;
+      }
+    }
+
+    normalizeIpAddress(addr: ipaddr.IPv4 | ipaddr.IPv6): ipaddr.IPv4 | ipaddr.IPv6 {
+      if (addr.kind() === 'ipv6') {
+        const ipv6 = addr as ipaddr.IPv6;
+        if (ipv6.isIPv4MappedAddress()) {
+          return ipv6.toIPv4Address();
         }
+      }
+      return addr;
+    }
+
+    matchIpAddress(
+      candidate: ipaddr.IPv4 | ipaddr.IPv6,
+      range: [ipaddr.IPv4 | ipaddr.IPv6, number],
+    ): boolean {
+      const [rangeAddr, prefix] = range;
+      if (candidate.kind() === 'ipv4' && rangeAddr.kind() === 'ipv4') {
+        return (candidate as ipaddr.IPv4).match([rangeAddr as ipaddr.IPv4, prefix]);
+      }
+      if (candidate.kind() === 'ipv6' && rangeAddr.kind() === 'ipv6') {
+        return (candidate as ipaddr.IPv6).match([rangeAddr as ipaddr.IPv6, prefix]);
       }
       return false;
     }
@@ -2278,13 +2333,21 @@ export function defineODataCrudController(def: EntitySetDef) {
       if (!value) return undefined;
       const trimmed = value.trim();
       if (!trimmed) return undefined;
-      return trimmed.replace(/:$/, '').toLowerCase();
+      const normalized = trimmed.replace(/:$/, '').toLowerCase();
+      if (normalized === 'http' || normalized === 'https') return normalized;
+      return undefined;
     }
 
     normalizeHost(value: string | undefined): string | undefined {
       if (!value) return undefined;
       const trimmed = value.trim();
       if (!trimmed) return undefined;
+      if (/\s/.test(trimmed)) return undefined;
+      for (let i = 0; i < trimmed.length; i++) {
+        const code = trimmed.charCodeAt(i);
+        if (code <= 31 || code === 127) return undefined;
+      }
+      if (/[\/\\]/.test(trimmed)) return undefined;
       if (trimmed.startsWith('[')) {
         const closingBracket = trimmed.indexOf(']');
         if (closingBracket >= 0) {

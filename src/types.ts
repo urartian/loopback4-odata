@@ -2,10 +2,13 @@ export interface ODataConfig {
   basePath?: string; // default '/odata'
   /**
    * When true, always trust Forwarded/X-Forwarded-* headers for origin/host/protocol detection.
-   * When false, ignore those headers even if LoopBack's RestServer is configured to trust proxies.
-   * When omitted, the runtime piggy-backs on Express' `trust proxy` setting (if enabled) to decide.
+   * When false/omitted, proxy headers are ignored unless `trustedProxySubnets` is configured.
    */
   trustProxyHeaders?: boolean;
+  /**
+   * CIDR/IP strings describing which remote addresses are allowed to influence host/protocol.
+   */
+  trustedProxySubnets?: string[];
   csdlFormat?: 'xml' | 'json'; // default 'xml'
   namespace?: string; // default 'Default'
   entityContainerName?: string; // default 'DefaultContainer'
