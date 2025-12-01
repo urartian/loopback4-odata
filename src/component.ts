@@ -70,6 +70,7 @@ export class ODataComponent implements Component {
         includeApplyPlanOnFallback: false,
         requestLogging: {
           enabled: false,
+          allowClientOverride: false,
           includeHeaders: true,
           includeResponseBody: false,
           maxPayloadBytes: 32 * 1024,

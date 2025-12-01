@@ -56,4 +56,48 @@ describe('request logging provider', () => {
     assert.equal(masked.orders[0].payments[1].cardNumber, '***');
     assert.equal(masked.orders[0].payments[0].cardNumber, '1111');
   });
+
+  it('ignores request-log preference unless allowClientOverride is enabled', () => {
+    const provider = new RequestLoggingProvider(
+      {
+        basePath: '/odata',
+        telemetry: {
+          requestLogging: {
+            enabled: false,
+            allowClientOverride: false,
+          },
+        },
+      } as any,
+      noopLogger,
+    );
+
+    const state: any = { telemetryPreferences: new Set(['request-log']) };
+    const resolved = (provider as any).resolveRequestLoggingConfig(state, undefined);
+    assert.equal(resolved, undefined);
+
+    const overrideProvider = new RequestLoggingProvider(
+      {
+        basePath: '/odata',
+        telemetry: {
+          requestLogging: {
+            allowClientOverride: true,
+          },
+        },
+      } as any,
+      noopLogger,
+    );
+    const overrideResolved = (overrideProvider as any).resolveRequestLoggingConfig(
+      state,
+      undefined,
+    );
+    assert.equal(overrideResolved?.enabled, true);
+  });
+
+  it('truncates large request bodies before cloning or masking', () => {
+    const provider = new RequestLoggingProvider({ basePath: '/odata' } as any, noopLogger);
+    const payload = { data: 'x'.repeat(5000) };
+    const capture = (provider as any).captureRequestBody(payload, { maxPayloadBytes: 128 });
+    assert.deepStrictEqual(capture, { truncated: true });
+    assert.equal(payload.data.length, 5000);
+  });
 });

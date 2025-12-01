@@ -670,7 +670,12 @@ describe('OData config plumbing acceptance', () => {
   it('logs requests when clients opt in via Prefer header', async function (this: any) {
     const logEntries: ODataLogEntry[] = [];
     await replaceApp(this, {
-      telemetry: { enabled: false },
+      telemetry: {
+        enabled: false,
+        requestLogging: {
+          allowClientOverride: true,
+        },
+      },
       onLog: (entry) => {
         if (entry.context?.telemetryEvent === 'request.log') {
           logEntries.push(entry);

@@ -237,6 +237,7 @@ export interface ODataCorrelationConfig {
 
 export interface ODataRequestLoggingConfig {
   enabled?: boolean;
+  allowClientOverride?: boolean;
   includeHeaders?: boolean;
   includeResponseBody?: boolean;
   maxPayloadBytes?: number;
