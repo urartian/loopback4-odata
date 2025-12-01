@@ -511,6 +511,101 @@ describe('$batch controller', () => {
     assert.equal(callCount, 1);
   });
 
+  it('propagates HTTPS protocol info from the parent request to sub-requests', async () => {
+    const observed: Array<{ protocol?: string; secure?: boolean; socketEncrypted?: boolean }> = [];
+    const controller = new ODataBatchController(
+      {
+        handleRequest: async (req: any, res: any) => {
+          observed.push({
+            protocol: req.protocol,
+            secure: req.secure,
+            socketEncrypted: req.socket?.encrypted,
+          });
+          res.statusCode = 204;
+          res.end();
+        },
+      } as any,
+      'http://localhost',
+      createRequestContextStub(),
+      { get: async () => undefined } as any,
+      { findByName: () => undefined } as any,
+      noopLogger,
+      defaultConfig,
+    );
+
+    const tlsSocket = { encrypted: true };
+    const parentRequest = requestStub('application/json', {
+      protocol: 'https',
+      secure: true,
+      socket: tlsSocket,
+      connection: tlsSocket,
+    });
+
+    const limits = (controller as any).getBatchLimits();
+    await (controller as any).executeSingle(
+      {
+        id: 'secure-subrequest',
+        method: 'GET',
+        url: '/odata/Products',
+      },
+      undefined,
+      parentRequest,
+      limits,
+    );
+
+    assert.equal(observed.length, 1);
+    assert.equal(observed[0].protocol, 'https');
+    assert.equal(observed[0].secure, true);
+    assert.equal(observed[0].socketEncrypted, true);
+  });
+
+  it('defaults sub-request protocol to http when parent is not secure', async () => {
+    const observed: Array<{ protocol?: string; secure?: boolean; socketEncrypted?: boolean }> = [];
+    const controller = new ODataBatchController(
+      {
+        handleRequest: async (req: any, res: any) => {
+          observed.push({
+            protocol: req.protocol,
+            secure: req.secure,
+            socketEncrypted: req.socket?.encrypted,
+          });
+          res.statusCode = 204;
+          res.end();
+        },
+      } as any,
+      'http://localhost',
+      createRequestContextStub(),
+      { get: async () => undefined } as any,
+      { findByName: () => undefined } as any,
+      noopLogger,
+      defaultConfig,
+    );
+
+    const parentRequest = requestStub('application/json', {
+      protocol: 'http',
+      secure: false,
+      socket: { encrypted: false },
+      connection: { encrypted: false },
+    });
+
+    const limits = (controller as any).getBatchLimits();
+    await (controller as any).executeSingle(
+      {
+        id: 'insecure-subrequest',
+        method: 'GET',
+        url: '/odata/Products',
+      },
+      undefined,
+      parentRequest,
+      limits,
+    );
+
+    assert.equal(observed.length, 1);
+    assert.equal(observed[0].protocol, 'http');
+    assert.equal(observed[0].secure, false);
+    assert.equal(observed[0].socketEncrypted, false);
+  });
+
   it('does not follow redirects that point outside the service root', async () => {
     let callCount = 0;
     const controller = new ODataBatchController(

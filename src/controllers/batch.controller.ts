@@ -1647,6 +1647,11 @@ export class ODataBatchController {
     req.url = rewrittenUrl;
     const combinedHeaders = this.buildHeadersForRequest(request, parentRequest);
     (req as any).headers = combinedHeaders;
+    const { protocol: resolvedProtocol, secure: isSecure } =
+      this.resolveParentProtocolState(parentRequest);
+    (req as any).protocol = resolvedProtocol;
+    (req as any).secure = isSecure;
+    socket.encrypted = isSecure;
 
     Object.defineProperty(req, 'path', {
       enumerable: true,
@@ -1680,7 +1685,6 @@ export class ODataBatchController {
       return (req as any).headers?.[String(name).toLowerCase()] as string | undefined;
     };
     (req as any).header = (name: string) => (req as any).get(name);
-    (req as any).protocol = 'http';
     (req as any).baseUrl = '';
     (req as any).originalUrl = url;
 
@@ -2086,6 +2090,38 @@ export class ODataBatchController {
     }
 
     return merged;
+  }
+
+  private resolveParentProtocolState(parentRequest?: Request): {
+    protocol: string;
+    secure: boolean;
+  } {
+    const fallback = { protocol: 'http', secure: false };
+    if (!parentRequest) return fallback;
+    const rawProtocol =
+      typeof parentRequest.protocol === 'string' && parentRequest.protocol.trim().length
+        ? parentRequest.protocol.trim().toLowerCase()
+        : undefined;
+    const parentSecure =
+      ((parentRequest as AnyObject)?.secure === true ||
+        Boolean(
+          (parentRequest as AnyObject)?.connection?.encrypted ??
+            (parentRequest as AnyObject)?.socket?.encrypted,
+        )) ??
+      false;
+    if (rawProtocol === 'https') {
+      return { protocol: 'https', secure: true };
+    }
+    if (parentSecure) {
+      return { protocol: 'https', secure: true };
+    }
+    if (rawProtocol === 'http') {
+      return { protocol: 'http', secure: false };
+    }
+    if (rawProtocol) {
+      return { protocol: rawProtocol, secure: false };
+    }
+    return fallback;
   }
 
   private decodeBufferedBody(bodyBuffer: Buffer, headers?: Record<string, string>): unknown {
