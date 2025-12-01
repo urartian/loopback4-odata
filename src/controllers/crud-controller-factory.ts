@@ -6030,15 +6030,7 @@ export function defineODataCrudController(def: EntitySetDef) {
       if (!this.throttler) return;
       if (!this.tenantQuotasEnabled()) return;
       if (this._throttleApplied) return;
-      const resolver = this.cfg?.tenantResolver;
-      let tenantId = 'default';
-      if (resolver) {
-        try {
-          tenantId = resolver(this.request) ?? 'default';
-        } catch {
-          tenantId = 'default';
-        }
-      }
+      const tenantId = this.resolveTenantId();
       let released = false;
       const release = () => {
         if (released) return;
@@ -6108,6 +6100,22 @@ export function defineODataCrudController(def: EntitySetDef) {
           );
         }
         throw error;
+      }
+    }
+
+    resolveTenantId(): string {
+      const resolver = this.cfg?.tenantResolver;
+      if (!resolver) return 'default';
+      try {
+        const resolved = resolver(this.request);
+        return resolved ?? 'default';
+      } catch (error) {
+        if (error instanceof HttpErrors.HttpError) {
+          throw error;
+        }
+        const err = new HttpErrors.BadRequest('Unable to resolve tenant identifier from request.');
+        (err as AnyObject).code = 'TenantResolutionFailed';
+        throw err;
       }
     }
 

@@ -347,6 +347,28 @@ describe('OData config plumbing acceptance', () => {
     await client.get('/api/odata/Products').set('x-tenant-id', 'beta').expect(200);
   });
 
+  it('rejects requests when tenantResolver throws', async function (this: any) {
+    await replaceApp(this, {
+      tenantResolver: () => {
+        throw new Error('bad tenant header');
+      },
+      tenantQuotas: { maxRequestsPerMinute: 5 },
+    });
+
+    const res = await client.get('/api/odata/Products').expect(400);
+    expect(res.body?.error?.code).to.equal('TenantResolutionFailed');
+  });
+
+  it('falls back to the default tenant when resolver returns undefined', async function (this: any) {
+    await replaceApp(this, {
+      tenantResolver: (req) => req.get('x-tenant-id') || undefined,
+      tenantQuotas: { maxRequestsPerMinute: 1 },
+    });
+
+    await client.get('/api/odata/Products').expect(200);
+    await client.get('/api/odata/Products').expect(429);
+  });
+
   it('enforces tenant quotas on entity write operations', async function (this: any) {
     await replaceApp(this, {
       tenantResolver: (req) => req.get('x-tenant-id') ?? 'default',
