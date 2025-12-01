@@ -34,12 +34,21 @@ end
 local nextHits = hits + 1
 if limit > 0 and nextHits > limit then
   local windowResetMs = math.max(0, windowStart + windowMs - now)
+  if concurrent > 0 then
+    redis.call('PERSIST', key)
+  else
+    redis.call('PEXPIRE', key, expireMs)
+  end
   return {hits, windowStart, windowResetMs, concurrent, 1}
 end
 
 hits = nextHits
 redis.call('HMSET', key, 'windowStart', windowStart, 'hits', hits, 'concurrent', concurrent)
-redis.call('PEXPIRE', key, expireMs)
+if concurrent > 0 then
+  redis.call('PERSIST', key)
+else
+  redis.call('PEXPIRE', key, expireMs)
+end
 local windowResetMs = math.max(0, windowStart + windowMs - now)
 return {hits, windowStart, windowResetMs, concurrent, 0}
 `;
@@ -62,19 +71,31 @@ if windowStart == 0 then
   windowStart = ARGV[3]
 end
 redis.call('HMSET', key, 'windowStart', windowStart, 'hits', hits, 'concurrent', concurrent)
-redis.call('PEXPIRE', key, expireMs)
+if concurrent > 0 then
+  redis.call('PERSIST', key)
+else
+  redis.call('PEXPIRE', key, expireMs)
+end
 return {windowStart, hits, concurrent, 0}
 `;
 
 export const RELEASE_SCRIPT = `
 local key = KEYS[1]
+local expireMs = tonumber(ARGV[1])
 local current = redis.call('HMGET', key, 'concurrent')
 local concurrent = tonumber(current[1]) or 0
 if concurrent <= 0 then
+  redis.call('HSET', key, 'concurrent', 0)
+  redis.call('PEXPIRE', key, expireMs)
   return 0
 end
 concurrent = math.max(0, concurrent - 1)
 redis.call('HSET', key, 'concurrent', concurrent)
+if concurrent == 0 then
+  redis.call('PEXPIRE', key, expireMs)
+else
+  redis.call('PERSIST', key)
+end
 return concurrent
 `;
 
@@ -110,7 +131,7 @@ export class RedisTenantThrottleStore implements TenantThrottleStore {
   }
 
   async acquireConcurrent(tenant: string, limit?: number): Promise<TenantThrottleConcurrentResult> {
-    const ttl = Math.max(this.options.minTtlMs ?? this.defaultTtl(), this.defaultTtl());
+    const ttl = this.concurrencyTtl();
     const limitValue = limit && limit > 0 ? limit : 0;
     const now = Date.now();
     const [, , concurrent, limited] = await this.execScript(
@@ -125,7 +146,8 @@ export class RedisTenantThrottleStore implements TenantThrottleStore {
   }
 
   async releaseConcurrent(tenant: string): Promise<number> {
-    const [concurrent] = await this.execScript('release', [this.key(tenant)], []);
+    const ttl = this.concurrencyTtl();
+    const [concurrent] = await this.execScript('release', [this.key(tenant)], [ttl]);
     return concurrent;
   }
 
@@ -135,6 +157,10 @@ export class RedisTenantThrottleStore implements TenantThrottleStore {
 
   private defaultTtl() {
     return this.options.minTtlMs ?? 120_000;
+  }
+
+  private concurrencyTtl() {
+    return this.defaultTtl();
   }
 
   private async execScript(
