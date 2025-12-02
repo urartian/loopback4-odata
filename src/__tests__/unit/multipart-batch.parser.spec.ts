@@ -175,6 +175,36 @@ describe('multipart batch parser', () => {
     ).to.be.rejectedWith(/part exceeds the configured size limit/i);
   });
 
+  it('aborts unterminated parts when maxPartBodyBytes is exceeded mid-stream', async () => {
+    const boundary = 'batch_unterminated_limit';
+    const prefix = Buffer.from(
+      [
+        `--${boundary}`,
+        'Content-Type: application/http',
+        'Content-Transfer-Encoding: binary',
+        '',
+        'POST /odata/Products HTTP/1.1',
+        'Content-Type: application/json',
+        '',
+        '',
+      ].join('\r\n'),
+      'utf-8',
+    );
+    const stream = new HangingPartReadable(prefix, 64, 8 * 1024);
+    let observedBytes: number | undefined;
+    await expect(
+      parseMultipartBatch(stream, boundary, {
+        limits: { maxPartBodyBytes: 512 },
+        onLimitViolation: () => {
+          observedBytes = stream.bodyBytes;
+        },
+      }),
+    ).to.be.rejectedWith(/part exceeds the configured size limit/i);
+    expect(observedBytes).to.be.Number();
+    expect(observedBytes).to.be.greaterThanOrEqual(512);
+    expect(observedBytes).to.be.lessThan(8 * 1024);
+  });
+
   it('preserves raw binary payloads inside application/http parts', async () => {
     const boundary = 'batch_binary';
     const binaryPayload = Buffer.from([0x00, 0xff, 0x41, 0x42, 0x10, 0x99]);
@@ -259,5 +289,35 @@ class ChunkedReadable extends Readable {
     const chunk = this.payload.slice(this.offset, this.offset + this.chunkSize);
     this.offset += chunk.length;
     this.push(chunk);
+  }
+}
+
+class HangingPartReadable extends Readable {
+  private prefixOffset = 0;
+  public bodyBytes = 0;
+
+  constructor(
+    private readonly prefix: Buffer,
+    private readonly chunkSize: number,
+    private readonly maxBodyBytes: number,
+  ) {
+    super({ highWaterMark: chunkSize });
+  }
+
+  _read() {
+    if ((this as Readable).destroyed) return;
+    if (this.prefixOffset < this.prefix.length) {
+      const chunk = this.prefix.slice(this.prefixOffset, this.prefixOffset + this.chunkSize);
+      this.prefixOffset += chunk.length;
+      this.push(chunk);
+      return;
+    }
+    if (this.bodyBytes >= this.maxBodyBytes) {
+      this.push(null);
+      return;
+    }
+    const chunkLength = Math.min(this.chunkSize, this.maxBodyBytes - this.bodyBytes);
+    this.bodyBytes += chunkLength;
+    this.push(Buffer.alloc(chunkLength, 0x58));
   }
 }

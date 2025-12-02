@@ -126,10 +126,12 @@ class StreamingBatchParser {
   private readonly boundaryPrefix: Buffer;
   private readonly boundaryMarker: Buffer;
   private readonly closingMarker: Buffer;
+  private readonly boundaryHeadroom: number;
   private buffer = Buffer.alloc(0);
   private firstBoundarySeen = false;
   private state: 'headers' | 'body' = 'headers';
   private currentHeaders: Record<string, string> | undefined;
+  private currentPartBytes = 0;
   private ended = false;
   private readonly requests: ParsedBatchRequest[] = [];
   private changesetOperationIndex = 0;
@@ -143,6 +145,7 @@ class StreamingBatchParser {
     this.boundaryPrefix = Buffer.from(`--${boundary}`);
     this.boundaryMarker = Buffer.from(`\r\n--${boundary}`);
     this.closingMarker = Buffer.from(`\r\n--${boundary}--`);
+    this.boundaryHeadroom = Math.max(this.boundaryMarker.length, this.closingMarker.length) + 4;
   }
 
   async parse(stream: Readable): Promise<ParsedBatchRequest[]> {
@@ -213,12 +216,13 @@ class StreamingBatchParser {
         this.currentHeaders = parseHeaders(headerBuffer.toString('utf-8'));
         this.buffer = this.buffer.slice(headerIdx + 4);
         this.state = 'body';
+        this.currentPartBytes = 0;
       }
 
       if (this.state === 'body') {
         const boundaryInfo = this.findNextBoundary();
         if (boundaryInfo.index < 0) {
-          this.ensurePartBufferLimit();
+          this.enforceStreamingPartLimit();
           if (finalPass) {
             throw new HttpErrors.BadRequest('Malformed multipart part: unterminated body.');
           }
@@ -229,6 +233,7 @@ class StreamingBatchParser {
         this.context.ensurePartSize(bodyBuffer.length);
         this.handlePart(bodyBuffer, this.currentHeaders);
         this.currentHeaders = undefined;
+        this.currentPartBytes = 0;
 
         const markerLength = boundaryInfo.closing
           ? this.closingMarker.length
@@ -251,14 +256,6 @@ class StreamingBatchParser {
     }
   }
 
-  private ensurePartBufferLimit() {
-    const { maxPartBodyBytes } = this.context.limits;
-    if (!maxPartBodyBytes || maxPartBodyBytes <= 0) return;
-    if (this.buffer.length > maxPartBodyBytes + this.boundaryMarker.length + 4) {
-      this.context.ensurePartSize(this.buffer.length);
-    }
-  }
-
   private findNextBoundary(): { index: number; closing: boolean } {
     const closingIndex = this.buffer.indexOf(this.closingMarker);
     const markerIndex = this.buffer.indexOf(this.boundaryMarker);
@@ -272,6 +269,15 @@ class StreamingBatchParser {
     }
 
     return { index: markerIndex, closing: false };
+  }
+
+  private enforceStreamingPartLimit() {
+    const { maxPartBodyBytes } = this.context.limits;
+    if (!maxPartBodyBytes || maxPartBodyBytes <= 0) return;
+    const safeLength = Math.max(0, this.buffer.length - this.boundaryHeadroom);
+    if (safeLength <= this.currentPartBytes) return;
+    this.currentPartBytes = safeLength;
+    this.context.ensurePartSize(this.currentPartBytes);
   }
 
   private handlePart(body: Buffer, headers: Record<string, string> | undefined) {
