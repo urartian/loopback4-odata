@@ -90,4 +90,16 @@ describe('Token signing guardrails', () => {
     );
     expect(result).to.deepEqual({ ok: true });
   });
+
+  it('rejects oversized token payloads before JSON parsing is attempted', () => {
+    const massivePayload = Buffer.alloc(70 * 1024, 'a').toString('base64url');
+    const massiveToken = `v3:${massivePayload}`;
+    try {
+      verifySkipToken(massiveToken, 'id:ASC', 'GET:/odata/Products?', { secret: 'skip-secret' });
+      throw new Error('Expected oversized token to be rejected.');
+    } catch (error) {
+      expect(error).to.be.instanceOf(TokenVerificationError);
+      expect((error as TokenVerificationError).reason).to.equal('invalid');
+    }
+  });
 });

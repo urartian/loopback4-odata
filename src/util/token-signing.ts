@@ -27,6 +27,7 @@ type TokenEnvelope<T> = {
 };
 
 const TOKEN_VERSION: TokenEnvelope<unknown>['v'] = 'v3';
+const MAX_TOKEN_ENVELOPE_BYTES = 64 * 1024; // keep envelopes under 64KB to avoid blocking JSON parsing
 
 export function stableStringify(value: unknown): string {
   return JSON.stringify(value, function replacer(this: unknown, key: string, val: unknown) {
@@ -55,7 +56,11 @@ function decodeEnvelope(token: string): TokenEnvelope<unknown> {
   }
   const payload = token.slice(separator + 1);
   try {
-    const decoded = Buffer.from(payload, 'base64url').toString('utf8');
+    const decodedBuffer = Buffer.from(payload, 'base64url');
+    if (decodedBuffer.length > MAX_TOKEN_ENVELOPE_BYTES) {
+      throw new TokenVerificationError('Token payload exceeds maximum size.', 'invalid');
+    }
+    const decoded = decodedBuffer.toString('utf8');
     const envelope = JSON.parse(decoded) as TokenEnvelope<unknown>;
     if (envelope?.v !== TOKEN_VERSION || typeof envelope.type !== 'string') {
       throw new Error('Malformed envelope.');
