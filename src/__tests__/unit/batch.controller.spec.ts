@@ -272,6 +272,53 @@ describe('$batch controller', () => {
     assert.deepStrictEqual(captured, [{ id: 'user-1' }]);
   });
 
+  it('propagates trusted proxy context to sub-requests', async () => {
+    const observed: Array<{ protocol?: string; secure?: boolean; remote?: string }> = [];
+    const handler = {
+      async handleRequest(req: any, res: any) {
+        observed.push({
+          protocol: (req as any).protocol,
+          secure: (req as any).secure,
+          remote: (req as any)?.socket?.remoteAddress,
+        });
+        res.statusCode = 200;
+        res.end(JSON.stringify({ ok: true }));
+      },
+    };
+    const controller = new ODataBatchController(
+      handler as any,
+      'http://localhost',
+      createRequestContextStub(),
+      { get: async () => undefined } as any,
+      { findByName: () => undefined } as any,
+      noopLogger,
+      {
+        ...defaultConfig,
+        batch: { ...defaultConfig.batch },
+        trustedProxySubnets: ['10.0.0.0/8'],
+      },
+    );
+    const parent = requestStub('application/json', {
+      headers: {
+        forwarded: 'for=198.51.100.7;proto=https;host=api.example.com',
+        'x-forwarded-proto': 'https',
+      },
+    }) as any;
+    parent.protocol = 'http';
+    parent.secure = false;
+    parent.socket = { remoteAddress: '10.1.2.3' };
+
+    await controller.handleBatch(
+      {
+        requests: [{ id: 'req-1', method: 'GET', url: '/odata/Products' }],
+      },
+      responseStub,
+      parent,
+    );
+
+    assert.deepStrictEqual(observed, [{ protocol: 'https', secure: true, remote: '10.1.2.3' }]);
+  });
+
   it('applies atomicity context when executing JSON changesets', async () => {
     const seenStates: unknown[] = [];
     const handler = {
@@ -1974,9 +2021,7 @@ describe('$batch controller', () => {
     await assert.rejects(
       controller.handleBatch(
         {
-          requests: [
-            { id: 'a', method: 'POST', url: '/odata/Products', dependsOn: 'root' as any },
-          ],
+          requests: [{ id: 'a', method: 'POST', url: '/odata/Products', dependsOn: 'root' as any }],
         },
         responseStub,
         requestStub('application/json'),
