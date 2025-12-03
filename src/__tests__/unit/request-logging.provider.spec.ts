@@ -102,6 +102,48 @@ describe('request logging provider', () => {
     assert.equal(payload.data.length, 5000);
   });
 
+  it('caps cloned container entries to avoid deep traversal', () => {
+    const provider = new RequestLoggingProvider({ basePath: '/odata' } as any, noopLogger);
+    const limit = RequestLoggingProvider.MAX_CONTAINER_ENTRIES;
+    const payload: Record<string, string> = {};
+    for (let i = 0; i < limit + 50; i += 1) {
+      payload[`prop-${i}`] = `value-${i}`;
+    }
+    const capture = (provider as any).captureRequestBody(payload, {
+      maxPayloadBytes: 1024 * 1024,
+    });
+    const cloned = (capture?.body ?? {}) as Record<string, unknown>;
+    const keys = Object.keys(cloned);
+
+    assert.equal(capture?.truncated, true);
+    assert.equal(keys.length, limit);
+    assert.equal(keys[0], 'prop-0');
+    assert.equal(keys[keys.length - 1], `prop-${limit - 1}`);
+  });
+
+  it('stops evaluating properties once the entry cap is reached', () => {
+    const provider = new RequestLoggingProvider({ basePath: '/odata' } as any, noopLogger);
+    const limit = RequestLoggingProvider.MAX_CONTAINER_ENTRIES;
+    const payload: Record<string, unknown> = {};
+    let readCount = 0;
+
+    for (let i = 0; i < limit * 5; i += 1) {
+      const index = i;
+      Object.defineProperty(payload, `prop-${index}`, {
+        configurable: true,
+        enumerable: true,
+        get: () => {
+          readCount += 1;
+          return `value-${index}`;
+        },
+      });
+    }
+
+    const capture = (provider as any).captureRequestBody(payload, { maxPayloadBytes: 1024 * 1024 });
+    assert.ok(readCount <= limit);
+    assert.equal(capture?.truncated, true);
+  });
+
   it('limits nested JSON bodies by depth and flags truncation', () => {
     const provider = new RequestLoggingProvider({ basePath: '/odata' } as any, noopLogger);
     const payload: any = { value: 'root' };

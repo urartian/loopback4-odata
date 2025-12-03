@@ -25,6 +25,8 @@ interface CloneState {
 const DEFAULT_MAX_CAPTURE_DEPTH = 5;
 
 export class RequestLoggingProvider implements Provider<Middleware> {
+  static readonly MAX_CONTAINER_ENTRIES = 100;
+
   constructor(
     @inject(ODATA_BINDINGS.CONFIG) private readonly cfg: ODataConfig,
     @inject(ODATA_BINDINGS.LOGGER, { optional: true }) private readonly logger?: ODataLogger,
@@ -177,12 +179,16 @@ export class RequestLoggingProvider implements Provider<Middleware> {
       if (Array.isArray(value)) {
         this.consumeBudget(state, 2); // brackets
         const cloned: unknown[] = [];
-        for (const entry of value) {
+        for (let index = 0; index < value.length; index += 1) {
+          if (index >= RequestLoggingProvider.MAX_CONTAINER_ENTRIES) {
+            state.truncated = true;
+            break;
+          }
           if (state.remaining <= 0) {
             state.truncated = true;
             break;
           }
-          const next = this.cloneStructuredValue(entry, depth + 1, maxDepth, state);
+          const next = this.cloneStructuredValue(value[index], depth + 1, maxDepth, state);
           if (next === undefined && state.truncated) break;
           cloned.push(next);
           this.consumeBudget(state, 1); // comma
@@ -200,15 +206,27 @@ export class RequestLoggingProvider implements Provider<Middleware> {
       }
       this.consumeBudget(state, 2); // braces
       const cloned: Record<string, unknown> = {};
-      for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+      const source = value as Record<string, unknown>;
+      let processed = 0;
+      for (const key in source) {
+        if (!Object.prototype.hasOwnProperty.call(source, key)) continue;
+        if (processed >= RequestLoggingProvider.MAX_CONTAINER_ENTRIES) {
+          state.truncated = true;
+          break;
+        }
         if (state.remaining <= 0) {
           state.truncated = true;
           break;
         }
         this.consumeBudget(state, this.keyBudget(key));
-        const next = this.cloneStructuredValue(entry, depth + 1, maxDepth, state);
+        if (state.remaining <= 0) {
+          state.truncated = true;
+          break;
+        }
+        const next = this.cloneStructuredValue(source[key], depth + 1, maxDepth, state);
         if (next === undefined && state.truncated) break;
         cloned[key] = next;
+        processed += 1;
       }
       return cloned;
     } finally {
