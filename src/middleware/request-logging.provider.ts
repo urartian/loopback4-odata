@@ -27,6 +27,7 @@ const DEFAULT_MAX_CAPTURE_DEPTH = 5;
 export class RequestLoggingProvider implements Provider<Middleware> {
   static readonly MAX_CONTAINER_ENTRIES = 100;
   private static readonly ACCESSOR_PLACEHOLDER = '[Getter]';
+  private static readonly NON_PLAIN_PLACEHOLDER = '[NonPlainObject]';
 
   constructor(
     @inject(ODATA_BINDINGS.CONFIG) private readonly cfg: ODataConfig,
@@ -167,6 +168,13 @@ export class RequestLoggingProvider implements Provider<Middleware> {
     if (value instanceof Date) {
       return this.clonePrimitiveValue(value.toISOString(), state);
     }
+    const isArray = Array.isArray(value);
+    if (!isArray && !this.isPlainObject(value)) {
+      return this.cloneNonPlainObject(state);
+    }
+    if (isArray && Object.getPrototypeOf(value) !== Array.prototype) {
+      return this.cloneNonPlainObject(state);
+    }
     if (state.seen.has(value as object)) {
       state.truncated = true;
       return '[Circular]';
@@ -177,7 +185,7 @@ export class RequestLoggingProvider implements Provider<Middleware> {
     }
     state.seen.add(value as object);
     try {
-      if (Array.isArray(value)) {
+      if (isArray) {
         this.consumeBudget(state, 2); // brackets
         const cloned: unknown[] = [];
         let processed = 0;
@@ -208,7 +216,7 @@ export class RequestLoggingProvider implements Provider<Middleware> {
         }
         return cloned;
       }
-      if (typeof (value as AnyObject)?.toJSON === 'function') {
+      if (this.isPlainObject(value) && typeof (value as AnyObject)?.toJSON === 'function') {
         try {
           const jsonValue = (value as AnyObject).toJSON();
           return this.cloneStructuredValue(jsonValue, depth + 1, maxDepth, state);
@@ -336,6 +344,17 @@ export class RequestLoggingProvider implements Provider<Middleware> {
   private cloneAccessorPlaceholder(state: CloneState): string {
     state.truncated = true;
     return this.clonePrimitiveValue(RequestLoggingProvider.ACCESSOR_PLACEHOLDER, state);
+  }
+
+  private cloneNonPlainObject(state: CloneState): string {
+    state.truncated = true;
+    return this.clonePrimitiveValue(RequestLoggingProvider.NON_PLAIN_PLACEHOLDER, state);
+  }
+
+  private isPlainObject(value: unknown): value is Record<string, unknown> {
+    if (!value || typeof value !== 'object') return false;
+    const proto = Object.getPrototypeOf(value);
+    return proto === Object.prototype || proto === null;
   }
 
   private captureRequestBody(
@@ -546,6 +565,9 @@ export class RequestLoggingProvider implements Provider<Middleware> {
 
   private cloneValue(value: unknown): any {
     if (Array.isArray(value)) {
+      if (Object.getPrototypeOf(value) !== Array.prototype) {
+        return RequestLoggingProvider.NON_PLAIN_PLACEHOLDER;
+      }
       const clone = new Array(value.length);
       for (let index = 0; index < value.length; index += 1) {
         if (!Object.prototype.hasOwnProperty.call(value, index)) continue;
@@ -560,6 +582,9 @@ export class RequestLoggingProvider implements Provider<Middleware> {
       return clone;
     }
     if (value && typeof value === 'object') {
+      if (!this.isPlainObject(value)) {
+        return RequestLoggingProvider.NON_PLAIN_PLACEHOLDER;
+      }
       const result: Record<string, unknown> = {};
       const descriptors = Object.getOwnPropertyDescriptors(value as AnyObject);
       for (const key of Object.keys(descriptors)) {

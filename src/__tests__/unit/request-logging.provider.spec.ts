@@ -102,6 +102,69 @@ describe('request logging provider', () => {
     assert.equal(payload.data.length, 5000);
   });
 
+  it('treats objects with custom prototypes as non-plain placeholders', () => {
+    const provider = new RequestLoggingProvider({ basePath: '/odata' } as any, noopLogger);
+    let getterCalls = 0;
+    const proto: Record<string, unknown> = {};
+    Object.defineProperty(proto, 'expensive', {
+      enumerable: true,
+      configurable: true,
+      get: () => {
+        getterCalls += 1;
+        throw new Error('prototype getter must not run');
+      },
+    });
+    const payload = { safe: 'ok' };
+    Object.setPrototypeOf(payload, proto);
+
+    const capture = (provider as any).captureRequestBody(payload, { maxPayloadBytes: 2048 });
+    assert.equal(getterCalls, 0);
+    assert.equal(capture?.truncated, true);
+    assert.equal(capture?.body, '[NonPlainObject]');
+  });
+
+  it('treats arrays with custom prototypes as non-plain placeholders', () => {
+    const provider = new RequestLoggingProvider({ basePath: '/odata' } as any, noopLogger);
+    let getterCalls = 0;
+    const proto: Record<string, unknown> = {};
+    Object.defineProperty(proto, '0', {
+      enumerable: true,
+      configurable: true,
+      get: () => {
+        getterCalls += 1;
+        throw new Error('array prototype getter must not run');
+      },
+    });
+    const records = [1, 2, 3];
+    Object.setPrototypeOf(records, proto);
+    const payload = { records };
+
+    const capture = (provider as any).captureRequestBody(payload, { maxPayloadBytes: 2048 });
+    assert.equal(getterCalls, 0);
+    assert.equal(capture?.truncated, true);
+    assert.equal(capture?.body?.records, '[NonPlainObject]');
+  });
+
+  it('treats mask clones of non-plain objects as placeholders without invoking getters', () => {
+    const provider = new RequestLoggingProvider({ basePath: '/odata' } as any, noopLogger);
+    let getterCalls = 0;
+    const proto: Record<string, unknown> = {};
+    Object.defineProperty(proto, 'hidden', {
+      enumerable: true,
+      configurable: true,
+      get: () => {
+        getterCalls += 1;
+        throw new Error('prototype getter must not run');
+      },
+    });
+    const payload = { safe: 'ok' };
+    Object.setPrototypeOf(payload, proto);
+
+    const masked = (provider as any).maskRequestBody(payload, ['safe'], true);
+    assert.equal(getterCalls, 0);
+    assert.equal(masked, '[NonPlainObject]');
+  });
+
   it('skips property getters when capturing request bodies', () => {
     const provider = new RequestLoggingProvider({ basePath: '/odata' } as any, noopLogger);
     let getterCalls = 0;
