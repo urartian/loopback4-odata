@@ -1788,4 +1788,80 @@ describe('$batch controller', () => {
         /unsupported get/i.test((err as Error).message ?? ''),
     );
   });
+
+  it('prevents overriding sensitive headers in sub-requests', () => {
+    const controller = createController({});
+    const parent = requestStub('application/json', {
+      headers: {
+        Authorization: 'Bearer parent',
+        'X-Tenant-Id': 'tenant-a',
+      },
+    });
+    const subHeaders = (controller as any).buildHeadersForRequest(
+      {
+        id: 'r1',
+        method: 'GET',
+        url: '/odata/Products',
+        headers: {
+          Authorization: 'Bearer attacker',
+          'X-Tenant-Id': 'tenant-b',
+          Prefer: 'return=minimal',
+        },
+      },
+      parent,
+    );
+
+    assert.equal(subHeaders.authorization, 'Bearer parent');
+    assert.equal(subHeaders['x-tenant-id'], 'tenant-a');
+    assert.equal(subHeaders.prefer, 'return=minimal');
+  });
+
+  it('ignores injection of new sensitive headers when parent is missing them', () => {
+    const controller = createController({});
+    const parent = requestStub('application/json');
+    const headers = (controller as any).buildHeadersForRequest(
+      {
+        id: 'r1',
+        method: 'GET',
+        url: '/odata/Products',
+        headers: {
+          Authorization: 'Bearer attacker',
+          'X-Forwarded-For': '10.0.0.1',
+          Prefer: 'return=representation',
+        },
+      },
+      parent,
+    );
+
+    assert.equal(headers.authorization, undefined);
+    assert.equal(headers['x-forwarded-for'], undefined);
+    assert.equal(headers.prefer, 'return=representation');
+  });
+
+  it('allows overriding safe content negotiation headers per sub-request', () => {
+    const controller = createController({});
+    const parent = requestStub('application/json', {
+      headers: {
+        Accept: 'application/json',
+        Prefer: 'return=representation',
+      },
+    });
+    const headers = (controller as any).buildHeadersForRequest(
+      {
+        id: 'r1',
+        method: 'POST',
+        url: '/odata/Products',
+        headers: {
+          Accept: 'text/plain',
+          Prefer: 'return=minimal',
+          'Content-Type': 'application/json;odata.metadata=minimal',
+        },
+      },
+      parent,
+    );
+
+    assert.equal(headers.accept, 'text/plain');
+    assert.equal(headers.prefer, 'return=minimal');
+    assert.equal(headers['content-type'], 'application/json;odata.metadata=minimal');
+  });
 });

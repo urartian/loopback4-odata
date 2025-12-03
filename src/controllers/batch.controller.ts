@@ -139,6 +139,24 @@ const TEXT_LIKE_MIME_TYPES = new Set([
   'application/ecmascript',
   'application/x-www-form-urlencoded',
 ]);
+const DEFAULT_ALLOWED_SUBREQUEST_HEADERS = Object.freeze([
+  'accept',
+  'accept-charset',
+  'accept-encoding',
+  'accept-language',
+  'content-type',
+  'dataserviceversion',
+  'maxdataserviceversion',
+  'prefer',
+  'if-match',
+  'if-none-match',
+  'if-modified-since',
+  'if-unmodified-since',
+  'if-range',
+  'odata-version',
+  'odata-maxversion',
+  'odata-isolation',
+]);
 
 class AtomicityGroupContext {
   private readonly requestState: AtomicityRequestState;
@@ -234,6 +252,7 @@ export class ODataBatchController {
   }
 
   private requestState?: ODataRequestState | null;
+  private allowedSubRequestHeaders?: Set<string>;
 
   @post('/odata/$batch', BATCH_OPERATION_SPEC)
   async handleBatch(
@@ -2047,6 +2066,22 @@ export class ODataBatchController {
     return segments.slice(this.serviceRootSegments.length);
   }
 
+  private resolveAllowedSubRequestHeaders(): Set<string> {
+    if (this.allowedSubRequestHeaders) return this.allowedSubRequestHeaders;
+    const configured = this.cfg?.batch?.allowedSubRequestHeaders;
+    const merged = new Set<string>(DEFAULT_ALLOWED_SUBREQUEST_HEADERS);
+    if (Array.isArray(configured)) {
+      for (const header of configured) {
+        if (typeof header !== 'string') continue;
+        const normalized = header.trim().toLowerCase();
+        if (!normalized) continue;
+        merged.add(normalized);
+      }
+    }
+    this.allowedSubRequestHeaders = merged;
+    return merged;
+  }
+
   private buildHeadersForRequest(
     request: BatchRequest,
     parentRequest?: Request,
@@ -2067,9 +2102,12 @@ export class ODataBatchController {
       }
     }
 
+    const allowedOverrides = this.resolveAllowedSubRequestHeaders();
     for (const [key, value] of Object.entries(request.headers ?? {})) {
       if (value == null) continue;
-      merged[key.toLowerCase()] = String(value);
+      const normalized = key.toLowerCase();
+      if (!allowedOverrides.has(normalized)) continue;
+      merged[normalized] = String(value);
     }
 
     // Drop hop-by-hop and forbidden headers for sub-requests

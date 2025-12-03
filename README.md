@@ -936,6 +936,7 @@ this.bind(ODATA_BINDINGS.CONFIG).to({
     maxPartBodyBytes: 4 * 1024 * 1024, // individual part payload limit
     maxResponseBodyBytes: 4 * 1024 * 1024, // per-sub-response buffering limit
     maxResponsePayloadBytes: 32 * 1024 * 1024, // aggregate buffered + serialized response limit
+    allowedSubRequestHeaders: ['if-match', 'prefer'], // optional extra headers sub-requests may override
   },
   onLog(entry) {
     myTelemetryClient.trackEvent({
@@ -1003,6 +1004,7 @@ const ProductsSet: EntitySetDef<Product> = {
 - `deltaTokenTtl`: Optional lifetime (seconds) for `$deltatoken` links. When omitted, delta tokens remain valid until you rotate the secret or prune their backing store.
 - `allowLegacyUnsignedTokens`: Set to `true` only while migrating from the unsigned (v1/v2) token format. New deployments should leave this `false` to reject tampered tokens outright.
 - `batch`: Guardrails for `$batch` requests. Provide `maxPayloadBytes` (default `16 MB`), `maxOperations` (100 operations), `maxChangesetOperations` (50 per changeset), `maxPartBodyBytes` (4 MB), `maxResponseBodyBytes` (4 MB per sub-response), `maxResponsePayloadBytes` (32 MB aggregate), and `maxDepth` (2 levels) to cap payload size, total operations, changeset nesting, and the amount of memory each buffered/serialized response may consume.
+- `$batch` sub-requests automatically reuse the caller's headers and security context. Only a safe allow-list (content negotiation, conditional headers, `Prefer`, etc.) may be overridden inside the payload; extend it via `batch.allowedSubRequestHeaders` if you need extra opt-in headers.
 - Sub-responses that exceed `maxResponseBodyBytes` are aborted in-process and return `413 ResponseTooLarge` so a single oversized entry cannot exhaust server memory even when the handler streams a large binary payload.
 - When the combined buffered responses and the serialized JSON/multipart payload would exceed `maxResponsePayloadBytes`, the controller rejects the entire batch with `413 Payload Too Large` before serialization begins, preventing attackers from flooding the process with many near-limit responses in a single request.
 - `$batch` limits are enforced while parsing the stream: once the cumulative payload or a single part exceeds the configured budget the server aborts immediately with `413 Payload Too Large`.
