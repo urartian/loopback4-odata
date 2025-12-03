@@ -157,6 +157,7 @@ const DEFAULT_ALLOWED_SUBREQUEST_HEADERS = Object.freeze([
   'odata-maxversion',
   'odata-isolation',
 ]);
+const DEFAULT_SUBREQUEST_TIMEOUT_MS = 30_000;
 
 class AtomicityGroupContext {
   private readonly requestState: AtomicityRequestState;
@@ -1850,7 +1851,10 @@ export class ODataBatchController {
     context?.applyTo(req);
     const handlerPromise = this.httpHandler
       .handleRequest(req as any, res as any)
-      .catch(() => undefined);
+      .catch(() => undefined)
+      .finally(() => {
+        context?.clearFrom(req);
+      });
 
     // Feed request body to the IncomingMessage stream directly
     if (bodyBuffer.length) {
@@ -1858,35 +1862,56 @@ export class ODataBatchController {
     }
     (req as any).push(null);
 
+    const abortRequest = (reason: Error) => {
+      if ((res as any).writableEnded !== true) {
+        try {
+          res.destroy?.(reason);
+        } catch {
+          /* ignore */
+        }
+      }
+      try {
+        socket.destroy?.(reason);
+      } catch {
+        /* ignore */
+      }
+      try {
+        (req as any).destroy?.(reason);
+      } catch {
+        /* ignore */
+      }
+    };
+
     // Add per-request timeout to avoid hangs; wait for finish/close
-    const TIMEOUT_MS = 30000;
+    const timeoutMs = this.cfg?.batch?.subRequestTimeoutMs ?? DEFAULT_SUBREQUEST_TIMEOUT_MS;
     let timeoutHandle: NodeJS.Timeout | undefined;
+    let timedOut = false;
     const timeoutPromise = new Promise<never>((_, reject) => {
-      timeoutHandle = setTimeout(() => reject(new Error('Batch sub-request timeout')), TIMEOUT_MS);
+      if (!timeoutMs || timeoutMs <= 0) return;
+      timeoutHandle = setTimeout(() => {
+        timedOut = true;
+        const error = new Error('Batch sub-request timeout');
+        abortRequest(error);
+        reject(error);
+      }, timeoutMs);
     });
 
     try {
       const result = await Promise.race([finishPromise, timeoutPromise]);
       return result;
     } catch (error) {
-      const status =
-        (error && typeof error === 'object' && 'statusCode' in error
-          ? (error as { statusCode?: number }).statusCode
-          : undefined) ?? 500;
-      const body = this.odataError(
-        'BatchExecutionError',
-        (error as Error).message ?? 'Failed to execute request.',
-      );
+      const status = timedOut ? 504 : ((error as { statusCode?: number })?.statusCode ?? 500);
+      const code = timedOut ? 'BatchSubRequestTimeout' : 'BatchExecutionError';
+      const message =
+        (error as Error)?.message ??
+        (timedOut ? 'Batch sub-request timeout.' : 'Failed to execute request.');
       return {
         id: request.id,
         status,
-        body,
+        body: this.odataError(code, message),
       };
     } finally {
-      if (timeoutHandle) {
-        clearTimeout(timeoutHandle);
-      }
-      context?.clearFrom(req);
+      if (timeoutHandle) clearTimeout(timeoutHandle);
     }
   }
 

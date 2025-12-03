@@ -201,6 +201,7 @@ export interface ODataBatchConfig {
   maxResponseBodyBytes?: number; // maximum bytes allowed in a single batch sub-response
   maxResponsePayloadBytes?: number; // maximum aggregate bytes buffered + serialized for the full batch response
   allowedSubRequestHeaders?: string[]; // additional header names that batch entries may override
+  subRequestTimeoutMs?: number; // max duration for each sub-request before it is aborted
 }
 
 export interface ODataPaginationConfig {

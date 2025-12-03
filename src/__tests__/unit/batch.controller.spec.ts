@@ -1864,4 +1864,50 @@ describe('$batch controller', () => {
     assert.equal(headers.prefer, 'return=minimal');
     assert.equal(headers['content-type'], 'application/json;odata.metadata=minimal');
   });
+
+  it('aborts sub-requests that exceed the configured timeout and clears context afterwards', async () => {
+    let clearCalled = false;
+    let handlerResolve: (() => void) | undefined;
+    const controller = new ODataBatchController(
+      {
+        async handleRequest() {
+          await new Promise<void>((resolve) => {
+            handlerResolve = resolve;
+          });
+        },
+      } as any,
+      'http://localhost',
+      createRequestContextStub(),
+      { get: async () => undefined } as any,
+      { findByName: () => undefined } as any,
+      noopLogger,
+      {
+        ...defaultConfig,
+        batch: { ...defaultConfig.batch, subRequestTimeoutMs: 10 },
+      },
+    );
+
+    const context = {
+      applyTo: () => undefined,
+      clearFrom: () => {
+        clearCalled = true;
+      },
+    } as any;
+
+    const limits = (controller as any).getBatchLimits();
+    const result = await (controller as any).executeSingle(
+      { id: 'timeout', method: 'GET', url: '/odata/Products' },
+      context,
+      requestStub('application/json'),
+      limits,
+    );
+
+    assert.equal(result.status, 504);
+    assert.equal((result.body as any)?.error?.code, 'BatchSubRequestTimeout');
+    assert.equal(clearCalled, false);
+
+    handlerResolve?.();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(clearCalled, true);
+  });
 });
