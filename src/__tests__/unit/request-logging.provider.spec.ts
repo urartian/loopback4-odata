@@ -102,6 +102,65 @@ describe('request logging provider', () => {
     assert.equal(payload.data.length, 5000);
   });
 
+  it('skips property getters when capturing request bodies', () => {
+    const provider = new RequestLoggingProvider({ basePath: '/odata' } as any, noopLogger);
+    let getterCalls = 0;
+    const payload: Record<string, unknown> = {};
+
+    Object.defineProperty(payload, 'secret', {
+      enumerable: true,
+      configurable: true,
+      get: () => {
+        getterCalls += 1;
+        throw new Error('getter must not run');
+      },
+    });
+
+    const capture = (provider as any).captureRequestBody(payload, { maxPayloadBytes: 2048 });
+    assert.equal(getterCalls, 0);
+    assert.equal(capture?.truncated, true);
+    assert.equal(capture?.body?.secret, '[Getter]');
+  });
+
+  it('skips array entry getters when cloning payloads', () => {
+    const provider = new RequestLoggingProvider({ basePath: '/odata' } as any, noopLogger);
+    let getterCalls = 0;
+    const records: any[] = [1, 2, 3];
+    Object.defineProperty(records, '1', {
+      enumerable: true,
+      configurable: true,
+      get: () => {
+        getterCalls += 1;
+        throw new Error('array getter must not run');
+      },
+    });
+
+    const payload = { records };
+    const capture = (provider as any).captureRequestBody(payload, { maxPayloadBytes: 2048 });
+    assert.equal(getterCalls, 0);
+    assert.equal(capture?.truncated, true);
+    assert.ok(Array.isArray(capture?.body?.records));
+    assert.equal(capture?.body?.records?.[1], '[Getter]');
+  });
+
+  it('clones masked bodies without invoking getters', () => {
+    const provider = new RequestLoggingProvider({ basePath: '/odata' } as any, noopLogger);
+    let getterCalls = 0;
+    const body: Record<string, unknown> = {};
+    Object.defineProperty(body, 'password', {
+      enumerable: true,
+      configurable: true,
+      get: () => {
+        getterCalls += 1;
+        throw new Error('getter must not run');
+      },
+    });
+
+    const masked = (provider as any).maskRequestBody(body, [], true);
+    assert.equal(getterCalls, 0);
+    assert.equal(masked.password, '[Getter]');
+  });
+
   it('caps cloned container entries to avoid deep traversal', () => {
     const provider = new RequestLoggingProvider({ basePath: '/odata' } as any, noopLogger);
     const limit = RequestLoggingProvider.MAX_CONTAINER_ENTRIES;

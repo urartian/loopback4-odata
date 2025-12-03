@@ -26,6 +26,7 @@ const DEFAULT_MAX_CAPTURE_DEPTH = 5;
 
 export class RequestLoggingProvider implements Provider<Middleware> {
   static readonly MAX_CONTAINER_ENTRIES = 100;
+  private static readonly ACCESSOR_PLACEHOLDER = '[Getter]';
 
   constructor(
     @inject(ODATA_BINDINGS.CONFIG) private readonly cfg: ODataConfig,
@@ -179,18 +180,30 @@ export class RequestLoggingProvider implements Provider<Middleware> {
       if (Array.isArray(value)) {
         this.consumeBudget(state, 2); // brackets
         const cloned: unknown[] = [];
+        let processed = 0;
         for (let index = 0; index < value.length; index += 1) {
-          if (index >= RequestLoggingProvider.MAX_CONTAINER_ENTRIES) {
+          if (processed >= RequestLoggingProvider.MAX_CONTAINER_ENTRIES) {
             state.truncated = true;
             break;
           }
+          if (!Object.prototype.hasOwnProperty.call(value, index)) continue;
           if (state.remaining <= 0) {
             state.truncated = true;
             break;
           }
-          const next = this.cloneStructuredValue(value[index], depth + 1, maxDepth, state);
+          const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+          if (!descriptor || descriptor.enumerable === false) continue;
+          if (this.hasAccessor(descriptor)) {
+            const placeholder = this.cloneAccessorPlaceholder(state);
+            cloned.push(placeholder);
+            processed += 1;
+            this.consumeBudget(state, 1); // comma
+            continue;
+          }
+          const next = this.cloneStructuredValue(descriptor.value, depth + 1, maxDepth, state);
           if (next === undefined && state.truncated) break;
           cloned.push(next);
+          processed += 1;
           this.consumeBudget(state, 1); // comma
         }
         return cloned;
@@ -208,8 +221,10 @@ export class RequestLoggingProvider implements Provider<Middleware> {
       const cloned: Record<string, unknown> = {};
       const source = value as Record<string, unknown>;
       let processed = 0;
-      for (const key in source) {
-        if (!Object.prototype.hasOwnProperty.call(source, key)) continue;
+      const descriptors = Object.getOwnPropertyDescriptors(source);
+      for (const key of Object.keys(descriptors)) {
+        const descriptor = descriptors[key];
+        if (!descriptor || descriptor.enumerable === false) continue;
         if (processed >= RequestLoggingProvider.MAX_CONTAINER_ENTRIES) {
           state.truncated = true;
           break;
@@ -223,7 +238,13 @@ export class RequestLoggingProvider implements Provider<Middleware> {
           state.truncated = true;
           break;
         }
-        const next = this.cloneStructuredValue(source[key], depth + 1, maxDepth, state);
+        if (this.hasAccessor(descriptor)) {
+          const placeholder = this.cloneAccessorPlaceholder(state);
+          cloned[key] = placeholder;
+          processed += 1;
+          continue;
+        }
+        const next = this.cloneStructuredValue(descriptor.value, depth + 1, maxDepth, state);
         if (next === undefined && state.truncated) break;
         cloned[key] = next;
         processed += 1;
@@ -305,6 +326,16 @@ export class RequestLoggingProvider implements Provider<Middleware> {
 
   private keyBudget(key: string): number {
     return Buffer.byteLength(key, 'utf8') + 4;
+  }
+
+  private hasAccessor(descriptor: PropertyDescriptor | undefined): boolean {
+    if (!descriptor) return false;
+    return typeof descriptor.get === 'function' || typeof descriptor.set === 'function';
+  }
+
+  private cloneAccessorPlaceholder(state: CloneState): string {
+    state.truncated = true;
+    return this.clonePrimitiveValue(RequestLoggingProvider.ACCESSOR_PLACEHOLDER, state);
   }
 
   private captureRequestBody(
@@ -515,12 +546,30 @@ export class RequestLoggingProvider implements Provider<Middleware> {
 
   private cloneValue(value: unknown): any {
     if (Array.isArray(value)) {
-      return value.map((entry) => this.cloneValue(entry));
+      const clone = new Array(value.length);
+      for (let index = 0; index < value.length; index += 1) {
+        if (!Object.prototype.hasOwnProperty.call(value, index)) continue;
+        const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+        if (!descriptor || descriptor.enumerable === false) continue;
+        if (this.hasAccessor(descriptor)) {
+          clone[index] = RequestLoggingProvider.ACCESSOR_PLACEHOLDER;
+          continue;
+        }
+        clone[index] = this.cloneValue(descriptor.value);
+      }
+      return clone;
     }
     if (value && typeof value === 'object') {
       const result: Record<string, unknown> = {};
-      for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
-        result[key] = this.cloneValue(entry);
+      const descriptors = Object.getOwnPropertyDescriptors(value as AnyObject);
+      for (const key of Object.keys(descriptors)) {
+        const descriptor = descriptors[key];
+        if (!descriptor || descriptor.enumerable === false) continue;
+        if (this.hasAccessor(descriptor)) {
+          result[key] = RequestLoggingProvider.ACCESSOR_PLACEHOLDER;
+          continue;
+        }
+        result[key] = this.cloneValue(descriptor.value);
       }
       return result;
     }
