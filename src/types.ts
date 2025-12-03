@@ -171,6 +171,7 @@ export interface ODataDeltaTokenInvalidEvent {
 export interface ODataTenantQuotaConfig {
   maxRequestsPerMinute?: number;
   maxConcurrentRequests?: number;
+  maxLeaseRefreshers?: number; // global cap on active tenant lease timers
   overrides?: Record<string, { maxRequestsPerMinute?: number; maxConcurrentRequests?: number }>;
 }
 

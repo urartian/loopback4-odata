@@ -6162,6 +6162,11 @@ export function defineODataCrudController(def: EntitySetDef) {
             'Tenant concurrent request limit exceeded. Retry after a short delay.',
           );
         }
+        if (message === 'tenant-lease-refreshers-exhausted') {
+          throw new HttpErrors.ServiceUnavailable(
+            'Tenant throttling is temporarily saturated. Retry after a short delay.',
+          );
+        }
         throw error;
       }
     }
