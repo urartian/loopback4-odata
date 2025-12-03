@@ -1,4 +1,5 @@
 import { inject, Provider } from '@loopback/core';
+import { AnyObject } from '@loopback/repository';
 import { Middleware, MiddlewareContext, Request } from '@loopback/rest';
 import { ODATA_BINDINGS, ODataLogger } from '../keys';
 import {
@@ -14,6 +15,14 @@ interface CapturedPayload {
   body?: unknown;
   truncated?: boolean;
 }
+
+interface CloneState {
+  remaining: number;
+  truncated: boolean;
+  seen: WeakSet<object>;
+}
+
+const DEFAULT_MAX_CAPTURE_DEPTH = 5;
 
 export class RequestLoggingProvider implements Provider<Middleware> {
   constructor(
@@ -118,6 +127,168 @@ export class RequestLoggingProvider implements Provider<Middleware> {
     };
   }
 
+  private cloneStructuredPayload(
+    payload: unknown,
+    maxBytes: number,
+    maxDepth: number,
+  ): CapturedPayload {
+    const state: CloneState = {
+      remaining: Math.max(0, maxBytes),
+      truncated: false,
+      seen: new WeakSet<object>(),
+    };
+    try {
+      const body = this.cloneStructuredValue(payload, 0, maxDepth, state);
+      return { body, truncated: state.truncated };
+    } catch {
+      return { body: '[unserializable]', truncated: true };
+    }
+  }
+
+  private cloneStructuredValue(
+    value: unknown,
+    depth: number,
+    maxDepth: number,
+    state: CloneState,
+  ): any {
+    if (state.remaining <= 0) {
+      state.truncated = true;
+      return undefined;
+    }
+    if (value === null || typeof value !== 'object') {
+      return this.clonePrimitiveValue(value, state);
+    }
+    if (Buffer.isBuffer(value)) {
+      return this.clonePrimitiveValue(value.toString('base64'), state);
+    }
+    if (value instanceof Date) {
+      return this.clonePrimitiveValue(value.toISOString(), state);
+    }
+    if (state.seen.has(value as object)) {
+      state.truncated = true;
+      return '[Circular]';
+    }
+    if (depth >= maxDepth) {
+      state.truncated = true;
+      return '[MaxDepth]';
+    }
+    state.seen.add(value as object);
+    try {
+      if (Array.isArray(value)) {
+        this.consumeBudget(state, 2); // brackets
+        const cloned: unknown[] = [];
+        for (const entry of value) {
+          if (state.remaining <= 0) {
+            state.truncated = true;
+            break;
+          }
+          const next = this.cloneStructuredValue(entry, depth + 1, maxDepth, state);
+          if (next === undefined && state.truncated) break;
+          cloned.push(next);
+          this.consumeBudget(state, 1); // comma
+        }
+        return cloned;
+      }
+      if (typeof (value as AnyObject)?.toJSON === 'function') {
+        try {
+          const jsonValue = (value as AnyObject).toJSON();
+          return this.cloneStructuredValue(jsonValue, depth + 1, maxDepth, state);
+        } catch {
+          state.truncated = true;
+          return '[unserializable]';
+        }
+      }
+      this.consumeBudget(state, 2); // braces
+      const cloned: Record<string, unknown> = {};
+      for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+        if (state.remaining <= 0) {
+          state.truncated = true;
+          break;
+        }
+        this.consumeBudget(state, this.keyBudget(key));
+        const next = this.cloneStructuredValue(entry, depth + 1, maxDepth, state);
+        if (next === undefined && state.truncated) break;
+        cloned[key] = next;
+      }
+      return cloned;
+    } finally {
+      state.seen.delete(value as object);
+    }
+  }
+
+  private clonePrimitiveValue(value: unknown, state: CloneState): any {
+    if (value === null) {
+      this.consumeBudget(state, 4);
+      return null;
+    }
+    const type = typeof value;
+    if (type === 'string') {
+      return this.consumeStringValue(value as string, state);
+    }
+    if (type === 'number' || type === 'boolean') {
+      this.consumeBudget(state, Buffer.byteLength(String(value), 'utf8'));
+      return value;
+    }
+    if (type === 'bigint') {
+      return this.consumeStringValue((value as bigint).toString(), state);
+    }
+    if (value === undefined) {
+      this.consumeBudget(state, 4);
+      return undefined;
+    }
+    if (type === 'symbol') {
+      return this.consumeStringValue((value as symbol).toString(), state);
+    }
+    return value;
+  }
+
+  private consumeStringValue(value: string, state: CloneState): string {
+    const bytes = Buffer.byteLength(value, 'utf8');
+    if (bytes <= state.remaining) {
+      state.remaining -= bytes;
+      return value;
+    }
+    if (state.remaining <= 0) {
+      state.truncated = true;
+      return '';
+    }
+    const truncated = this.truncateStringByBytes(value, state.remaining);
+    state.remaining = 0;
+    state.truncated = true;
+    return truncated;
+  }
+
+  private truncateStringByBytes(value: string, limit: number): string {
+    if (limit <= 0) return '';
+    let result = '';
+    let consumed = 0;
+    for (const char of value) {
+      const charBytes = Buffer.byteLength(char, 'utf8');
+      if (consumed + charBytes > limit) break;
+      consumed += charBytes;
+      result += char;
+    }
+    return result;
+  }
+
+  private consumeBudget(state: CloneState, bytes: number): void {
+    if (bytes <= 0) return;
+    if (state.remaining <= 0) {
+      state.truncated = true;
+      return;
+    }
+    if (bytes > state.remaining) {
+      state.remaining = 0;
+      state.truncated = true;
+      return;
+    }
+    state.remaining -= bytes;
+  }
+
+  private keyBudget(key: string): number {
+    return Buffer.byteLength(key, 'utf8') + 4;
+  }
+
   private captureRequestBody(
     payload: unknown,
     config: ODataRequestLoggingConfig,
@@ -141,17 +312,14 @@ export class RequestLoggingProvider implements Provider<Middleware> {
       };
     }
     if (typeof payload === 'object') {
-      try {
-        const serialized = JSON.stringify(payload);
-        if (Buffer.byteLength(serialized, 'utf8') > maxBytes) {
-          return { truncated: true };
-        }
-        const clone = JSON.parse(serialized);
-        const masked = this.maskRequestBody(clone, config.maskBodyPaths ?? []);
-        return { body: masked };
-      } catch {
-        return { body: '[unserializable]' };
+      const cloned = this.cloneStructuredPayload(payload, maxBytes, DEFAULT_MAX_CAPTURE_DEPTH);
+      if (!cloned.body && cloned.truncated) {
+        return { truncated: true };
       }
+      const masked = cloned.body
+        ? this.maskRequestBody(cloned.body, config.maskBodyPaths ?? [], false)
+        : undefined;
+      return { body: masked, truncated: cloned.truncated || undefined };
     }
     return { body: payload };
   }
@@ -166,15 +334,8 @@ export class RequestLoggingProvider implements Provider<Middleware> {
       };
     }
     if (typeof payload === 'object') {
-      try {
-        const serialized = JSON.stringify(payload);
-        if (Buffer.byteLength(serialized, 'utf8') > maxBytes) {
-          return { truncated: true };
-        }
-        return { body: payload };
-      } catch {
-        return { body: '[unserializable]' };
-      }
+      const cloned = this.cloneStructuredPayload(payload, maxBytes, DEFAULT_MAX_CAPTURE_DEPTH);
+      return { body: cloned.body, truncated: cloned.truncated || undefined };
     }
     return { body: payload };
   }
@@ -195,9 +356,9 @@ export class RequestLoggingProvider implements Provider<Middleware> {
     return masked;
   }
 
-  private maskRequestBody(body: any, maskPaths: string[]): any {
+  private maskRequestBody(body: any, maskPaths: string[], cloneBody = true): any {
     if (!body || typeof body !== 'object') return body;
-    const clone = this.cloneValue(body);
+    const clone = cloneBody ? this.cloneValue(body) : body;
     for (const path of maskPaths) {
       const segments = this.parseMaskPath(path);
       if (!segments || !segments.length) continue;

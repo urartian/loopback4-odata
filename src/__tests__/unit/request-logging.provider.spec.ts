@@ -97,7 +97,32 @@ describe('request logging provider', () => {
     const provider = new RequestLoggingProvider({ basePath: '/odata' } as any, noopLogger);
     const payload = { data: 'x'.repeat(5000) };
     const capture = (provider as any).captureRequestBody(payload, { maxPayloadBytes: 128 });
-    assert.deepStrictEqual(capture, { truncated: true });
+    assert.equal(capture?.truncated, true);
+    assert.ok(typeof capture?.body === 'object');
     assert.equal(payload.data.length, 5000);
+  });
+
+  it('limits nested JSON bodies by depth and flags truncation', () => {
+    const provider = new RequestLoggingProvider({ basePath: '/odata' } as any, noopLogger);
+    const payload: any = { value: 'root' };
+    let builder = payload;
+    for (let i = 0; i < 10; i++) {
+      builder.next = { value: `level-${i}` };
+      builder = builder.next;
+    }
+    const capture = (provider as any).captureRequestBody(payload, { maxPayloadBytes: 4096 });
+    assert.equal(capture?.truncated, true);
+    const bodyString = JSON.stringify(capture?.body);
+    assert.ok(bodyString.includes('[MaxDepth]'));
+  });
+
+  it('captures partial response bodies without exhausting memory', () => {
+    const provider = new RequestLoggingProvider({ basePath: '/odata' } as any, noopLogger);
+    const payload = {
+      records: Array.from({ length: 1000 }).map((_, i) => ({ id: i, name: 'x'.repeat(50) })),
+    };
+    const capture = (provider as any).captureResponseBody(payload, 512);
+    assert.equal(capture?.truncated, true);
+    assert.ok(Array.isArray(capture?.body?.records));
   });
 });
