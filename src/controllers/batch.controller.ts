@@ -158,6 +158,7 @@ const DEFAULT_ALLOWED_SUBREQUEST_HEADERS = Object.freeze([
   'odata-isolation',
 ]);
 const DEFAULT_SUBREQUEST_TIMEOUT_MS = 30_000;
+const BATCH_TOKEN_REGEX = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
 
 class AtomicityGroupContext {
   private readonly requestState: AtomicityRequestState;
@@ -341,11 +342,15 @@ export class ODataBatchController {
         this.enforceOperationLimit(jsonRequests.length, limits);
         this.enforceJsonPayloadSize(jsonPayload, limits);
         requests = jsonRequests;
+        this.sanitizeBatchRequestIdentifiers(requests);
         this.validateJsonDependsOn(requests);
         this.enforceJsonPartBodySize(requests, limits);
       }
 
       this.enforceOperationLimit(requests.length, limits);
+      if (isMultipart) {
+        this.sanitizeBatchRequestIdentifiers(requests);
+      }
       const requestOrder = this.buildRequestOrderIndex(requests);
 
       this.validateContiguousAtomicityGroups(requests);
@@ -768,6 +773,38 @@ export class ODataBatchController {
         }
       }
     }
+  }
+
+  private sanitizeBatchRequestIdentifiers(requests: BatchRequest[]): void {
+    for (const request of requests) {
+      request.id = this.sanitizeBatchToken(request.id, 'request id');
+      request.atomicityGroup = this.sanitizeBatchToken(request.atomicityGroup, 'atomicityGroup');
+      if (request.dependsOn !== undefined) {
+        if (!Array.isArray(request.dependsOn)) {
+          throw new HttpErrors.BadRequest('dependsOn must be an array of request identifiers.');
+        }
+        request.dependsOn = request.dependsOn.map(
+          (dep) => this.sanitizeBatchToken(dep, 'dependsOn entry')!,
+        );
+      }
+    }
+  }
+
+  private sanitizeBatchToken(value: unknown, field: string): string | undefined {
+    if (value == null) return undefined;
+    if (typeof value !== 'string') {
+      throw new HttpErrors.BadRequest(`Batch ${field} must be a string token.`);
+    }
+    const trimmed = value.trim();
+    if (!trimmed) {
+      throw new HttpErrors.BadRequest(`Batch ${field} must be a non-empty token.`);
+    }
+    if (!BATCH_TOKEN_REGEX.test(trimmed)) {
+      throw new HttpErrors.BadRequest(
+        `Batch ${field} contains invalid characters. Only RFC7230 tokens are allowed.`,
+      );
+    }
+    return trimmed;
   }
 
   private async executeGroup(

@@ -1910,4 +1910,80 @@ describe('$batch controller', () => {
     await new Promise((resolve) => setImmediate(resolve));
     assert.equal(clearCalled, true);
   });
+
+  it('rejects sub-request ids containing control characters', async () => {
+    const controller = createController({});
+    await assert.rejects(
+      controller.handleBatch(
+        {
+          requests: [{ id: 'req\r\nInjected: 1', method: 'GET', url: '/odata/Products' }],
+        },
+        responseStub,
+        requestStub('application/json'),
+      ),
+      (err: unknown) =>
+        err instanceof HttpErrors.BadRequest &&
+        /request id contains invalid characters/i.test((err as Error).message),
+    );
+  });
+
+  it('rejects atomicity groups containing invalid characters', async () => {
+    const controller = createController({});
+    await assert.rejects(
+      controller.handleBatch(
+        {
+          requests: [
+            {
+              id: 'a',
+              method: 'POST',
+              url: '/odata/Products',
+              atomicityGroup: 'set-1\r\nInjected: 1',
+            },
+          ],
+        },
+        responseStub,
+        requestStub('application/json'),
+      ),
+      (err: unknown) =>
+        err instanceof HttpErrors.BadRequest &&
+        /atomicitygroup contains invalid characters/i.test((err as Error).message),
+    );
+  });
+
+  it('rejects duplicate ids after sanitization', async () => {
+    const controller = createController({});
+    await assert.rejects(
+      controller.handleBatch(
+        {
+          requests: [
+            { id: 'req', method: 'GET', url: '/odata/Products' },
+            { id: ' req ', method: 'GET', url: '/odata/Products/$count' },
+          ],
+        },
+        responseStub,
+        requestStub('application/json'),
+      ),
+      (err: unknown) =>
+        err instanceof HttpErrors.BadRequest &&
+        /duplicate request id/i.test((err as Error).message),
+    );
+  });
+
+  it('rejects non-array dependsOn payloads before sanitization', async () => {
+    const controller = createController({});
+    await assert.rejects(
+      controller.handleBatch(
+        {
+          requests: [
+            { id: 'a', method: 'POST', url: '/odata/Products', dependsOn: 'root' as any },
+          ],
+        },
+        responseStub,
+        requestStub('application/json'),
+      ),
+      (err: unknown) =>
+        err instanceof HttpErrors.BadRequest &&
+        /dependsOn must be an array/i.test((err as Error).message),
+    );
+  });
 });
