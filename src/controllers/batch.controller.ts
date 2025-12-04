@@ -2174,13 +2174,13 @@ export class ODataBatchController {
     for (const [key, value] of Object.entries(request.headers ?? {})) {
       if (value == null) continue;
       const normalized = key.toLowerCase();
+      if (normalized === 'host') continue;
       if (!allowedOverrides.has(normalized)) continue;
       merged[normalized] = String(value);
     }
 
     // Drop hop-by-hop and forbidden headers for sub-requests
     const forbidden = new Set([
-      'host',
       'connection',
       'content-length',
       'transfer-encoding',
