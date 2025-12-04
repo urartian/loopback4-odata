@@ -6,10 +6,14 @@ import {
   TenantThrottleStore,
 } from '../services/tenant-throttle-store';
 
+type ActiveTenantEntry = { count: number; timer?: NodeJS.Timeout };
+
 export class TenantThrottlerProvider implements Provider<ODataTenantThrottler> {
   private readonly windowMs = 60_000;
   private readonly store: TenantThrottleStore;
-  private readonly activeTenants = new Map<string, { count: number; timer?: NodeJS.Timeout }>();
+  private readonly activeTenants = new Map<string, ActiveTenantEntry>();
+  private activeLeaseTimerCount = 0;
+  private readonly leaseTimerLimit: number;
 
   constructor(
     @inject(ODATA_BINDINGS.CONFIG) private readonly config: ODataConfig,
@@ -19,6 +23,7 @@ export class TenantThrottlerProvider implements Provider<ODataTenantThrottler> {
     store?: TenantThrottleStore,
   ) {
     this.store = store ?? new InMemoryTenantThrottleStore(this.windowMs);
+    this.leaseTimerLimit = this.resolveLeaseTimerLimit();
   }
 
   value(): ODataTenantThrottler {
@@ -84,12 +89,20 @@ export class TenantThrottlerProvider implements Provider<ODataTenantThrottler> {
       );
       throw new Error('tenant-concurrent-limit-exceeded');
     }
-    this.incrementActiveTenant(tenant);
+    try {
+      this.incrementActiveTenant(tenant);
+    } catch (error) {
+      await this.store.releaseConcurrent(tenant);
+      throw error;
+    }
   }
 
   private async releaseTenant(tenant: string) {
-    await this.store.releaseConcurrent(tenant);
-    this.decrementActiveTenant(tenant);
+    try {
+      await this.store.releaseConcurrent(tenant);
+    } finally {
+      this.decrementActiveTenant(tenant);
+    }
   }
 
   private emitThrottleLog(
@@ -130,28 +143,32 @@ export class TenantThrottlerProvider implements Provider<ODataTenantThrottler> {
   }
 
   private incrementActiveTenant(tenant: string) {
-    if (typeof this.store.refreshConcurrentLease !== 'function') return;
-    const entry = this.activeTenants.get(tenant) ?? { count: 0 };
-    entry.count += 1;
-    if (entry.count === 1) {
-      entry.timer = this.startLeaseTimer(tenant);
+    if (!this.supportsLeaseRefresh()) return;
+    const entry = this.activeTenants.get(tenant);
+    if (entry) {
+      entry.count += 1;
+      return;
     }
-    this.activeTenants.set(tenant, entry);
+    this.ensureLeaseTimerCapacity(tenant);
+    const timer = this.startLeaseTimer(tenant);
+    this.activeTenants.set(tenant, { count: 1, timer });
+    if (timer) this.activeLeaseTimerCount += 1;
   }
 
   private decrementActiveTenant(tenant: string) {
-    if (typeof this.store.refreshConcurrentLease !== 'function') return;
+    if (!this.supportsLeaseRefresh()) return;
     const entry = this.activeTenants.get(tenant);
     if (!entry) return;
     entry.count = Math.max(0, entry.count - 1);
     if (entry.count === 0) {
       if (entry.timer) {
         clearInterval(entry.timer);
+        this.activeLeaseTimerCount = Math.max(0, this.activeLeaseTimerCount - 1);
       }
       this.activeTenants.delete(tenant);
-    } else {
-      this.activeTenants.set(tenant, entry);
+      return;
     }
+    this.activeTenants.set(tenant, entry);
   }
 
   private startLeaseTimer(tenant: string): NodeJS.Timeout | undefined {
@@ -167,10 +184,39 @@ export class TenantThrottlerProvider implements Provider<ODataTenantThrottler> {
     return timer;
   }
 
+  private supportsLeaseRefresh(): boolean {
+    return typeof this.store.refreshConcurrentLease === 'function';
+  }
+
+  private ensureLeaseTimerCapacity(tenant: string) {
+    if (!this.leaseTimerLimit) return;
+    if (this.activeLeaseTimerCount >= this.leaseTimerLimit) {
+      this.emitLeaseLimitLog(tenant);
+      throw new Error('tenant-lease-refreshers-exhausted');
+    }
+  }
+
+  private emitLeaseLimitLog(tenant: string) {
+    if (!this.logger) return;
+    this.logger.warn('Tenant lease refresher pool exhausted', {
+      event: 'tenant-throttle',
+      tenantId: tenant,
+      limitType: 'lease',
+      limit: this.leaseTimerLimit,
+      activeLeaseRefreshers: this.activeLeaseTimerCount,
+    });
+  }
+
   private getLeaseRefreshInterval(): number {
     const ttl = this.store.getConcurrentLeaseDuration?.();
     const base = ttl && ttl > 0 ? ttl : 120_000;
     const half = Math.floor(base / 2);
     return Math.max(5_000, Math.min(half, base - 1_000));
+  }
+
+  private resolveLeaseTimerLimit(): number {
+    const configured = this.config.tenantQuotas?.maxLeaseRefreshers;
+    if (configured && configured > 0) return configured;
+    return 1000;
   }
 }

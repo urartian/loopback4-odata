@@ -2,10 +2,13 @@ export interface ODataConfig {
   basePath?: string; // default '/odata'
   /**
    * When true, always trust Forwarded/X-Forwarded-* headers for origin/host/protocol detection.
-   * When false, ignore those headers even if LoopBack's RestServer is configured to trust proxies.
-   * When omitted, the runtime piggy-backs on Express' `trust proxy` setting (if enabled) to decide.
+   * When false/omitted, proxy headers are ignored unless `trustedProxySubnets` is configured.
    */
   trustProxyHeaders?: boolean;
+  /**
+   * CIDR/IP strings describing which remote addresses are allowed to influence host/protocol.
+   */
+  trustedProxySubnets?: string[];
   csdlFormat?: 'xml' | 'json'; // default 'xml'
   namespace?: string; // default 'Default'
   entityContainerName?: string; // default 'DefaultContainer'
@@ -168,6 +171,7 @@ export interface ODataDeltaTokenInvalidEvent {
 export interface ODataTenantQuotaConfig {
   maxRequestsPerMinute?: number;
   maxConcurrentRequests?: number;
+  maxLeaseRefreshers?: number; // global cap on active tenant lease timers
   overrides?: Record<string, { maxRequestsPerMinute?: number; maxConcurrentRequests?: number }>;
 }
 
@@ -196,6 +200,8 @@ export interface ODataBatchConfig {
   maxPartBodyBytes?: number; // maximum body size for an individual part
   maxResponseBodyBytes?: number; // maximum bytes allowed in a single batch sub-response
   maxResponsePayloadBytes?: number; // maximum aggregate bytes buffered + serialized for the full batch response
+  allowedSubRequestHeaders?: string[]; // additional header names that batch entries may override
+  subRequestTimeoutMs?: number; // max duration for each sub-request before it is aborted
 }
 
 export interface ODataPaginationConfig {

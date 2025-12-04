@@ -97,7 +97,196 @@ describe('request logging provider', () => {
     const provider = new RequestLoggingProvider({ basePath: '/odata' } as any, noopLogger);
     const payload = { data: 'x'.repeat(5000) };
     const capture = (provider as any).captureRequestBody(payload, { maxPayloadBytes: 128 });
-    assert.deepStrictEqual(capture, { truncated: true });
+    assert.equal(capture?.truncated, true);
+    assert.ok(typeof capture?.body === 'object');
     assert.equal(payload.data.length, 5000);
+  });
+
+  it('treats objects with custom prototypes as non-plain placeholders', () => {
+    const provider = new RequestLoggingProvider({ basePath: '/odata' } as any, noopLogger);
+    let getterCalls = 0;
+    const proto: Record<string, unknown> = {};
+    Object.defineProperty(proto, 'expensive', {
+      enumerable: true,
+      configurable: true,
+      get: () => {
+        getterCalls += 1;
+        throw new Error('prototype getter must not run');
+      },
+    });
+    const payload = { safe: 'ok' };
+    Object.setPrototypeOf(payload, proto);
+
+    const capture = (provider as any).captureRequestBody(payload, { maxPayloadBytes: 2048 });
+    assert.equal(getterCalls, 0);
+    assert.equal(capture?.truncated, true);
+    assert.equal(capture?.body, '[NonPlainObject]');
+  });
+
+  it('treats arrays with custom prototypes as non-plain placeholders', () => {
+    const provider = new RequestLoggingProvider({ basePath: '/odata' } as any, noopLogger);
+    let getterCalls = 0;
+    const proto: Record<string, unknown> = {};
+    Object.defineProperty(proto, '0', {
+      enumerable: true,
+      configurable: true,
+      get: () => {
+        getterCalls += 1;
+        throw new Error('array prototype getter must not run');
+      },
+    });
+    const records = [1, 2, 3];
+    Object.setPrototypeOf(records, proto);
+    const payload = { records };
+
+    const capture = (provider as any).captureRequestBody(payload, { maxPayloadBytes: 2048 });
+    assert.equal(getterCalls, 0);
+    assert.equal(capture?.truncated, true);
+    assert.equal(capture?.body?.records, '[NonPlainObject]');
+  });
+
+  it('treats mask clones of non-plain objects as placeholders without invoking getters', () => {
+    const provider = new RequestLoggingProvider({ basePath: '/odata' } as any, noopLogger);
+    let getterCalls = 0;
+    const proto: Record<string, unknown> = {};
+    Object.defineProperty(proto, 'hidden', {
+      enumerable: true,
+      configurable: true,
+      get: () => {
+        getterCalls += 1;
+        throw new Error('prototype getter must not run');
+      },
+    });
+    const payload = { safe: 'ok' };
+    Object.setPrototypeOf(payload, proto);
+
+    const masked = (provider as any).maskRequestBody(payload, ['safe'], true);
+    assert.equal(getterCalls, 0);
+    assert.equal(masked, '[NonPlainObject]');
+  });
+
+  it('skips property getters when capturing request bodies', () => {
+    const provider = new RequestLoggingProvider({ basePath: '/odata' } as any, noopLogger);
+    let getterCalls = 0;
+    const payload: Record<string, unknown> = {};
+
+    Object.defineProperty(payload, 'secret', {
+      enumerable: true,
+      configurable: true,
+      get: () => {
+        getterCalls += 1;
+        throw new Error('getter must not run');
+      },
+    });
+
+    const capture = (provider as any).captureRequestBody(payload, { maxPayloadBytes: 2048 });
+    assert.equal(getterCalls, 0);
+    assert.equal(capture?.truncated, true);
+    assert.equal(capture?.body?.secret, '[Getter]');
+  });
+
+  it('skips array entry getters when cloning payloads', () => {
+    const provider = new RequestLoggingProvider({ basePath: '/odata' } as any, noopLogger);
+    let getterCalls = 0;
+    const records: any[] = [1, 2, 3];
+    Object.defineProperty(records, '1', {
+      enumerable: true,
+      configurable: true,
+      get: () => {
+        getterCalls += 1;
+        throw new Error('array getter must not run');
+      },
+    });
+
+    const payload = { records };
+    const capture = (provider as any).captureRequestBody(payload, { maxPayloadBytes: 2048 });
+    assert.equal(getterCalls, 0);
+    assert.equal(capture?.truncated, true);
+    assert.ok(Array.isArray(capture?.body?.records));
+    assert.equal(capture?.body?.records?.[1], '[Getter]');
+  });
+
+  it('clones masked bodies without invoking getters', () => {
+    const provider = new RequestLoggingProvider({ basePath: '/odata' } as any, noopLogger);
+    let getterCalls = 0;
+    const body: Record<string, unknown> = {};
+    Object.defineProperty(body, 'password', {
+      enumerable: true,
+      configurable: true,
+      get: () => {
+        getterCalls += 1;
+        throw new Error('getter must not run');
+      },
+    });
+
+    const masked = (provider as any).maskRequestBody(body, [], true);
+    assert.equal(getterCalls, 0);
+    assert.equal(masked.password, '[Getter]');
+  });
+
+  it('caps cloned container entries to avoid deep traversal', () => {
+    const provider = new RequestLoggingProvider({ basePath: '/odata' } as any, noopLogger);
+    const limit = RequestLoggingProvider.MAX_CONTAINER_ENTRIES;
+    const payload: Record<string, string> = {};
+    for (let i = 0; i < limit + 50; i += 1) {
+      payload[`prop-${i}`] = `value-${i}`;
+    }
+    const capture = (provider as any).captureRequestBody(payload, {
+      maxPayloadBytes: 1024 * 1024,
+    });
+    const cloned = (capture?.body ?? {}) as Record<string, unknown>;
+    const keys = Object.keys(cloned);
+
+    assert.equal(capture?.truncated, true);
+    assert.equal(keys.length, limit);
+    assert.equal(keys[0], 'prop-0');
+    assert.equal(keys[keys.length - 1], `prop-${limit - 1}`);
+  });
+
+  it('stops evaluating properties once the entry cap is reached', () => {
+    const provider = new RequestLoggingProvider({ basePath: '/odata' } as any, noopLogger);
+    const limit = RequestLoggingProvider.MAX_CONTAINER_ENTRIES;
+    const payload: Record<string, unknown> = {};
+    let readCount = 0;
+
+    for (let i = 0; i < limit * 5; i += 1) {
+      const index = i;
+      Object.defineProperty(payload, `prop-${index}`, {
+        configurable: true,
+        enumerable: true,
+        get: () => {
+          readCount += 1;
+          return `value-${index}`;
+        },
+      });
+    }
+
+    const capture = (provider as any).captureRequestBody(payload, { maxPayloadBytes: 1024 * 1024 });
+    assert.ok(readCount <= limit);
+    assert.equal(capture?.truncated, true);
+  });
+
+  it('limits nested JSON bodies by depth and flags truncation', () => {
+    const provider = new RequestLoggingProvider({ basePath: '/odata' } as any, noopLogger);
+    const payload: any = { value: 'root' };
+    let builder = payload;
+    for (let i = 0; i < 10; i++) {
+      builder.next = { value: `level-${i}` };
+      builder = builder.next;
+    }
+    const capture = (provider as any).captureRequestBody(payload, { maxPayloadBytes: 4096 });
+    assert.equal(capture?.truncated, true);
+    const bodyString = JSON.stringify(capture?.body);
+    assert.ok(bodyString.includes('[MaxDepth]'));
+  });
+
+  it('captures partial response bodies without exhausting memory', () => {
+    const provider = new RequestLoggingProvider({ basePath: '/odata' } as any, noopLogger);
+    const payload = {
+      records: Array.from({ length: 1000 }).map((_, i) => ({ id: i, name: 'x'.repeat(50) })),
+    };
+    const capture = (provider as any).captureResponseBody(payload, 512);
+    assert.equal(capture?.truncated, true);
+    assert.ok(Array.isArray(capture?.body?.records));
   });
 });

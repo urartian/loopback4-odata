@@ -168,6 +168,7 @@ describe('CRUD controller navigation reference parsing', () => {
           host: 'tenant.test',
           forwarded: 'proto=https;host=example.test',
         },
+        socket: { remoteAddress: '203.0.113.10' } as any,
       },
     );
     expect(() =>
@@ -183,6 +184,7 @@ describe('CRUD controller navigation reference parsing', () => {
           host: 'tenant.test',
           forwarded: 'proto=HTTPS;host=EXAMPLE.TEST',
         },
+        socket: { remoteAddress: '198.51.100.25' } as any,
       },
     );
     const result = (controller as any).parseODataIdReference(
@@ -191,7 +193,7 @@ describe('CRUD controller navigation reference parsing', () => {
     expect(result).to.deepEqual({ entitySet: 'Products', keyExpression: '15' });
   });
 
-  it('honors Express trust proxy setting when config is unset', () => {
+  it('ignores Express trust proxy setting when config is unset', () => {
     const controller = createController({ basePath: '/api/odata' }, {
       headers: {
         host: 'tenant.test',
@@ -202,11 +204,61 @@ describe('CRUD controller navigation reference parsing', () => {
           return setting === 'trust proxy';
         },
       },
+      socket: { remoteAddress: '203.0.113.11' } as any,
     } as any);
+    expect(() =>
+      (controller as any).parseODataIdReference('https://example.test/api/odata/Products(21)'),
+    ).to.throw(/Invalid @odata\.id value/);
+  });
+
+  it('honors trusted proxy subnets when remote address matches', () => {
+    const controller = createController(
+      { basePath: '/api/odata', trustedProxySubnets: ['10.0.0.0/8'] },
+      {
+        headers: {
+          host: 'tenant.test',
+          forwarded: 'proto=https;host=example.test',
+        },
+        socket: { remoteAddress: '10.1.2.3' } as any,
+      },
+    );
     const result = (controller as any).parseODataIdReference(
       'https://example.test/api/odata/Products(21)',
     );
     expect(result).to.deepEqual({ entitySet: 'Products', keyExpression: '21' });
+  });
+
+  it('rejects headers when remote address is outside trusted subnets', () => {
+    const controller = createController(
+      { basePath: '/api/odata', trustedProxySubnets: ['10.0.0.0/8'] },
+      {
+        headers: {
+          host: 'tenant.test',
+          forwarded: 'proto=https;host=example.test',
+        },
+        socket: { remoteAddress: '198.51.100.50' } as any,
+      },
+    );
+    expect(() =>
+      (controller as any).parseODataIdReference('https://example.test/api/odata/Products(22)'),
+    ).to.throw(/Invalid @odata\.id value/);
+  });
+
+  it('supports IPv6 trusted proxy subnets', () => {
+    const controller = createController(
+      { basePath: '/api/odata', trustedProxySubnets: ['2001:db8::/32'] },
+      {
+        headers: {
+          host: 'tenant.test',
+          forwarded: 'proto=https;host=example.test',
+        },
+        socket: { remoteAddress: '2001:db8::1234' } as any,
+      },
+    );
+    const result = (controller as any).parseODataIdReference(
+      'https://example.test/api/odata/Products(23)',
+    );
+    expect(result).to.deepEqual({ entitySet: 'Products', keyExpression: '23' });
   });
 
   it('uses X-Forwarded-* headers when trustProxyHeaders is true', () => {

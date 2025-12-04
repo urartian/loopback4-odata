@@ -1,11 +1,12 @@
 import { AnyObject } from '@loopback/repository';
 import {
   ODataConfig,
+  ODataCorrelationConfig,
   ODataPaginationConfig,
   ODataTelemetryCategory,
   ODataTelemetryConfig,
   ODataTelemetryLevel,
-  ODataCorrelationConfig,
+  ODataTenantQuotaConfig,
 } from '../types';
 
 const validatedConfigs = new WeakSet<ODataConfig>();
@@ -65,6 +66,9 @@ export function validateODataConfig(config: ODataConfig): void {
   }
   if (config.correlation) {
     validateCorrelationConfig(config.correlation);
+  }
+  if (config.tenantQuotas) {
+    validateTenantQuotas('ODataConfig.tenantQuotas', config.tenantQuotas);
   }
 }
 
@@ -174,5 +178,19 @@ function validateRequestLoggingConfig(config: AnyObject): void {
     if (!Array.isArray(config.maskBodyPaths)) {
       throw new Error('ODataConfig.telemetry.requestLogging.maskBodyPaths must be an array.');
     }
+  }
+}
+
+function validateTenantQuotas(label: string, quotas: ODataTenantQuotaConfig): void {
+  const target = quotas as AnyObject;
+  assignPositive(target, 'maxRequestsPerMinute', label);
+  assignPositive(target, 'maxConcurrentRequests', label);
+  assignPositive(target, 'maxLeaseRefreshers', label);
+  if (!quotas.overrides) return;
+  for (const [tenant, override] of Object.entries(quotas.overrides)) {
+    if (!override) continue;
+    const overrideLabel = `${label}.overrides["${tenant}"]`;
+    assignPositive(override as AnyObject, 'maxRequestsPerMinute', overrideLabel);
+    assignPositive(override as AnyObject, 'maxConcurrentRequests', overrideLabel);
   }
 }

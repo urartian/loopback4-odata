@@ -272,6 +272,53 @@ describe('$batch controller', () => {
     assert.deepStrictEqual(captured, [{ id: 'user-1' }]);
   });
 
+  it('propagates trusted proxy context to sub-requests', async () => {
+    const observed: Array<{ protocol?: string; secure?: boolean; remote?: string }> = [];
+    const handler = {
+      async handleRequest(req: any, res: any) {
+        observed.push({
+          protocol: (req as any).protocol,
+          secure: (req as any).secure,
+          remote: (req as any)?.socket?.remoteAddress,
+        });
+        res.statusCode = 200;
+        res.end(JSON.stringify({ ok: true }));
+      },
+    };
+    const controller = new ODataBatchController(
+      handler as any,
+      'http://localhost',
+      createRequestContextStub(),
+      { get: async () => undefined } as any,
+      { findByName: () => undefined } as any,
+      noopLogger,
+      {
+        ...defaultConfig,
+        batch: { ...defaultConfig.batch },
+        trustedProxySubnets: ['10.0.0.0/8'],
+      },
+    );
+    const parent = requestStub('application/json', {
+      headers: {
+        forwarded: 'for=198.51.100.7;proto=https;host=api.example.com',
+        'x-forwarded-proto': 'https',
+      },
+    }) as any;
+    parent.protocol = 'http';
+    parent.secure = false;
+    parent.socket = { remoteAddress: '10.1.2.3' };
+
+    await controller.handleBatch(
+      {
+        requests: [{ id: 'req-1', method: 'GET', url: '/odata/Products' }],
+      },
+      responseStub,
+      parent,
+    );
+
+    assert.deepStrictEqual(observed, [{ protocol: 'https', secure: true, remote: '10.1.2.3' }]);
+  });
+
   it('applies atomicity context when executing JSON changesets', async () => {
     const seenStates: unknown[] = [];
     const handler = {
@@ -1786,6 +1833,202 @@ describe('$batch controller', () => {
       (err: unknown) =>
         err instanceof HttpErrors.BadRequest &&
         /unsupported get/i.test((err as Error).message ?? ''),
+    );
+  });
+
+  it('prevents overriding sensitive headers in sub-requests', () => {
+    const controller = createController({});
+    const parent = requestStub('application/json', {
+      headers: {
+        Authorization: 'Bearer parent',
+        'X-Tenant-Id': 'tenant-a',
+      },
+    });
+    const subHeaders = (controller as any).buildHeadersForRequest(
+      {
+        id: 'r1',
+        method: 'GET',
+        url: '/odata/Products',
+        headers: {
+          Authorization: 'Bearer attacker',
+          'X-Tenant-Id': 'tenant-b',
+          Prefer: 'return=minimal',
+        },
+      },
+      parent,
+    );
+
+    assert.equal(subHeaders.authorization, 'Bearer parent');
+    assert.equal(subHeaders['x-tenant-id'], 'tenant-a');
+    assert.equal(subHeaders.prefer, 'return=minimal');
+  });
+
+  it('ignores injection of new sensitive headers when parent is missing them', () => {
+    const controller = createController({});
+    const parent = requestStub('application/json');
+    const headers = (controller as any).buildHeadersForRequest(
+      {
+        id: 'r1',
+        method: 'GET',
+        url: '/odata/Products',
+        headers: {
+          Authorization: 'Bearer attacker',
+          'X-Forwarded-For': '10.0.0.1',
+          Prefer: 'return=representation',
+        },
+      },
+      parent,
+    );
+
+    assert.equal(headers.authorization, undefined);
+    assert.equal(headers['x-forwarded-for'], undefined);
+    assert.equal(headers.prefer, 'return=representation');
+  });
+
+  it('allows overriding safe content negotiation headers per sub-request', () => {
+    const controller = createController({});
+    const parent = requestStub('application/json', {
+      headers: {
+        Accept: 'application/json',
+        Prefer: 'return=representation',
+      },
+    });
+    const headers = (controller as any).buildHeadersForRequest(
+      {
+        id: 'r1',
+        method: 'POST',
+        url: '/odata/Products',
+        headers: {
+          Accept: 'text/plain',
+          Prefer: 'return=minimal',
+          'Content-Type': 'application/json;odata.metadata=minimal',
+        },
+      },
+      parent,
+    );
+
+    assert.equal(headers.accept, 'text/plain');
+    assert.equal(headers.prefer, 'return=minimal');
+    assert.equal(headers['content-type'], 'application/json;odata.metadata=minimal');
+  });
+
+  it('aborts sub-requests that exceed the configured timeout and clears context afterwards', async () => {
+    let clearCalled = false;
+    let handlerResolve: (() => void) | undefined;
+    const controller = new ODataBatchController(
+      {
+        async handleRequest() {
+          await new Promise<void>((resolve) => {
+            handlerResolve = resolve;
+          });
+        },
+      } as any,
+      'http://localhost',
+      createRequestContextStub(),
+      { get: async () => undefined } as any,
+      { findByName: () => undefined } as any,
+      noopLogger,
+      {
+        ...defaultConfig,
+        batch: { ...defaultConfig.batch, subRequestTimeoutMs: 10 },
+      },
+    );
+
+    const context = {
+      applyTo: () => undefined,
+      clearFrom: () => {
+        clearCalled = true;
+      },
+    } as any;
+
+    const limits = (controller as any).getBatchLimits();
+    const result = await (controller as any).executeSingle(
+      { id: 'timeout', method: 'GET', url: '/odata/Products' },
+      context,
+      requestStub('application/json'),
+      limits,
+    );
+
+    assert.equal(result.status, 504);
+    assert.equal((result.body as any)?.error?.code, 'BatchSubRequestTimeout');
+    assert.equal(clearCalled, false);
+
+    handlerResolve?.();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(clearCalled, true);
+  });
+
+  it('rejects sub-request ids containing control characters', async () => {
+    const controller = createController({});
+    await assert.rejects(
+      controller.handleBatch(
+        {
+          requests: [{ id: 'req\r\nInjected: 1', method: 'GET', url: '/odata/Products' }],
+        },
+        responseStub,
+        requestStub('application/json'),
+      ),
+      (err: unknown) =>
+        err instanceof HttpErrors.BadRequest &&
+        /request id contains invalid characters/i.test((err as Error).message),
+    );
+  });
+
+  it('rejects atomicity groups containing invalid characters', async () => {
+    const controller = createController({});
+    await assert.rejects(
+      controller.handleBatch(
+        {
+          requests: [
+            {
+              id: 'a',
+              method: 'POST',
+              url: '/odata/Products',
+              atomicityGroup: 'set-1\r\nInjected: 1',
+            },
+          ],
+        },
+        responseStub,
+        requestStub('application/json'),
+      ),
+      (err: unknown) =>
+        err instanceof HttpErrors.BadRequest &&
+        /atomicitygroup contains invalid characters/i.test((err as Error).message),
+    );
+  });
+
+  it('rejects duplicate ids after sanitization', async () => {
+    const controller = createController({});
+    await assert.rejects(
+      controller.handleBatch(
+        {
+          requests: [
+            { id: 'req', method: 'GET', url: '/odata/Products' },
+            { id: ' req ', method: 'GET', url: '/odata/Products/$count' },
+          ],
+        },
+        responseStub,
+        requestStub('application/json'),
+      ),
+      (err: unknown) =>
+        err instanceof HttpErrors.BadRequest &&
+        /duplicate request id/i.test((err as Error).message),
+    );
+  });
+
+  it('rejects non-array dependsOn payloads before sanitization', async () => {
+    const controller = createController({});
+    await assert.rejects(
+      controller.handleBatch(
+        {
+          requests: [{ id: 'a', method: 'POST', url: '/odata/Products', dependsOn: 'root' as any }],
+        },
+        responseStub,
+        requestStub('application/json'),
+      ),
+      (err: unknown) =>
+        err instanceof HttpErrors.BadRequest &&
+        /dependsOn must be an array/i.test((err as Error).message),
     );
   });
 });

@@ -19,6 +19,7 @@ import {
   Transaction,
   juggler,
 } from '@loopback/repository';
+import * as ipaddr from 'ipaddr.js';
 import { ODATA_BINDINGS, ODataLogger } from '../keys';
 import { EntitySetDef, EntitySetRegistry } from '../registry/entityset-registry';
 import { ODATA_ATOMICITY_STATE, ODATA_VERSION } from '../constants';
@@ -139,6 +140,26 @@ const TEXT_LIKE_MIME_TYPES = new Set([
   'application/ecmascript',
   'application/x-www-form-urlencoded',
 ]);
+const DEFAULT_ALLOWED_SUBREQUEST_HEADERS = Object.freeze([
+  'accept',
+  'accept-charset',
+  'accept-encoding',
+  'accept-language',
+  'content-type',
+  'dataserviceversion',
+  'maxdataserviceversion',
+  'prefer',
+  'if-match',
+  'if-none-match',
+  'if-modified-since',
+  'if-unmodified-since',
+  'if-range',
+  'odata-version',
+  'odata-maxversion',
+  'odata-isolation',
+]);
+const DEFAULT_SUBREQUEST_TIMEOUT_MS = 30_000;
+const BATCH_TOKEN_REGEX = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
 
 class AtomicityGroupContext {
   private readonly requestState: AtomicityRequestState;
@@ -234,6 +255,8 @@ export class ODataBatchController {
   }
 
   private requestState?: ODataRequestState | null;
+  private allowedSubRequestHeaders?: Set<string>;
+  private _trustedProxyRanges?: Array<[ipaddr.IPv4 | ipaddr.IPv6, number]>;
 
   @post('/odata/$batch', BATCH_OPERATION_SPEC)
   async handleBatch(
@@ -321,11 +344,15 @@ export class ODataBatchController {
         this.enforceOperationLimit(jsonRequests.length, limits);
         this.enforceJsonPayloadSize(jsonPayload, limits);
         requests = jsonRequests;
+        this.sanitizeBatchRequestIdentifiers(requests);
         this.validateJsonDependsOn(requests);
         this.enforceJsonPartBodySize(requests, limits);
       }
 
       this.enforceOperationLimit(requests.length, limits);
+      if (isMultipart) {
+        this.sanitizeBatchRequestIdentifiers(requests);
+      }
       const requestOrder = this.buildRequestOrderIndex(requests);
 
       this.validateContiguousAtomicityGroups(requests);
@@ -748,6 +775,38 @@ export class ODataBatchController {
         }
       }
     }
+  }
+
+  private sanitizeBatchRequestIdentifiers(requests: BatchRequest[]): void {
+    for (const request of requests) {
+      request.id = this.sanitizeBatchToken(request.id, 'request id');
+      request.atomicityGroup = this.sanitizeBatchToken(request.atomicityGroup, 'atomicityGroup');
+      if (request.dependsOn !== undefined) {
+        if (!Array.isArray(request.dependsOn)) {
+          throw new HttpErrors.BadRequest('dependsOn must be an array of request identifiers.');
+        }
+        request.dependsOn = request.dependsOn.map(
+          (dep) => this.sanitizeBatchToken(dep, 'dependsOn entry')!,
+        );
+      }
+    }
+  }
+
+  private sanitizeBatchToken(value: unknown, field: string): string | undefined {
+    if (value == null) return undefined;
+    if (typeof value !== 'string') {
+      throw new HttpErrors.BadRequest(`Batch ${field} must be a string token.`);
+    }
+    const trimmed = value.trim();
+    if (!trimmed) {
+      throw new HttpErrors.BadRequest(`Batch ${field} must be a non-empty token.`);
+    }
+    if (!BATCH_TOKEN_REGEX.test(trimmed)) {
+      throw new HttpErrors.BadRequest(
+        `Batch ${field} contains invalid characters. Only RFC7230 tokens are allowed.`,
+      );
+    }
+    return trimmed;
   }
 
   private async executeGroup(
@@ -1632,6 +1691,10 @@ export class ODataBatchController {
 
     const bodyBuffer = this.resolveRequestBodyBuffer(request);
     const socket = new PassThrough() as any;
+    const remoteAddress = this.getRemoteAddress(parentRequest);
+    if (remoteAddress) {
+      socket.remoteAddress = remoteAddress;
+    }
     // minimal socket surface for Node/Express expectations
     socket.writable = true;
     socket.readable = true;
@@ -1831,7 +1894,10 @@ export class ODataBatchController {
     context?.applyTo(req);
     const handlerPromise = this.httpHandler
       .handleRequest(req as any, res as any)
-      .catch(() => undefined);
+      .catch(() => undefined)
+      .finally(() => {
+        context?.clearFrom(req);
+      });
 
     // Feed request body to the IncomingMessage stream directly
     if (bodyBuffer.length) {
@@ -1839,35 +1905,56 @@ export class ODataBatchController {
     }
     (req as any).push(null);
 
+    const abortRequest = (reason: Error) => {
+      if ((res as any).writableEnded !== true) {
+        try {
+          res.destroy?.(reason);
+        } catch {
+          /* ignore */
+        }
+      }
+      try {
+        socket.destroy?.(reason);
+      } catch {
+        /* ignore */
+      }
+      try {
+        (req as any).destroy?.(reason);
+      } catch {
+        /* ignore */
+      }
+    };
+
     // Add per-request timeout to avoid hangs; wait for finish/close
-    const TIMEOUT_MS = 30000;
+    const timeoutMs = this.cfg?.batch?.subRequestTimeoutMs ?? DEFAULT_SUBREQUEST_TIMEOUT_MS;
     let timeoutHandle: NodeJS.Timeout | undefined;
+    let timedOut = false;
     const timeoutPromise = new Promise<never>((_, reject) => {
-      timeoutHandle = setTimeout(() => reject(new Error('Batch sub-request timeout')), TIMEOUT_MS);
+      if (!timeoutMs || timeoutMs <= 0) return;
+      timeoutHandle = setTimeout(() => {
+        timedOut = true;
+        const error = new Error('Batch sub-request timeout');
+        abortRequest(error);
+        reject(error);
+      }, timeoutMs);
     });
 
     try {
       const result = await Promise.race([finishPromise, timeoutPromise]);
       return result;
     } catch (error) {
-      const status =
-        (error && typeof error === 'object' && 'statusCode' in error
-          ? (error as { statusCode?: number }).statusCode
-          : undefined) ?? 500;
-      const body = this.odataError(
-        'BatchExecutionError',
-        (error as Error).message ?? 'Failed to execute request.',
-      );
+      const status = timedOut ? 504 : ((error as { statusCode?: number })?.statusCode ?? 500);
+      const code = timedOut ? 'BatchSubRequestTimeout' : 'BatchExecutionError';
+      const message =
+        (error as Error)?.message ??
+        (timedOut ? 'Batch sub-request timeout.' : 'Failed to execute request.');
       return {
         id: request.id,
         status,
-        body,
+        body: this.odataError(code, message),
       };
     } finally {
-      if (timeoutHandle) {
-        clearTimeout(timeoutHandle);
-      }
-      context?.clearFrom(req);
+      if (timeoutHandle) clearTimeout(timeoutHandle);
     }
   }
 
@@ -2047,6 +2134,22 @@ export class ODataBatchController {
     return segments.slice(this.serviceRootSegments.length);
   }
 
+  private resolveAllowedSubRequestHeaders(): Set<string> {
+    if (this.allowedSubRequestHeaders) return this.allowedSubRequestHeaders;
+    const configured = this.cfg?.batch?.allowedSubRequestHeaders;
+    const merged = new Set<string>(DEFAULT_ALLOWED_SUBREQUEST_HEADERS);
+    if (Array.isArray(configured)) {
+      for (const header of configured) {
+        if (typeof header !== 'string') continue;
+        const normalized = header.trim().toLowerCase();
+        if (!normalized) continue;
+        merged.add(normalized);
+      }
+    }
+    this.allowedSubRequestHeaders = merged;
+    return merged;
+  }
+
   private buildHeadersForRequest(
     request: BatchRequest,
     parentRequest?: Request,
@@ -2067,14 +2170,17 @@ export class ODataBatchController {
       }
     }
 
+    const allowedOverrides = this.resolveAllowedSubRequestHeaders();
     for (const [key, value] of Object.entries(request.headers ?? {})) {
       if (value == null) continue;
-      merged[key.toLowerCase()] = String(value);
+      const normalized = key.toLowerCase();
+      if (normalized === 'host') continue;
+      if (!allowedOverrides.has(normalized)) continue;
+      merged[normalized] = String(value);
     }
 
     // Drop hop-by-hop and forbidden headers for sub-requests
     const forbidden = new Set([
-      'host',
       'connection',
       'content-length',
       'transfer-encoding',
@@ -2098,6 +2204,13 @@ export class ODataBatchController {
   } {
     const fallback = { protocol: 'http', secure: false };
     if (!parentRequest) return fallback;
+    const effective = this.getParentEffectiveProtocol(parentRequest);
+    if (effective === 'https') {
+      return { protocol: 'https', secure: true };
+    }
+    if (effective === 'http') {
+      return { protocol: 'http', secure: false };
+    }
     const rawProtocol =
       typeof parentRequest.protocol === 'string' && parentRequest.protocol.trim().length
         ? parentRequest.protocol.trim().toLowerCase()
@@ -2122,6 +2235,179 @@ export class ODataBatchController {
       return { protocol: rawProtocol, secure: false };
     }
     return fallback;
+  }
+
+  private getParentEffectiveProtocol(parentRequest: Request): 'http' | 'https' | undefined {
+    const trustProxy = this.shouldTrustProxyHeaders(parentRequest);
+    if (trustProxy) {
+      const forwarded = this.parseForwardedHeader(parentRequest);
+      const forwardedProto = this.normalizeProtocol(forwarded?.proto);
+      if (forwardedProto) return forwardedProto;
+      const headerProto = this.normalizeProtocol(
+        this.getCommaSeparatedHeaderValue(this.getParentHeader(parentRequest, 'x-forwarded-proto')),
+      );
+      if (headerProto) return headerProto;
+    }
+    const normalized = this.normalizeProtocol(
+      typeof parentRequest.protocol === 'string' ? parentRequest.protocol : undefined,
+    );
+    if (normalized) return normalized;
+    return undefined;
+  }
+
+  private shouldTrustProxyHeaders(parentRequest?: Request): boolean {
+    const configured = this.cfg?.trustProxyHeaders;
+    if (configured === true) return true;
+    if (configured === false) return false;
+    if (!this.getTrustedProxyRanges().length) return false;
+    return this.isTrustedRemoteAddress(this.getRemoteAddress(parentRequest));
+  }
+
+  private getTrustedProxyRanges(): Array<[ipaddr.IPv4 | ipaddr.IPv6, number]> {
+    if (this._trustedProxyRanges) return this._trustedProxyRanges;
+    const configured = Array.isArray(this.cfg?.trustedProxySubnets)
+      ? (this.cfg?.trustedProxySubnets ?? [])
+      : [];
+    const parsed: Array<[ipaddr.IPv4 | ipaddr.IPv6, number]> = [];
+    for (const entry of configured) {
+      const raw = entry?.trim();
+      if (!raw) continue;
+      try {
+        const cidr = raw.includes('/') ? raw : raw.includes(':') ? `${raw}/128` : `${raw}/32`;
+        const [addr, prefix] = ipaddr.parseCIDR(cidr);
+        parsed.push([this.normalizeIpAddress(addr), prefix]);
+      } catch {
+        this.logger?.warn('Ignoring invalid trustedProxySubnets entry.', {
+          event: 'invalid-trusted-proxy-subnet',
+          subnet: raw,
+        });
+      }
+    }
+    this._trustedProxyRanges = parsed;
+    return parsed;
+  }
+
+  private getRemoteAddress(parentRequest?: Request): string | undefined {
+    if (!parentRequest) return undefined;
+    const reqAny = parentRequest as AnyObject;
+    const socket =
+      reqAny?.socket ??
+      reqAny?.connection ??
+      (reqAny?.res && typeof reqAny.res === 'object'
+        ? (reqAny.res as AnyObject).connection
+        : undefined);
+    const remote = socket?.remoteAddress;
+    if (typeof remote === 'string' && remote.trim()) {
+      return remote.trim();
+    }
+    return undefined;
+  }
+
+  private isTrustedRemoteAddress(address: string | undefined): boolean {
+    if (!address) return false;
+    const ranges = this.getTrustedProxyRanges();
+    if (!ranges.length) return false;
+    try {
+      const parsed = this.normalizeIpAddress(ipaddr.parse(address));
+      return ranges.some((range) => this.matchIpAddress(parsed, range));
+    } catch {
+      return false;
+    }
+  }
+
+  private normalizeIpAddress(addr: ipaddr.IPv4 | ipaddr.IPv6): ipaddr.IPv4 | ipaddr.IPv6 {
+    if (addr.kind() === 'ipv6') {
+      const ipv6 = addr as ipaddr.IPv6;
+      if (ipv6.isIPv4MappedAddress()) {
+        return ipv6.toIPv4Address();
+      }
+    }
+    return addr;
+  }
+
+  private matchIpAddress(
+    candidate: ipaddr.IPv4 | ipaddr.IPv6,
+    range: [ipaddr.IPv4 | ipaddr.IPv6, number],
+  ): boolean {
+    const [rangeAddr, prefix] = range;
+    if (candidate.kind() === 'ipv4' && rangeAddr.kind() === 'ipv4') {
+      return (candidate as ipaddr.IPv4).match([rangeAddr as ipaddr.IPv4, prefix]);
+    }
+    if (candidate.kind() === 'ipv6' && rangeAddr.kind() === 'ipv6') {
+      return (candidate as ipaddr.IPv6).match([rangeAddr as ipaddr.IPv6, prefix]);
+    }
+    return false;
+  }
+
+  private getParentHeader(parentRequest: Request | undefined, name: string): string | undefined {
+    if (!parentRequest || !name) return undefined;
+    const getter = (parentRequest as AnyObject)?.get;
+    if (typeof getter === 'function') {
+      const value = getter.call(parentRequest, name);
+      if (value != null) {
+        return Array.isArray(value) ? String(value[0]) : String(value);
+      }
+    }
+    const headers = (parentRequest as AnyObject)?.headers ?? {};
+    const target = name.toLowerCase();
+    for (const [key, rawValue] of Object.entries(headers)) {
+      if (key?.toLowerCase() !== target) continue;
+      if (Array.isArray(rawValue)) {
+        const value = rawValue[0];
+        return value == null ? undefined : String(value);
+      }
+      if (rawValue == null) return undefined;
+      return String(rawValue);
+    }
+    return undefined;
+  }
+
+  private getCommaSeparatedHeaderValue(value: string | undefined): string | undefined {
+    if (!value) return undefined;
+    const first = value.split(',')[0]?.trim();
+    if (!first) return undefined;
+    return first;
+  }
+
+  private parseForwardedHeader(
+    parentRequest?: Request,
+  ): { host?: string; proto?: string } | undefined {
+    if (!parentRequest) return undefined;
+    const header = this.getParentHeader(parentRequest, 'forwarded');
+    if (!header) return undefined;
+    const firstEntry = header.split(',')[0];
+    if (!firstEntry) return undefined;
+    const directives = firstEntry.split(';');
+    const result: { host?: string; proto?: string } = {};
+    for (const directive of directives) {
+      const [rawKey, rawValue] = directive.split('=');
+      if (!rawKey || !rawValue) continue;
+      const key = rawKey.trim().toLowerCase();
+      if (!key) continue;
+      let value = rawValue.trim();
+      if (!value) continue;
+      if (value.startsWith('"') && value.endsWith('"') && value.length >= 2) {
+        value = value.slice(1, -1);
+      }
+      if (key === 'host' && !result.host) {
+        result.host = value;
+      } else if (key === 'proto' && !result.proto) {
+        result.proto = value;
+      }
+    }
+    if (!result.host && !result.proto) {
+      return undefined;
+    }
+    return result;
+  }
+
+  private normalizeProtocol(value: string | undefined): 'http' | 'https' | undefined {
+    if (!value) return undefined;
+    const trimmed = value.trim();
+    if (!trimmed) return undefined;
+    const normalized = trimmed.replace(/:$/, '').toLowerCase();
+    if (normalized === 'http' || normalized === 'https') return normalized;
+    return undefined;
   }
 
   private decodeBufferedBody(bodyBuffer: Buffer, headers?: Record<string, string>): unknown {

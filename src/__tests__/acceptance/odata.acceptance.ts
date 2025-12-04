@@ -1680,6 +1680,57 @@ describe('OData component acceptance', () => {
     expect(fetch.body?.id).to.equal(create.body?.id);
   });
 
+  it('links navigation references inside JSON $batch when @odata.id is absolute', async () => {
+    const dataSource = await app.get('datasources.db');
+    (dataSource as AnyObject).beginTransaction = async (_isolation?: unknown) => ({
+      commit: async () => undefined,
+      rollback: async () => undefined,
+    });
+
+    const newOrder = await client.post('/odata/Orders').send({ total: 0 }).expect(201);
+    const orderItemsRes = await client.get('/odata/OrderItems').expect(200);
+    const existingItem = orderItemsRes.body.value[0];
+    expect(existingItem).to.be.Object();
+    const originalOrderId = existingItem.orderId;
+    const serverUrl = app.restServer.url;
+    expect(serverUrl).to.be.String();
+    if (!serverUrl) {
+      throw new Error('Expected server URL to be defined');
+    }
+    const normalizedBase = serverUrl.replace(/\/+$/, '');
+    const absoluteReference = `${normalizedBase}/odata/OrderItems(${existingItem.id})`;
+
+    const res = await client
+      .post('/odata/$batch')
+      .send({
+        requests: [
+          {
+            id: 'link-absolute',
+            atomicityGroup: 'abs-link',
+            method: 'POST',
+            url: `/odata/Orders(${newOrder.body.id})/items/$ref`,
+            headers: { 'Content-Type': 'application/json' },
+            body: { '@odata.id': absoluteReference },
+          },
+        ],
+      })
+      .expect(200);
+
+    const responseEntry = (res.body.responses ?? []).find(
+      (entry: AnyObject) => entry.id === 'link-absolute',
+    );
+    expect(responseEntry).to.be.Object();
+    expect(responseEntry.status).to.equal(204);
+
+    const linkedItem = await client.get(`/odata/OrderItems(${existingItem.id})`).expect(200);
+    expect(linkedItem.body.orderId).to.equal(newOrder.body.id);
+
+    await client
+      .post(`/odata/Orders(${originalOrderId})/items/$ref`)
+      .send({ '@odata.id': `/odata/OrderItems(${existingItem.id})` })
+      .expect(204);
+  });
+
   it('rejects JSON $batch payloads with non-contiguous atomicity groups', async () => {
     const dataSource = await app.get('datasources.db');
     (dataSource as AnyObject).beginTransaction = async (_isolation?: unknown) => ({
