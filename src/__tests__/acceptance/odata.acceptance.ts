@@ -294,20 +294,13 @@ describe('OData component acceptance', () => {
     await client.get(`${nextUrl.pathname}?${nextUrl.searchParams.toString()}`).expect(400);
   });
 
-  it('fails when tokenSecret is missing while issuing $skiptoken values', async () => {
-    const current = app.getSync(ODATA_BINDINGS.CONFIG) as ODataConfig;
-    app.bind(ODATA_BINDINGS.CONFIG).to({
-      ...current,
-      tokenSecret: undefined,
-      pageSize: 2,
-    });
-
-    const res = await client.get('/odata/Products').expect(500);
-    expect(res.body?.error?.message).to.match(/tokenSecret must be configured/i);
-
-    app.bind(ODATA_BINDINGS.CONFIG).to({
-      ...current,
-    });
+  it('fails to start when tokenSecret is missing', async function (this: Mocha.Context) {
+    await app.stop();
+    await expect(
+      rebuildApp(this as SkipContext, {
+        tokenSecret: undefined,
+      }),
+    ).to.be.rejectedWith(/tokenSecret must be configured/i);
   });
 
   it('expires $skiptoken after configured TTL', async function (this: Mocha.Context) {
@@ -1290,10 +1283,13 @@ describe('OData component acceptance', () => {
   it('enforces maxApplyResultSize limits during fallback execution', async function () {
     if (app.state === 'started') await app.stop();
     app = await givenODataApplication({ port: 0, host: '127.0.0.1' });
+    const current = app.getSync(ODATA_BINDINGS.CONFIG) as ODataConfig;
     app.bind(ODATA_BINDINGS.CONFIG).to({
+      ...current,
       maxApplyResultSize: 1,
       logApplyFallbacks: false,
       capabilities: {
+        ...(current.capabilities ?? {}),
         aggregation: true,
       },
     } as ODataConfig);
@@ -1315,6 +1311,7 @@ describe('OData component acceptance', () => {
   it('executes $apply via a registered pushdown executor when available', async function (this: Mocha.Context) {
     if (app.state === 'started') await app.stop();
     app = await givenODataApplication({ port: 0, host: '127.0.0.1' });
+    const current = app.getSync(ODATA_BINDINGS.CONFIG) as ODataConfig;
 
     const fallbackEvents: string[] = [];
     const sentinel = [{ TotalProducts: 999 }];
@@ -1338,9 +1335,11 @@ describe('OData component acceptance', () => {
     let executionCount = 0;
 
     app.bind(ODATA_BINDINGS.CONFIG).to({
+      ...current,
       enableApplyPushdown: true,
       onApplyFallback: (event) => fallbackEvents.push(event.event),
       capabilities: {
+        ...(current.capabilities ?? {}),
         aggregation: true,
       },
     } as ODataConfig);
@@ -1729,6 +1728,36 @@ describe('OData component acceptance', () => {
       .post(`/odata/Orders(${originalOrderId})/items/$ref`)
       .send({ '@odata.id': `/odata/OrderItems(${existingItem.id})` })
       .expect(204);
+  });
+
+  it('rejects JSON $batch recursion that exceeds configured depth', async function (this: Mocha.Context) {
+    await rebuildApp(this as SkipContext, {}, async (instance) => {
+      const base = instance.getSync(ODATA_BINDINGS.CONFIG) as ODataConfig;
+      instance.bind(ODATA_BINDINGS.CONFIG).to({
+        ...base,
+        batch: { ...(base.batch ?? {}), maxDepth: 1 },
+      });
+    });
+
+    await client
+      .post('/odata/$batch')
+      .send({
+        requests: [
+          {
+            id: 'nested',
+            method: 'POST',
+            url: '/odata/$batch',
+            headers: { 'Content-Type': 'application/json' },
+            body: {
+              requests: [{ id: 'inner', method: 'GET', url: '/odata/Products?$top=1' }],
+            },
+          },
+        ],
+      })
+      .expect(400)
+      .expect((res) => {
+        expect(res.body?.error?.message).to.match(/nest/i);
+      });
   });
 
   it('rejects JSON $batch payloads with non-contiguous atomicity groups', async () => {

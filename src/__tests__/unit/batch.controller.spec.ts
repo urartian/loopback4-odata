@@ -240,6 +240,34 @@ describe('$batch controller', () => {
     );
   });
 
+  it('rejects JSON batches when nesting depth exceeds maxDepth', async () => {
+    const config: ODataConfig = {
+      ...defaultConfig,
+      batch: { ...defaultConfig.batch, maxDepth: 1 },
+    };
+    const controller = createController(
+      {
+        nested: { status: 200, body: { ok: true } },
+      },
+      config,
+    );
+    const req = requestStub('application/json');
+    (req as any).headers = (req as any).headers ?? {};
+    (req as any).headers['x-odata-batch-depth'] = 1;
+
+    await assert.rejects(
+      controller.handleBatch(
+        {
+          requests: [{ id: 'nested', method: 'GET', url: '/odata/Products' }],
+        },
+        responseStub,
+        req as any,
+      ),
+      (err: unknown) =>
+        err instanceof HttpErrors.BadRequest && /nesting depth/i.test((err as Error).message ?? ''),
+    );
+  });
+
   it('reuses parent request user for JSON batch entries', async () => {
     const captured: unknown[] = [];
     const handler = {

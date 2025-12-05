@@ -1,7 +1,9 @@
 import { BindingScope, inject, Provider } from '@loopback/core';
 import { Middleware, Request } from '@loopback/rest';
+import { AnyObject } from '@loopback/repository';
 import { randomUUID } from 'node:crypto';
 import { ODATA_BINDINGS } from '../keys';
+import { ODATA_BATCH_DEPTH, ODATA_BATCH_DEPTH_PROP } from '../constants';
 import {
   ODataConfig,
   ODataCorrelationConfig,
@@ -29,6 +31,11 @@ export class ODataRequestContextProvider implements Provider<Middleware> {
       const requestState: ODataRequestState = {
         startedAtNs: process.hrtime.bigint(),
       };
+
+      const batchDepth = this.readBatchDepth(ctx.request);
+      if (batchDepth !== undefined) {
+        requestState.batchDepth = batchDepth;
+      }
 
       this.applyCorrelation(ctx, requestState, this.cfg?.correlation);
       const preferences = this.parseTelemetryPreferences(ctx.request.header('prefer'));
@@ -218,6 +225,31 @@ export class ODataRequestContextProvider implements Provider<Middleware> {
     if (Array.isArray(raw)) return raw[0];
     const value = raw.toString().trim();
     return value.length > 0 ? value : undefined;
+  }
+
+  private readBatchDepth(request: MiddlewareContext['request']): number | undefined {
+    const carriers: Array<unknown> = [
+      request,
+      (request as AnyObject)?.res,
+      (request as AnyObject)?.socket,
+      (request as AnyObject)?.connection,
+    ];
+    for (const carrier of carriers) {
+      const depth = this.extractBatchDepth(carrier);
+      if (depth !== undefined) return depth;
+    }
+    return undefined;
+  }
+
+  private extractBatchDepth(carrier: unknown): number | undefined {
+    if (!carrier || typeof carrier !== 'object') return undefined;
+    const depth =
+      (Reflect.get(carrier as object, ODATA_BATCH_DEPTH) as number | undefined) ??
+      ((carrier as AnyObject)[ODATA_BATCH_DEPTH_PROP] as number | undefined);
+    if (typeof depth === 'number' && Number.isFinite(depth) && depth >= 0) {
+      return Math.floor(depth);
+    }
+    return undefined;
   }
 
   private appendPreferenceApplied(response: MiddlewareContext['response'], token: string) {

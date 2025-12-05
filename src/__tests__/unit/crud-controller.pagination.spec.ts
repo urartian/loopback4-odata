@@ -47,6 +47,7 @@ describe('CRUD controller pagination config', () => {
     const cfg = {
       ...(restConfig as object),
     } as ODataConfig;
+    cfg.tokenSecret = cfg.tokenSecret ?? 'test-secret';
     if (paginationOverrides) {
       cfg.pagination = { ...(paginationOverrides as ODataPaginationConfig) };
     }

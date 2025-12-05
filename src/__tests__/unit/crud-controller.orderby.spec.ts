@@ -33,6 +33,10 @@ describe('CRUD controller $orderby validation', () => {
 
   function createController(cfg: Partial<ODataConfig> = {}) {
     const Controller = defineODataCrudController(def);
+    const resolvedConfig = {
+      ...cfg,
+      tokenSecret: cfg.tokenSecret ?? 'test-secret',
+    } as ODataConfig;
     return new Controller(
       {} as any,
       {} as any,
@@ -44,7 +48,7 @@ describe('CRUD controller $orderby validation', () => {
         end() {},
       } as any,
       {} as any,
-      cfg,
+      resolvedConfig,
       {} as any,
       noopLogger,
       {

@@ -22,7 +22,13 @@ import {
 import * as ipaddr from 'ipaddr.js';
 import { ODATA_BINDINGS, ODataLogger } from '../keys';
 import { EntitySetDef, EntitySetRegistry } from '../registry/entityset-registry';
-import { ODATA_ATOMICITY_STATE, ODATA_VERSION } from '../constants';
+import {
+  ODATA_ATOMICITY_STATE,
+  ODATA_BATCH_DEPTH,
+  ODATA_BATCH_DEPTH_HEADER,
+  ODATA_BATCH_DEPTH_PROP,
+  ODATA_VERSION,
+} from '../constants';
 import { AtomicityRequestState } from '../types/batch';
 import { parseMultipartBatch } from '../services/multipart-batch.parser';
 import { serializeMultipartBatch } from '../services/multipart-batch.serializer';
@@ -160,6 +166,7 @@ const DEFAULT_ALLOWED_SUBREQUEST_HEADERS = Object.freeze([
 ]);
 const DEFAULT_SUBREQUEST_TIMEOUT_MS = 30_000;
 const BATCH_TOKEN_REGEX = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
+type BatchDepthCarrier = { [ODATA_BATCH_DEPTH]?: number };
 
 class AtomicityGroupContext {
   private readonly requestState: AtomicityRequestState;
@@ -305,6 +312,9 @@ export class ODataBatchController {
     const isMultipart = /multipart\/mixed/i.test(contentType ?? '');
     const limits = this.getBatchLimits();
     this.enforceDeclaredSizeLimit(request, limits);
+    const currentDepth = this.getBatchDepth(request);
+    this.enforceBatchDepthLimit(currentDepth, limits);
+    this.setBatchDepth(request, currentDepth);
     let requests: BatchRequest[];
     let grouped: Array<{ atomicityGroup?: string; requests: BatchRequest[] }> = [];
     let boundary: string | undefined;
@@ -584,7 +594,7 @@ export class ODataBatchController {
     context: Record<string, unknown>,
     level: ODataTelemetryLevel = 'info',
   ): void {
-    emitTelemetryEvent(this.logger, this.getRequestTelemetryState(), {
+    emitTelemetryEvent(this.logger, this.getRequestState(), {
       category: 'batch',
       event,
       level,
@@ -592,7 +602,7 @@ export class ODataBatchController {
     });
   }
 
-  private getRequestTelemetryState(): ODataRequestState | undefined {
+  private getRequestState(): ODataRequestState | undefined {
     if (this.requestState !== undefined) {
       return this.requestState ?? undefined;
     }
@@ -1715,6 +1725,9 @@ export class ODataBatchController {
     (req as any).protocol = resolvedProtocol;
     (req as any).secure = isSecure;
     socket.encrypted = isSecure;
+    const parentDepth = this.getBatchDepth(parentRequest);
+    this.enforceBatchDepthLimit(parentDepth + 1, limits);
+    this.setBatchDepth(req, parentDepth + 1);
 
     Object.defineProperty(req, 'path', {
       enumerable: true,
@@ -2160,6 +2173,7 @@ export class ODataBatchController {
     for (const [key, value] of Object.entries(parentHeaders)) {
       if (value == null) continue;
       const normalized = key.toLowerCase();
+      if (normalized === ODATA_BATCH_DEPTH_HEADER) continue;
       if (Array.isArray(value)) {
         merged[normalized] = value
           .filter((v) => v != null)
@@ -2174,7 +2188,7 @@ export class ODataBatchController {
     for (const [key, value] of Object.entries(request.headers ?? {})) {
       if (value == null) continue;
       const normalized = key.toLowerCase();
-      if (normalized === 'host') continue;
+      if (normalized === 'host' || normalized === ODATA_BATCH_DEPTH_HEADER) continue;
       if (!allowedOverrides.has(normalized)) continue;
       merged[normalized] = String(value);
     }
@@ -2190,6 +2204,7 @@ export class ODataBatchController {
       'te',
       'trailer',
       'content-transfer-encoding',
+      ODATA_BATCH_DEPTH_HEADER,
     ]);
     for (const name of Object.keys(merged)) {
       if (forbidden.has(name)) delete merged[name];
@@ -2709,6 +2724,79 @@ export class ODataBatchController {
 
   private shouldDefaultJsonContentType(request: BatchRequest): boolean {
     return !request.rawBody && request.body !== undefined && typeof request.body !== 'string';
+  }
+
+  private getBatchDepth(req?: Request | IncomingMessage): number {
+    const stateDepth = this.getRequestState()?.batchDepth;
+    if (typeof stateDepth === 'number' && Number.isFinite(stateDepth) && stateDepth >= 0) {
+      return Math.floor(stateDepth);
+    }
+    const extract = (carrier: unknown): number | undefined => {
+      if (!carrier || typeof carrier !== 'object') return undefined;
+      const record = carrier as BatchDepthCarrier;
+      const depth =
+        record?.[ODATA_BATCH_DEPTH] ??
+        (record && typeof (record as AnyObject)[ODATA_BATCH_DEPTH_PROP] === 'number'
+          ? (record as AnyObject)[ODATA_BATCH_DEPTH_PROP]
+          : undefined);
+      if (typeof depth === 'number' && Number.isFinite(depth) && depth >= 0) {
+        return depth;
+      }
+      return undefined;
+    };
+    const candidates: Array<unknown> = [
+      req,
+      (req as AnyObject | undefined)?.res,
+      (req as AnyObject | undefined)?.res?.req,
+      (req as AnyObject | undefined)?.socket,
+      (req as AnyObject | undefined)?.connection,
+    ];
+    for (const candidate of candidates) {
+      const depth = extract(candidate);
+      if (depth !== undefined) return depth;
+    }
+    const headerValue = this.getBatchDepthHeader(req);
+    if (headerValue !== undefined) return headerValue;
+    return 0;
+  }
+
+  private setBatchDepth(req: Request | IncomingMessage, depth: number) {
+    const assign = (carrier: unknown) => {
+      if (!carrier || typeof carrier !== 'object') return;
+      (carrier as BatchDepthCarrier)[ODATA_BATCH_DEPTH] = depth;
+      (carrier as AnyObject)[ODATA_BATCH_DEPTH_PROP] = depth;
+    };
+    assign(req);
+    const response = (req as AnyObject | undefined)?.res;
+    assign(response);
+    assign(response?.req);
+    assign((req as AnyObject | undefined)?.socket);
+    assign((req as AnyObject | undefined)?.connection);
+    const headers = ((req as AnyObject).headers ??= {});
+    headers[ODATA_BATCH_DEPTH_HEADER] = String(depth);
+  }
+
+  private enforceBatchDepthLimit(depth: number, limits: NormalizedBatchLimits) {
+    const maxDepth = limits.maxDepth;
+    if (maxDepth && maxDepth > 0 && depth >= maxDepth) {
+      this.warn('Batch request exceeded configured nesting depth.', {
+        depth,
+        maxDepth,
+      });
+      throw new HttpErrors.BadRequest('Batch request exceeds the configured nesting depth.');
+    }
+  }
+
+  private getBatchDepthHeader(req?: Request | IncomingMessage): number | undefined {
+    if (!req) return undefined;
+    const headers = (req as AnyObject)?.headers;
+    if (!headers) return undefined;
+    const raw = headers[ODATA_BATCH_DEPTH_HEADER];
+    if (raw == null) return undefined;
+    const first = Array.isArray(raw) ? raw[0] : raw;
+    const parsed = Number(first);
+    if (!Number.isFinite(parsed) || parsed < 0) return undefined;
+    return Math.floor(parsed);
   }
 
   private isBatchValidationError(error: unknown): boolean {

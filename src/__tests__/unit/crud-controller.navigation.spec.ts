@@ -129,6 +129,10 @@ describe('CRUD controller navigation path validation', () => {
 
   function createController(cfg: Partial<ODataConfig> = {}) {
     const Controller = defineODataCrudController(def);
+    const resolvedConfig = {
+      ...cfg,
+      tokenSecret: cfg.tokenSecret ?? 'test-secret',
+    } as ODataConfig;
     return new Controller(
       {} as any,
       {} as any,
@@ -140,7 +144,7 @@ describe('CRUD controller navigation path validation', () => {
         end() {},
       } as any,
       {} as any,
-      cfg,
+      resolvedConfig,
       {} as any,
       noopLogger,
       {

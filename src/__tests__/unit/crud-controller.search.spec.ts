@@ -36,6 +36,10 @@ describe('CRUD controller $search guardrails', () => {
 
   const createController = (cfg: Partial<ODataConfig>, repositoryStub?: object) => {
     const Controller = defineODataCrudController(def);
+    const resolvedConfig = {
+      ...cfg,
+      tokenSecret: cfg.tokenSecret ?? 'test-secret',
+    } as ODataConfig;
     return new Controller(
       (repositoryStub ?? {}) as any,
       {} as any,
@@ -47,7 +51,7 @@ describe('CRUD controller $search guardrails', () => {
         end() {},
       } as any,
       {} as any,
-      cfg,
+      resolvedConfig,
       {} as any,
       noopLogger,
       {

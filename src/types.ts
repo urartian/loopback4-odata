@@ -277,4 +277,5 @@ export interface ODataRequestState {
   telemetry?: ODataTelemetryState;
   statistics?: ODataStatisticsState;
   startedAtNs?: bigint;
+  batchDepth?: number;
 }

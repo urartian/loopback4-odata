@@ -37,6 +37,14 @@ export function validateODataConfig(config: ODataConfig): void {
   if (!config) {
     throw new Error('ODataConfig must be provided.');
   }
+  if (
+    typeof config.tokenSecret !== 'string' ||
+    !config.tokenSecret ||
+    !config.tokenSecret.trim().length
+  ) {
+    throw new Error('ODataConfig.tokenSecret must be configured.');
+  }
+  config.tokenSecret = config.tokenSecret.trim();
   if (config.pagination) {
     validatePaginationLimits('ODataConfig.pagination', config.pagination);
   }

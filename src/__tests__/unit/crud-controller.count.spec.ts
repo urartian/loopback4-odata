@@ -75,12 +75,17 @@ describe('CRUD controller $count Accept negotiation', () => {
 
   const createController = (accept?: string, cfg?: Partial<ODataConfig>) => {
     const response = createResponse();
+    const resolvedConfig = {
+      strict: true,
+      ...(cfg ?? {}),
+      tokenSecret: cfg?.tokenSecret ?? 'test-secret',
+    } as ODataConfig;
     const controller = new Controller(
       { ...baseRepo } as any,
       createRequest(accept),
       response,
       {} as any,
-      { strict: true, ...(cfg ?? {}) } as ODataConfig,
+      resolvedConfig,
       {} as any,
       noopLogger,
       throttler,
