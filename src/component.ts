@@ -1,5 +1,6 @@
 import { Component, Binding, BindingScope, createBindingFromClass } from '@loopback/core';
 import { RestBindings, createMiddlewareBinding } from '@loopback/rest';
+import { randomBytes } from 'crypto';
 import { ODataConfig } from './types';
 import { ODATA_BINDINGS } from './keys';
 import { CsdlGenerator } from './metadata/csdl-generator';
@@ -83,6 +84,7 @@ export class ODataComponent implements Component {
         generateWhenMissing: true,
         propagateToRepositories: false,
       },
+      tokenSecret: randomBytes(32).toString('hex'),
     } as ODataConfig),
     Binding.bind(ODATA_BINDINGS.CSDL_GEN).toClass(CsdlGenerator).inScope(BindingScope.SINGLETON),
     Binding.bind(ODATA_BINDINGS.ENTITY_SET_REGISTRY)

@@ -5,6 +5,7 @@ import { ODataConfig } from '../../types';
 describe('OData config validation', () => {
   it('normalizes numeric strings and accepts positive values', () => {
     const config: ODataConfig = {
+      tokenSecret: 'test-secret',
       pageSize: '25' as unknown as number,
       skipTokenTtl: '120' as unknown as number,
       pagination: {
@@ -21,6 +22,7 @@ describe('OData config validation', () => {
 
   it('throws for non-positive guardrail values', () => {
     const config: ODataConfig = {
+      tokenSecret: 'test-secret',
       pageSize: 0,
     };
 
@@ -31,5 +33,12 @@ describe('OData config validation', () => {
     expect(() =>
       validatePaginationLimits('EntitySet "Products".pagination', { maxTop: -5 }),
     ).to.throw(/EntitySet "Products"\.pagination\.maxTop/);
+  });
+
+  it('requires tokenSecret to be configured', () => {
+    expect(() => validateODataConfig({} as ODataConfig)).to.throw(/tokenSecret/);
+    expect(() => validateODataConfig({ tokenSecret: '   ' } as unknown as ODataConfig)).to.throw(
+      /tokenSecret/,
+    );
   });
 });

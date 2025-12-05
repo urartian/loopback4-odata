@@ -63,12 +63,17 @@ function createController(
     ...responseOverrides,
   } as Response;
 
+  const resolvedConfig = {
+    ...config,
+    tokenSecret: config.tokenSecret ?? 'test-secret',
+  } as ODataConfig;
+
   return new Controller(
     {} as any,
     request as any,
     response as any,
     {} as any,
-    config,
+    resolvedConfig,
     {} as any,
     noopLogger,
     throttler,

@@ -4,6 +4,7 @@ import { expect } from '@loopback/testlab';
 import { defineODataCrudController } from '../../controllers/crud-controller-factory';
 import { EntitySetDef } from '../../registry/entityset-registry';
 import { ODataLogger, ODataTenantThrottler } from '../../keys';
+import { ODataConfig } from '../../types';
 
 describe('CRUD controller response normalization', () => {
   @model()
@@ -56,6 +57,8 @@ describe('CRUD controller response normalization', () => {
     error: () => undefined,
   };
 
+  const baseConfig: ODataConfig = { tokenSecret: 'test-secret' };
+
   const createController = () =>
     new Controller(
       {} as any,
@@ -68,7 +71,7 @@ describe('CRUD controller response normalization', () => {
         end() {},
       } as any,
       {} as any,
-      {} as any,
+      baseConfig,
       {} as any,
       noopLogger,
       {

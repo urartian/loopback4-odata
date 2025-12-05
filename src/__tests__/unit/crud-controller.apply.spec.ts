@@ -5,6 +5,7 @@ import { defineODataCrudController } from '../../controllers/crud-controller-fac
 import { EntitySetDef } from '../../registry/entityset-registry';
 import { ApplyExecutionPlan } from '../../services/odata-apply-planner.service';
 import { ODataLogger, ODataTenantThrottler } from '../../keys';
+import { ODataConfig } from '../../types';
 
 describe('CRUD controller $apply fallback', () => {
   @model()
@@ -27,6 +28,8 @@ describe('CRUD controller $apply fallback', () => {
     error: () => undefined,
   };
 
+  const baseConfig: ODataConfig = { tokenSecret: 'test-secret' };
+
   const createController = () => {
     const Controller = defineODataCrudController(baseDef);
     return new Controller(
@@ -40,7 +43,7 @@ describe('CRUD controller $apply fallback', () => {
         end() {},
       } as any,
       {} as any,
-      {},
+      baseConfig,
       {} as any,
       noopLogger,
       {
@@ -98,7 +101,7 @@ describe('CRUD controller $apply fallback', () => {
       request as any,
       response as any,
       {} as any,
-      {},
+      baseConfig,
       {} as any,
       noopLogger,
       {
