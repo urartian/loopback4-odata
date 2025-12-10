@@ -70,6 +70,50 @@ describe('OData strict mode acceptance', () => {
     expect(res.body?.error?.code).to.equal('NotAcceptable');
   });
 
+  it('allows media requests when Accept matches stored content type', async () => {
+    const listing = await client.get('/odata/MediaAssets').expect(200);
+    const asset = listing.body.value[0];
+    await client
+      .get(`/odata/MediaAssets(${asset.id})/$value`)
+      .set('Accept', asset['@odata.mediaContentType'])
+      .expect(200);
+  });
+
+  it('rejects media requests when Accept excludes stored content type', async () => {
+    const listing = await client.get('/odata/MediaAssets').expect(200);
+    const asset = listing.body.value[0];
+    const res = await client
+      .get(`/odata/MediaAssets(${asset.id})/$value`)
+      .set('Accept', 'image/png')
+      .expect(406);
+    expect(res.body?.error?.code).to.equal('NotAcceptable');
+  });
+
+  it('rejects conditional media requests when Accept header is incompatible', async () => {
+    const listing = await client.get('/odata/MediaAssets').expect(200);
+    const asset = listing.body.value[0];
+    const res = await client
+      .get(`/odata/MediaAssets(${asset.id})/$value`)
+      .set('If-None-Match', asset['@odata.mediaEtag'])
+      .set('Accept', 'image/png')
+      .expect(406);
+    expect(res.body?.error?.code).to.equal('NotAcceptable');
+  });
+
+  it('rejects $value PUT return=representation responses when Accept excludes JSON', async () => {
+    const listing = await client.get('/odata/MediaAssets').expect(200);
+    const asset = listing.body.value[0];
+    const res = await client
+      .put(`/odata/MediaAssets(${asset.id})/$value`)
+      .set('Content-Type', 'text/plain')
+      .set('Accept', 'text/plain')
+      .set('Prefer', 'return=representation')
+      .set('If-Match', asset['@odata.mediaEtag'])
+      .send('Updated spec sheet')
+      .expect(406);
+    expect(res.body?.error?.code).to.equal('NotAcceptable');
+  });
+
   it('rejects $expand deeper than maxExpandDepth', async function () {
     if (app.state === 'started') await app.stop();
     app = await givenODataApplication({ port: 0, host: '127.0.0.1' });

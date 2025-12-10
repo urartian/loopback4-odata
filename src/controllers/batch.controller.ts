@@ -152,6 +152,7 @@ const DEFAULT_ALLOWED_SUBREQUEST_HEADERS = Object.freeze([
   'accept-encoding',
   'accept-language',
   'content-type',
+  'slug',
   'dataserviceversion',
   'maxdataserviceversion',
   'prefer',
@@ -623,17 +624,22 @@ export class ODataBatchController {
     return Number(elapsed) / 1e6;
   }
 
-  private async ensureTransactionalSupport(def: EntitySetDef, groupId: string): Promise<void> {
-    if (def.supportsTransactions !== false) return;
+  private async ensureTransactionalSupport(def: EntitySetDef, groupId: string): Promise<boolean> {
+    if (def.supportsTransactions === true) return true;
     if (def.transactionCapabilityLocked === false) {
       const refreshed = await this.tryRefreshTransactionalSupport(def);
-      if (refreshed) return;
+      if (refreshed) return true;
     }
-    this.warn('Atomicity group rejected: datasource lacks transaction support.', {
-      entitySet: def.name,
-      atomicityGroup: groupId,
-    });
-    throw this.atomicityNotSupported(def);
+    if (def.supportsTransactions === false) {
+      def.supportsTransactions = false;
+      def.transactionCapabilityLocked = true;
+      this.warn('Atomicity group downgraded: datasource lacks transaction support.', {
+        entitySet: def.name,
+        atomicityGroup: groupId,
+      });
+      return false;
+    }
+    return true;
   }
 
   private async tryRefreshTransactionalSupport(def: EntitySetDef): Promise<boolean> {
@@ -672,12 +678,6 @@ export class ODataBatchController {
       });
       throw error;
     }
-  }
-
-  private atomicityNotSupported(def: EntitySetDef): HttpErrors.HttpError {
-    return new HttpErrors.NotImplemented(
-      `Atomicity groups require datasource transactions, but entity set ${def.name} is backed by a datasource without transaction support.`,
-    );
   }
 
   private markEntitySetNonTransactional(def: EntitySetDef, dataSourceName?: string): void {
@@ -1397,7 +1397,7 @@ export class ODataBatchController {
       );
       const failedIndex = entries.findIndex((entry) => entry.status >= 400);
       if (failedIndex >= 0) {
-        await context.rollback();
+        await context?.rollback();
         // Append synthetic responses for any requests that were not executed due to failure
         if (entries.length < requests.length) {
           for (const req of requests.slice(entries.length)) {
@@ -1416,7 +1416,7 @@ export class ODataBatchController {
         }
         return entries;
       }
-      await context.commit();
+      await context?.commit();
       for (const [key, value] of contentIdMap) {
         if (!sharedContentIds.has(key)) {
           sharedContentIds.set(key, value);
@@ -1429,7 +1429,7 @@ export class ODataBatchController {
       }
       return entries;
     } catch (error) {
-      await context.rollback();
+      await context?.rollback();
       throw error;
     }
   }
@@ -1481,7 +1481,7 @@ export class ODataBatchController {
   private async createAtomicGroupContext(
     groupId: string,
     requests: BatchRequest[],
-  ): Promise<AtomicityGroupContext> {
+  ): Promise<AtomicityGroupContext | undefined> {
     const setNames = new Set<string>();
     for (const request of requests) {
       const method = (request.method ?? 'GET').toUpperCase();
@@ -1494,12 +1494,17 @@ export class ODataBatchController {
     const transactionsBySet = new Map<string, Transaction>();
     const transactionsByDataSource = new Map<string, Transaction>();
     const startedTransactions: Transaction[] = [];
+    const nonTransactionalSets = new Set<string>();
 
     try {
       for (const setName of setNames) {
         const def = this.registry.findByName(setName);
         if (!def) continue;
-        await this.ensureTransactionalSupport(def, groupId);
+        const transactional = await this.ensureTransactionalSupport(def, groupId);
+        if (!transactional) {
+          nonTransactionalSets.add(def.name);
+          continue;
+        }
         if (!def.repositoryBindingKey) {
           throw new HttpErrors.InternalServerError(
             `Entity set ${def.name} is missing a repository binding and cannot participate in transactions.`,
@@ -1510,7 +1515,8 @@ export class ODataBatchController {
         const dataSource = (repository as { dataSource?: juggler.DataSource }).dataSource;
         if (!dataSource || !dataSourceSupportsTransactions(dataSource)) {
           this.markEntitySetNonTransactional(def, dataSource?.name ?? def.repositoryBindingKey);
-          throw this.atomicityNotSupported(def);
+          nonTransactionalSets.add(def.name);
+          continue;
         }
 
         const dsKey = dataSource.name ?? def.repositoryBindingKey;
@@ -1521,6 +1527,8 @@ export class ODataBatchController {
           } catch (error) {
             if (error instanceof HttpErrors.HttpError && error.statusCode === 501) {
               this.markEntitySetNonTransactional(def, dataSource.name ?? def.repositoryBindingKey);
+              nonTransactionalSets.add(def.name);
+              continue;
             }
             throw error;
           }
@@ -1529,20 +1537,58 @@ export class ODataBatchController {
         }
         def.supportsTransactions = true;
         def.transactionCapabilityLocked = true;
-        transactionsBySet.set(def.name, tx);
+        transactionsBySet.set(def.name, tx!);
       }
     } catch (error) {
-      for (const tx of startedTransactions) {
-        try {
-          await tx.rollback();
-        } catch {
-          /* no-op */
-        }
-      }
+      await this.rollbackGroupTransactions(startedTransactions);
       throw error;
     }
 
+    if (!transactionsBySet.size) {
+      if (setNames.size) {
+        const affected = Array.from(nonTransactionalSets.size ? nonTransactionalSets : setNames);
+        this.warn('Atomicity group cannot start datasource transactions.', {
+          atomicityGroup: groupId,
+          entitySets: affected,
+        });
+        await this.rollbackGroupTransactions(startedTransactions);
+        throw this.atomicityTransactionsUnsupported(groupId, affected);
+      }
+      return undefined;
+    }
+
+    if (nonTransactionalSets.size) {
+      const affected = Array.from(nonTransactionalSets);
+      this.warn('Atomicity group contains non-transactional entity sets.', {
+        atomicityGroup: groupId,
+        entitySets: affected,
+      });
+      await this.rollbackGroupTransactions(startedTransactions);
+      throw this.atomicityTransactionsUnsupported(groupId, affected);
+    }
+
     return new AtomicityGroupContext(groupId, transactionsBySet);
+  }
+  private async rollbackGroupTransactions(transactions: Transaction[]): Promise<void> {
+    for (const tx of transactions) {
+      try {
+        await tx.rollback();
+      } catch {
+        /* ignore rollback errors */
+      }
+    }
+  }
+
+  private atomicityTransactionsUnsupported(groupId: string, entitySets: string[]): HttpErrors.HttpError {
+    const detail = entitySets.length
+      ? `The following entity sets do not support transactions: ${entitySets.join(', ')}.`
+      : 'Datasource transactions are unavailable.';
+    const err = new HttpErrors.NotImplemented(
+      `Atomicity group ${groupId} cannot be executed without transaction support. ${detail}`,
+    );
+    (err as AnyObject).code = 'TransactionsNotSupported';
+    (err as AnyObject).details = { entitySets };
+    return err;
   }
 
   private resolveEntitySetName(rawUrl: string): string | undefined {

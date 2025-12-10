@@ -135,6 +135,34 @@ export class OrderItemNote extends Entity {
   text!: string;
 }
 
+@odataModel({
+  hasStream: true,
+  mediaField: 'data',
+  mediaContentTypeField: 'contentType',
+  mediaEtagField: 'mediaVersion',
+  mediaLengthField: 'size',
+})
+@model()
+export class MediaAsset extends Entity {
+  @property({ id: true, generated: true })
+  id?: number;
+
+  @property({ type: 'string' })
+  name?: string;
+
+  @property({ type: 'string' })
+  contentType?: string;
+
+  @property({ type: 'number' })
+  size?: number;
+
+  @property({ type: 'string' })
+  mediaVersion?: string;
+
+  @property({ type: 'buffer' })
+  data?: Buffer;
+}
+
 export class ProductRepository extends DefaultCrudRepository<Product, typeof Product.prototype.id> {
   public readonly orderItems: HasManyRepositoryFactory<OrderItem, typeof Product.prototype.id>;
   public readonly orders: HasManyThroughRepositoryFactory<
@@ -276,6 +304,15 @@ export class OrderItemNoteRepository extends DefaultCrudRepository<
   }
 }
 
+export class MediaAssetRepository extends DefaultCrudRepository<
+  MediaAsset,
+  typeof MediaAsset.prototype.id
+> {
+  constructor(@inject('datasources.db') dataSource: juggler.DataSource) {
+    super(MediaAsset, dataSource);
+  }
+}
+
 @odataController(Product)
 class ProductODataController {
   constructor(@repository(ProductRepository) private readonly products: ProductRepository) {}
@@ -352,6 +389,9 @@ class OrderItemODataController {}
 
 @odataController(OrderItemNote)
 class OrderItemNoteODataController {}
+
+@odataController(MediaAsset)
+class MediaAssetODataController {}
 
 @odataModel({ entitySetName: 'OdataOnlyIncidents' })
 export class OdataOnlyIncident extends Entity {
@@ -443,6 +483,7 @@ export async function givenODataApplication(
   app.repository(ProductRepository);
   app.repository(OrderRepository);
   app.repository(OrderItemNoteRepository);
+  app.repository(MediaAssetRepository);
   app.component(ODataComponent);
   const currentConfig = app.getSync(ODATA_BINDINGS.CONFIG) as ODataConfig;
   app.bind(ODATA_BINDINGS.CONFIG).to({
@@ -453,6 +494,7 @@ export async function givenODataApplication(
   app.controller(OrderODataController);
   app.controller(OrderItemODataController);
   app.controller(OrderItemNoteODataController);
+  app.controller(MediaAssetODataController);
   return app;
 }
 
@@ -460,6 +502,7 @@ export async function seedExampleData(app: TestApplication) {
   const productRepo = await app.getRepository(ProductRepository);
   const orderRepo = await app.getRepository(OrderRepository);
   const orderItemRepo = await app.getRepository(OrderItemRepository);
+  const mediaAssetRepo = await app.getRepository(MediaAssetRepository);
 
   const existingProducts = await productRepo.count();
   if (existingProducts.count > 0) return;
@@ -508,4 +551,12 @@ export async function seedExampleData(app: TestApplication) {
       orderRepo.updateById(Number(orderId), { total }),
     ),
   );
+
+  await mediaAssetRepo.create({
+    name: 'Spec Sheet',
+    contentType: 'text/plain',
+    data: Buffer.from('Initial spec sheet'),
+    mediaVersion: 'W/"asset-1"',
+    size: Buffer.byteLength('Initial spec sheet'),
+  });
 }

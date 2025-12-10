@@ -1,5 +1,11 @@
 import 'reflect-metadata';
-import { Application, inject } from '@loopback/core';
+import {
+  Application,
+  inject,
+  BindingScope,
+  Context,
+  ResolutionContext,
+} from '@loopback/core';
 import { RestApplication } from '@loopback/rest';
 import {
   AnyObject,
@@ -13,7 +19,7 @@ import {
 } from '@loopback/repository';
 import { expect } from '@loopback/testlab';
 import { ODataBooter } from '../../booters/odata.booter';
-import { EntitySetRegistry } from '../../registry/entityset-registry';
+import { EntitySetDef, EntitySetRegistry } from '../../registry/entityset-registry';
 import { odataModel } from '../../decorators/model.decorator';
 import { odataController } from '../../decorators/controller.decorator';
 import { ODataApplyExecutorRegistry } from '../../services/odata-apply-executor.registry';
@@ -396,6 +402,107 @@ describe('ODataBooter operation parameter warnings', () => {
       binding: 'entity',
       kind: 'Action',
     });
+  });
+});
+
+describe('ODataBooter media handler bindings', () => {
+  it('resolves property-backed media repositories within the request context', async () => {
+    const app = new Application();
+    const registry = new EntitySetRegistry();
+    const booter = new ODataBooter(
+      app,
+      registry,
+      {} as any,
+      new ODataApplyExecutorRegistry(),
+      noopLogger,
+    );
+
+    app
+      .bind('repositories.MediaRepository')
+      .toDynamicValue(async (ctx: ResolutionContext) => {
+        const requestContext = ctx?.context ?? app;
+        const requestId = await requestContext.get<string>('request-id');
+        return { requestId } as AnyObject;
+      })
+      .inScope(BindingScope.REQUEST);
+
+    const repoBinding = app.getBinding('repositories.MediaRepository');
+    const def = {
+      name: 'MediaAssets',
+      hasStream: true,
+      mediaField: 'content',
+    } as EntitySetDef;
+
+    await (booter as any).configureMediaHandler(def, repoBinding);
+
+    const mediaBindingKey = def.mediaHandlerBindingKey!;
+    const requestCtx = new Context(app);
+    requestCtx.bind('request-id').to('req-123');
+
+    const handler = (await requestCtx.get(mediaBindingKey)) as AnyObject;
+    expect(handler).to.be.Object();
+    expect(handler.repository?.requestId).to.equal('req-123');
+  });
+
+  it('resolves repository-adapter media handlers within the request context', async () => {
+    const RepoApp = RepositoryMixin(Application);
+    const app = new RepoApp();
+    app.dataSource(new juggler.DataSource({ name: 'db', connector: 'memory' }), 'db');
+    const registry = new EntitySetRegistry();
+    const booter = new ODataBooter(
+      app,
+      registry,
+      {} as any,
+      new ODataApplyExecutorRegistry(),
+      noopLogger,
+    );
+
+    @model()
+    class MediaEntity extends Entity {
+      @property({ id: true })
+      id?: number;
+    }
+
+    class StreamingRepository extends DefaultCrudRepository<
+      MediaEntity,
+      typeof MediaEntity.prototype.id
+    > {
+      constructor(
+        @inject('datasources.db') dataSource: juggler.DataSource,
+        @inject('request-id') public readonly requestId: string,
+      ) {
+        super(MediaEntity, dataSource);
+      }
+
+      async getMedia() {
+        return Buffer.from(this.requestId ?? '');
+      }
+
+      async setMedia() {
+        return { etag: this.requestId ?? 'etag' };
+      }
+    }
+
+    app
+      .bind('repositories.StreamingRepository')
+      .toClass(StreamingRepository)
+      .inScope(BindingScope.REQUEST);
+
+    const repoBinding = app.getBinding('repositories.StreamingRepository');
+    const def = {
+      name: 'StreamingAssets',
+      hasStream: true,
+    } as EntitySetDef;
+
+    await (booter as any).configureMediaHandler(def, repoBinding);
+
+    const mediaBindingKey = def.mediaHandlerBindingKey!;
+    const requestCtx = new Context(app);
+    requestCtx.bind('request-id').to('request-xyz');
+
+    const handler = (await requestCtx.get(mediaBindingKey)) as AnyObject;
+    expect(handler).to.be.Object();
+    expect(handler.repository?.requestId).to.equal('request-xyz');
   });
 });
 const noopLogger: ODataLogger = {

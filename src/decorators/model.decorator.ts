@@ -8,6 +8,12 @@ export interface ODataModelOptions {
   deepUpdate?: boolean;
   applyPushdown?: boolean;
   documentInOpenApi?: boolean;
+  hasStream?: boolean;
+  mediaField?: string;
+  mediaContentTypeField?: string;
+  mediaEtagField?: string;
+  mediaLengthField?: string;
+  mediaHandlerBindingKey?: string;
   delta?: {
     enabled?: boolean;
     field?: string;

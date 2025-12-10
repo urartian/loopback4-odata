@@ -4,6 +4,7 @@ import { CsdlGenerator } from './metadata/csdl-generator';
 import { EntitySetRegistry } from './registry/entityset-registry';
 import { ODataApplyExecutorRegistry } from './services/odata-apply-executor.registry';
 import { TenantThrottleStore } from './services/tenant-throttle-store';
+import { ODataMediaHandler } from './services/odata-media-handler';
 
 export const ODATA_BINDINGS = {
   CONFIG: BindingKey.create<ODataConfig>('odata.config'),
@@ -14,6 +15,7 @@ export const ODATA_BINDINGS = {
   THROTTLER: BindingKey.create<ODataTenantThrottler>('odata.tenantThrottler'),
   THROTTLE_STORE: BindingKey.create<TenantThrottleStore>('odata.tenantThrottler.store'),
   REQUEST_STATE: BindingKey.create<ODataRequestState>('odata.request.state'),
+  MEDIA_HANDLERS: BindingKey.create<ODataMediaHandler>('odata.media.handlers'),
 };
 
 export interface ODataLogger {

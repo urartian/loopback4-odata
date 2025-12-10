@@ -53,6 +53,12 @@ class Widget extends Entity {
   @property({ type: 'string', jsonSchema: { format: 'uuid' } })
   sku?: string;
 
+  @property({ type: 'string' })
+  contentType?: string;
+
+  @property({ type: 'buffer' })
+  data?: Buffer;
+
   @property({ type: 'array', itemType: 'string' })
   tags?: string[];
 
@@ -91,6 +97,9 @@ describe('CsdlGenerator', () => {
       modelCtor: Widget,
       etagProperties: ['updatedAt'],
       hasStream: true,
+      mediaField: 'data',
+      mediaContentTypeField: 'contentType',
+      mediaEtagField: 'sku',
       deepInsert: true,
       supportsTransactions: true,
       capabilities: {
@@ -201,6 +210,14 @@ describe('CsdlGenerator', () => {
     expect(xml.includes('<EnumType Name="WidgetStatusEnum"')).to.be.true();
     expect(xml.includes('<Member Name="draft" Value="0"')).to.be.true();
     expect(xml.includes('Annotation Term="Org.OData.Core.V1.HasStream" Bool="true"')).to.be.true();
+    expect(
+      xml.includes('Annotation Term="Org.OData.Capabilities.V1.Streaming" Bool="true"'),
+    ).to.be.true();
+    expect(
+      xml.includes(
+        '<Annotation Term="Org.OData.Core.V1.MediaType"><Path>contentType</Path></Annotation>',
+      ),
+    ).to.be.true();
     expect(
       xml.includes('Annotation Term="Org.OData.Capabilities.V1.CountRestrictions"'),
     ).to.be.true();

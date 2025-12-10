@@ -1,6 +1,8 @@
 import {
   Application,
   Binding,
+  BindingScope,
+  Context,
   CoreBindings,
   MetadataInspector,
   inject,
@@ -8,6 +10,7 @@ import {
   invokeMethod,
   describeInjectedArguments,
   describeInjectedProperties,
+  ResolutionContext,
 } from '@loopback/core';
 import { Booter } from '@loopback/boot';
 import {
@@ -27,6 +30,7 @@ import { getODataModelMeta, ODataModelOptions } from '../decorators/model.decora
 import { ODATA_BINDINGS, ODataLogger } from '../keys';
 import {
   AnyObject,
+  DefaultCrudRepository,
   Entity,
   ModelDefinition,
   MODEL_KEY,
@@ -51,6 +55,11 @@ import { inferSqlMetadata } from '../util/sql-metadata';
 import { ODATA_VERSION } from '../constants';
 import { probeDataSourceTransactionalCapability } from '../util/datasource-transactions';
 import { normalizeBasePath } from '../util/base-path';
+import {
+  PropertyBackedMediaHandler,
+  RepositoryMediaAdapterTarget,
+  RepositoryMediaHandlerAdapter,
+} from '../services/odata-media-handler';
 
 @injectable({ tags: { booters: 'odata' } })
 export class ODataBooter implements Booter {
@@ -250,6 +259,14 @@ export class ODataBooter implements Booter {
           entitySet: setName,
         });
       }
+      const hasStream = Boolean(modelMeta?.hasStream);
+      const mediaField = modelMeta?.mediaField;
+      const mediaContentTypeField = modelMeta?.mediaContentTypeField;
+      const mediaEtagField = modelMeta?.mediaEtagField;
+      const mediaLengthField = modelMeta?.mediaLengthField;
+      const mediaHandlerBindingKey = hasStream
+        ? modelMeta?.mediaHandlerBindingKey ?? this.buildMediaHandlerBindingKey(setName)
+        : undefined;
       const def = this.registry.register({
         name: setName,
         modelCtor,
@@ -264,10 +281,19 @@ export class ODataBooter implements Booter {
         deltaEnabled,
         deltaField,
         documentInOpenApi,
+        hasStream,
+        mediaField,
+        mediaContentTypeField,
+        mediaEtagField,
+        mediaLengthField,
+        mediaHandlerBindingKey: mediaHandlerBindingKey ?? undefined,
       });
 
       await this.detectTransactionalCapability(def, repoBinding);
       await this.configureApplyPushdown(def, repoBinding, modelMeta, modelCtor);
+      if (hasStream) {
+        await this.configureMediaHandler(def, repoBinding);
+      }
 
       const CrudController = defineODataCrudController(def);
       def.controllerCtor = CrudController;
@@ -432,6 +458,80 @@ export class ODataBooter implements Booter {
         datasource: datasourceName,
       });
     }
+  }
+
+  private buildMediaHandlerBindingKey(entitySetName: string): string {
+    const trimmed = entitySetName.replace(/\s+/g, '');
+    return `${ODATA_BINDINGS.MEDIA_HANDLERS.key}.${trimmed}`;
+  }
+
+  private repositoryExposesMediaMethods(proto: AnyObject | undefined): boolean {
+    if (!proto) return false;
+    const hasGetter = typeof (proto as AnyObject).getMedia === 'function';
+    const hasSetter = typeof (proto as AnyObject).setMedia === 'function';
+    return hasGetter && hasSetter;
+  }
+
+  private async configureMediaHandler(
+    def: EntitySetDef,
+    repoBinding: Readonly<Binding<unknown>>,
+  ): Promise<void> {
+    if (!def.hasStream) return;
+    if (!def.mediaHandlerBindingKey) {
+      def.mediaHandlerBindingKey = this.buildMediaHandlerBindingKey(def.name);
+    }
+    const bindingKey = def.mediaHandlerBindingKey;
+    if (!bindingKey) return;
+    if (this.app.isBound(bindingKey)) return;
+
+    const repoCtor = repoBinding.valueConstructor as
+      | (new (...args: unknown[]) => unknown)
+      | undefined;
+    if (repoCtor && this.repositoryExposesMediaMethods(repoCtor.prototype as AnyObject)) {
+      this.app
+        .bind(bindingKey)
+        .toDynamicValue(async (resolutionCtx: ResolutionContext) => {
+          const repo =
+            (await this.resolveMediaRepository(
+              repoBinding.key,
+              resolutionCtx,
+            )) as DefaultCrudRepository<Entity & AnyObject, unknown> & RepositoryMediaAdapterTarget;
+          return new RepositoryMediaHandlerAdapter(repo);
+        })
+        .inScope(BindingScope.REQUEST);
+      return;
+    }
+
+    if (def.mediaField) {
+      this.app
+        .bind(bindingKey)
+        .toDynamicValue(async (resolutionCtx: ResolutionContext) => {
+          const repo = (await this.resolveMediaRepository(
+            repoBinding.key,
+            resolutionCtx,
+          )) as DefaultCrudRepository<Entity & AnyObject, unknown>;
+          return new PropertyBackedMediaHandler(repo, def.mediaField!);
+        })
+        .inScope(BindingScope.REQUEST);
+      return;
+    }
+
+    this.logger.warn('hasStream entity set registered without a media handler.', {
+      entitySet: def.name,
+    });
+  }
+
+  private async resolveMediaRepository(
+    bindingKey: string,
+    resolutionCtx?: ResolutionContext,
+  ): Promise<DefaultCrudRepository<Entity & AnyObject, unknown>> {
+    const context = this.resolveMediaHandlerContext(resolutionCtx);
+    return (await context.get(bindingKey)) as DefaultCrudRepository<Entity & AnyObject, unknown>;
+  }
+
+  private resolveMediaHandlerContext(resolutionCtx?: ResolutionContext): Context {
+    const requestContext = (resolutionCtx as { context?: Context } | undefined)?.context;
+    return requestContext ?? this.app;
   }
 
   private async resolveRepositoryBindingForModel(
@@ -945,4 +1045,5 @@ class ODataNavigationRefRoute extends ControllerRoute<object> {
     }
     return undefined;
   }
+
 }

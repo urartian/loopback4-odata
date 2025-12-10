@@ -1121,6 +1121,7 @@ Entity-set specific overrides are available via `EntitySetRegistry.register`:
 
 - `capabilities`: refine or override filter functions, countability, navigation restrictions, permissions, or stream support for a single entity set.
 - `hasStream`: mark the backing entity type as streaming (`Org.OData.Core.V1.HasStream`).
+- `mediaField`, `mediaContentTypeField`, `mediaEtagField`, `mediaLengthField`, `mediaHandlerBindingKey`: see [Streaming Media Entities](#streaming-media-entities).
 
 Both the global `capabilities` defaults and per-set overrides support the new `insertRestrictions`, `updateRestrictions`, `deleteRestrictions`, and `searchRestrictions` keys. Example: `insertRestrictions: {insertable: false, nonInsertableNavigationProperties: ['orders']}` emits `Org.OData.Capabilities.V1.InsertRestrictions`, while `searchRestrictions: {unsupportedExpressions: ['not']}` maps shorthand values (`and`, `or`, `not`, etc.) to the corresponding `Org.OData.Capabilities.V1.SearchExpressions/*` enum members.
 
@@ -1155,6 +1156,66 @@ this.bind(ODATA_BINDINGS.CONFIG).to({
 ```
 
 Inspect the processed spec via `await app.restServer.getApiSpec()` or by requesting `/openapi.json` to confirm which routes are published.
+
+### Streaming Media Entities
+
+LoopBack OData services can expose [$value media streams](https://www.odata.org/documentation/odata-version-3-0/media-entities/) by decorating a model with `@odataModel({ hasStream: true })`. A few optional metadata properties help the runtime locate content and track metadata:
+
+- `mediaField`: Property name that stores the binary payload (Buffer/Uint8Array/Readable). When provided, the booter auto-registers a `PropertyBackedMediaHandler` that persists streams inside the entity itself.  
+- `mediaContentTypeField`: String property containing the MIME type returned by `$value` (e.g., `image/png`).  
+- `mediaEtagField`: Property holding the stream-specific ETag; enables conditional headers (`If-None-Match`, `If-Match`) for media operations.  
+- `mediaLengthField`: Numeric property storing the byte length; when set the controller emits `Content-Length` without fully buffering the stream.  
+- `mediaHandlerBindingKey`: Override the IoC binding key used to resolve the media handler (defaults to `ODATA_BINDINGS.MEDIA_HANDLERS.key.<EntitySet>`). Useful when multiple entity sets share a handler implementation.
+
+When `hasStream` is enabled the booter inspects the repository binding and registers an `ODataMediaHandler` automatically:
+
+- If the repository prototype implements `getMedia(id, options)` / `setMedia(id, stream, metadata, options)` (and optionally `deleteMedia`), the booter wires a `RepositoryMediaHandlerAdapter` that forwards reads/writes into those hooks.
+- Otherwise, if `mediaField` is configured, a request-scoped `PropertyBackedMediaHandler` is bound which reads/writes the binary column directly.
+- You can always bind your own handler to `def.mediaHandlerBindingKey` to integrate object storage, CDNs, etc. Custom handlers must implement the `ODataMediaHandler` interface exported from `src/services/odata-media-handler.ts`.
+
+Example: property-backed storage that tracks MIME type/length/ETag on the entity:
+
+```ts
+@odataModel({
+  hasStream: true,
+  mediaField: 'data',
+  mediaContentTypeField: 'contentType',
+  mediaEtagField: 'mediaVersion',
+  mediaLengthField: 'size',
+})
+@model()
+class MediaAsset extends Entity {
+  @property({ id: true }) id?: number;
+  @property({ type: 'string' }) contentType?: string;
+  @property({ type: 'number' }) size?: number;
+  @property({ type: 'string' }) mediaVersion?: string;
+  @property({ type: 'buffer' }) data?: Buffer;
+}
+```
+
+Custom storage backends can replace the default handler by binding to the generated key:
+
+```ts
+import { ODATA_BINDINGS, ODataMediaHandler, ODataMediaReadContext, ODataMediaWriteContext } from '@loopback/odata';
+
+class S3MediaHandler implements ODataMediaHandler {
+  constructor(@inject('services.S3') private readonly client: S3Client) {}
+
+  async read(ctx: ODataMediaReadContext) {
+    const stream = await this.client.getObject({ Key: ctx.id as string });
+    return { stream, contentType: ctx.entity?.contentType };
+  }
+
+  async write(ctx: ODataMediaWriteContext) {
+    await this.client.putObject({ Key: ctx.id as string, Body: ctx.stream, ContentType: ctx.contentType });
+    return { contentType: ctx.contentType };
+  }
+}
+
+app.bind(`${ODATA_BINDINGS.MEDIA_HANDLERS.key}.MediaAssets`).toClass(S3MediaHandler);
+```
+
+Handlers run inside the request scope, so repository injections, current-tenant providers, and other per-request bindings remain available while processing `$value` endpoints.
 
 ### Server-driven Paging & `$skiptoken`
 

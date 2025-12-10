@@ -29,6 +29,11 @@ export interface EntitySetDef<T extends Entity = Entity> {
   hooks?: CrudHookBundle; // controller-declared hooks
   sourceControllerBindingKey?: string; // binding key to resolve controller instance
   hasStream?: boolean;
+  mediaField?: string;
+  mediaContentTypeField?: string;
+  mediaEtagField?: string;
+  mediaLengthField?: string;
+  mediaHandlerBindingKey?: string;
   capabilities?: ODataCapabilitiesConfig;
   deepInsert?: boolean;
   deepUpdate?: boolean;
@@ -111,6 +116,24 @@ export class EntitySetRegistry {
     }
     if (def.pagination === undefined && existing?.pagination !== undefined) {
       next.pagination = existing.pagination;
+    }
+    if (def.hasStream === undefined && existing?.hasStream !== undefined) {
+      next.hasStream = existing.hasStream;
+    }
+    if (!def.mediaField && existing?.mediaField) {
+      next.mediaField = existing.mediaField;
+    }
+    if (!def.mediaContentTypeField && existing?.mediaContentTypeField) {
+      next.mediaContentTypeField = existing.mediaContentTypeField;
+    }
+    if (!def.mediaEtagField && existing?.mediaEtagField) {
+      next.mediaEtagField = existing.mediaEtagField;
+    }
+    if (!def.mediaLengthField && existing?.mediaLengthField) {
+      next.mediaLengthField = existing.mediaLengthField;
+    }
+    if (!def.mediaHandlerBindingKey && existing?.mediaHandlerBindingKey) {
+      next.mediaHandlerBindingKey = existing.mediaHandlerBindingKey;
     }
     validatePaginationLimits(`EntitySet "${next.name}".pagination`, next.pagination);
     this.sets.set(def.modelCtor, next);

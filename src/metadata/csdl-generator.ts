@@ -695,7 +695,17 @@ function buildEntityType(
 
   if (hasStream) {
     annotationLines.push('      <Annotation Term="Org.OData.Core.V1.HasStream" Bool="true"/>');
+    annotationLines.push(
+      '      <Annotation Term="Org.OData.Capabilities.V1.Streaming" Bool="true"/>',
+    );
     json['@Org.OData.Core.V1.HasStream'] = true;
+    json['@Org.OData.Capabilities.V1.Streaming'] = true;
+    if (def.mediaContentTypeField) {
+      annotationLines.push(
+        `      <Annotation Term="Org.OData.Core.V1.MediaType"><Path>${xmlEscape(def.mediaContentTypeField)}</Path></Annotation>`,
+      );
+      json['@Org.OData.Core.V1.MediaType'] = { $Path: def.mediaContentTypeField };
+    }
   }
 
   const relations = (modelDefinition.relations ?? {}) as RelationDefinitionMap;

@@ -149,6 +149,195 @@ describe('OData component acceptance', () => {
     expect(response.body.value.price).to.be.a.Number();
     expect(response.body['@odata.context']).to.equal('/odata/$metadata#Products/Default.discount');
   });
+  describe('media entities', () => {
+    it('includes media annotations in entity responses', async () => {
+      const res = await client.get('/odata/MediaAssets').expect(200);
+      expect(res.body.value).to.be.Array();
+      expect(res.body.value).to.not.be.empty();
+      const asset = res.body.value[0];
+      expect(asset['@odata.mediaReadLink']).to.match(/\$value$/);
+      expect(asset['@odata.mediaEditLink']).to.match(/\$value$/);
+      expect(asset['@odata.mediaContentType']).to.equal('text/plain');
+      expect(asset['@odata.mediaEtag']).to.be.a.String();
+    });
+
+    it('streams media content with conditional headers', async () => {
+      const listing = await client.get('/odata/MediaAssets').expect(200);
+      const asset = listing.body.value[0];
+      const etag = asset['@odata.mediaEtag'] as string;
+      const id = asset.id;
+
+      const res = await client
+        .get(`/odata/MediaAssets(${id})/$value`)
+        .expect(200)
+        .expect('Content-Type', /text\/plain/);
+      expect(res.text).to.equal('Initial spec sheet');
+
+      await client.get(`/odata/MediaAssets(${id})/$value`).set('If-None-Match', etag).expect(304);
+    });
+
+    it('updates media via PUT $value and enforces ETags', async () => {
+      const listing = await client.get('/odata/MediaAssets').expect(200);
+      const asset = listing.body.value[0];
+      const previousEtag = asset['@odata.mediaEtag'] as string;
+      const id = asset.id;
+
+      await client
+        .put(`/odata/MediaAssets(${id})/$value`)
+        .set('Content-Type', 'text/plain')
+        .set('If-Match', previousEtag)
+        .send('Updated spec sheet')
+        .expect(204);
+
+      const updated = await client.get(`/odata/MediaAssets(${id})`).expect(200);
+      expect(updated.body['@odata.mediaEtag']).to.not.equal(previousEtag);
+
+      const updatedStream = await client.get(`/odata/MediaAssets(${id})/$value`).expect(200);
+      expect(updatedStream.text).to.equal('Updated spec sheet');
+    });
+
+    it('creates media entities from binary POST bodies', async () => {
+      const res = await client
+        .post('/odata/MediaAssets')
+        .set('Content-Type', 'text/plain')
+        .send('Setup diagram')
+        .expect(201);
+
+      expect(res.body['@odata.mediaContentType']).to.equal('text/plain');
+      const id = res.body.id;
+      expect(id).to.be.a.Number();
+
+      const stream = await client.get(`/odata/MediaAssets(${id})/$value`).expect(200);
+      expect(stream.text).to.equal('Setup diagram');
+    });
+
+    it('accepts binary media uploads with arbitrary content types', async () => {
+      const res = await client
+        .post('/odata/MediaAssets')
+        .set('Content-Type', 'image/png')
+        .send(Buffer.from('binary-png'))
+        .expect(201);
+
+      expect(res.body['@odata.mediaContentType']).to.equal('image/png');
+      const id = res.body.id;
+      await client
+        .get(`/odata/MediaAssets(${id})/$value`)
+        .set('Accept', 'image/png')
+        .expect('Content-Type', /image\/png/)
+        .expect(200);
+    });
+
+    it('rejects media updates via $batch change sets when datasource lacks transactions', async () => {
+      const listing = await client.get('/odata/MediaAssets').expect(200);
+      const asset = listing.body.value[0];
+      const id = asset.id;
+      const etag = asset['@odata.mediaEtag'] as string;
+      const original = await client.get(`/odata/MediaAssets(${id})/$value`).expect(200);
+
+      const res = await client
+        .post('/odata/$batch')
+        .send({
+          requests: [
+            {
+              id: 'media-update',
+              method: 'PUT',
+              url: `/odata/MediaAssets(${id})/$value`,
+              headers: {
+                'Content-Type': 'text/plain',
+                'If-Match': etag,
+              },
+              body: 'Updated via batch',
+              atomicityGroup: 'media',
+            },
+          ],
+        })
+        .expect(200);
+
+      expect(res.body.responses).to.be.Array();
+      const entry = res.body.responses.find(
+        (item: AnyObject) => item.atomicityGroup === 'media' && item.id === 'media-update',
+      );
+      expect(entry).to.be.Object();
+      expect(entry.status).to.equal(501);
+      expect(entry.body?.error).to.be.Object();
+      const errorCode = entry.body?.error?.code;
+      expect(['BatchExecutionError', 'TransactionsNotSupported']).to.containEql(errorCode);
+
+      const after = await client.get(`/odata/MediaAssets(${id})/$value`).expect(200);
+      expect(after.text).to.equal(original.text);
+    });
+
+    it('updates media via $batch change sets when datasource supports transactions', async () => {
+      const ds = (await app.get('datasources.db')) as AnyObject;
+      const originalBeginTransaction = ds.beginTransaction;
+      ds.beginTransaction = async () => ({
+        commit: async () => undefined,
+        rollback: async () => undefined,
+      });
+
+      try {
+        const listing = await client.get('/odata/MediaAssets').expect(200);
+        const asset = listing.body.value[0];
+        const id = asset.id;
+        const etag = asset['@odata.mediaEtag'] as string;
+
+        const res = await client
+          .post('/odata/$batch')
+          .send({
+            requests: [
+              {
+                id: 'media-update',
+                method: 'PUT',
+                url: `/odata/MediaAssets(${id})/$value`,
+                headers: {
+                  'Content-Type': 'text/plain',
+                  'If-Match': etag,
+                },
+                body: 'Updated via transactional batch',
+                atomicityGroup: 'tx',
+              },
+            ],
+          })
+          .expect(200);
+
+        expect(res.body.responses).to.be.Array();
+        const entry = res.body.responses.find(
+          (item: AnyObject) => item.atomicityGroup === 'tx' && item.id === 'media-update',
+        );
+        expect(entry).to.be.Object();
+        expect(entry.status).to.equal(204);
+
+        const stream = await client.get(`/odata/MediaAssets(${id})/$value`).expect(200);
+        expect(stream.text).to.equal('Updated via transactional batch');
+      } finally {
+        if (originalBeginTransaction) {
+          ds.beginTransaction = originalBeginTransaction;
+        } else {
+          delete ds.beginTransaction;
+        }
+      }
+    });
+
+    it('updates media via PUT $value with arbitrary content types', async () => {
+      const listing = await client.get('/odata/MediaAssets').expect(200);
+      const asset = listing.body.value[0];
+      const id = asset.id;
+      const etag = asset['@odata.mediaEtag'] as string;
+
+      await client
+        .put(`/odata/MediaAssets(${id})/$value`)
+        .set('Content-Type', 'application/pdf')
+        .set('If-Match', etag)
+        .send(Buffer.from('%PDF-1.4'))
+        .expect(204);
+
+      await client
+        .get(`/odata/MediaAssets(${id})/$value`)
+        .set('Accept', 'application/pdf')
+        .expect('Content-Type', /application\/pdf/)
+        .expect(200);
+    });
+  });
   it('exposes collection-bound functions with query parameters', async () => {
     const res = await client
       .get('/odata/Products/premiumProducts')
@@ -2114,7 +2303,9 @@ describe('OData component acceptance', () => {
     expect(res.body.responses[0].body?.error?.code).to.equal('InvalidUrl');
   });
 
-  it('rejects transactional changesets when datasource lacks transactions', async () => {
+  it('rejects transactional change sets when datasource lacks transactions', async () => {
+    const { etag, body: original } = await getProductWithEtag(1);
+
     const res = await client
       .post('/odata/$batch')
       .send({
@@ -2130,6 +2321,7 @@ describe('OData component acceptance', () => {
             id: 'c2',
             method: 'PATCH',
             url: '/odata/Products(1)',
+            headers: { 'If-Match': etag },
             body: { price: 1499 },
             atomicityGroup: 'g1',
           },
@@ -2137,12 +2329,24 @@ describe('OData component acceptance', () => {
       })
       .expect(200);
 
-    const failures = res.body.responses.filter((entry: AnyObject) => entry.atomicityGroup === 'g1');
-    expect(failures).to.have.lengthOf(2);
-    failures.forEach((failure: AnyObject) => {
-      expect(failure.status).to.equal(501);
-      expect(failure.body?.error?.code).to.equal('BatchExecutionError');
-    });
+    const changeset = res.body.responses.filter(
+      (entry: AnyObject) => entry.atomicityGroup === 'g1',
+    );
+    expect(changeset).to.have.lengthOf(2);
+    for (const entry of changeset) {
+      expect(entry.status).to.equal(501);
+      expect(entry.body?.error).to.be.Object();
+      const errorCode = entry.body?.error?.code;
+      expect(['BatchExecutionError', 'TransactionsNotSupported']).to.containEql(errorCode);
+    }
+
+    const created = await client
+      .get('/odata/Products')
+      .query({ $filter: `name eq 'Tablet'` })
+      .expect(200);
+    expect(created.body.value).to.have.length(0);
+    const updated = await client.get('/odata/Products(1)').expect(200);
+    expect(updated.body.price).to.equal(original.price);
   });
 
   it('rejects $batch requests that exceed maxOperations', async () => {
