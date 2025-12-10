@@ -434,7 +434,7 @@ export function defineODataCrudController(def: EntitySetDef) {
   const buildStreamEntry = () =>
     ({
       'x-parser': 'stream',
-    } as AnyObject);
+    }) as AnyObject;
   const createRequestContent: ContentObject = {
     'application/json': {
       schema: getModelSchemaRef(modelCtor, {
@@ -8069,8 +8069,7 @@ export function defineODataCrudController(def: EntitySetDef) {
           return undefined;
         }
 
-        const contentType =
-          result.contentType ?? storedContentType ?? 'application/octet-stream';
+        const contentType = result.contentType ?? storedContentType ?? 'application/octet-stream';
         this.ensureMediaAccepts(contentType);
         const length = result.length ?? this.readMediaLength(plain);
         this.response.type(contentType);

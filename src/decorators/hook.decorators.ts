@@ -1,5 +1,5 @@
 import 'reflect-metadata';
-import { CrudHookBundle, CrudOperation, CrudScope } from '../types/crud-hooks';
+import { CrudHookBundle, CrudOperation, CrudScope, CRUD_OPERATIONS } from '../types/crud-hooks';
 
 const BEFORE_KEY = 'odata:controller:hooks:before';
 const AFTER_KEY = 'odata:controller:hooks:after';
@@ -14,10 +14,16 @@ function push(
   Reflect.defineMetadata(key, [...existing, entry], target);
 }
 
+type CrudOperationInput = CrudOperation | ReadonlyArray<CrudOperation> | '*';
+
 function decoratorFactory(phase: 'before' | 'after' | 'on') {
   const key = phase === 'before' ? BEFORE_KEY : phase === 'after' ? AFTER_KEY : ON_KEY;
-  return (op: CrudOperation, scope?: CrudScope) => (target: object, methodName: string) => {
-    push(target, key, { methodName, op, scope });
+  return (input: CrudOperationInput, scope?: CrudScope) => (target: object, methodName: string) => {
+    const ops = input === '*' ? CRUD_OPERATIONS : Array.isArray(input) ? input : [input];
+
+    ops.forEach((op) => {
+      push(target, key, { methodName, op, scope: op === 'READ' ? scope : undefined });
+    });
   };
 }
 

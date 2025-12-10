@@ -51,6 +51,8 @@ class HookItemRepository extends DefaultCrudRepository<HookItem, typeof HookItem
 
 @odataController(HookItem)
 class HookItemController {
+  static auditLog: string[] = [];
+
   constructor(@repository(HookItemRepository) private repo: HookItemRepository) {}
 
   // BEFORE CREATE: normalize name if header present
@@ -86,6 +88,23 @@ class HookItemController {
     const items = await (this.repo as any).find({ order: ['name DESC'] }, ctx.options);
     return ctx.helpers.collection(items);
   }
+
+  // BEFORE CREATE & UPDATE: mark the payload with active operation
+  @odata.before(['CREATE', 'UPDATE'])
+  beforeCreateAndUpdate(ctx: CrudHookContext) {
+    if (ctx.request.get('x-multi-hook') !== '1') return;
+    const payload = ctx.payload as AnyObject;
+    if (typeof payload?.name === 'string') {
+      payload.name = `${ctx.operation}:${payload.name}`;
+    }
+  }
+
+  // BEFORE *: track every operation when header is present
+  @odata.before('*')
+  trackAllOps(ctx: CrudHookContext) {
+    if (ctx.request.get('x-track-hooks') !== '1') return;
+    HookItemController.auditLog.push(ctx.operation);
+  }
 }
 
 describe('OData controller hooks & overrides', () => {
@@ -93,6 +112,7 @@ describe('OData controller hooks & overrides', () => {
   let client: Client;
 
   beforeEach(async function () {
+    HookItemController.auditLog = [];
     app = new HookTestApp({ port: 0, host: '127.0.0.1' });
     const ds = new juggler.DataSource({ name: 'db', connector: 'memory' });
     app.dataSource(ds, 'db');
@@ -163,5 +183,42 @@ describe('OData controller hooks & overrides', () => {
     expect(res.body['@odata.context']).to.match(/HookItems$/);
     expect(Array.isArray(res.body.value)).to.be.true();
     expect(res.body.value.length).to.be.greaterThanOrEqual(2);
+  });
+
+  it('runs @odata.before when array syntax targets multiple operations', async () => {
+    const created = await client
+      .post('/odata/HookItems')
+      .set('x-multi-hook', '1')
+      .send({ name: 'multi-create' })
+      .expect(201);
+
+    expect(created.body.name).to.equal('CREATE:multi-create');
+    const id = created.body.id;
+    const createEtag = created.body['@odata.etag'] ?? created.headers.etag;
+    expect(createEtag).to.be.String();
+
+    const updated = await client
+      .patch(`/odata/HookItems(${id})`)
+      .set('x-multi-hook', '1')
+      .set('If-Match', createEtag)
+      .send({ name: 'multi-update' })
+      .expect(200);
+
+    expect(updated.body.name).to.equal('UPDATE:multi-update');
+  });
+
+  it('runs wildcard @odata.before hooks on non-read operations', async () => {
+    const created = await client.post('/odata/HookItems').send({ name: 'to-delete' }).expect(201);
+    const id = created.body.id;
+    const etag = created.body['@odata.etag'] ?? created.headers.etag;
+    expect(etag).to.be.String();
+
+    await client
+      .del(`/odata/HookItems(${id})`)
+      .set('x-track-hooks', '1')
+      .set('If-Match', etag)
+      .expect(204);
+
+    expect(HookItemController.auditLog).to.containEql('DELETE');
   });
 });

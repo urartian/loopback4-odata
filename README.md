@@ -622,6 +622,8 @@ Supported operations and scopes:
 - Operations: `READ`, `CREATE`, `UPDATE`, `DELETE`, `LINK_NAVIGATION`, `UNLINK_NAVIGATION`
 - Scopes for `READ`: `collection`, `entity`, `count`
 
+Decorators accept a single operation, an array of operations, or `'*'` to run on every CRUD action. Arrays behave exactly like stacking individual decorators, so `@odata.before(['CREATE', 'UPDATE'])` is equivalent to declaring both `@odata.before('CREATE')` and `@odata.before('UPDATE')`. Passing `'*'` expands to all CRUD verbs (`READ`, `CREATE`, `UPDATE`, `DELETE`, `LINK_NAVIGATION`, `UNLINK_NAVIGATION`). When multiple operations are expanded, the hook scope is preserved only for the entries whose resolved operation is `READ`.
+
 Example usage:
 
 ```ts
@@ -669,12 +671,28 @@ export class ProductODataController {
     const items = await this.products.find({ where: { featured: true } }, ctx.options);
     return ctx.helpers.collection(items);
   }
+
+  // Reuse one hook across multiple write operations
+  @odata.before(['CREATE', 'UPDATE'])
+  stampWrites(ctx: CrudHookContext) {
+    ctx.state.lastWriteOp = ctx.operation;
+  }
+
+  // Run after hook on every operation
+  @odata.after('*')
+  auditAll(ctx: CrudHookContext) {
+    console.log('completed', ctx.operation);
+  }
 }
 ```
 
 Notes:
 
 - `before → on → after` is the execution order.
+- `@odata.before` is the place for validation, authorization checks, or enriching/mutating incoming payload/filter data before the generated CRUD logic runs.
+- `@odata.on` lets you replace or wrap the default CRUD handler, e.g., to call external REST APIs, implement custom persistence, or add business logic before delegating via `next()`.
+- `@odata.after` is ideal for post-processing responses, emitting audit logs, or firing side effects/events after a successful CRUD call but before the response is sent.
+- Scopes exist solely to split the single `READ` operation into its three variants (`collection`, `entity`, `$count`). Non-read operations have no notion of scope, so the argument is ignored once a decorator entry resolves to `CREATE`, `UPDATE`, `DELETE`, `LINK_NAVIGATION`, or `UNLINK_NAVIGATION`. For example, `@odata.before(['READ', 'UPDATE'], 'collection')` runs on collection reads and on every update.
 - `@odata.on` can replace the generated logic by not calling `next()`. Use `ctx.helpers.entity`, `ctx.helpers.collection`, `ctx.helpers.count`, or `ctx.helpers.noContent` to produce OData-correct responses when you override.
 - Hooks receive `CrudHookContext` with `request`, `response`, `repository`, `options` (including active transactions for `$batch`), `payload/filter/id`, and a mutable `state` bag for passing data between phases.
 - Only one `@odata.on` is allowed per operation/scope per controller; duplicates fail at boot.
@@ -1161,10 +1179,10 @@ Inspect the processed spec via `await app.restServer.getApiSpec()` or by request
 
 LoopBack OData services can expose [$value media streams](https://www.odata.org/documentation/odata-version-3-0/media-entities/) by decorating a model with `@odataModel({ hasStream: true })`. A few optional metadata properties help the runtime locate content and track metadata:
 
-- `mediaField`: Property name that stores the binary payload (Buffer/Uint8Array/Readable). When provided, the booter auto-registers a `PropertyBackedMediaHandler` that persists streams inside the entity itself.  
-- `mediaContentTypeField`: String property containing the MIME type returned by `$value` (e.g., `image/png`).  
-- `mediaEtagField`: Property holding the stream-specific ETag; enables conditional headers (`If-None-Match`, `If-Match`) for media operations.  
-- `mediaLengthField`: Numeric property storing the byte length; when set the controller emits `Content-Length` without fully buffering the stream.  
+- `mediaField`: Property name that stores the binary payload (Buffer/Uint8Array/Readable). When provided, the booter auto-registers a `PropertyBackedMediaHandler` that persists streams inside the entity itself.
+- `mediaContentTypeField`: String property containing the MIME type returned by `$value` (e.g., `image/png`).
+- `mediaEtagField`: Property holding the stream-specific ETag; enables conditional headers (`If-None-Match`, `If-Match`) for media operations.
+- `mediaLengthField`: Numeric property storing the byte length; when set the controller emits `Content-Length` without fully buffering the stream.
 - `mediaHandlerBindingKey`: Override the IoC binding key used to resolve the media handler (defaults to `ODATA_BINDINGS.MEDIA_HANDLERS.key.<EntitySet>`). Useful when multiple entity sets share a handler implementation.
 
 When `hasStream` is enabled the booter inspects the repository binding and registers an `ODataMediaHandler` automatically:
@@ -1196,7 +1214,12 @@ class MediaAsset extends Entity {
 Custom storage backends can replace the default handler by binding to the generated key:
 
 ```ts
-import { ODATA_BINDINGS, ODataMediaHandler, ODataMediaReadContext, ODataMediaWriteContext } from '@loopback/odata';
+import {
+  ODATA_BINDINGS,
+  ODataMediaHandler,
+  ODataMediaReadContext,
+  ODataMediaWriteContext,
+} from '@loopback/odata';
 
 class S3MediaHandler implements ODataMediaHandler {
   constructor(@inject('services.S3') private readonly client: S3Client) {}
@@ -1207,7 +1230,11 @@ class S3MediaHandler implements ODataMediaHandler {
   }
 
   async write(ctx: ODataMediaWriteContext) {
-    await this.client.putObject({ Key: ctx.id as string, Body: ctx.stream, ContentType: ctx.contentType });
+    await this.client.putObject({
+      Key: ctx.id as string,
+      Body: ctx.stream,
+      ContentType: ctx.contentType,
+    });
     return { contentType: ctx.contentType };
   }
 }

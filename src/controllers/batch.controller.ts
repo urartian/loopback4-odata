@@ -1579,7 +1579,10 @@ export class ODataBatchController {
     }
   }
 
-  private atomicityTransactionsUnsupported(groupId: string, entitySets: string[]): HttpErrors.HttpError {
+  private atomicityTransactionsUnsupported(
+    groupId: string,
+    entitySets: string[],
+  ): HttpErrors.HttpError {
     const detail = entitySets.length
       ? `The following entity sets do not support transactions: ${entitySets.join(', ')}.`
       : 'Datasource transactions are unavailable.';
