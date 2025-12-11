@@ -1167,6 +1167,16 @@ LoopBack OData services can expose [$value media streams](https://www.odata.org/
 - `mediaLengthField`: Numeric property storing the byte length; when set the controller emits `Content-Length` without fully buffering the stream.  
 - `mediaHandlerBindingKey`: Override the IoC binding key used to resolve the media handler (defaults to `ODATA_BINDINGS.MEDIA_HANDLERS.key.<EntitySet>`). Useful when multiple entity sets share a handler implementation.
 
+When `mediaField` is configured the handler writes the uploaded stream directly into that property. Make sure the backing column is a binary type in your datasource (e.g., PostgreSQL `bytea`, MySQL `LONGBLOB`, MSSQL `VARBINARY`). Use the connector-specific metadata to request the correct type:
+
+```ts
+@property({
+  type: 'buffer',
+  postgresql: { dataType: 'bytea' }, // <-- important: BLOB/bytea column
+})
+data?: Buffer;
+```
+
 When `hasStream` is enabled the booter inspects the repository binding and registers an `ODataMediaHandler` automatically:
 
 - If the repository prototype implements `getMedia(id, options)` / `setMedia(id, stream, metadata, options)` (and optionally `deleteMedia`), the booter wires a `RepositoryMediaHandlerAdapter` that forwards reads/writes into those hooks.
