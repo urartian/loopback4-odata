@@ -1199,7 +1199,13 @@ class MediaAsset extends Entity {
   @property({ type: 'string' }) contentType?: string;
   @property({ type: 'number' }) size?: number;
   @property({ type: 'string' }) mediaVersion?: string;
-  @property({ type: 'buffer' }) data?: Buffer;
+  @property({
+    type: 'buffer',
+    // Describe the binary column as a base64 string in OpenAPI/JSON Schema so validation passes.
+    jsonSchema: { type: 'string', format: 'byte' },
+    postgresql: { dataType: 'bytea' },
+  })
+  data?: Buffer;
 }
 ```
 
