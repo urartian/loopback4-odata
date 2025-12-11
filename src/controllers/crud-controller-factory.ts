@@ -489,9 +489,52 @@ export function defineODataCrudController(def: EntitySetDef) {
     return Boolean(value && typeof value === 'object' && '$ref' in (value as AnyObject));
   };
 
+  const normalizeSchemaFormats = (schema?: AnyObject): void => {
+    if (!schema || typeof schema !== 'object') return;
+    if (typeof schema.format === 'string') {
+      const normalized = schema.format.trim().toLowerCase();
+      if (normalized === 'buffer') {
+        schema.format = 'byte';
+      }
+    }
+    if (schema.type === 'array' && schema.items && typeof schema.items === 'object') {
+      normalizeSchemaFormats(schema.items as AnyObject);
+    }
+    if (schema.properties && typeof schema.properties === 'object') {
+      for (const value of Object.values(schema.properties)) {
+        if (value && typeof value === 'object') {
+          normalizeSchemaFormats(value as AnyObject);
+        }
+      }
+    }
+    if (schema.allOf && Array.isArray(schema.allOf)) {
+      for (const entry of schema.allOf) {
+        if (entry && typeof entry === 'object') {
+          normalizeSchemaFormats(entry as AnyObject);
+        }
+      }
+    }
+    if (schema.anyOf && Array.isArray(schema.anyOf)) {
+      for (const entry of schema.anyOf) {
+        if (entry && typeof entry === 'object') {
+          normalizeSchemaFormats(entry as AnyObject);
+        }
+      }
+    }
+    if (schema.oneOf && Array.isArray(schema.oneOf)) {
+      for (const entry of schema.oneOf) {
+        if (entry && typeof entry === 'object') {
+          normalizeSchemaFormats(entry as AnyObject);
+        }
+      }
+    }
+  };
+
   const cloneSchemaObject = (schema: AnyObject | undefined): SchemaObject => {
     if (!schema) return {} as SchemaObject;
-    return JSON.parse(JSON.stringify(schema)) as SchemaObject;
+    const clone = JSON.parse(JSON.stringify(schema)) as SchemaObject;
+    normalizeSchemaFormats(clone as AnyObject);
+    return clone;
   };
 
   const applyPropertyConstraints = (schema: SchemaObject, propDef?: PropertyDefinition): void => {
