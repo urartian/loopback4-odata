@@ -63,7 +63,10 @@ export interface RepositoryMediaAdapterTarget {
 }
 
 export class PropertyBackedMediaHandler implements ODataMediaHandler {
-  constructor(private readonly repository: MediaRepository, private readonly field: string) {}
+  constructor(
+    private readonly repository: MediaRepository,
+    private readonly field: string,
+  ) {}
 
   async read(ctx: ODataMediaReadContext): Promise<ODataMediaReadResult | undefined> {
     const entity = ctx.entity ?? (await this.loadEntity(ctx));

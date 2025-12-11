@@ -1161,10 +1161,10 @@ Inspect the processed spec via `await app.restServer.getApiSpec()` or by request
 
 LoopBack OData services can expose [$value media streams](https://www.odata.org/documentation/odata-version-3-0/media-entities/) by decorating a model with `@odataModel({ hasStream: true })`. A few optional metadata properties help the runtime locate content and track metadata:
 
-- `mediaField`: Property name that stores the binary payload (Buffer/Uint8Array/Readable). When provided, the booter auto-registers a `PropertyBackedMediaHandler` that persists streams inside the entity itself.  
-- `mediaContentTypeField`: String property containing the MIME type returned by `$value` (e.g., `image/png`).  
-- `mediaEtagField`: Property holding the stream-specific ETag; enables conditional headers (`If-None-Match`, `If-Match`) for media operations.  
-- `mediaLengthField`: Numeric property storing the byte length; when set the controller emits `Content-Length` without fully buffering the stream.  
+- `mediaField`: Property name that stores the binary payload (Buffer/Uint8Array/Readable). When provided, the booter auto-registers a `PropertyBackedMediaHandler` that persists streams inside the entity itself.
+- `mediaContentTypeField`: String property containing the MIME type returned by `$value` (e.g., `image/png`).
+- `mediaEtagField`: Property holding the stream-specific ETag; enables conditional headers (`If-None-Match`, `If-Match`) for media operations.
+- `mediaLengthField`: Numeric property storing the byte length; when set the controller emits `Content-Length` without fully buffering the stream.
 - `mediaHandlerBindingKey`: Override the IoC binding key used to resolve the media handler (defaults to `ODATA_BINDINGS.MEDIA_HANDLERS.key.<EntitySet>`). Useful when multiple entity sets share a handler implementation.
 
 When `mediaField` is configured the handler writes the uploaded stream directly into that property. Make sure the backing column is a binary type in your datasource (e.g., PostgreSQL `bytea`, MySQL `LONGBLOB`, MSSQL `VARBINARY`). Use the connector-specific metadata to request the correct type:
@@ -1206,7 +1206,12 @@ class MediaAsset extends Entity {
 Custom storage backends can replace the default handler by binding to the generated key:
 
 ```ts
-import { ODATA_BINDINGS, ODataMediaHandler, ODataMediaReadContext, ODataMediaWriteContext } from '@loopback/odata';
+import {
+  ODATA_BINDINGS,
+  ODataMediaHandler,
+  ODataMediaReadContext,
+  ODataMediaWriteContext,
+} from '@loopback/odata';
 
 class S3MediaHandler implements ODataMediaHandler {
   constructor(@inject('services.S3') private readonly client: S3Client) {}
@@ -1217,7 +1222,11 @@ class S3MediaHandler implements ODataMediaHandler {
   }
 
   async write(ctx: ODataMediaWriteContext) {
-    await this.client.putObject({ Key: ctx.id as string, Body: ctx.stream, ContentType: ctx.contentType });
+    await this.client.putObject({
+      Key: ctx.id as string,
+      Body: ctx.stream,
+      ContentType: ctx.contentType,
+    });
     return { contentType: ctx.contentType };
   }
 }

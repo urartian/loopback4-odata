@@ -1,11 +1,5 @@
 import 'reflect-metadata';
-import {
-  Application,
-  inject,
-  BindingScope,
-  Context,
-  ResolutionContext,
-} from '@loopback/core';
+import { Application, inject, BindingScope, Context, ResolutionContext } from '@loopback/core';
 import { RestApplication } from '@loopback/rest';
 import {
   AnyObject,

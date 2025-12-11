@@ -265,7 +265,7 @@ export class ODataBooter implements Booter {
       const mediaEtagField = modelMeta?.mediaEtagField;
       const mediaLengthField = modelMeta?.mediaLengthField;
       const mediaHandlerBindingKey = hasStream
-        ? modelMeta?.mediaHandlerBindingKey ?? this.buildMediaHandlerBindingKey(setName)
+        ? (modelMeta?.mediaHandlerBindingKey ?? this.buildMediaHandlerBindingKey(setName))
         : undefined;
       const def = this.registry.register({
         name: setName,
@@ -491,11 +491,10 @@ export class ODataBooter implements Booter {
       this.app
         .bind(bindingKey)
         .toDynamicValue(async (resolutionCtx: ResolutionContext) => {
-          const repo =
-            (await this.resolveMediaRepository(
-              repoBinding.key,
-              resolutionCtx,
-            )) as DefaultCrudRepository<Entity & AnyObject, unknown> & RepositoryMediaAdapterTarget;
+          const repo = (await this.resolveMediaRepository(
+            repoBinding.key,
+            resolutionCtx,
+          )) as DefaultCrudRepository<Entity & AnyObject, unknown> & RepositoryMediaAdapterTarget;
           return new RepositoryMediaHandlerAdapter(repo);
         })
         .inScope(BindingScope.REQUEST);
@@ -1045,5 +1044,4 @@ class ODataNavigationRefRoute extends ControllerRoute<object> {
     }
     return undefined;
   }
-
 }

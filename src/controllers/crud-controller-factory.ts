@@ -434,7 +434,7 @@ export function defineODataCrudController(def: EntitySetDef) {
   const buildStreamEntry = () =>
     ({
       'x-parser': 'stream',
-    } as AnyObject);
+    }) as AnyObject;
   const createRequestContent: ContentObject = {
     'application/json': {
       schema: getModelSchemaRef(modelCtor, {
@@ -501,9 +501,14 @@ export function defineODataCrudController(def: EntitySetDef) {
     if (source.default !== undefined) schema.default = source.default;
     if (Array.isArray(source.enum)) schema.enum = [...source.enum];
     for (const key of PROPERTY_CONSTRAINT_KEYS) {
-      if (source[key] !== undefined) {
-        (schema as AnyObject)[key] = source[key];
+      if (source[key] === undefined) continue;
+      const value = source[key];
+      if (key === 'format' && typeof value === 'string') {
+        const normalized = value.trim().toLowerCase();
+        (schema as AnyObject)[key] = normalized === 'buffer' ? 'byte' : value;
+        continue;
       }
+      (schema as AnyObject)[key] = value;
     }
   };
 
@@ -8069,8 +8074,7 @@ export function defineODataCrudController(def: EntitySetDef) {
           return undefined;
         }
 
-        const contentType =
-          result.contentType ?? storedContentType ?? 'application/octet-stream';
+        const contentType = result.contentType ?? storedContentType ?? 'application/octet-stream';
         this.ensureMediaAccepts(contentType);
         const length = result.length ?? this.readMediaLength(plain);
         this.response.type(contentType);
