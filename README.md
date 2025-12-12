@@ -622,6 +622,8 @@ Supported operations and scopes:
 - Operations: `READ`, `CREATE`, `UPDATE`, `DELETE`, `LINK_NAVIGATION`, `UNLINK_NAVIGATION`
 - Scopes for `READ`: `collection`, `entity`, `count`
 
+Decorators accept a single operation, an array of operations, or `'*'` to run on every CRUD action. Arrays behave exactly like stacking individual decorators, so `@odata.before(['CREATE', 'UPDATE'])` is equivalent to declaring both `@odata.before('CREATE')` and `@odata.before('UPDATE')`. Passing `'*'` expands to all CRUD verbs (`READ`, `CREATE`, `UPDATE`, `DELETE`, `LINK_NAVIGATION`, `UNLINK_NAVIGATION`). When multiple operations are expanded, the hook scope is preserved only for the entries whose resolved operation is `READ`.
+
 Example usage:
 
 ```ts
@@ -669,12 +671,28 @@ export class ProductODataController {
     const items = await this.products.find({ where: { featured: true } }, ctx.options);
     return ctx.helpers.collection(items);
   }
+
+  // Reuse one hook across multiple write operations
+  @odata.before(['CREATE', 'UPDATE'])
+  stampWrites(ctx: CrudHookContext) {
+    ctx.state.lastWriteOp = ctx.operation;
+  }
+
+  // Run after hook on every operation
+  @odata.after('*')
+  auditAll(ctx: CrudHookContext) {
+    console.log('completed', ctx.operation);
+  }
 }
 ```
 
 Notes:
 
 - `before → on → after` is the execution order.
+- `@odata.before` is the place for validation, authorization checks, or enriching/mutating incoming payload/filter data before the generated CRUD logic runs.
+- `@odata.on` lets you replace or wrap the default CRUD handler, e.g., to call external REST APIs, implement custom persistence, or add business logic before delegating via `next()`.
+- `@odata.after` is ideal for post-processing responses, emitting audit logs, or firing side effects/events after a successful CRUD call but before the response is sent.
+- Scopes exist solely to split the single `READ` operation into its three variants (`collection`, `entity`, `$count`). Non-read operations have no notion of scope, so the argument is ignored once a decorator entry resolves to `CREATE`, `UPDATE`, `DELETE`, `LINK_NAVIGATION`, or `UNLINK_NAVIGATION`. For example, `@odata.before(['READ', 'UPDATE'], 'collection')` runs on collection reads and on every update.
 - `@odata.on` can replace the generated logic by not calling `next()`. Use `ctx.helpers.entity`, `ctx.helpers.collection`, `ctx.helpers.count`, or `ctx.helpers.noContent` to produce OData-correct responses when you override.
 - Hooks receive `CrudHookContext` with `request`, `response`, `repository`, `options` (including active transactions for `$batch`), `payload/filter/id`, and a mutable `state` bag for passing data between phases.
 - Only one `@odata.on` is allowed per operation/scope per controller; duplicates fail at boot.
