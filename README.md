@@ -138,7 +138,30 @@ export class ProductODataController {
 
 Generated routes (list, findById, create, update, delete) will enforce the same strategies and scopes. `$batch` requests automatically reuse the caller’s headers and resolved user profile, so you don’t have to repeat credentials for each entry.
 
-LoopBack’s built-in methods (`find`, `deleteById`, `updateById`, `replaceById`) are remapped to the OData CRUD handlers automatically. If you expose differently named controller methods, supply custom aliases when registering the entity set so the security metadata still flows through:
+LoopBack’s built-in methods (`find`, `findById`, `create`, `updateById`, `replaceById`, `deleteById`, `count`) are remapped to the OData CRUD handlers automatically. `$value` routes reuse metadata from `getMediaValue`, `replaceMediaValue`, and `deleteMediaValue`, so add empty stubs with those names when you need to secure media streams:
+
+```ts
+@odataController(MediaAsset)
+@authenticate('jwt')
+export class MediaAssetController {
+  @authorize({scopes: ['media.read']})
+  async find() {}
+
+  @authorize({scopes: ['media.read']})
+  async findById() {}
+
+  @authorize({scopes: ['media.read']})
+  async getMediaValue() {}
+
+  @authorize({scopes: ['media.update']})
+  async replaceMediaValue() {}
+
+  @authorize({scopes: ['media.delete']})
+  async deleteMediaValue() {}
+}
+```
+
+If you expose differently named controller methods, supply custom aliases when registering the entity set so the security metadata still flows through. Any of the canonical handlers below can be remapped: `find`, `findById`, `create`, `updateById`, `replaceById`, `deleteById`, `count`, `linkNavigationRef`, `unlinkNavigationRef`, `getMediaValue`, `replaceMediaValue`, and `deleteMediaValue`.
 
 ```ts
 import { ODATA_BINDINGS } from '@loopback/odata';
@@ -149,7 +172,18 @@ registry.register({
   modelCtor: Product,
   repositoryBindingKey: 'repositories.ProductRepository',
   securityMethodAliases: {
+    find: 'list',
+    findById: 'get',
+    create: 'create',
+    updateById: 'patch',
+    replaceById: 'put',
     deleteById: 'remove',
+    count: 'count',
+    linkNavigationRef: 'attachRelation',
+    unlinkNavigationRef: 'detachRelation',
+    replaceMediaValue: 'uploadBinary',
+    getMediaValue: 'downloadBinary',
+    deleteMediaValue: 'removeBinary',
   },
 });
 ```
