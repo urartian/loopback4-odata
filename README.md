@@ -131,6 +131,7 @@ import { authorize } from '@loopback/authorization';
 @authorize({ scopes: ['product.read'] })
 export class ProductODataController {
   // Stubbing a method is enough to apply fine-grained metadata.
+  // Decorators (authorization, interceptors, etc.) only run when a stub exists.
   @authorize({ scopes: ['product.summary'] })
   async find() {}
 }
