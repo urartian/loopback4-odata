@@ -303,6 +303,10 @@ DELETE /odata/Products/1
 
 `PATCH` accepts partial payloads, and `DELETE` responds with `204 No Content` once the repository removes the entity.
 
+> **Note**
+>
+> The CRUD controller does **not** generate a `PUT /odata/<EntitySet>/{id}` endpoint. All scalar/JSON updates must go through `PATCH` (or the `$batch` equivalent). `PUT` is reserved exclusively for `$value` media streams, so calling `PUT /odata/Products(1)/$value` only replaces the binary payload and its metadata — it will never touch regular model properties like `title`.
+
 When you enable optimistic concurrency by configuring an ETag property (for example `@odataModel({etag: 'updatedAt'})`), the generated endpoints require clients to supply the latest ETag via the `If-Match` request header. Missing headers result in `428 Precondition Required`, while mismatched values return `412 Precondition Failed`. ETags are exposed both in response headers and as the `@odata.etag` field in response bodies so clients can round-trip them easily.
 
 ##### Query options
@@ -1294,6 +1298,10 @@ app.bind(`${ODATA_BINDINGS.MEDIA_HANDLERS.key}.MediaAssets`).toClass(S3MediaHand
 ```
 
 Handlers run inside the request scope, so repository injections, current-tenant providers, and other per-request bindings remain available while processing `$value` endpoints.
+
+> **Reminder**
+>
+> `$value` routes only interact with the media stream (and optional metadata fields configured via `mediaContentTypeField`, `mediaLengthField`, `mediaEtagField`). Updating scalar properties such as `title`, `description`, or custom columns still requires a JSON `PATCH /odata/<EntitySet>('{id}')` call. The controller intentionally separates these concerns so file uploads cannot silently overwrite regular entity data.
 
 ### Server-driven Paging & `$skiptoken`
 
