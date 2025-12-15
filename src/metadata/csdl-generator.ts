@@ -706,6 +706,12 @@ function buildEntityType(
       );
       json['@Org.OData.Core.V1.MediaType'] = { $Path: def.mediaContentTypeField };
     }
+    if (def.mediaEtagField) {
+      annotationLines.push(
+        `      <Annotation Term="Org.OData.Core.V1.MediaETag"><Path>${xmlEscape(def.mediaEtagField)}</Path></Annotation>`,
+      );
+      json['@Org.OData.Core.V1.MediaETag'] = { $Path: def.mediaEtagField };
+    }
   }
 
   const relations = (modelDefinition.relations ?? {}) as RelationDefinitionMap;

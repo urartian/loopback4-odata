@@ -145,19 +145,19 @@ LoopBack’s built-in methods (`find`, `findById`, `create`, `updateById`, `repl
 @odataController(MediaAsset)
 @authenticate('jwt')
 export class MediaAssetController {
-  @authorize({scopes: ['media.read']})
+  @authorize({ scopes: ['media.read'] })
   async find() {}
 
-  @authorize({scopes: ['media.read']})
+  @authorize({ scopes: ['media.read'] })
   async findById() {}
 
-  @authorize({scopes: ['media.read']})
+  @authorize({ scopes: ['media.read'] })
   async getMediaValue() {}
 
-  @authorize({scopes: ['media.update']})
+  @authorize({ scopes: ['media.update'] })
   async replaceMediaValue() {}
 
-  @authorize({scopes: ['media.delete']})
+  @authorize({ scopes: ['media.delete'] })
   async deleteMediaValue() {}
 }
 ```
@@ -1223,6 +1223,8 @@ LoopBack OData services can expose [$value media streams](https://www.odata.org/
 - `mediaEtagField`: Property holding the stream-specific ETag; enables conditional headers (`If-None-Match`, `If-Match`) for media operations.
 - `mediaLengthField`: Numeric property storing the byte length; when set the controller emits `Content-Length` without fully buffering the stream.
 - `mediaHandlerBindingKey`: Override the IoC binding key used to resolve the media handler (defaults to `ODATA_BINDINGS.MEDIA_HANDLERS.key.<EntitySet>`). Useful when multiple entity sets share a handler implementation.
+
+When `mediaEtagField` is configured the generated `$metadata` advertises `@Org.OData.Core.V1.MediaETag`, allowing clients to discover which property carries the stream ETag and rely on conditional caching headers automatically.
 
 When `mediaField` is configured the handler writes the uploaded stream directly into that property. Make sure the backing column is a binary type in your datasource (e.g., PostgreSQL `bytea`, MySQL `LONGBLOB`, MSSQL `VARBINARY`). Use the connector-specific metadata to request the correct type:
 

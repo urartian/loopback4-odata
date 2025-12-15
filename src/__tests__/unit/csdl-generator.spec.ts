@@ -165,6 +165,7 @@ describe('CsdlGenerator', () => {
       name: 'Gadgets',
       modelCtor: Gadget,
       supportsTransactions: false,
+      hasStream: true,
     });
 
     registry.register({
@@ -218,6 +219,11 @@ describe('CsdlGenerator', () => {
         '<Annotation Term="Org.OData.Core.V1.MediaType"><Path>contentType</Path></Annotation>',
       ),
     ).to.be.true();
+    expect(
+      xml.includes('<Annotation Term="Org.OData.Core.V1.MediaETag"><Path>sku</Path></Annotation>'),
+    ).to.be.true();
+    const mediaEtagAnnotations = xml.match(/Org\.OData\.Core\.V1\.MediaETag/g) ?? [];
+    expect(mediaEtagAnnotations).to.have.length(1);
     expect(
       xml.includes('Annotation Term="Org.OData.Capabilities.V1.CountRestrictions"'),
     ).to.be.true();
@@ -323,6 +329,7 @@ describe('CsdlGenerator', () => {
     expect(schema.Widget.tags.$Type).to.equal('Collection(Edm.String)');
     expect(schema.Widget.dimensions.$Type).to.equal('Catalog.Dimensions');
     expect(schema.Widget['updatedAt@ConcurrencyMode']).to.equal('Fixed');
+    expect(schema.Widget['@Org.OData.Core.V1.MediaETag']).to.containDeep({ $Path: 'sku' });
     expect(schema.Dimensions.$Kind).to.equal('ComplexType');
     expect(schema.Dimensions.width.$Type).to.equal('Edm.Double');
     expect(schema.Widget.status.$Type).to.equal('Catalog.WidgetStatusEnum');
@@ -333,6 +340,7 @@ describe('CsdlGenerator', () => {
     expect(schema.Widget.gadgets.$Kind).to.equal('NavigationProperty');
     expect(schema.Widget.gadgets.$Type).to.equal('Collection(Catalog.Gadget)');
     expect(schema.Widget['@Org.OData.Core.V1.HasStream']).to.equal(true);
+    expect(schema.Gadget['@Org.OData.Core.V1.MediaETag']).to.equal(undefined);
     expect(schema.AdvancedWidget.$BaseType).to.equal('Catalog.Widget');
     expect(schema.Widget.gadgets.$Partner).to.equal('widget');
     expect(schema.Widget.gadgets.$ReferentialConstraint).to.equal(undefined);
