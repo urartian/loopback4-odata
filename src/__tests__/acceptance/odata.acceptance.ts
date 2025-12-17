@@ -3,6 +3,7 @@
 import { Client, createRestAppClient, expect } from '@loopback/testlab';
 import { BindingScope } from '@loopback/core';
 import { AnyObject, juggler } from '@loopback/repository';
+import { Readable } from 'stream';
 import {
   TestApplication,
   givenODataApplication,
@@ -17,9 +18,57 @@ import {
   ODataApplyExecutor,
   ODataApplyExecutorContext,
 } from '../../services/odata-apply-executor.registry';
+import {
+  ODataMediaHandler,
+  ODataMediaReadContext,
+  ODataMediaWriteContext,
+} from '../../services/odata-media-handler';
 
 if (typeof process.setMaxListeners === 'function') {
   process.setMaxListeners(20);
+}
+
+class MetadataOverrideMediaHandler implements ODataMediaHandler {
+  static readonly MEDIA_TYPE = 'application/x-handler-sniffed';
+  static readonly LENGTH_OFFSET = 7;
+
+  async read(ctx: ODataMediaReadContext) {
+    const entity = (await ctx.repository.findById(
+      ctx.id as any,
+      undefined,
+      ctx.options,
+    )) as AnyObject;
+    const data = entity?.data;
+    const buffer =
+      data == null ? Buffer.alloc(0) : Buffer.isBuffer(data) ? data : Buffer.from(data);
+    return {
+      stream: Readable.from(buffer),
+      contentType: entity?.contentType,
+      etag: entity?.mediaVersion,
+      length: buffer.length,
+    };
+  }
+
+  async write(ctx: ODataMediaWriteContext) {
+    const payload = await bufferReadable(ctx.stream);
+    await ctx.repository.updateById(ctx.id as any, { data: payload }, ctx.options);
+    return {
+      contentType: MetadataOverrideMediaHandler.MEDIA_TYPE,
+      length: payload.length + MetadataOverrideMediaHandler.LENGTH_OFFSET,
+      etag: `W/"sniffed-${payload.length}"`,
+    };
+  }
+}
+
+function bufferReadable(stream: Readable): Promise<Buffer> {
+  return new Promise<Buffer>((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    stream.on('data', (chunk: Buffer | string) => {
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    });
+    stream.once('error', reject);
+    stream.once('end', () => resolve(Buffer.concat(chunks)));
+  });
 }
 
 describe('OData component acceptance', () => {
@@ -225,6 +274,44 @@ describe('OData component acceptance', () => {
         .set('Accept', 'image/png')
         .expect('Content-Type', /image\/png/)
         .expect(200);
+    });
+
+    it('persists handler-provided media metadata overrides', async function (this: Mocha.Context) {
+      await rebuildApp(this as SkipContext, {}, async (instance) => {
+        instance
+          .bind(`${ODATA_BINDINGS.MEDIA_HANDLERS.key}.MediaAssets`)
+          .toClass(MetadataOverrideMediaHandler)
+          .inScope(BindingScope.REQUEST);
+      });
+
+      const listing = await client.get('/odata/MediaAssets').expect(200);
+      const asset = listing.body.value[0];
+      const id = asset.id;
+      const etag = asset['@odata.mediaEtag'] as string;
+      const payload = 'handler-metadata';
+      const expectedLength =
+        Buffer.byteLength(payload) + MetadataOverrideMediaHandler.LENGTH_OFFSET;
+      const expectedEtag = `W/"sniffed-${Buffer.byteLength(payload)}"`;
+      const expectedType = MetadataOverrideMediaHandler.MEDIA_TYPE;
+
+      const res = await client
+        .put(`/odata/MediaAssets(${id})/$value`)
+        .set('Prefer', 'return=representation')
+        .set('Content-Type', 'text/plain')
+        .set('If-Match', etag)
+        .send(payload)
+        .expect(200);
+
+      expect(res.body['@odata.mediaContentType']).to.equal(expectedType);
+      expect(res.body['@odata.mediaEtag']).to.equal(expectedEtag);
+      expect(res.body.contentType).to.equal(expectedType);
+      expect(res.body.size).to.equal(expectedLength);
+
+      const reloaded = await client.get(`/odata/MediaAssets(${id})`).expect(200);
+      expect(reloaded.body['@odata.mediaContentType']).to.equal(expectedType);
+      expect(reloaded.body['@odata.mediaEtag']).to.equal(expectedEtag);
+      expect(reloaded.body.contentType).to.equal(expectedType);
+      expect(reloaded.body.size).to.equal(expectedLength);
     });
 
     it('rejects media updates via $batch change sets when datasource lacks transactions', async () => {

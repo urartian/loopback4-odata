@@ -976,25 +976,39 @@ export function defineODataCrudController(def: EntitySetDef) {
       return next;
     }
 
+    resolveMediaMetadata(
+      handlerResult: ODataMediaWriteResult | undefined,
+      overrides?: { contentType?: string; contentLength?: number; etag?: string },
+    ): { contentType?: string; length?: number; etag?: string } {
+      const lengthCandidate = handlerResult?.length ?? overrides?.contentLength;
+      const length =
+        typeof lengthCandidate === 'number' && Number.isFinite(lengthCandidate)
+          ? lengthCandidate
+          : undefined;
+      const contentType = handlerResult?.contentType ?? overrides?.contentType;
+      const etag = handlerResult?.etag ?? overrides?.etag ?? this.generateMediaEtag();
+      return { contentType, length, etag };
+    }
+
     async applyMediaMetadataUpdates(
       id: unknown,
       handlerResult: ODataMediaWriteResult | undefined,
       overrides?: { contentType?: string; contentLength?: number; etag?: string },
+      resolved?: { contentType?: string; length?: number; etag?: string },
     ): Promise<AnyObject | undefined> {
       if (!hasStream) return undefined;
       const patch: AnyObject = {};
       const updates: AnyObject = {};
-      const contentType = overrides?.contentType ?? handlerResult?.contentType;
+      const metadata = resolved ?? this.resolveMediaMetadata(handlerResult, overrides);
+      const { contentType, length, etag } = metadata;
       if (mediaContentTypeField && contentType) {
         patch[mediaContentTypeField] = contentType;
         updates[mediaContentTypeField] = contentType;
       }
-      const length = overrides?.contentLength ?? handlerResult?.length;
       if (mediaLengthField && typeof length === 'number' && Number.isFinite(length)) {
         patch[mediaLengthField] = length;
         updates[mediaLengthField] = length;
       }
-      const etag = overrides?.etag ?? handlerResult?.etag ?? this.generateMediaEtag();
       if (mediaEtagField && etag) {
         patch[mediaEtagField] = etag;
         updates[mediaEtagField] = etag;
@@ -8214,10 +8228,13 @@ export function defineODataCrudController(def: EntitySetDef) {
         const handler = await this.requireMediaHandler();
         const stream = this.coerceBodyToStream(body);
         const contentLengthHeader = this.request.headers['content-length'];
-        const contentLength =
+        const contentLengthValue =
           typeof contentLengthHeader === 'string' && contentLengthHeader.trim()
             ? Number(contentLengthHeader)
             : undefined;
+        const httpContentLength = Number.isFinite(contentLengthValue)
+          ? Number(contentLengthValue)
+          : undefined;
 
         const writeResult = await handler.write({
           id,
@@ -8227,25 +8244,32 @@ export function defineODataCrudController(def: EntitySetDef) {
           options,
           stream,
           contentType,
-          contentLength: Number.isFinite(contentLength) ? Number(contentLength) : undefined,
+          contentLength: httpContentLength,
         });
 
-        const metadataUpdates = await this.applyMediaMetadataUpdates(id, writeResult, {
+        const overrides = {
           contentType,
-        });
+          contentLength: httpContentLength,
+        };
+        const resolvedMetadata = this.resolveMediaMetadata(writeResult, overrides);
+        const metadataUpdates = await this.applyMediaMetadataUpdates(
+          id,
+          writeResult,
+          overrides,
+          resolvedMetadata,
+        );
         if (metadataUpdates) {
           plain = this.mergeMediaMetadata(plain, metadataUpdates);
         }
 
         this.ensureODataHeaders();
         this.setMediaEtagHeader(plain);
-        const reportedLength =
-          writeResult?.length ??
-          (mediaLengthField && metadataUpdates ? metadataUpdates[mediaLengthField] : undefined);
+        const reportedLength = resolvedMetadata.length;
+        const telemetryContentType = resolvedMetadata.contentType ?? contentType;
         this.logMediaTelemetry('media.write', {
           entityId: id,
           bytes: reportedLength,
-          contentType,
+          contentType: telemetryContentType,
         });
 
         const preference = preferences.returnPreference;
@@ -8597,16 +8621,22 @@ export function defineODataCrudController(def: EntitySetDef) {
             contentType: effectiveContentType,
             slug: slugHeader,
           });
-          const updates = await this.applyMediaMetadataUpdates(createdEntityId, writeResult, {
-            contentType: effectiveContentType,
-          });
+          const createOverrides = { contentType: effectiveContentType };
+          const resolvedMetadata = this.resolveMediaMetadata(writeResult, createOverrides);
+          const updates = await this.applyMediaMetadataUpdates(
+            createdEntityId,
+            writeResult,
+            createOverrides,
+            resolvedMetadata,
+          );
           if (updates) {
             entityForResponse = this.mergeMediaMetadata(entityForResponse, updates);
           }
+          const telemetryContentType = resolvedMetadata.contentType ?? effectiveContentType;
           this.logMediaTelemetry('media.write', {
             entityId: createdEntityId,
-            bytes: writeResult?.length,
-            contentType: effectiveContentType,
+            bytes: resolvedMetadata.length,
+            contentType: telemetryContentType,
           });
         }
 

@@ -1226,6 +1226,8 @@ LoopBack OData services can expose [$value media streams](https://www.odata.org/
 
 When `mediaEtagField` is configured the generated `$metadata` advertises `@Org.OData.Core.V1.MediaETag`, allowing clients to discover which property carries the stream ETag and rely on conditional caching headers automatically.
 
+When handling uploads the controller prefers metadata reported by the `ODataMediaHandler` over the incoming HTTP headers. Handlers can return `contentType`, `length`, and `etag` from their `write()` result to override the stored values. This enables sniffing binary payloads server-side, emitting custom weak ETags, or correcting bogus `Content-Type`/`Content-Length` headers before persisting the entity’s metadata and `@odata.mediaContentType`.
+
 When `mediaField` is configured the handler writes the uploaded stream directly into that property. Make sure the backing column is a binary type in your datasource (e.g., PostgreSQL `bytea`, MySQL `LONGBLOB`, MSSQL `VARBINARY`). Use the connector-specific metadata to request the correct type:
 
 ```ts
