@@ -6,6 +6,7 @@ import {
   ModelDefinition,
   PropertyDefinition,
   RelationDefinitionMap,
+  buildModelDefinition,
 } from '@loopback/repository';
 import { EntitySetDef, EntitySetRegistry } from '../registry/entityset-registry';
 import { ODATA_BINDINGS } from '../keys';
@@ -362,7 +363,11 @@ function ensureComplexType(
   if (existing) return existing;
   if (context.visitingComplex.has(ctor)) return undefined;
 
-  const definition = (ctor as typeof Entity).definition as ModelDefinition | undefined;
+  let definition = (ctor as typeof Model).definition as ModelDefinition | undefined;
+  if (!definition) {
+    buildModelDefinition(ctor as typeof Model & { definition?: ModelDefinition });
+    definition = (ctor as typeof Model).definition as ModelDefinition | undefined;
+  }
   if (!definition) return undefined;
 
   context.visitingComplex.add(ctor);

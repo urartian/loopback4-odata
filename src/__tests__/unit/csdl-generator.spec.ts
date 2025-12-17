@@ -22,7 +22,6 @@ class Dimensions extends Model {
   height!: number;
 }
 
-@model()
 class ResetPayload extends Model {
   @property({ type: 'boolean' })
   confirm?: boolean;
