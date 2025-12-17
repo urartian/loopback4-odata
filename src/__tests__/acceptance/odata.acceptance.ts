@@ -458,6 +458,22 @@ describe('OData component acceptance', () => {
     expect(res.body.value.total).to.be.a.Number();
   });
 
+  it('accepts payloads that match complex action parameters', async () => {
+    const res = await client
+      .post('/odata/echoDimensions')
+      .send({ input: { width: 123, height: 456 } })
+      .expect(200);
+    expect(res.body.value.input).to.containEql({ width: 123, height: 456 });
+  });
+
+  it('rejects unknown properties in complex action parameters', async () => {
+    const res = await client
+      .post('/odata/echoDimensions')
+      .send({ input: { width: 10, height: 20, extra: 'nope' } })
+      .expect(400);
+    expect(res.body.error?.message ?? '').to.match(/Unknown property "extra"/);
+  });
+
   it('supports inline $count with filters', async () => {
     const res = await client
       .get('/odata/Products')

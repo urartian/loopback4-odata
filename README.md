@@ -600,7 +600,7 @@ You can publish custom OData operations on top of the generated CRUD surface by 
 - `returnType` sets the CSDL return type hint. Functions default to `Edm.String` when omitted.
 - `rawResponse` skips the default OData annotations (like `@odata.context`/`@odata.etag`) so you can return a bespoke payload.
 
-`params[].type` accepts either a literal EDM string (`'Edm.Guid'`, `'Collection(Edm.String)'`, etc.) or a LoopBack `@model()` constructor (pass the class or a factory such as `() => DecisionInput`). When you hand it a model the generator emits the referenced complex type in `$metadata`, so clients can discover the schema of your action payload without adding dummy properties to entities.
+`params[].type` accepts either a literal EDM string (`'Edm.Guid'`, `'Collection(Edm.String)'`, etc.) or a LoopBack `@model()` constructor (pass the class or a factory such as `() => DecisionInput`). When you hand it a model the generator emits the referenced complex type in `$metadata`, so clients can discover the schema of your action payload without adding dummy properties to entities. Runtime requests are validated against the model definition, so unknown properties trigger `400 Bad Request` before your controller runs.
 
 At runtime the framework resolves method arguments this way:
 

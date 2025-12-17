@@ -14,6 +14,7 @@ import {
   getODataActions,
   getODataFunctions,
   OperationMeta,
+  OperationParameter,
   OperationParameterType,
 } from '../decorators/action.function.decorators';
 import {
@@ -1775,7 +1776,7 @@ export class CsdlGenerator {
     }
 
     for (const param of op.parameters ?? []) {
-      const type = this.resolveOperationParameterType(param.type, context);
+      const type = this.resolveOperationParameterType(param, context);
       lines.push(`  <Parameter Name="${xmlEscape(param.name)}" Type="${xmlEscape(type)}" />`);
     }
 
@@ -1825,7 +1826,7 @@ export class CsdlGenerator {
       });
     }
     for (const param of op.parameters ?? []) {
-      const type = this.resolveOperationParameterType(param.type, context);
+      const type = this.resolveOperationParameterType(param, context);
       parameters.push({
         $Name: param.name,
         $Type: type,
@@ -1850,22 +1851,35 @@ export class CsdlGenerator {
   }
 
   private resolveOperationParameterType(
-    type: OperationParameterType | undefined,
+    param: OperationParameter,
     context: SchemaBuildContext,
   ): string {
-    const resolved = this.unwrapOperationParameterType(type);
+    const ctor = param.modelCtor;
+    if (ctor) {
+      if (ctor.prototype instanceof Entity) {
+        const definition = (ctor as typeof Entity).definition as ModelDefinition | undefined;
+        const entityName = definition?.name ?? ctor.name ?? 'Entity';
+        return `${context.namespace}.${entityName}`;
+      }
+      const complex = ensureComplexType(ctor, context);
+      if (complex) {
+        return `${context.namespace}.${complex.name}`;
+      }
+    }
+
+    const resolved = this.unwrapOperationParameterType(param.type);
     if (!resolved) return 'Edm.String';
     if (typeof resolved === 'string') return resolved;
 
-    const ctor = resolved;
-    const proto = (ctor as any)?.prototype;
+    const resolvedCtor = resolved;
+    const proto = (resolvedCtor as any)?.prototype;
     if (proto instanceof Entity) {
-      const definition = (ctor as typeof Entity).definition as ModelDefinition | undefined;
-      const entityName = definition?.name ?? ctor.name ?? 'Entity';
+      const definition = (resolvedCtor as typeof Entity).definition as ModelDefinition | undefined;
+      const entityName = definition?.name ?? resolvedCtor.name ?? 'Entity';
       return `${context.namespace}.${entityName}`;
     }
-    if (proto instanceof Model || (ctor as { definition?: ModelDefinition }).definition) {
-      const complex = ensureComplexType(ctor, context);
+    if (proto instanceof Model || (resolvedCtor as { definition?: ModelDefinition }).definition) {
+      const complex = ensureComplexType(resolvedCtor, context);
       if (complex) {
         return `${context.namespace}.${complex.name}`;
       }

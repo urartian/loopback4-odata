@@ -32,8 +32,10 @@ import {
   AnyObject,
   DefaultCrudRepository,
   Entity,
+  Model,
   ModelDefinition,
   MODEL_KEY,
+  buildModelDefinition,
   juggler,
   RelationDefinitionMap,
 } from '@loopback/repository';
@@ -41,6 +43,7 @@ import {
   getODataActions,
   getODataFunctions,
   OperationMeta,
+  OperationParameter,
 } from '../decorators/action.function.decorators';
 import { pluralize } from 'inflection';
 import { normalizeEtagProperties } from '../util/etag';
@@ -893,7 +896,9 @@ class ODataOperationRoute extends ControllerRoute<object> {
     }
 
     if (this.httpVerb === 'post') {
-      invocationArgs.push(requestContext.request.body);
+      const body = requestContext.request.body;
+      this.validateActionPayload(body);
+      invocationArgs.push(body);
     } else {
       invocationArgs.push(requestContext.request.query);
     }
@@ -927,6 +932,39 @@ class ODataOperationRoute extends ControllerRoute<object> {
       '@odata.context': context,
       value: result,
     };
+  }
+
+  private validateActionPayload(body: unknown) {
+    if (!this.operation.parameters?.length) return;
+    if (!body || typeof body !== 'object') return;
+    for (const param of this.operation.parameters) {
+      const ctor = param.modelCtor;
+      if (!ctor) continue;
+      const value = (body as AnyObject)[param.name];
+      if (value == null) continue;
+      if (typeof value !== 'object' || Array.isArray(value)) {
+        throw new HttpErrors.BadRequest(
+          `Parameter "${param.name}" must be an object matching the declared model.`,
+        );
+      }
+      this.rejectUnknownProperties(param, value as AnyObject);
+    }
+  }
+
+  private rejectUnknownProperties(param: OperationParameter, value: AnyObject) {
+    const ctor = param.modelCtor;
+    if (!ctor) return;
+    let definition = (ctor as typeof Model).definition as ModelDefinition | undefined;
+    if (!definition) {
+      buildModelDefinition(ctor as typeof Model & { definition?: ModelDefinition });
+      definition = (ctor as typeof Model).definition as ModelDefinition | undefined;
+    }
+    const props = definition?.properties ?? {};
+    for (const key of Object.keys(value)) {
+      if (!props[key]) {
+        throw new HttpErrors.BadRequest(`Unknown property "${key}" on parameter "${param.name}".`);
+      }
+    }
   }
 }
 
