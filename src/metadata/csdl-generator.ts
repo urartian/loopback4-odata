@@ -2,6 +2,7 @@ import { BindingScope, inject, injectable } from '@loopback/core';
 import {
   AnyObject,
   Entity,
+  Model,
   ModelDefinition,
   PropertyDefinition,
   RelationDefinitionMap,
@@ -12,6 +13,7 @@ import {
   getODataActions,
   getODataFunctions,
   OperationMeta,
+  OperationParameterType,
 } from '../decorators/action.function.decorators';
 import {
   ODataConfig,
@@ -1491,7 +1493,7 @@ export class CsdlGenerator {
       const entityName = (set.modelCtor as typeof Entity).definition?.name ?? set.modelCtor.name;
       const actions = set.actions ?? [];
       for (const action of actions) {
-        const result = this.buildOperationSchema('Action', action, namespace, entityName);
+        const result = this.buildOperationSchema('Action', action, namespace, entityName, context);
         actionXml.push(result.xml);
         if (result.importXml) operationImportsXml.push(result.importXml);
         jsonActions[action.name] = result.json;
@@ -1500,7 +1502,7 @@ export class CsdlGenerator {
 
       const functions = set.functions ?? [];
       for (const fn of functions) {
-        const result = this.buildOperationSchema('Function', fn, namespace, entityName);
+        const result = this.buildOperationSchema('Function', fn, namespace, entityName, context);
         functionXml.push(result.xml);
         if (result.importXml) operationImportsXml.push(result.importXml);
         jsonFunctions[fn.name] = result.json;
@@ -1754,6 +1756,7 @@ export class CsdlGenerator {
     op: OperationMeta,
     namespace: string,
     entityName: string | undefined,
+    context: SchemaBuildContext,
   ) {
     const isBound = op.binding !== 'unbound';
     const lines: string[] = [];
@@ -1767,7 +1770,7 @@ export class CsdlGenerator {
     }
 
     for (const param of op.parameters ?? []) {
-      const type = param.type ?? 'Edm.String';
+      const type = this.resolveOperationParameterType(param.type, context);
       lines.push(`  <Parameter Name="${xmlEscape(param.name)}" Type="${xmlEscape(type)}" />`);
     }
 
@@ -1817,9 +1820,10 @@ export class CsdlGenerator {
       });
     }
     for (const param of op.parameters ?? []) {
+      const type = this.resolveOperationParameterType(param.type, context);
       parameters.push({
         $Name: param.name,
-        $Type: param.type ?? 'Edm.String',
+        $Type: type,
       });
     }
     if (parameters.length) {
@@ -1838,6 +1842,55 @@ export class CsdlGenerator {
       json: jsonOp,
       jsonImport,
     };
+  }
+
+  private resolveOperationParameterType(
+    type: OperationParameterType | undefined,
+    context: SchemaBuildContext,
+  ): string {
+    const resolved = this.unwrapOperationParameterType(type);
+    if (!resolved) return 'Edm.String';
+    if (typeof resolved === 'string') return resolved;
+
+    const ctor = resolved;
+    const proto = (ctor as any)?.prototype;
+    if (proto instanceof Entity) {
+      const definition = (ctor as typeof Entity).definition as ModelDefinition | undefined;
+      const entityName = definition?.name ?? ctor.name ?? 'Entity';
+      return `${context.namespace}.${entityName}`;
+    }
+    if (proto instanceof Model || (ctor as { definition?: ModelDefinition }).definition) {
+      const complex = ensureComplexType(ctor, context);
+      if (complex) {
+        return `${context.namespace}.${complex.name}`;
+      }
+    }
+    return 'Edm.String';
+  }
+
+  private unwrapOperationParameterType(
+    type: OperationParameterType | undefined,
+  ): string | typeof Model | undefined {
+    if (!type) return undefined;
+    if (typeof type === 'string') return type;
+    if (typeof type === 'function') {
+      if (this.isModelConstructor(type)) {
+        return type as typeof Model;
+      }
+      try {
+        const factory = type as () => string | typeof Model;
+        return this.unwrapOperationParameterType(factory());
+      } catch {
+        return undefined;
+      }
+    }
+    return undefined;
+  }
+
+  private isModelConstructor(value: unknown): value is typeof Model {
+    if (typeof value !== 'function') return false;
+    const proto = (value as any)?.prototype;
+    return Boolean(proto);
   }
 }
 function capitalize(name: string): string {

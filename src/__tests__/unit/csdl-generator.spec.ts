@@ -23,6 +23,15 @@ class Dimensions extends Model {
 }
 
 @model()
+class ResetPayload extends Model {
+  @property({ type: 'boolean' })
+  confirm?: boolean;
+
+  @property({ type: 'string' })
+  note?: string;
+}
+
+@model()
 class Gadget extends Entity {
   @property({ id: true, type: 'number' })
   id!: number;
@@ -140,7 +149,7 @@ describe('CsdlGenerator', () => {
           methodName: 'resetInventory',
           binding: 'entity',
           rawResponse: false,
-          parameters: [{ name: 'confirm', type: 'Edm.Boolean' }],
+          parameters: [{ name: 'payload', type: () => ResetPayload }],
         },
       ],
       functions: [
@@ -205,9 +214,11 @@ describe('CsdlGenerator', () => {
       ),
     ).to.be.true();
     expect(xml.includes('<ComplexType Name="Dimensions">')).to.be.true();
+    expect(xml.includes('<ComplexType Name="ResetPayload">')).to.be.true();
     expect(
       xml.includes('<Property Name="dimensions" Type="Catalog.Dimensions" Nullable="true"'),
     ).to.be.true();
+    expect(xml.includes('Parameter Name="payload" Type="Catalog.ResetPayload"')).to.be.true();
     expect(xml.includes('<EnumType Name="WidgetStatusEnum"')).to.be.true();
     expect(xml.includes('<Member Name="draft" Value="0"')).to.be.true();
     expect(xml.includes('Annotation Term="Org.OData.Core.V1.HasStream" Bool="true"')).to.be.true();
@@ -332,6 +343,8 @@ describe('CsdlGenerator', () => {
     expect(schema.Widget['@Org.OData.Core.V1.MediaETag']).to.containDeep({ $Path: 'sku' });
     expect(schema.Dimensions.$Kind).to.equal('ComplexType');
     expect(schema.Dimensions.width.$Type).to.equal('Edm.Double');
+    expect(schema.ResetPayload.$Kind).to.equal('ComplexType');
+    expect(schema.ResetPayload.confirm.$Type).to.equal('Edm.Boolean');
     expect(schema.Widget.status.$Type).to.equal('Catalog.WidgetStatusEnum');
     expect(schema.WidgetStatusEnum.$Kind).to.equal('EnumType');
     expect(schema.WidgetStatusEnum.Members).to.have.length(3);
@@ -352,6 +365,10 @@ describe('CsdlGenerator', () => {
     expect(schema.resetInventory.$Kind).to.equal('Action');
     expect(schema.resetInventory.$IsBound).to.equal(true);
     expect(Array.isArray(schema.resetInventory.$Parameter)).to.be.true();
+    const payloadParam = (schema.resetInventory.$Parameter as AnyObject[]).find(
+      (entry) => entry.$Name === 'payload',
+    );
+    expect(payloadParam?.$Type).to.equal('Catalog.ResetPayload');
 
     expect(schema).to.have.property('topWidgets');
     expect(schema.topWidgets.$Kind).to.equal('Function');

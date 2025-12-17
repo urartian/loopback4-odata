@@ -1,4 +1,5 @@
 import 'reflect-metadata';
+import type { Model } from '@loopback/repository';
 
 export type ODataBindingScope = 'collection' | 'entity' | 'unbound';
 
@@ -18,9 +19,11 @@ export interface OperationMeta extends Required<Omit<ODataOperationOptions, 'ret
   methodName: string;
 }
 
+export type OperationParameterType = string | typeof Model | (() => string | typeof Model);
+
 export interface OperationParameter {
   name: string;
-  type?: string;
+  type?: OperationParameterType;
 }
 
 function pushMetadata(target: any, key: string, entry: OperationMeta) {
