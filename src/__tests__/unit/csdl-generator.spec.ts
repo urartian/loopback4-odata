@@ -12,6 +12,7 @@ import {
 import { CsdlGenerator } from '../../metadata/csdl-generator';
 import { EntitySetRegistry, EntitySetDef } from '../../registry/entityset-registry';
 import { odataSearchable } from '../../decorators/search.decorators';
+import { odataModel } from '../../decorators/model.decorator';
 
 @model()
 class Dimensions extends Model {
@@ -22,6 +23,7 @@ class Dimensions extends Model {
   height!: number;
 }
 
+@odataModel()
 class ResetPayload extends Model {
   @property({ type: 'boolean' })
   confirm?: boolean;
