@@ -935,29 +935,39 @@ class ODataOperationRoute extends ControllerRoute<object> {
   }
 
   private validateActionPayload(body: unknown) {
-    if (!this.operation.parameters?.length) return;
+    const params = this.operation.parameters;
+    if (!params?.length) return;
     if (!body || typeof body !== 'object') return;
-    for (const param of this.operation.parameters) {
-      const ctor = param.modelCtor;
+
+    const payload = body as AnyObject;
+    const allowedParams = new Set(params.map((param) => param.name));
+    for (const key of Object.keys(payload)) {
+      if (!allowedParams.has(key)) {
+        throw new HttpErrors.BadRequest(
+          `Unknown parameter "${key}" on action "${this.operation.name}".`,
+        );
+      }
+    }
+
+    for (const param of params) {
+      const ctor = this.resolveParameterModelCtor(param);
       if (!ctor) continue;
-      const value = (body as AnyObject)[param.name];
+      const value = payload[param.name];
       if (value == null) continue;
       if (typeof value !== 'object' || Array.isArray(value)) {
         throw new HttpErrors.BadRequest(
           `Parameter "${param.name}" must be an object matching the declared model.`,
         );
       }
-      this.rejectUnknownProperties(param, value as AnyObject);
+      this.rejectUnknownProperties(param, ctor, value as AnyObject);
     }
   }
 
-  private rejectUnknownProperties(param: OperationParameter, value: AnyObject) {
-    const ctor = param.modelCtor;
-    if (!ctor) return;
-    let definition = (ctor as typeof Model).definition as ModelDefinition | undefined;
+  private rejectUnknownProperties(param: OperationParameter, ctor: typeof Model, value: AnyObject) {
+    let definition = ctor.definition as ModelDefinition | undefined;
     if (!definition) {
       buildModelDefinition(ctor as typeof Model & { definition?: ModelDefinition });
-      definition = (ctor as typeof Model).definition as ModelDefinition | undefined;
+      definition = ctor.definition as ModelDefinition | undefined;
     }
     const props = definition?.properties ?? {};
     for (const key of Object.keys(value)) {
@@ -965,6 +975,31 @@ class ODataOperationRoute extends ControllerRoute<object> {
         throw new HttpErrors.BadRequest(`Unknown property "${key}" on parameter "${param.name}".`);
       }
     }
+  }
+
+  private resolveParameterModelCtor(param: OperationParameter): typeof Model | undefined {
+    if (param.modelCtor) return param.modelCtor;
+    const ctor = this.tryResolveParameterCtor(param.type);
+    if (ctor) param.modelCtor = ctor;
+    return ctor;
+  }
+
+  private tryResolveParameterCtor(type: OperationParameter['type']): typeof Model | undefined {
+    if (!type) return undefined;
+    if (typeof type === 'function') {
+      if (this.isModelConstructor(type)) return type as typeof Model;
+      try {
+        const resolved = (type as () => string | typeof Model)();
+        if (this.isModelConstructor(resolved)) return resolved;
+      } catch {
+        return undefined;
+      }
+    }
+    return undefined;
+  }
+
+  private isModelConstructor(value: unknown): value is typeof Model {
+    return typeof value === 'function' && value.prototype instanceof Model;
   }
 }
 

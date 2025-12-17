@@ -474,6 +474,14 @@ describe('OData component acceptance', () => {
     expect(res.body.error?.message ?? '').to.match(/Unknown property "extra"/);
   });
 
+  it('rejects unknown parameters in action payloads', async () => {
+    const res = await client
+      .post('/odata/echoDimensions')
+      .send({ input: { width: 10, height: 20 }, unexpected: true })
+      .expect(400);
+    expect(res.body.error?.message ?? '').to.match(/Unknown parameter "unexpected"/);
+  });
+
   it('supports inline $count with filters', async () => {
     const res = await client
       .get('/odata/Products')
