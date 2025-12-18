@@ -32,8 +32,10 @@ import {
   AnyObject,
   DefaultCrudRepository,
   Entity,
+  Model,
   ModelDefinition,
   MODEL_KEY,
+  buildModelDefinition,
   juggler,
   RelationDefinitionMap,
 } from '@loopback/repository';
@@ -41,6 +43,7 @@ import {
   getODataActions,
   getODataFunctions,
   OperationMeta,
+  OperationParameter,
 } from '../decorators/action.function.decorators';
 import { pluralize } from 'inflection';
 import { normalizeEtagProperties } from '../util/etag';
@@ -893,7 +896,9 @@ class ODataOperationRoute extends ControllerRoute<object> {
     }
 
     if (this.httpVerb === 'post') {
-      invocationArgs.push(requestContext.request.body);
+      const body = requestContext.request.body;
+      this.validateActionPayload(body);
+      invocationArgs.push(body);
     } else {
       invocationArgs.push(requestContext.request.query);
     }
@@ -927,6 +932,79 @@ class ODataOperationRoute extends ControllerRoute<object> {
       '@odata.context': context,
       value: result,
     };
+  }
+
+  private validateActionPayload(body: unknown) {
+    const params = this.operation.parameters;
+    if (!params?.length) return;
+    if (!body || typeof body !== 'object') return;
+
+    const payload = body as AnyObject;
+    const allowedParams = new Set(params.map((param) => param.name));
+    for (const key of Object.keys(payload)) {
+      if (!allowedParams.has(key)) {
+        throw new HttpErrors.BadRequest(
+          `Unknown parameter "${key}" on action "${this.operation.name}".`,
+        );
+      }
+    }
+
+    for (const param of params) {
+      const ctor = this.resolveParameterModelCtor(param);
+      if (!ctor) continue;
+      const value = payload[param.name];
+      if (value == null) continue;
+      if (typeof value !== 'object' || Array.isArray(value)) {
+        throw new HttpErrors.BadRequest(
+          `Parameter "${param.name}" must be an object matching the declared model.`,
+        );
+      }
+      this.rejectUnknownProperties(param, ctor, value as AnyObject);
+    }
+  }
+
+  private rejectUnknownProperties(param: OperationParameter, ctor: typeof Model, value: AnyObject) {
+    let definition = ctor.definition as ModelDefinition | undefined;
+    if (!definition) {
+      buildModelDefinition(ctor as typeof Model & { definition?: ModelDefinition });
+      definition = ctor.definition as ModelDefinition | undefined;
+    }
+    const props = definition?.properties ?? {};
+    for (const key of Object.keys(value)) {
+      if (!props[key]) {
+        throw new HttpErrors.BadRequest(`Unknown property "${key}" on parameter "${param.name}".`);
+      }
+    }
+  }
+
+  private resolveParameterModelCtor(param: OperationParameter): typeof Model | undefined {
+    if (param.modelCtor) return param.modelCtor;
+    const ctor = this.tryResolveParameterCtor(param.type);
+    if (ctor) param.modelCtor = ctor;
+    return ctor;
+  }
+
+  private tryResolveParameterCtor(type: OperationParameter['type']): typeof Model | undefined {
+    if (!type) return undefined;
+    if (typeof type === 'function') {
+      if (this.isModelConstructor(type)) return type as typeof Model;
+      try {
+        const resolved = (type as () => string | typeof Model)();
+        if (this.isModelConstructor(resolved)) return resolved;
+      } catch {
+        return undefined;
+      }
+    }
+    return undefined;
+  }
+
+  private isModelConstructor(value: unknown): value is typeof Model {
+    if (typeof value !== 'function') return false;
+    const candidate = value as typeof Model & { definition?: unknown };
+    const proto = candidate.prototype;
+    if (!proto) return false;
+    if (proto instanceof Model) return true;
+    return Boolean(candidate.definition);
   }
 }
 

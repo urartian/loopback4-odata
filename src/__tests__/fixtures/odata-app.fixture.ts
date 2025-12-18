@@ -362,6 +362,15 @@ class ProductODataController {
     return { status: 'ok', total: count.count };
   }
 
+  @odataAction({
+    name: 'echoDimensions',
+    binding: 'unbound',
+    params: [{ name: 'input', type: () => ProductDimensions }],
+  })
+  async echoDimensions(body: { input?: ProductDimensions }) {
+    return { input: body.input ?? null };
+  }
+
   @odata.before('CREATE')
   validateCreate(ctx: CrudHookContext) {
     const payload = ctx.payload as AnyObject | undefined;

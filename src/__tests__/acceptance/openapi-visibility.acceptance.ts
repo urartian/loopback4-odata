@@ -177,13 +177,15 @@ function findPaths(paths: Record<string, unknown> | undefined, fragment: string)
 }
 
 describe('OData OpenAPI visibility', () => {
-  it('hides @odataModel-only entity sets by default', async function (this: TestContext) {
+  it('documents @odataModel-only entity sets by default', async function (this: TestContext) {
     await withVisibilityApp(
       { entities: ['internal', 'published'] },
       async (app) => {
         const spec = await app.restServer.getApiSpec();
         const paths = spec.paths ?? {};
-        expect(findPaths(paths, 'InternalEntities')).to.be.empty();
+        const internal = paths['/odata/InternalEntities'] as Record<string, any> | undefined;
+        expect(internal).to.be.Object();
+        expect(internal?.get?.['x-visibility']).to.equal('documented');
         const published = paths['/odata/PublishedEntities'] as Record<string, any> | undefined;
         expect(published).to.be.Object();
         expect(published?.get).to.be.Object();
@@ -224,28 +226,28 @@ describe('OData OpenAPI visibility', () => {
 
   it('retains and retags hidden routes when removal is disabled', async function (this: TestContext) {
     await withVisibilityApp(
-      { entities: ['internal', 'published'], config: { removeUndocumentedFromSpec: false } },
+      { entities: ['suppressed', 'published'], config: { removeUndocumentedFromSpec: false } },
       async (app) => {
         const spec = await app.restServer.getApiSpec();
         const cfg = app.getSync(ODATA_BINDINGS.CONFIG) as ODataConfig;
         expect(cfg.removeUndocumentedFromSpec).to.be.false();
         const client: Client = createRestAppClient(app);
         await client.get('/odata/PublishedEntities').expect(200);
-        await client.get('/odata/InternalEntities').expect(200);
+        await client.get('/odata/SuppressedEntities').expect(200);
         const rawPaths = (app.restServer as any).httpHandler.describeApiPaths();
-        expect(Object.keys(rawPaths)).to.containEql('/odata/InternalEntities');
+        expect(Object.keys(rawPaths)).to.containEql('/odata/SuppressedEntities');
         const registry = (await app.get(ODATA_BINDINGS.ENTITY_SET_REGISTRY)) as any;
         expect(
           registry.list().map((def: any) => `${def.name}:${def.documentInOpenApi}`),
-        ).to.containEql('InternalEntities:false');
+        ).to.containEql('SuppressedEntities:false');
         const paths = spec.paths ?? {};
         const published = paths['/odata/PublishedEntities'] as Record<string, any> | undefined;
         expect(published).to.be.Object();
-        expect(Object.keys(paths)).to.containEql('/odata/InternalEntities');
-        const internal = paths['/odata/InternalEntities'] as Record<string, any> | undefined;
-        expect(internal).to.be.Object();
-        expect(internal?.get?.['x-visibility']).to.equal('internal');
-        expect(internal?.get?.['x-odata-generated']).to.be.true();
+        expect(Object.keys(paths)).to.containEql('/odata/SuppressedEntities');
+        const suppressed = paths['/odata/SuppressedEntities'] as Record<string, any> | undefined;
+        expect(suppressed).to.be.Object();
+        expect(suppressed?.get?.['x-visibility']).to.equal('internal');
+        expect(suppressed?.get?.['x-odata-generated']).to.be.true();
       },
       this,
     );
