@@ -999,7 +999,12 @@ class ODataOperationRoute extends ControllerRoute<object> {
   }
 
   private isModelConstructor(value: unknown): value is typeof Model {
-    return typeof value === 'function' && value.prototype instanceof Model;
+    if (typeof value !== 'function') return false;
+    const candidate = value as typeof Model & { definition?: unknown };
+    const proto = candidate.prototype;
+    if (!proto) return false;
+    if (proto instanceof Model) return true;
+    return Boolean(candidate.definition);
   }
 }
 
