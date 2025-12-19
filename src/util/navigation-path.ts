@@ -1,5 +1,6 @@
 import { AnyObject, Entity, ModelDefinition, buildModelDefinition } from '@loopback/repository';
 import { ensureNavigationTargetKey } from './relation-metadata';
+import { isEntityCtor } from './model-helpers';
 
 type RelationMeta = AnyObject & {
   name?: string;
@@ -155,7 +156,7 @@ function resolveRelationTarget(meta: RelationMeta): typeof Entity | undefined {
 }
 
 function isEntityConstructor(value: AnyObject): value is typeof Entity {
-  return typeof value === 'function' && value.prototype instanceof Entity;
+  return isEntityCtor(value);
 }
 
 function buildJoinSegment(

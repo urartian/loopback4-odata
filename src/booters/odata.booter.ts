@@ -63,6 +63,7 @@ import {
   RepositoryMediaAdapterTarget,
   RepositoryMediaHandlerAdapter,
 } from '../services/odata-media-handler';
+import { isModelCtor } from '../util/model-helpers';
 
 @injectable({ tags: { booters: 'odata' } })
 export class ODataBooter implements Booter {
@@ -999,12 +1000,7 @@ class ODataOperationRoute extends ControllerRoute<object> {
   }
 
   private isModelConstructor(value: unknown): value is typeof Model {
-    if (typeof value !== 'function') return false;
-    const candidate = value as typeof Model & { definition?: unknown };
-    const proto = candidate.prototype;
-    if (!proto) return false;
-    if (proto instanceof Model) return true;
-    return Boolean(candidate.definition);
+    return isModelCtor(value);
   }
 }
 

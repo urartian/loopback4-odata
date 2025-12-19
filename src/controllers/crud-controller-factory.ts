@@ -84,6 +84,7 @@ import { ODataConfig, ODataApplyTelemetryEvent, ODataRequestState } from '../typ
 import * as ipaddr from 'ipaddr.js';
 import { getODataSearchableProps } from '../decorators/search.decorators';
 import { ensureModelDefinitionWithRelations } from '../util/model-definition';
+import { isEntityCtor } from '../util/model-helpers';
 import { ensureNavigationTargetKey } from '../util/relation-metadata';
 import {
   ResolvedNavigationPath,
@@ -349,7 +350,7 @@ export function defineODataCrudController(def: EntitySetDef) {
     if (!target) return undefined;
     let ctor: typeof Entity | undefined;
     const maybeCtor = target as typeof Entity;
-    if (typeof maybeCtor === 'function' && maybeCtor.prototype instanceof Entity) {
+    if (isEntityCtor(maybeCtor)) {
       ctor = maybeCtor;
     } else if (typeof target === 'function') {
       try {
@@ -788,9 +789,7 @@ export function defineODataCrudController(def: EntitySetDef) {
       if ((ctor as unknown) === Object) return undefined;
       const maybeDefinition = (ctor as unknown as { definition?: ModelDefinition }).definition;
       if (maybeDefinition) return ctor as typeof Entity;
-      if ((ctor as unknown as { prototype?: unknown }).prototype instanceof Entity) {
-        return ctor as typeof Entity;
-      }
+      if (isEntityCtor(ctor)) return ctor as typeof Entity;
       return undefined;
     }
 
