@@ -8517,6 +8517,18 @@ export function defineODataCrudController(def: EntitySetDef) {
         this.ensureJsonContentType();
       }
       const slugHeader = bodyIsBinary ? this.getSlugHeader() : undefined;
+      const contentLengthHeader =
+        bodyIsBinary && typeof this.request.headers['content-length'] === 'string'
+          ? this.request.headers['content-length']
+          : undefined;
+      const contentLengthValue =
+        bodyIsBinary && contentLengthHeader && contentLengthHeader.trim()
+          ? Number(contentLengthHeader)
+          : undefined;
+      const mediaContentLength =
+        bodyIsBinary && Number.isFinite(contentLengthValue)
+          ? Number(contentLengthValue)
+          : undefined;
       const initialPayload =
         bodyIsBinary || !payload || typeof payload !== 'object'
           ? (this.buildMediaSlugPayload(slugHeader) ?? {})
@@ -8625,9 +8637,13 @@ export function defineODataCrudController(def: EntitySetDef) {
             options,
             stream: mediaStream,
             contentType: effectiveContentType,
+            contentLength: mediaContentLength,
             slug: slugHeader,
           });
-          const createOverrides = { contentType: effectiveContentType };
+          const createOverrides = {
+            contentType: effectiveContentType,
+            contentLength: mediaContentLength,
+          };
           const resolvedMetadata = this.resolveMediaMetadata(writeResult, createOverrides);
           const updates = await this.applyMediaMetadataUpdates(
             createdEntityId,
