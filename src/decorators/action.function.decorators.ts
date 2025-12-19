@@ -1,5 +1,6 @@
 import 'reflect-metadata';
 import { Model } from '@loopback/repository';
+import { isModelCtor } from '../util/model-helpers';
 
 export type ODataBindingScope = 'collection' | 'entity' | 'unbound';
 
@@ -106,10 +107,5 @@ function resolveOperationParameterCtor(
 }
 
 function isModelConstructor(value: unknown): value is typeof Model {
-  if (typeof value !== 'function') return false;
-  const candidate = value as typeof Model & { definition?: unknown };
-  const proto = candidate.prototype;
-  if (!proto) return false;
-  if (proto instanceof Model) return true;
-  return Boolean(candidate.definition);
+  return isModelCtor(value);
 }

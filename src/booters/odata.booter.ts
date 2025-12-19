@@ -63,6 +63,7 @@ import {
   RepositoryMediaAdapterTarget,
   RepositoryMediaHandlerAdapter,
 } from '../services/odata-media-handler';
+import { isModelCtor, modelsRepresentSameEntity } from '../util/model-helpers';
 
 @injectable({ tags: { booters: 'odata' } })
 export class ODataBooter implements Booter {
@@ -123,7 +124,16 @@ export class ODataBooter implements Booter {
             typeof (relMeta as AnyObject).target === 'function'
               ? ((relMeta as AnyObject).target() as typeof Entity | undefined)
               : undefined;
-          if (relTargetCtor !== modelCtor) continue;
+          const relTargetDef = relTargetCtor
+            ? ((relTargetCtor as unknown as { definition?: ModelDefinition }).definition as
+                | ModelDefinition
+                | undefined)
+            : undefined;
+          const matchesSource = modelsRepresentSameEntity(relTargetCtor, modelCtor, {
+            leftDefinition: relTargetDef,
+            rightDefinition: modelDefinition,
+          });
+          if (!matchesSource) continue;
           const keyFrom = (relMeta as AnyObject).keyFrom as string | undefined;
           if (!keyFrom) continue;
           const targetProp = targetDef.properties?.[keyFrom];
@@ -999,12 +1009,7 @@ class ODataOperationRoute extends ControllerRoute<object> {
   }
 
   private isModelConstructor(value: unknown): value is typeof Model {
-    if (typeof value !== 'function') return false;
-    const candidate = value as typeof Model & { definition?: unknown };
-    const proto = candidate.prototype;
-    if (!proto) return false;
-    if (proto instanceof Model) return true;
-    return Boolean(candidate.definition);
+    return isModelCtor(value);
   }
 }
 

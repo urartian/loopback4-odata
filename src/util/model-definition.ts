@@ -1,4 +1,5 @@
 import { AnyObject, Entity, ModelDefinition, buildModelDefinition } from '@loopback/repository';
+import { isEntityCtor } from './model-helpers';
 
 type RelationMeta = AnyObject & {
   target?: (() => typeof Entity) | typeof Entity;
@@ -41,13 +42,13 @@ export function ensureModelDefinition(modelCtor: typeof Entity): ModelDefinition
 function resolveRelationTarget(relation: RelationMeta | undefined): typeof Entity | undefined {
   if (!relation?.target) return undefined;
   const target = relation.target;
-  if (isEntityConstructor(target)) {
+  if (isEntityCtor(target)) {
     return target;
   }
   if (typeof target === 'function') {
     try {
       const resolved = (target as () => typeof Entity)();
-      if (isEntityConstructor(resolved)) return resolved;
+      if (isEntityCtor(resolved)) return resolved;
       if (typeof resolved === 'function') {
         return resolved as typeof Entity;
       }
@@ -56,8 +57,4 @@ function resolveRelationTarget(relation: RelationMeta | undefined): typeof Entit
     }
   }
   return undefined;
-}
-
-function isEntityConstructor(value: AnyObject): value is typeof Entity {
-  return typeof value === 'function' && value.prototype instanceof Entity;
 }

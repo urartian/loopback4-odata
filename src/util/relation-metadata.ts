@@ -1,4 +1,5 @@
 import { AnyObject, Entity, ModelDefinition } from '@loopback/repository';
+import { isEntityCtor } from './model-helpers';
 
 interface RelationMetaLike extends AnyObject {
   keyTo?: string;
@@ -25,8 +26,7 @@ export function ensureNavigationTargetKey(meta: RelationMetaLike | undefined): s
 
   let targetModel: typeof Entity | undefined;
   const maybeCtor = targetResolver as unknown as typeof Entity;
-  const prototype = (maybeCtor as AnyObject)?.prototype;
-  if (prototype && prototype instanceof Entity) {
+  if (isEntityCtor(maybeCtor)) {
     targetModel = maybeCtor;
   } else {
     try {

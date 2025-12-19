@@ -7,6 +7,7 @@ import {
   buildModelDefinition,
 } from '@loopback/repository';
 import { ensureModelDefinitionWithRelations } from './model-definition';
+import { isModelCtor } from './model-helpers';
 
 export type PrimitivePropertyKind = 'string' | 'number' | 'boolean' | 'date' | 'buffer';
 
@@ -233,7 +234,7 @@ function resolveStructuredCtor(candidate: unknown): typeof Model | undefined {
 }
 
 function isStructuredModelCtor(value: unknown): value is typeof Model {
-  return typeof value === 'function' && value.prototype instanceof Model;
+  return isModelCtor(value);
 }
 
 function isArrayPropertyDefinition(definition: PropertyDefinition | undefined): boolean {

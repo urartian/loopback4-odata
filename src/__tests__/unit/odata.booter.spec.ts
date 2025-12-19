@@ -59,6 +59,84 @@ describe('ODataBooter entity set naming', () => {
   });
 });
 
+describe('ODataBooter composition detection', () => {
+  it('enables deep insert/update when related models only match structurally', async () => {
+    const RepoRestApp = RepositoryMixin(RestApplication);
+    const app = new RepoRestApp();
+    app.dataSource(new juggler.DataSource({ name: 'db', connector: 'memory' }), 'db');
+
+    @model({ name: 'LibraryItem' })
+    class BaseLibraryItem extends Entity {
+      @property({ id: true })
+      id!: number;
+    }
+
+    @model({ name: 'LibraryItem' })
+    class DuplicateLibraryItem extends Entity {
+      @property({ id: true })
+      id!: number;
+    }
+
+    @model()
+    class LibraryPart extends Entity {
+      @property({ id: true })
+      id!: number;
+
+      @property({ required: true })
+      libraryItemId!: number;
+    }
+
+    const duplicateDefinition = (DuplicateLibraryItem as typeof Entity).definition;
+    duplicateDefinition.addRelation({
+      name: 'parts',
+      type: RelationType.hasMany,
+      targetsMany: true,
+      source: DuplicateLibraryItem,
+      target: () => LibraryPart,
+    });
+
+    const partDefinition = (LibraryPart as typeof Entity).definition;
+    partDefinition.addRelation({
+      name: 'libraryItem',
+      type: RelationType.belongsTo,
+      targetsMany: false,
+      source: LibraryPart,
+      target: () => BaseLibraryItem,
+      keyFrom: 'libraryItemId',
+    });
+
+    class LibraryItemRepository extends DefaultCrudRepository<
+      DuplicateLibraryItem,
+      typeof DuplicateLibraryItem.prototype.id
+    > {
+      constructor(@inject('datasources.db') dataSource: juggler.DataSource) {
+        super(DuplicateLibraryItem, dataSource);
+      }
+    }
+
+    @odataController(DuplicateLibraryItem)
+    class LibraryItemController {}
+
+    app.repository(LibraryItemRepository);
+    app.controller(LibraryItemController);
+
+    const registry = new EntitySetRegistry();
+    const booter = new ODataBooter(
+      app,
+      registry,
+      {} as any,
+      new ODataApplyExecutorRegistry(),
+      noopLogger,
+    );
+
+    await booter.load();
+
+    const def = registry.get(DuplicateLibraryItem);
+    expect(def?.deepInsert).to.equal(true);
+    expect(def?.deepUpdate).to.equal(true);
+  });
+});
+
 describe('ODataBooter repository binding resolution', () => {
   it('uses naming conventions to resolve repositories without instantiating them', async () => {
     const RepoApp = RepositoryMixin(Application);

@@ -39,6 +39,7 @@ import {
   dataSourceSupportsTransactions,
   probeDataSourceTransactionalCapability,
 } from '../util/datasource-transactions';
+import { isEntityCtor } from '../util/model-helpers';
 import { emitTelemetryEvent } from '../util/telemetry';
 import { rewriteODataUrl } from '../middleware/odata-path-rewriter';
 import { ensureModelDefinitionWithRelations } from '../util/model-definition';
@@ -1691,7 +1692,7 @@ export class ODataBatchController {
   }
 
   private isEntityConstructor(value: AnyObject): value is typeof Entity {
-    return typeof value === 'function' && value.prototype instanceof Entity;
+    return isEntityCtor(value);
   }
 
   private extractBoundary(contentType: string): string | undefined {

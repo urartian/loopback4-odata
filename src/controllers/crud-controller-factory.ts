@@ -84,6 +84,7 @@ import { ODataConfig, ODataApplyTelemetryEvent, ODataRequestState } from '../typ
 import * as ipaddr from 'ipaddr.js';
 import { getODataSearchableProps } from '../decorators/search.decorators';
 import { ensureModelDefinitionWithRelations } from '../util/model-definition';
+import { isEntityCtor } from '../util/model-helpers';
 import { ensureNavigationTargetKey } from '../util/relation-metadata';
 import {
   ResolvedNavigationPath,
@@ -349,7 +350,7 @@ export function defineODataCrudController(def: EntitySetDef) {
     if (!target) return undefined;
     let ctor: typeof Entity | undefined;
     const maybeCtor = target as typeof Entity;
-    if (typeof maybeCtor === 'function' && maybeCtor.prototype instanceof Entity) {
+    if (isEntityCtor(maybeCtor)) {
       ctor = maybeCtor;
     } else if (typeof target === 'function') {
       try {
@@ -788,9 +789,7 @@ export function defineODataCrudController(def: EntitySetDef) {
       if ((ctor as unknown) === Object) return undefined;
       const maybeDefinition = (ctor as unknown as { definition?: ModelDefinition }).definition;
       if (maybeDefinition) return ctor as typeof Entity;
-      if ((ctor as unknown as { prototype?: unknown }).prototype instanceof Entity) {
-        return ctor as typeof Entity;
-      }
+      if (isEntityCtor(ctor)) return ctor as typeof Entity;
       return undefined;
     }
 
@@ -1106,10 +1105,17 @@ export function defineODataCrudController(def: EntitySetDef) {
           : typeof prop.type === 'string'
             ? prop.type.toLowerCase()
             : undefined;
-      if (rawType === 'number' || rawType === 'bigint') {
+      if (rawType === 'bigint') {
+        try {
+          return BigInt(value);
+        } catch {
+          return undefined;
+        }
+      }
+      if (rawType === 'number') {
         const num = Number(value);
         if (Number.isNaN(num)) return undefined;
-        return rawType === 'bigint' ? BigInt(num) : num;
+        return num;
       }
       if (rawType === 'boolean') {
         return value.toLowerCase() === 'true';
@@ -8511,6 +8517,18 @@ export function defineODataCrudController(def: EntitySetDef) {
         this.ensureJsonContentType();
       }
       const slugHeader = bodyIsBinary ? this.getSlugHeader() : undefined;
+      const contentLengthHeader =
+        bodyIsBinary && typeof this.request.headers['content-length'] === 'string'
+          ? this.request.headers['content-length']
+          : undefined;
+      const contentLengthValue =
+        bodyIsBinary && contentLengthHeader && contentLengthHeader.trim()
+          ? Number(contentLengthHeader)
+          : undefined;
+      const mediaContentLength =
+        bodyIsBinary && Number.isFinite(contentLengthValue)
+          ? Number(contentLengthValue)
+          : undefined;
       const initialPayload =
         bodyIsBinary || !payload || typeof payload !== 'object'
           ? (this.buildMediaSlugPayload(slugHeader) ?? {})
@@ -8619,9 +8637,13 @@ export function defineODataCrudController(def: EntitySetDef) {
             options,
             stream: mediaStream,
             contentType: effectiveContentType,
+            contentLength: mediaContentLength,
             slug: slugHeader,
           });
-          const createOverrides = { contentType: effectiveContentType };
+          const createOverrides = {
+            contentType: effectiveContentType,
+            contentLength: mediaContentLength,
+          };
           const resolvedMetadata = this.resolveMediaMetadata(writeResult, createOverrides);
           const updates = await this.applyMediaMetadataUpdates(
             createdEntityId,
@@ -8850,6 +8872,9 @@ export function defineODataCrudController(def: EntitySetDef) {
         const options = this.repositoryOptions();
         const ifMatch = this.parseIfMatchHeader();
         const preference = preferences.returnPreference;
+        if (preference === 'representation') {
+          this.ensureAcceptsJson();
+        }
         let entityForResponse: AnyObject | undefined;
 
         if (this.etagEnabled() && this.cfg?.strict && !ifMatch) {

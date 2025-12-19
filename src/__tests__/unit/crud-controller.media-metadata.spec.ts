@@ -5,6 +5,7 @@ import { defineODataCrudController } from '../../controllers/crud-controller-fac
 import { ODataConfig } from '../../types';
 import { ODataApplyExecutorRegistry } from '../../services/odata-apply-executor.registry';
 import { ODataLogger, ODataTenantThrottler } from '../../keys';
+import { ODataMediaHandler } from '../../services/odata-media-handler';
 
 @model()
 class MediaMetadataEntity extends Entity {
@@ -150,5 +151,53 @@ describe('ODataCrudController media metadata updates', () => {
       size: 256,
       mediaVersion: 'W/"handler-override"',
     });
+  });
+
+  it('propagates Content-Length headers for binary media creates', async () => {
+    const binaryHeaders: AnyObject = {};
+    const binaryRequest = {
+      headers: binaryHeaders,
+      get: (name: string) => binaryHeaders[name.toLowerCase()],
+    } as unknown as Request;
+    const binaryResponse = {
+      headersSent: false,
+      set: sinon.stub(),
+      status: sinon.stub(),
+      end: sinon.stub(),
+      once: sinon.stub(),
+      getHeader: sinon.stub().returns(undefined),
+      type: sinon.stub(),
+    } as unknown as Response;
+    (binaryResponse.status as sinon.SinonStub).returns(binaryResponse);
+    const createStub = sinon.stub().resolves({ id: 1 });
+    const updateStub = sinon.stub().resolves();
+    const repository = {
+      create: createStub,
+      updateById: updateStub,
+    } as unknown as DefaultCrudRepository<Entity & AnyObject, unknown>;
+    const controller = new ControllerCtor(
+      repository,
+      binaryRequest,
+      binaryResponse,
+      httpCtx,
+      cfg,
+      applyExecutors,
+      logger,
+      undefined as unknown as ODataTenantThrottler,
+    );
+    const contentLength = 2048;
+    binaryHeaders['content-type'] = 'application/octet-stream';
+    binaryHeaders['content-length'] = String(contentLength);
+    const writeStub = sinon.stub().resolves(undefined);
+    const handler: ODataMediaHandler = {
+      read: sinon.stub().resolves(undefined),
+      write: writeStub,
+    };
+    sinon.stub(controller, 'requireMediaHandler').resolves(handler);
+
+    await controller.create(Buffer.from('example-binary'));
+
+    sinon.assert.calledWithMatch(writeStub, sinon.match.has('contentLength', contentLength));
+    sinon.assert.calledWithMatch(updateStub, 1, sinon.match.has('size', contentLength));
   });
 });
