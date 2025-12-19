@@ -114,6 +114,25 @@ describe('OData strict mode acceptance', () => {
     expect(res.body?.error?.code).to.equal('NotAcceptable');
   });
 
+  it('rejects delete return=representation responses when Accept excludes JSON', async () => {
+    const created = await client
+      .post('/odata/Products')
+      .send({ name: 'Strict Delete Device', price: 42 })
+      .expect(201);
+    const productId = created.body.id;
+    const etag = created.headers['etag'] as string;
+
+    const res = await client
+      .del(`/odata/Products(${productId})`)
+      .set('Prefer', 'return=representation')
+      .set('Accept', 'text/plain')
+      .set('If-Match', etag)
+      .expect(406);
+    expect(res.body?.error?.code).to.equal('NotAcceptable');
+
+    await client.del(`/odata/Products(${productId})`).set('If-Match', etag).expect(204);
+  });
+
   it('rejects $expand deeper than maxExpandDepth', async function () {
     if (app.state === 'started') await app.stop();
     app = await givenODataApplication({ port: 0, host: '127.0.0.1' });

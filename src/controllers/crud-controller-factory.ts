@@ -8872,6 +8872,9 @@ export function defineODataCrudController(def: EntitySetDef) {
         const options = this.repositoryOptions();
         const ifMatch = this.parseIfMatchHeader();
         const preference = preferences.returnPreference;
+        if (preference === 'representation') {
+          this.ensureAcceptsJson();
+        }
         let entityForResponse: AnyObject | undefined;
 
         if (this.etagEnabled() && this.cfg?.strict && !ifMatch) {
