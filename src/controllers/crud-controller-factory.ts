@@ -1105,10 +1105,17 @@ export function defineODataCrudController(def: EntitySetDef) {
           : typeof prop.type === 'string'
             ? prop.type.toLowerCase()
             : undefined;
-      if (rawType === 'number' || rawType === 'bigint') {
+      if (rawType === 'bigint') {
+        try {
+          return BigInt(value);
+        } catch {
+          return undefined;
+        }
+      }
+      if (rawType === 'number') {
         const num = Number(value);
         if (Number.isNaN(num)) return undefined;
-        return rawType === 'bigint' ? BigInt(num) : num;
+        return num;
       }
       if (rawType === 'boolean') {
         return value.toLowerCase() === 'true';
