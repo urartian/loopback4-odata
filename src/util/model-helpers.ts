@@ -24,3 +24,49 @@ export function isEntityCtor(value: unknown): value is typeof Entity {
   if (typeof ctor.getIdOf === 'function') return true;
   return false;
 }
+
+type ModelIdentityOptions = {
+  leftDefinition?: ModelDefinition;
+  rightDefinition?: ModelDefinition;
+};
+
+function normalizeModelIdentity(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+  return trimmed.toLowerCase();
+}
+
+function getModelIdentifiers(
+  ctor: typeof Model | typeof Entity,
+  definition?: ModelDefinition,
+): Set<string> {
+  const identifiers = new Set<string>();
+  const resolvedDefinition = definition ?? (ctor as MaybeModelCtor).definition;
+  const definitionName = normalizeModelIdentity(resolvedDefinition?.name);
+  if (definitionName) identifiers.add(definitionName);
+  const modelName = normalizeModelIdentity(
+    (ctor as typeof Entity & { modelName?: string }).modelName,
+  );
+  if (modelName) identifiers.add(modelName);
+  const ctorName = normalizeModelIdentity(ctor.name);
+  if (ctorName) identifiers.add(ctorName);
+  return identifiers;
+}
+
+export function modelsRepresentSameEntity(
+  left: typeof Model | typeof Entity | undefined,
+  right: typeof Model | typeof Entity | undefined,
+  options?: ModelIdentityOptions,
+): boolean {
+  if (!left || !right) return false;
+  if (left === right) return true;
+  const leftIds = getModelIdentifiers(left, options?.leftDefinition);
+  if (!leftIds.size) return false;
+  const rightIds = getModelIdentifiers(right, options?.rightDefinition);
+  if (!rightIds.size) return false;
+  for (const id of leftIds) {
+    if (rightIds.has(id)) return true;
+  }
+  return false;
+}
