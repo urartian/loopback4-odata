@@ -1176,7 +1176,10 @@ export function defineODataCrudController(def: EntitySetDef) {
         return num;
       }
       if (primitive === 'boolean') {
-        return value.toLowerCase() === 'true';
+        const normalized = value.toLowerCase();
+        if (normalized === 'true') return true;
+        if (normalized === 'false') return false;
+        return undefined;
       }
       return value;
     }
