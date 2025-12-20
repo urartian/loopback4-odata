@@ -75,4 +75,22 @@ describe('Slug handling for binary media entities', () => {
 
     expect(result).to.be.undefined();
   });
+
+  it('coerces slug headers to booleans when literals are provided', () => {
+    const controller = givenController();
+
+    const trueResult = controller.coerceSlugValue('TRUE', { type: 'boolean' });
+    const falseResult = controller.coerceSlugValue('false', { type: 'boolean' });
+
+    expect(trueResult).to.be.true();
+    expect(falseResult).to.be.false();
+  });
+
+  it('rejects invalid boolean slug values', () => {
+    const controller = givenController();
+
+    const result = controller.coerceSlugValue('not-a-boolean', { type: 'boolean' });
+
+    expect(result).to.be.undefined();
+  });
 });

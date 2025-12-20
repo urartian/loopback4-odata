@@ -28,6 +28,8 @@ if (typeof process.setMaxListeners === 'function') {
   process.setMaxListeners(20);
 }
 
+const BIG_INT_ASSET_ID = '9223372036854775807';
+
 class MetadataOverrideMediaHandler implements ODataMediaHandler {
   static readonly MEDIA_TYPE = 'application/x-handler-sniffed';
   static readonly LENGTH_OFFSET = 7;
@@ -423,6 +425,91 @@ describe('OData component acceptance', () => {
         .set('Accept', 'application/pdf')
         .expect('Content-Type', /application\/pdf/)
         .expect(200);
+    });
+
+    it('serves media streams for entities with BigInt identifiers', async () => {
+      const res = await client.get(`/odata/BigIntAssets(${BIG_INT_ASSET_ID})/$value`).expect(200);
+      expect(res.text).to.equal('Primary BigInt asset payload');
+    });
+
+    it('links and unlinks BigInt navigation targets via $ref', async () => {
+      const library = await client
+        .post('/odata/AssetLibraries')
+        .send({ name: 'Overflowing' })
+        .expect(201);
+      const libraryId = library.body.id;
+      expect(libraryId).to.be.ok();
+
+      await client
+        .post(`/odata/AssetLibraries(${libraryId})/assets/$ref`)
+        .send({ '@odata.id': `/odata/BigIntAssets(${BIG_INT_ASSET_ID})` })
+        .expect(204);
+
+      const linked = await client.get(`/odata/BigIntAssets(${BIG_INT_ASSET_ID})`).expect(200);
+      expect(linked.body.libraryId).to.equal(libraryId);
+
+      await client
+        .del(`/odata/AssetLibraries(${libraryId})/assets(${BIG_INT_ASSET_ID})/$ref`)
+        .expect(204);
+
+      const after = await client.get(`/odata/BigIntAssets(${BIG_INT_ASSET_ID})`).expect(200);
+      expect(after.body.libraryId).to.equal(null);
+    });
+
+    it('handles JSON $batch requests that reference BigInt keys', async () => {
+      const ds = (await app.get('datasources.db')) as AnyObject;
+      const originalBeginTransaction = ds.beginTransaction;
+      ds.beginTransaction = async () => ({
+        commit: async () => undefined,
+        rollback: async () => undefined,
+      });
+
+      try {
+        const res = await client
+          .post('/odata/$batch')
+          .send({
+            requests: [
+              {
+                id: 'fetch-original',
+                method: 'GET',
+                url: `/odata/BigIntAssets(${BIG_INT_ASSET_ID})`,
+              },
+              {
+                id: 'update-big',
+                method: 'PATCH',
+                url: `/odata/BigIntAssets(${BIG_INT_ASSET_ID})`,
+                body: { name: 'Updated BigInt asset' },
+                atomicityGroup: 'big',
+              },
+              {
+                id: 'fetch-updated',
+                method: 'GET',
+                url: `/odata/BigIntAssets(${BIG_INT_ASSET_ID})`,
+                dependsOn: ['update-big'],
+              },
+            ],
+          })
+          .expect(200);
+
+        const updateEntry = (res.body.responses ?? []).find(
+          (entry: AnyObject) => entry.id === 'update-big',
+        );
+        expect(updateEntry).to.be.Object();
+        expect([200, 204]).to.containEql(updateEntry.status);
+
+        const fetchEntry = (res.body.responses ?? []).find(
+          (entry: AnyObject) => entry.id === 'fetch-updated',
+        );
+        expect(fetchEntry).to.be.Object();
+        expect(fetchEntry.status).to.equal(200);
+        expect(fetchEntry.body?.name).to.equal('Updated BigInt asset');
+      } finally {
+        if (originalBeginTransaction) {
+          ds.beginTransaction = originalBeginTransaction;
+        } else {
+          delete ds.beginTransaction;
+        }
+      }
     });
   });
   it('exposes collection-bound functions with query parameters', async () => {
