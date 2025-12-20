@@ -436,13 +436,15 @@ export function defineODataCrudController(def: EntitySetDef) {
     ({
       'x-parser': 'stream',
     }) as AnyObject;
+  const createPayloadSchema = getModelSchemaRef(modelCtor, {
+    title: `New${modelCtor.name ?? 'Entity'}`,
+    optional: optionalProperties as unknown as (keyof Entity)[],
+    includeRelations: deepInsertEnabledForSet,
+  }) as SchemaObject;
+  normalizeSchemaFormats(createPayloadSchema as AnyObject);
   const createRequestContent: ContentObject = {
     'application/json': {
-      schema: getModelSchemaRef(modelCtor, {
-        title: `New${modelCtor.name ?? 'Entity'}`,
-        optional: optionalProperties as unknown as (keyof Entity)[],
-        includeRelations: deepInsertEnabledForSet,
-      }),
+      schema: createPayloadSchema,
     },
     ...(hasStream
       ? {
@@ -470,6 +472,7 @@ export function defineODataCrudController(def: EntitySetDef) {
     title: `${modelCtor.name ?? 'Entity'}Patch`,
     partial: true,
   }) as SchemaObject;
+  normalizeSchemaFormats(basePatchSchema as AnyObject);
 
   const PROPERTY_CONSTRAINT_KEYS = [
     'minimum',
@@ -490,8 +493,11 @@ export function defineODataCrudController(def: EntitySetDef) {
     return Boolean(value && typeof value === 'object' && '$ref' in (value as AnyObject));
   };
 
-  const normalizeSchemaFormats = (schema?: AnyObject): void => {
+  function normalizeSchemaFormats(schema?: AnyObject): void {
     if (!schema || typeof schema !== 'object') return;
+    if ('dataType' in schema) {
+      delete schema.dataType;
+    }
     if (typeof schema.format === 'string') {
       const normalized = schema.format.trim().toLowerCase();
       if (normalized === 'buffer') {
@@ -503,6 +509,13 @@ export function defineODataCrudController(def: EntitySetDef) {
     }
     if (schema.properties && typeof schema.properties === 'object') {
       for (const value of Object.values(schema.properties)) {
+        if (value && typeof value === 'object') {
+          normalizeSchemaFormats(value as AnyObject);
+        }
+      }
+    }
+    if (schema.definitions && typeof schema.definitions === 'object') {
+      for (const value of Object.values(schema.definitions)) {
         if (value && typeof value === 'object') {
           normalizeSchemaFormats(value as AnyObject);
         }
@@ -529,7 +542,7 @@ export function defineODataCrudController(def: EntitySetDef) {
         }
       }
     }
-  };
+  }
 
   const cloneSchemaObject = (schema: AnyObject | undefined): SchemaObject => {
     if (!schema) return {} as SchemaObject;
@@ -996,6 +1009,7 @@ export function defineODataCrudController(def: EntitySetDef) {
       resolved?: { contentType?: string; length?: number; etag?: string },
     ): Promise<AnyObject | undefined> {
       if (!hasStream) return undefined;
+      const entityId = this.coerceParentId(id);
       const patch: AnyObject = {};
       const updates: AnyObject = {};
       const metadata = resolved ?? this.resolveMediaMetadata(handlerResult, overrides);
@@ -1013,19 +1027,20 @@ export function defineODataCrudController(def: EntitySetDef) {
         updates[mediaEtagField] = etag;
       }
       if (Object.keys(patch).length) {
-        await this.repository.updateById(id as any, patch, this.repositoryOptions());
+        await this.repository.updateById(entityId as any, patch, this.repositoryOptions());
       }
       return Object.keys(updates).length ? updates : undefined;
     }
 
     async clearMediaMetadata(id: unknown): Promise<void> {
       if (!hasStream) return;
+      const entityId = this.coerceParentId(id);
       const patch: AnyObject = {};
       if (mediaContentTypeField) patch[mediaContentTypeField] = null;
       if (mediaLengthField) patch[mediaLengthField] = null;
       if (mediaEtagField) patch[mediaEtagField] = null;
       if (Object.keys(patch).length) {
-        await this.repository.updateById(id as any, patch, this.repositoryOptions());
+        await this.repository.updateById(entityId as any, patch, this.repositoryOptions());
       }
     }
 
@@ -1097,30 +1112,135 @@ export function defineODataCrudController(def: EntitySetDef) {
       return { [property]: value };
     }
 
+    detectPrimitivePropertyType(
+      prop?: PropertyDefinition,
+    ): 'bigint' | 'number' | 'boolean' | undefined {
+      if (!prop) return undefined;
+      const raw = prop.type;
+      if (typeof raw === 'function') {
+        if (raw === Number) return 'number';
+        if (raw === Boolean) return 'boolean';
+        if ((raw as unknown) === BigInt) return 'bigint';
+        const lowered = raw.name?.toLowerCase();
+        if (lowered === 'bigint' || lowered === 'number' || lowered === 'boolean') {
+          return lowered as 'bigint' | 'number' | 'boolean';
+        }
+      } else if (typeof raw === 'string') {
+        const lowered = raw.toLowerCase();
+        if (lowered === 'bigint' || lowered === 'number' || lowered === 'boolean') {
+          return lowered as 'bigint' | 'number' | 'boolean';
+        }
+      }
+      const schema = (prop as AnyObject)?.jsonSchema as AnyObject | undefined;
+      const schemaType = typeof schema?.type === 'string' ? schema.type.toLowerCase() : undefined;
+      const schemaFormat =
+        typeof schema?.format === 'string' ? schema.format.toLowerCase() : undefined;
+      const schemaDataType =
+        typeof schema?.dataType === 'string' ? schema.dataType.toLowerCase() : undefined;
+      if (
+        schemaDataType === 'int64' ||
+        schemaDataType === 'long' ||
+        schemaFormat === 'int64' ||
+        schemaFormat === 'long'
+      ) {
+        return 'bigint';
+      }
+      if (schemaType === 'boolean') return 'boolean';
+      if (schemaType === 'number' || schemaType === 'integer') return 'number';
+      return undefined;
+    }
+
+    propertyDeclaresString(prop?: PropertyDefinition): boolean {
+      if (!prop) return false;
+      const raw = prop.type;
+      if (raw === String) return true;
+      if (typeof raw === 'function' && raw.name?.toLowerCase() === 'string') return true;
+      if (typeof raw === 'string' && raw.toLowerCase() === 'string') return true;
+      return false;
+    }
+
     coerceSlugValue(value: string, prop?: PropertyDefinition): unknown | undefined {
-      if (!prop) return value;
-      const rawType =
-        typeof prop.type === 'function'
-          ? prop.type.name.toLowerCase()
-          : typeof prop.type === 'string'
-            ? prop.type.toLowerCase()
-            : undefined;
-      if (rawType === 'bigint') {
+      const primitive = this.detectPrimitivePropertyType(prop);
+      const declaresString = this.propertyDeclaresString(prop);
+      if (primitive === 'bigint') {
         try {
-          return BigInt(value);
+          const parsed = BigInt(value);
+          return declaresString ? value : parsed;
         } catch {
           return undefined;
         }
       }
-      if (rawType === 'number') {
+      if (primitive === 'number') {
         const num = Number(value);
         if (Number.isNaN(num)) return undefined;
         return num;
       }
-      if (rawType === 'boolean') {
+      if (primitive === 'boolean') {
         return value.toLowerCase() === 'true';
       }
       return value;
+    }
+
+    coerceIdentifierLiteral(
+      literal: string,
+      prop?: PropertyDefinition,
+      descriptor = 'identifier',
+    ): unknown {
+      const primitive = this.detectPrimitivePropertyType(prop);
+      const declaresString = this.propertyDeclaresString(prop);
+      if (primitive === 'bigint') {
+        try {
+          const parsed = BigInt(literal);
+          return declaresString ? literal : parsed;
+        } catch {
+          throw new HttpErrors.BadRequest(`Invalid ${descriptor}: ${literal}`);
+        }
+      }
+      if (primitive === 'number') {
+        const num = Number(literal);
+        if (Number.isNaN(num)) {
+          throw new HttpErrors.BadRequest(`Invalid ${descriptor}: ${literal}`);
+        }
+        return num;
+      }
+      if (primitive === 'boolean') {
+        const normalized = literal.toLowerCase();
+        if (normalized === 'true') return true;
+        if (normalized === 'false') return false;
+        throw new HttpErrors.BadRequest(`Invalid ${descriptor}: ${literal}`);
+      }
+      return literal;
+    }
+
+    stripODataAnnotations(target: AnyObject | undefined): void {
+      if (!target || typeof target !== 'object') return;
+      for (const key of Object.keys(target)) {
+        if (key.includes('@odata.')) {
+          delete target[key];
+          continue;
+        }
+        const value = target[key];
+        if (Array.isArray(value)) {
+          for (const entry of value) {
+            if (entry && typeof entry === 'object') {
+              this.stripODataAnnotations(entry as AnyObject);
+            }
+          }
+        } else if (value && typeof value === 'object') {
+          this.stripODataAnnotations(value as AnyObject);
+        }
+      }
+    }
+
+    removeEntityIdProperties(target: AnyObject | undefined, repo?: CrudRepo | AnyObject): void {
+      if (!target || typeof target !== 'object' || !repo) return;
+      const entityClass = (repo as AnyObject).entityClass as typeof Entity | undefined;
+      const idProps = entityClass?.getIdProperties?.() ?? [];
+      for (const prop of idProps) {
+        if (prop && prop in target) {
+          delete target[prop];
+        }
+      }
     }
 
     getSlugHeader(): string | undefined {
@@ -2321,6 +2441,8 @@ export function defineODataCrudController(def: EntitySetDef) {
         ctx.navigationTargetId = navId;
         ctx.navigationTargetEntity = existing;
         const plain = this.toPlainEntity(existing) ?? {};
+        this.stripODataAnnotations(plain);
+        this.removeEntityIdProperties(plain, navRepo);
         plain[keyTo] = ctx.id ?? parentId;
         await navRepo.replaceById(navId as any, plain as AnyObject, this.repositoryOptions());
         return undefined;
@@ -2397,6 +2519,8 @@ export function defineODataCrudController(def: EntitySetDef) {
           ctx.navigationTargetId = navId;
           ctx.navigationTargetEntity = existing;
           const plain = this.toPlainEntity(existing) ?? {};
+          this.stripODataAnnotations(plain);
+          this.removeEntityIdProperties(plain, navRepo);
           // Ensure the link actually exists (entity is linked to this parent); otherwise 404.
           if (plain[keyTo] == null || plain[keyTo] !== parentId) {
             throw new HttpErrors.NotFound('Navigation link does not exist.');
@@ -2419,6 +2543,8 @@ export function defineODataCrudController(def: EntitySetDef) {
         if (navId == null) throw new HttpErrors.NotFound('Navigation link does not exist.');
         ctx.navigationTargetId = navId;
         const plain = this.toPlainEntity(existing) ?? {};
+        this.stripODataAnnotations(plain);
+        this.removeEntityIdProperties(plain, navRepo);
         plain[keyTo] = null;
         await navRepo.replaceById(navId as any, plain as AnyObject, this.repositoryOptions());
       };
@@ -2802,39 +2928,17 @@ export function defineODataCrudController(def: EntitySetDef) {
       const entityClass = (targetRepo as AnyObject).entityClass as typeof Entity | undefined;
       const idProps = entityClass?.getIdProperties?.() ?? [];
       const idName = idProps[0] ?? 'id';
-      const idDef = (entityClass as AnyObject)?.definition?.properties?.[idName];
-      const type = idDef?.type;
-      if (type === Number || type === 'number') {
-        const num = Number(literal);
-        if (Number.isNaN(num)) {
-          throw new HttpErrors.BadRequest(`Invalid numeric identifier: ${literal}`);
-        }
-        return num;
-      }
-      if (type === Boolean || type === 'boolean') {
-        if (literal === 'true') return true;
-        if (literal === 'false') return false;
-      }
-      return literal;
+      const idDef = (entityClass as AnyObject)?.definition?.properties?.[idName] as
+        | PropertyDefinition
+        | undefined;
+      return this.coerceIdentifierLiteral(literal, idDef, 'identifier');
     }
 
     coerceParentId(raw: unknown): unknown {
       if (typeof raw !== 'string') return raw;
       const idName = idProperties[0];
-      const idDef = modelDefinition?.properties?.[idName];
-      const type = idDef?.type;
-      if (type === Number || type === 'number') {
-        const num = Number(raw);
-        if (Number.isNaN(num)) {
-          throw new HttpErrors.BadRequest(`Invalid identifier: ${raw}`);
-        }
-        return num;
-      }
-      if (type === Boolean || type === 'boolean') {
-        if (raw === 'true') return true;
-        if (raw === 'false') return false;
-      }
-      return raw;
+      const idDef = modelDefinition?.properties?.[idName] as PropertyDefinition | undefined;
+      return this.coerceIdentifierLiteral(raw, idDef, 'identifier');
     }
 
     extractEntityId(entity: CrudEntity | AnyObject | undefined): unknown {
@@ -3031,11 +3135,12 @@ export function defineODataCrudController(def: EntitySetDef) {
       where: Filter<CrudEntity>['where'] | undefined,
       options?: Options,
     ): Promise<AnyObject | undefined> {
+      const entityId = this.coerceParentId(id);
       if (where) {
         const existing = await this.repository.findOne({ where } as Filter<CrudEntity>, options);
         return this.toPlainEntity(existing ?? undefined);
       }
-      const entity = await this.repository.findById(id as any, undefined, options);
+      const entity = await this.repository.findById(entityId as any, undefined, options);
       return this.toPlainEntity(entity);
     }
 
@@ -8004,12 +8109,13 @@ export function defineODataCrudController(def: EntitySetDef) {
       this.validateFieldsStrict(baseFilter as Filter<CrudEntity>);
       this.enforceSkipLimit(baseFilter as Filter<CrudEntity>);
 
+      const entityId = this.coerceParentId(id);
       const op: CrudOperation = 'READ';
       const scope: CrudScope = 'entity';
       const ctx = this.buildHookContext({
         operation: op,
         scope,
-        id,
+        id: entityId,
         filter: baseFilter as any,
         options: this.repositoryOptions(),
       });
@@ -8018,7 +8124,7 @@ export function defineODataCrudController(def: EntitySetDef) {
 
       const execDefault = async () => {
         const options = this.repositoryOptions();
-        const entity = await this.repository.findById(id as any, baseFilter, options);
+        const entity = await this.repository.findById(entityId as any, baseFilter, options);
         const plain = this.toPlainEntity(entity) ?? {};
         if (postFilterExpr) {
           const matches = this.evaluatePredicate(postFilterExpr, plain, '', plain);
@@ -8088,12 +8194,13 @@ export function defineODataCrudController(def: EntitySetDef) {
       };
       this.ensureEtagField(baseFilter);
       const ifNoneMatch = this.parseIfNoneMatchHeader();
+      const entityId = this.coerceParentId(id);
       const op: CrudOperation = 'READ';
       const scope: CrudScope = 'entity';
       const ctx = this.buildHookContext({
         operation: op,
         scope,
-        id,
+        id: entityId,
         filter: baseFilter as any,
         options: this.repositoryOptions(),
       });
@@ -8102,7 +8209,7 @@ export function defineODataCrudController(def: EntitySetDef) {
 
       const execDefault = async () => {
         const options = this.repositoryOptions();
-        const entity = await this.repository.findById(id as any, baseFilter, options);
+        const entity = await this.repository.findById(entityId as any, baseFilter, options);
         const plain = this.toPlainEntity(entity) ?? {};
         const storedContentType = this.readMediaContentType(plain);
         const mediaEtag = this.readMediaEtag(plain);
@@ -8122,7 +8229,7 @@ export function defineODataCrudController(def: EntitySetDef) {
 
         const handler = await this.requireMediaHandler();
         const result = await handler.read({
-          id,
+          id: entityId,
           entitySet: def,
           entity: plain,
           repository: this.repository as unknown as DefaultCrudRepository<CrudEntity, unknown>,
@@ -8147,7 +8254,7 @@ export function defineODataCrudController(def: EntitySetDef) {
 
         await this.streamToResponse(result.stream);
         this.logMediaTelemetry('media.read', {
-          entityId: id,
+          entityId,
           bytes: length,
           contentType,
         });
@@ -8195,12 +8302,13 @@ export function defineODataCrudController(def: EntitySetDef) {
       const preferences = this.parsePreferenceHeader();
       if (preferences.respondAsync) this.throwPreferenceNotSupported('respond-async');
       const contentType = this.ensureMediaContentType();
+      const entityId = this.coerceParentId(id);
       const op: CrudOperation = 'UPDATE';
       const scope: CrudScope = 'entity';
       const ctx = this.buildHookContext({
         operation: op,
         scope,
-        id,
+        id: entityId,
         options: this.repositoryOptions(),
       });
       await this.enforceTenantLimit(op, scope);
@@ -8210,7 +8318,7 @@ export function defineODataCrudController(def: EntitySetDef) {
         const options = this.repositoryOptions();
         const baseFilter: Filter<CrudEntity> = { fields: this.buildMediaProjectionFields() };
         this.ensureEtagField(baseFilter);
-        const entity = await this.repository.findById(id as any, baseFilter, options);
+        const entity = await this.repository.findById(entityId as any, baseFilter, options);
         let plain = this.toPlainEntity(entity) ?? {};
         const ifMatch = this.parseIfMatchHeader();
         const requireEtag = (this.etagEnabled() || Boolean(mediaEtagField)) && this.cfg?.strict;
@@ -8243,7 +8351,7 @@ export function defineODataCrudController(def: EntitySetDef) {
           : undefined;
 
         const writeResult = await handler.write({
-          id,
+          id: entityId,
           entitySet: def,
           entity: plain,
           repository: this.repository as unknown as DefaultCrudRepository<CrudEntity, unknown>,
@@ -8259,7 +8367,7 @@ export function defineODataCrudController(def: EntitySetDef) {
         };
         const resolvedMetadata = this.resolveMediaMetadata(writeResult, overrides);
         const metadataUpdates = await this.applyMediaMetadataUpdates(
-          id,
+          entityId,
           writeResult,
           overrides,
           resolvedMetadata,
@@ -8273,7 +8381,7 @@ export function defineODataCrudController(def: EntitySetDef) {
         const reportedLength = resolvedMetadata.length;
         const telemetryContentType = resolvedMetadata.contentType ?? contentType;
         this.logMediaTelemetry('media.write', {
-          entityId: id,
+          entityId,
           bytes: reportedLength,
           contentType: telemetryContentType,
         });
@@ -8281,7 +8389,7 @@ export function defineODataCrudController(def: EntitySetDef) {
         const preference = preferences.returnPreference;
         if (preference === 'representation') {
           this.ensureAcceptsJson();
-          const reloaded = await this.repository.findById(id as any, undefined, options);
+          const reloaded = await this.repository.findById(entityId as any, undefined, options);
           const responsePlain = this.toPlainEntity(reloaded) ?? plain;
           const entityEtag = this.computeEtagFromPlain(responsePlain);
           const decorated = this.decoratePlainEntity(responsePlain, entityEtag);
@@ -8327,12 +8435,13 @@ export function defineODataCrudController(def: EntitySetDef) {
       }
       const preferences = this.parsePreferenceHeader();
       if (preferences.respondAsync) this.throwPreferenceNotSupported('respond-async');
+      const entityId = this.coerceParentId(id);
       const op: CrudOperation = 'DELETE';
       const scope: CrudScope = 'entity';
       const ctx = this.buildHookContext({
         operation: op,
         scope,
-        id,
+        id: entityId,
         options: this.repositoryOptions(),
       });
       await this.enforceTenantLimit(op, scope);
@@ -8342,7 +8451,7 @@ export function defineODataCrudController(def: EntitySetDef) {
         const options = this.repositoryOptions();
         const baseFilter: Filter<CrudEntity> = { fields: this.buildMediaProjectionFields() };
         this.ensureEtagField(baseFilter);
-        const entity = await this.repository.findById(id as any, baseFilter, options);
+        const entity = await this.repository.findById(entityId as any, baseFilter, options);
         const plain = this.toPlainEntity(entity) ?? {};
         const ifMatch = this.parseIfMatchHeader();
         const requireEtag = (this.etagEnabled() || Boolean(mediaEtagField)) && this.cfg?.strict;
@@ -8368,16 +8477,16 @@ export function defineODataCrudController(def: EntitySetDef) {
           throw new HttpErrors.NotImplemented('Media handler does not support delete.');
         }
         await handler.delete({
-          id,
+          id: entityId,
           entitySet: def,
           entity: plain,
           repository: this.repository as unknown as DefaultCrudRepository<CrudEntity, unknown>,
           options,
         });
-        await this.clearMediaMetadata(id);
+        await this.clearMediaMetadata(entityId);
         this.ensureODataHeaders();
         this.response.status(204).end();
-        this.logMediaTelemetry('media.delete', { entityId: id });
+        this.logMediaTelemetry('media.delete', { entityId });
         return undefined;
       };
 
@@ -8435,12 +8544,13 @@ export function defineODataCrudController(def: EntitySetDef) {
       this.ensureEtagField(baseFilter);
 
       const ifNoneMatch = this.parseIfNoneMatchHeader();
+      const entityId = this.coerceParentId(id);
       const op: CrudOperation = 'READ';
       const scope: CrudScope = 'entity';
       const ctx = this.buildHookContext({
         operation: op,
         scope,
-        id,
+        id: entityId,
         filter: baseFilter as any,
         options: this.repositoryOptions(),
       });
@@ -8449,7 +8559,7 @@ export function defineODataCrudController(def: EntitySetDef) {
 
       const execDefault = async () => {
         const options = this.repositoryOptions();
-        const entity = await this.repository.findById(id as any, baseFilter, options);
+        const entity = await this.repository.findById(entityId as any, baseFilter, options);
         const plain = this.toPlainEntity(entity) ?? {};
         const etag = this.computeEtagFromPlain(plain);
 
@@ -8746,12 +8856,13 @@ export function defineODataCrudController(def: EntitySetDef) {
         rootPayload = { ...(payload as AnyObject) };
       }
 
+      const entityId = this.coerceParentId(id);
       const op: CrudOperation = 'UPDATE';
       const scope: CrudScope | undefined = undefined;
       const ctx = this.buildHookContext({
         operation: op,
         scope,
-        id,
+        id: entityId,
         payload: rootPayload as AnyObject,
         options: this.repositoryOptions(),
       });
@@ -8763,7 +8874,7 @@ export function defineODataCrudController(def: EntitySetDef) {
         const preference = preferences.returnPreference;
         const ifMatch = this.parseIfMatchHeader();
         const workingPayload = ctx.payload ?? rootPayload ?? {};
-        const parentIdValue = this.coerceParentId(id);
+        const parentIdValue = entityId;
 
         if (this.etagEnabled() && this.cfg?.strict && !ifMatch) {
           const error = new HttpErrors.PreconditionRequired(
@@ -8779,7 +8890,7 @@ export function defineODataCrudController(def: EntitySetDef) {
             etagPropertyDefs,
           );
           if (invalidComposite || !values.length) this.throwPreconditionFailed();
-          const where = this.buildConditionalWhere(id, values, false);
+          const where = this.buildConditionalWhere(parentIdValue, values, false);
           const { count } = await this.repository.updateAll(
             workingPayload as AnyObject,
             where,
@@ -8788,11 +8899,15 @@ export function defineODataCrudController(def: EntitySetDef) {
           if (!count) this.throwPreconditionFailed();
         } else {
           if (Object.keys(workingPayload).length) {
-            await this.repository.updateById(id as any, workingPayload as AnyObject, options);
+            await this.repository.updateById(
+              parentIdValue as any,
+              workingPayload as AnyObject,
+              options,
+            );
           }
         }
 
-        let updated = await this.repository.findById(id as any, undefined, options);
+        let updated = await this.repository.findById(parentIdValue as any, undefined, options);
         if (deepUpdateEnabled && relationPayloads && Object.keys(relationPayloads).length) {
           await this.applyDeepUpdateRelations(
             parentIdValue,
@@ -8802,7 +8917,7 @@ export function defineODataCrudController(def: EntitySetDef) {
             options,
             0,
           );
-          updated = await this.repository.findById(id as any, undefined, options);
+          updated = await this.repository.findById(parentIdValue as any, undefined, options);
         }
 
         const plain = this.toPlainEntity(updated) ?? {};
@@ -8857,12 +8972,13 @@ export function defineODataCrudController(def: EntitySetDef) {
       const preferences = this.parsePreferenceHeader();
       if (preferences.respondAsync) this.throwPreferenceNotSupported('respond-async');
 
+      const entityId = this.coerceParentId(id);
       const op: CrudOperation = 'DELETE';
       const scope: CrudScope | undefined = undefined;
       const ctx = this.buildHookContext({
         operation: op,
         scope,
-        id,
+        id: entityId,
         options: this.repositoryOptions(),
       });
       await this.enforceTenantLimit(op);
@@ -8891,21 +9007,25 @@ export function defineODataCrudController(def: EntitySetDef) {
             etagPropertyDefs,
           );
           if (invalidComposite || !values.length) this.throwPreconditionFailed();
-          const where = this.buildConditionalWhere(id, values, false);
+          const where = this.buildConditionalWhere(entityId, values, false);
           if (preference === 'representation') {
-            entityForResponse = await this.findEntityForDeleteRepresentation(id, where, options);
+            entityForResponse = await this.findEntityForDeleteRepresentation(
+              entityId,
+              where,
+              options,
+            );
           }
           const { count } = await this.repository.deleteAll(where, options);
           if (!count) this.throwPreconditionFailed();
         } else {
           if (preference === 'representation') {
             entityForResponse = await this.findEntityForDeleteRepresentation(
-              id,
+              entityId,
               undefined,
               options,
             );
           }
-          await this.repository.deleteById(id as any, options);
+          await this.repository.deleteById(entityId as any, options);
         }
         this.ensureODataHeaders();
         if (preference === 'representation') {
