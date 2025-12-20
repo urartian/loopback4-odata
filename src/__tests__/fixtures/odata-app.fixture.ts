@@ -38,6 +38,8 @@ const MEMORY_DS_CONFIG = {
   connector: 'memory',
 };
 
+const BIG_INT_ASSET_ID = BigInt('9223372036854775807');
+
 export class TestApplication extends BootMixin(RepositoryMixin(RestApplication)) {
   constructor(config: RestServerConfig = {}) {
     super({ rest: config, shutdown: { signals: [] } });
@@ -133,6 +135,82 @@ export class OrderItemNote extends Entity {
 
   @property({ required: true })
   text!: string;
+}
+
+@odataModel({
+  hasStream: true,
+  mediaField: 'data',
+  mediaContentTypeField: 'contentType',
+  mediaEtagField: 'mediaVersion',
+  mediaLengthField: 'size',
+})
+@model()
+export class MediaAsset extends Entity {
+  @property({ id: true, generated: true })
+  id?: number;
+
+  @property({ type: 'string' })
+  name?: string;
+
+  @property({ type: 'string' })
+  contentType?: string;
+
+  @property({ type: 'number' })
+  size?: number;
+
+  @property({ type: 'string' })
+  mediaVersion?: string;
+
+  @property({ type: 'buffer' })
+  data?: Buffer;
+}
+
+@odataModel()
+@model()
+export class AssetLibrary extends Entity {
+  @property({ id: true, generated: true })
+  id?: number;
+
+  @property({ type: 'string' })
+  name?: string;
+
+  @hasMany(() => BigIntAsset, { keyTo: 'libraryId' })
+  assets?: BigIntAsset[];
+}
+
+@odataModel({
+  hasStream: true,
+  mediaField: 'data',
+  mediaContentTypeField: 'contentType',
+  mediaEtagField: 'mediaVersion',
+  mediaLengthField: 'size',
+})
+@model()
+export class BigIntAsset extends Entity {
+  @property({
+    id: true,
+    type: 'string',
+    jsonSchema: { type: 'string', dataType: 'int64', format: 'int64' },
+  })
+  id!: bigint;
+
+  @property({ type: 'string' })
+  name?: string;
+
+  @property({ type: 'string' })
+  contentType?: string;
+
+  @property({ type: 'number' })
+  size?: number;
+
+  @property({ type: 'string' })
+  mediaVersion?: string;
+
+  @property({ type: 'buffer' })
+  data?: Buffer;
+
+  @belongsTo(() => AssetLibrary, { name: 'library' })
+  libraryId?: typeof AssetLibrary.prototype.id;
 }
 
 export class ProductRepository extends DefaultCrudRepository<Product, typeof Product.prototype.id> {
@@ -276,6 +354,49 @@ export class OrderItemNoteRepository extends DefaultCrudRepository<
   }
 }
 
+export class MediaAssetRepository extends DefaultCrudRepository<
+  MediaAsset,
+  typeof MediaAsset.prototype.id
+> {
+  constructor(@inject('datasources.db') dataSource: juggler.DataSource) {
+    super(MediaAsset, dataSource);
+  }
+}
+
+export class AssetLibraryRepository extends DefaultCrudRepository<
+  AssetLibrary,
+  typeof AssetLibrary.prototype.id
+> {
+  public readonly assets: HasManyRepositoryFactory<BigIntAsset, typeof AssetLibrary.prototype.id>;
+
+  constructor(
+    @inject('datasources.db') dataSource: juggler.DataSource,
+    @repository.getter('BigIntAssetRepository')
+    protected bigIntAssetRepositoryGetter: Getter<BigIntAssetRepository>,
+  ) {
+    super(AssetLibrary, dataSource);
+    this.assets = this.createHasManyRepositoryFactoryFor('assets', bigIntAssetRepositoryGetter);
+    this.registerInclusionResolver('assets', this.assets.inclusionResolver);
+  }
+}
+
+export class BigIntAssetRepository extends DefaultCrudRepository<
+  BigIntAsset,
+  typeof BigIntAsset.prototype.id
+> {
+  public readonly library: BelongsToAccessor<AssetLibrary, typeof BigIntAsset.prototype.id>;
+
+  constructor(
+    @inject('datasources.db') dataSource: juggler.DataSource,
+    @repository.getter('AssetLibraryRepository')
+    protected assetLibraryRepositoryGetter: Getter<AssetLibraryRepository>,
+  ) {
+    super(BigIntAsset, dataSource);
+    this.library = this.createBelongsToAccessorFor('library', assetLibraryRepositoryGetter);
+    this.registerInclusionResolver('library', this.library.inclusionResolver);
+  }
+}
+
 @odataController(Product)
 class ProductODataController {
   constructor(@repository(ProductRepository) private readonly products: ProductRepository) {}
@@ -325,6 +446,15 @@ class ProductODataController {
     return { status: 'ok', total: count.count };
   }
 
+  @odataAction({
+    name: 'echoDimensions',
+    binding: 'unbound',
+    params: [{ name: 'input', type: () => ProductDimensions }],
+  })
+  async echoDimensions(body: { input?: ProductDimensions }) {
+    return { input: body.input ?? null };
+  }
+
   @odata.before('CREATE')
   validateCreate(ctx: CrudHookContext) {
     const payload = ctx.payload as AnyObject | undefined;
@@ -352,6 +482,15 @@ class OrderItemODataController {}
 
 @odataController(OrderItemNote)
 class OrderItemNoteODataController {}
+
+@odataController(MediaAsset)
+class MediaAssetODataController {}
+
+@odataController(AssetLibrary)
+class AssetLibraryODataController {}
+
+@odataController(BigIntAsset)
+class BigIntAssetODataController {}
 
 @odataModel({ entitySetName: 'OdataOnlyIncidents' })
 export class OdataOnlyIncident extends Entity {
@@ -443,6 +582,9 @@ export async function givenODataApplication(
   app.repository(ProductRepository);
   app.repository(OrderRepository);
   app.repository(OrderItemNoteRepository);
+  app.repository(MediaAssetRepository);
+  app.repository(AssetLibraryRepository);
+  app.repository(BigIntAssetRepository);
   app.component(ODataComponent);
   const currentConfig = app.getSync(ODATA_BINDINGS.CONFIG) as ODataConfig;
   app.bind(ODATA_BINDINGS.CONFIG).to({
@@ -453,6 +595,9 @@ export async function givenODataApplication(
   app.controller(OrderODataController);
   app.controller(OrderItemODataController);
   app.controller(OrderItemNoteODataController);
+  app.controller(MediaAssetODataController);
+  app.controller(AssetLibraryODataController);
+  app.controller(BigIntAssetODataController);
   return app;
 }
 
@@ -460,6 +605,9 @@ export async function seedExampleData(app: TestApplication) {
   const productRepo = await app.getRepository(ProductRepository);
   const orderRepo = await app.getRepository(OrderRepository);
   const orderItemRepo = await app.getRepository(OrderItemRepository);
+  const mediaAssetRepo = await app.getRepository(MediaAssetRepository);
+  const assetLibraryRepo = await app.getRepository(AssetLibraryRepository);
+  const bigIntAssetRepo = await app.getRepository(BigIntAssetRepository);
 
   const existingProducts = await productRepo.count();
   if (existingProducts.count > 0) return;
@@ -508,4 +656,23 @@ export async function seedExampleData(app: TestApplication) {
       orderRepo.updateById(Number(orderId), { total }),
     ),
   );
+
+  await mediaAssetRepo.create({
+    name: 'Spec Sheet',
+    contentType: 'text/plain',
+    data: Buffer.from('Initial spec sheet'),
+    mediaVersion: 'W/"asset-1"',
+    size: Buffer.byteLength('Initial spec sheet'),
+  });
+
+  const library = await assetLibraryRepo.create({ name: 'Primary Library' });
+  await bigIntAssetRepo.create({
+    id: BIG_INT_ASSET_ID,
+    name: 'Overflow Asset',
+    contentType: 'text/plain',
+    data: Buffer.from('Primary BigInt asset payload'),
+    mediaVersion: 'W/"big-asset-1"',
+    size: Buffer.byteLength('Primary BigInt asset payload'),
+    libraryId: library.id,
+  });
 }

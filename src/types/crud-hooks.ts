@@ -11,6 +11,15 @@ export type CrudOperation =
   | 'UNLINK_NAVIGATION';
 export type CrudScope = 'collection' | 'entity' | 'count';
 
+export const CRUD_OPERATIONS: ReadonlyArray<CrudOperation> = [
+  'READ',
+  'CREATE',
+  'UPDATE',
+  'DELETE',
+  'LINK_NAVIGATION',
+  'UNLINK_NAVIGATION',
+];
+
 export interface CrudHookContext {
   // Operation targeting
   operation: CrudOperation;

@@ -1,4 +1,6 @@
 import 'reflect-metadata';
+import { MetadataInspector } from '@loopback/core';
+import { model as applyModel, Model, MODEL_KEY } from '@loopback/repository';
 const ODATA_MODEL_KEY = 'odata:model';
 
 export interface ODataModelOptions {
@@ -8,6 +10,12 @@ export interface ODataModelOptions {
   deepUpdate?: boolean;
   applyPushdown?: boolean;
   documentInOpenApi?: boolean;
+  hasStream?: boolean;
+  mediaField?: string;
+  mediaContentTypeField?: string;
+  mediaEtagField?: string;
+  mediaLengthField?: string;
+  mediaHandlerBindingKey?: string;
   delta?: {
     enabled?: boolean;
     field?: string;
@@ -16,6 +24,9 @@ export interface ODataModelOptions {
 
 export function odataModel(opts: ODataModelOptions = {}) {
   return (target: Function) => {
+    if (!MetadataInspector.getClassMetadata(MODEL_KEY, target)) {
+      applyModel()(target as typeof Model);
+    }
     Reflect.defineMetadata(ODATA_MODEL_KEY, opts, target);
   };
 }

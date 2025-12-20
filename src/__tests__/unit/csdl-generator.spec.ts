@@ -12,6 +12,7 @@ import {
 import { CsdlGenerator } from '../../metadata/csdl-generator';
 import { EntitySetRegistry, EntitySetDef } from '../../registry/entityset-registry';
 import { odataSearchable } from '../../decorators/search.decorators';
+import { odataModel } from '../../decorators/model.decorator';
 
 @model()
 class Dimensions extends Model {
@@ -20,6 +21,15 @@ class Dimensions extends Model {
 
   @property({ type: 'number' })
   height!: number;
+}
+
+@odataModel()
+class ResetPayload extends Model {
+  @property({ type: 'boolean' })
+  confirm?: boolean;
+
+  @property({ type: 'string' })
+  note?: string;
 }
 
 @model()
@@ -52,6 +62,12 @@ class Widget extends Entity {
 
   @property({ type: 'string', jsonSchema: { format: 'uuid' } })
   sku?: string;
+
+  @property({ type: 'string' })
+  contentType?: string;
+
+  @property({ type: 'buffer' })
+  data?: Buffer;
 
   @property({ type: 'array', itemType: 'string' })
   tags?: string[];
@@ -91,6 +107,9 @@ describe('CsdlGenerator', () => {
       modelCtor: Widget,
       etagProperties: ['updatedAt'],
       hasStream: true,
+      mediaField: 'data',
+      mediaContentTypeField: 'contentType',
+      mediaEtagField: 'sku',
       deepInsert: true,
       supportsTransactions: true,
       capabilities: {
@@ -131,7 +150,7 @@ describe('CsdlGenerator', () => {
           methodName: 'resetInventory',
           binding: 'entity',
           rawResponse: false,
-          parameters: [{ name: 'confirm', type: 'Edm.Boolean' }],
+          parameters: [{ name: 'payload', type: () => ResetPayload }],
         },
       ],
       functions: [
@@ -156,6 +175,7 @@ describe('CsdlGenerator', () => {
       name: 'Gadgets',
       modelCtor: Gadget,
       supportsTransactions: false,
+      hasStream: true,
     });
 
     registry.register({
@@ -195,12 +215,27 @@ describe('CsdlGenerator', () => {
       ),
     ).to.be.true();
     expect(xml.includes('<ComplexType Name="Dimensions">')).to.be.true();
+    expect(xml.includes('<ComplexType Name="ResetPayload">')).to.be.true();
     expect(
       xml.includes('<Property Name="dimensions" Type="Catalog.Dimensions" Nullable="true"'),
     ).to.be.true();
+    expect(xml.includes('Parameter Name="payload" Type="Catalog.ResetPayload"')).to.be.true();
     expect(xml.includes('<EnumType Name="WidgetStatusEnum"')).to.be.true();
     expect(xml.includes('<Member Name="draft" Value="0"')).to.be.true();
     expect(xml.includes('Annotation Term="Org.OData.Core.V1.HasStream" Bool="true"')).to.be.true();
+    expect(
+      xml.includes('Annotation Term="Org.OData.Capabilities.V1.Streaming" Bool="true"'),
+    ).to.be.true();
+    expect(
+      xml.includes(
+        '<Annotation Term="Org.OData.Core.V1.MediaType"><Path>contentType</Path></Annotation>',
+      ),
+    ).to.be.true();
+    expect(
+      xml.includes('<Annotation Term="Org.OData.Core.V1.MediaETag"><Path>sku</Path></Annotation>'),
+    ).to.be.true();
+    const mediaEtagAnnotations = xml.match(/Org\.OData\.Core\.V1\.MediaETag/g) ?? [];
+    expect(mediaEtagAnnotations).to.have.length(1);
     expect(
       xml.includes('Annotation Term="Org.OData.Capabilities.V1.CountRestrictions"'),
     ).to.be.true();
@@ -306,8 +341,11 @@ describe('CsdlGenerator', () => {
     expect(schema.Widget.tags.$Type).to.equal('Collection(Edm.String)');
     expect(schema.Widget.dimensions.$Type).to.equal('Catalog.Dimensions');
     expect(schema.Widget['updatedAt@ConcurrencyMode']).to.equal('Fixed');
+    expect(schema.Widget['@Org.OData.Core.V1.MediaETag']).to.containDeep({ $Path: 'sku' });
     expect(schema.Dimensions.$Kind).to.equal('ComplexType');
     expect(schema.Dimensions.width.$Type).to.equal('Edm.Double');
+    expect(schema.ResetPayload.$Kind).to.equal('ComplexType');
+    expect(schema.ResetPayload.confirm.$Type).to.equal('Edm.Boolean');
     expect(schema.Widget.status.$Type).to.equal('Catalog.WidgetStatusEnum');
     expect(schema.WidgetStatusEnum.$Kind).to.equal('EnumType');
     expect(schema.WidgetStatusEnum.Members).to.have.length(3);
@@ -316,6 +354,7 @@ describe('CsdlGenerator', () => {
     expect(schema.Widget.gadgets.$Kind).to.equal('NavigationProperty');
     expect(schema.Widget.gadgets.$Type).to.equal('Collection(Catalog.Gadget)');
     expect(schema.Widget['@Org.OData.Core.V1.HasStream']).to.equal(true);
+    expect(schema.Gadget['@Org.OData.Core.V1.MediaETag']).to.equal(undefined);
     expect(schema.AdvancedWidget.$BaseType).to.equal('Catalog.Widget');
     expect(schema.Widget.gadgets.$Partner).to.equal('widget');
     expect(schema.Widget.gadgets.$ReferentialConstraint).to.equal(undefined);
@@ -327,6 +366,10 @@ describe('CsdlGenerator', () => {
     expect(schema.resetInventory.$Kind).to.equal('Action');
     expect(schema.resetInventory.$IsBound).to.equal(true);
     expect(Array.isArray(schema.resetInventory.$Parameter)).to.be.true();
+    const payloadParam = (schema.resetInventory.$Parameter as AnyObject[]).find(
+      (entry) => entry.$Name === 'payload',
+    );
+    expect(payloadParam?.$Type).to.equal('Catalog.ResetPayload');
 
     expect(schema).to.have.property('topWidgets');
     expect(schema.topWidgets.$Kind).to.equal('Function');

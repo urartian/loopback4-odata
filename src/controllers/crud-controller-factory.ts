@@ -1,5 +1,6 @@
 import { inject } from '@loopback/core';
-import { ReferenceObject } from '@loopback/openapi-v3';
+import { randomBytes } from 'crypto';
+import { ReferenceObject, ContentObject } from '@loopback/openapi-v3';
 import {
   HttpErrors,
   del,
@@ -8,6 +9,7 @@ import {
   param,
   patch,
   post,
+  put,
   requestBody,
   Request,
   RestBindings,
@@ -82,6 +84,7 @@ import { ODataConfig, ODataApplyTelemetryEvent, ODataRequestState } from '../typ
 import * as ipaddr from 'ipaddr.js';
 import { getODataSearchableProps } from '../decorators/search.decorators';
 import { ensureModelDefinitionWithRelations } from '../util/model-definition';
+import { isEntityCtor } from '../util/model-helpers';
 import { ensureNavigationTargetKey } from '../util/relation-metadata';
 import {
   ResolvedNavigationPath,
@@ -121,6 +124,13 @@ import {
 } from '../util/telemetry';
 import { acceptsAnyMediaType } from '../util/accept';
 import { normalizeBasePath } from '../util/base-path';
+import { Readable } from 'stream';
+import {
+  ODataMediaHandler,
+  ODataMediaReadResult,
+  ODataMediaWriteResult,
+  PropertyBackedMediaHandler,
+} from '../services/odata-media-handler';
 type CrudEntity = Entity & { [key: string]: unknown };
 type CrudRepo = DefaultCrudRepository<CrudEntity, unknown>;
 type NormalizedInclusion = Exclude<InclusionFilter, string>;
@@ -278,6 +288,12 @@ export function defineODataCrudController(def: EntitySetDef) {
   const optionalProperties = Array.from(new Set([...idProperties, ...(etagProperties ?? [])]));
   const operationVisibility: ODataVisibility =
     def.documentInOpenApi === false ? 'undocumented' : 'documented';
+  const hasStream = Boolean(def.hasStream);
+  const mediaField = def.mediaField;
+  const mediaContentTypeField = def.mediaContentTypeField;
+  const mediaEtagField = def.mediaEtagField;
+  const mediaLengthField = def.mediaLengthField;
+  const mediaHandlerBindingKey = def.mediaHandlerBindingKey;
 
   const collectionResponseSchema = {
     type: 'object',
@@ -334,7 +350,7 @@ export function defineODataCrudController(def: EntitySetDef) {
     if (!target) return undefined;
     let ctor: typeof Entity | undefined;
     const maybeCtor = target as typeof Entity;
-    if (typeof maybeCtor === 'function' && maybeCtor.prototype instanceof Entity) {
+    if (isEntityCtor(maybeCtor)) {
       ctor = maybeCtor;
     } else if (typeof target === 'function') {
       try {
@@ -416,6 +432,35 @@ export function defineODataCrudController(def: EntitySetDef) {
 
   const hooks: CrudHookBundle | undefined = def.hooks;
   const deepInsertEnabledForSet = Boolean(def.deepInsert);
+  const buildStreamEntry = () =>
+    ({
+      'x-parser': 'stream',
+    }) as AnyObject;
+  const createPayloadSchema = getModelSchemaRef(modelCtor, {
+    title: `New${modelCtor.name ?? 'Entity'}`,
+    optional: optionalProperties as unknown as (keyof Entity)[],
+    includeRelations: deepInsertEnabledForSet,
+  }) as SchemaObject;
+  normalizeSchemaFormats(createPayloadSchema as AnyObject);
+  const createRequestContent: ContentObject = {
+    'application/json': {
+      schema: createPayloadSchema,
+    },
+    ...(hasStream
+      ? {
+          'application/octet-stream': buildStreamEntry(),
+          'text/plain': buildStreamEntry(),
+          '*/*': buildStreamEntry(),
+        }
+      : {}),
+  } as ContentObject;
+  const mediaRequestContent: ContentObject | undefined = hasStream
+    ? ({
+        'application/octet-stream': buildStreamEntry(),
+        'text/plain': buildStreamEntry(),
+        '*/*': buildStreamEntry(),
+      } as ContentObject)
+    : undefined;
   const deepUpdateEnabledForSet = Boolean(def.deepUpdate);
   const sourceCtrlBindingKey: string | undefined = def.sourceControllerBindingKey;
   // Determine PATCH body schema at boot.
@@ -427,6 +472,7 @@ export function defineODataCrudController(def: EntitySetDef) {
     title: `${modelCtor.name ?? 'Entity'}Patch`,
     partial: true,
   }) as SchemaObject;
+  normalizeSchemaFormats(basePatchSchema as AnyObject);
 
   const PROPERTY_CONSTRAINT_KEYS = [
     'minimum',
@@ -447,9 +493,62 @@ export function defineODataCrudController(def: EntitySetDef) {
     return Boolean(value && typeof value === 'object' && '$ref' in (value as AnyObject));
   };
 
+  function normalizeSchemaFormats(schema?: AnyObject): void {
+    if (!schema || typeof schema !== 'object') return;
+    if ('dataType' in schema) {
+      delete schema.dataType;
+    }
+    if (typeof schema.format === 'string') {
+      const normalized = schema.format.trim().toLowerCase();
+      if (normalized === 'buffer') {
+        schema.format = 'byte';
+      }
+    }
+    if (schema.type === 'array' && schema.items && typeof schema.items === 'object') {
+      normalizeSchemaFormats(schema.items as AnyObject);
+    }
+    if (schema.properties && typeof schema.properties === 'object') {
+      for (const value of Object.values(schema.properties)) {
+        if (value && typeof value === 'object') {
+          normalizeSchemaFormats(value as AnyObject);
+        }
+      }
+    }
+    if (schema.definitions && typeof schema.definitions === 'object') {
+      for (const value of Object.values(schema.definitions)) {
+        if (value && typeof value === 'object') {
+          normalizeSchemaFormats(value as AnyObject);
+        }
+      }
+    }
+    if (schema.allOf && Array.isArray(schema.allOf)) {
+      for (const entry of schema.allOf) {
+        if (entry && typeof entry === 'object') {
+          normalizeSchemaFormats(entry as AnyObject);
+        }
+      }
+    }
+    if (schema.anyOf && Array.isArray(schema.anyOf)) {
+      for (const entry of schema.anyOf) {
+        if (entry && typeof entry === 'object') {
+          normalizeSchemaFormats(entry as AnyObject);
+        }
+      }
+    }
+    if (schema.oneOf && Array.isArray(schema.oneOf)) {
+      for (const entry of schema.oneOf) {
+        if (entry && typeof entry === 'object') {
+          normalizeSchemaFormats(entry as AnyObject);
+        }
+      }
+    }
+  }
+
   const cloneSchemaObject = (schema: AnyObject | undefined): SchemaObject => {
     if (!schema) return {} as SchemaObject;
-    return JSON.parse(JSON.stringify(schema)) as SchemaObject;
+    const clone = JSON.parse(JSON.stringify(schema)) as SchemaObject;
+    normalizeSchemaFormats(clone as AnyObject);
+    return clone;
   };
 
   const applyPropertyConstraints = (schema: SchemaObject, propDef?: PropertyDefinition): void => {
@@ -459,9 +558,14 @@ export function defineODataCrudController(def: EntitySetDef) {
     if (source.default !== undefined) schema.default = source.default;
     if (Array.isArray(source.enum)) schema.enum = [...source.enum];
     for (const key of PROPERTY_CONSTRAINT_KEYS) {
-      if (source[key] !== undefined) {
-        (schema as AnyObject)[key] = source[key];
+      if (source[key] === undefined) continue;
+      const value = source[key];
+      if (key === 'format' && typeof value === 'string') {
+        const normalized = value.trim().toLowerCase();
+        (schema as AnyObject)[key] = normalized === 'buffer' ? 'byte' : value;
+        continue;
       }
+      (schema as AnyObject)[key] = value;
     }
   };
 
@@ -599,6 +703,7 @@ export function defineODataCrudController(def: EntitySetDef) {
     searchComparisonStrategy?: SearchComparisonStrategy;
     modelPropertyCache = new WeakMap<typeof Entity, Set<string>>();
     _trustedProxyRanges?: Array<[ipaddr.IPv4 | ipaddr.IPv6, number]>;
+    mediaHandlerCache?: ODataMediaHandler | null;
 
     constructor(
       @inject(repoBindingKey)
@@ -673,19 +778,20 @@ export function defineODataCrudController(def: EntitySetDef) {
 
     decoratePlainEntity(plain: AnyObject, etag?: string): AnyObject {
       const normalized = this.normalizePlainEntityForResponse(plain, this.entityCtor);
+      if (hasStream) {
+        this.decorateMediaAnnotations(normalized, plain, etag);
+      }
       if (!etag) return normalized;
       if (normalized['@odata.etag'] === etag) return normalized;
       return { ...normalized, '@odata.etag': etag };
     }
 
     decoratePlainEntities(plainEntities: AnyObject[]): AnyObject[] {
-      if (!this.etagEnabled()) {
-        return plainEntities.map((entity) =>
-          this.normalizePlainEntityForResponse(entity, this.entityCtor),
-        );
-      }
       return plainEntities.map((plain) =>
-        this.decoratePlainEntity(plain, this.computeEtagFromPlain(plain)),
+        this.decoratePlainEntity(
+          plain,
+          this.etagEnabled() ? this.computeEtagFromPlain(plain) : undefined,
+        ),
       );
     }
 
@@ -696,9 +802,7 @@ export function defineODataCrudController(def: EntitySetDef) {
       if ((ctor as unknown) === Object) return undefined;
       const maybeDefinition = (ctor as unknown as { definition?: ModelDefinition }).definition;
       if (maybeDefinition) return ctor as typeof Entity;
-      if ((ctor as unknown as { prototype?: unknown }).prototype instanceof Entity) {
-        return ctor as typeof Entity;
-      }
+      if (isEntityCtor(ctor)) return ctor as typeof Entity;
       return undefined;
     }
 
@@ -768,6 +872,423 @@ export function defineODataCrudController(def: EntitySetDef) {
           target[relationName] = nested;
         }
       }
+    }
+
+    hasMediaStream(): boolean {
+      return hasStream;
+    }
+
+    async resolveMediaHandler(): Promise<ODataMediaHandler | undefined> {
+      if (!hasStream) return undefined;
+      if (this.mediaHandlerCache !== undefined) {
+        return this.mediaHandlerCache ?? undefined;
+      }
+      if (mediaHandlerBindingKey) {
+        try {
+          const handler = await this.httpCtx.get<ODataMediaHandler>(mediaHandlerBindingKey, {
+            optional: true,
+          });
+          if (handler) {
+            this.mediaHandlerCache = handler;
+            return handler;
+          }
+        } catch {
+          this.mediaHandlerCache = null;
+        }
+      }
+      if (mediaField) {
+        const fallback = new PropertyBackedMediaHandler(
+          this.repository as unknown as DefaultCrudRepository<CrudEntity, unknown>,
+          mediaField,
+        );
+        this.mediaHandlerCache = fallback;
+        return fallback;
+      }
+      this.mediaHandlerCache = null;
+      return undefined;
+    }
+
+    async requireMediaHandler(): Promise<ODataMediaHandler> {
+      const handler = await this.resolveMediaHandler();
+      if (handler) return handler;
+      throw new HttpErrors.NotImplemented('Media handler is not configured for this entity set.');
+    }
+
+    buildMediaProjectionFields(): Pick<AnyObject, string> | undefined {
+      if (!hasStream) return undefined;
+      const projection: Record<string, boolean> = {};
+      for (const idProp of idProperties) projection[idProp] = true;
+      if (mediaField) projection[mediaField] = true;
+      if (mediaContentTypeField) projection[mediaContentTypeField] = true;
+      if (mediaEtagField) projection[mediaEtagField] = true;
+      if (mediaLengthField) projection[mediaLengthField] = true;
+      if (etagProperties) {
+        for (const prop of etagProperties) projection[prop] = true;
+      }
+      return Object.keys(projection).length ? projection : undefined;
+    }
+
+    decorateMediaAnnotations(target: AnyObject, source: AnyObject, entityEtag?: string) {
+      if (!hasStream) return;
+      let entityUrl = this.buildEntityLocationUrl(this.extractEntityId(source), source);
+      if (!entityUrl) {
+        const keyLiteral = this.buildEntityKeyLiteral(undefined, source);
+        if (keyLiteral) {
+          const basePath = normalizeBasePath(this.cfg?.basePath);
+          const prefix = basePath === '/' ? '' : basePath;
+          entityUrl = `${prefix}/${setName}${keyLiteral}`;
+        }
+      }
+      if (entityUrl) {
+        const valueUrl = entityUrl.endsWith('/$value') ? entityUrl : `${entityUrl}/$value`;
+        target['@odata.mediaReadLink'] = valueUrl;
+        target['@odata.mediaEditLink'] = valueUrl;
+      }
+      const contentType = this.readMediaContentType(source);
+      if (contentType) {
+        target['@odata.mediaContentType'] = contentType;
+      }
+      const mediaEtag = this.readMediaEtag(source) ?? entityEtag;
+      if (mediaEtag) {
+        target['@odata.mediaEtag'] = mediaEtag;
+      }
+    }
+
+    readMediaEtag(plain: AnyObject | undefined): string | undefined {
+      if (!plain) return undefined;
+      if (mediaEtagField) {
+        const raw = plain[mediaEtagField];
+        if (typeof raw === 'string' && raw.trim()) return raw;
+      }
+      return this.computeEtagFromPlain(plain);
+    }
+
+    readMediaContentType(plain: AnyObject | undefined): string | undefined {
+      if (!plain) return undefined;
+      if (mediaContentTypeField) {
+        const raw = plain[mediaContentTypeField];
+        if (typeof raw === 'string' && raw.trim()) return raw;
+      }
+      return 'application/octet-stream';
+    }
+
+    readMediaLength(plain: AnyObject | undefined): number | undefined {
+      if (!plain || !mediaLengthField) return undefined;
+      const value = plain[mediaLengthField];
+      if (typeof value === 'number' && Number.isFinite(value)) return value;
+      return undefined;
+    }
+
+    mergeMediaMetadata(target: AnyObject | undefined, updates: AnyObject | undefined): AnyObject {
+      if (!updates) return target ?? {};
+      const next = target ? { ...target } : {};
+      for (const [key, value] of Object.entries(updates)) {
+        next[key] = value;
+      }
+      return next;
+    }
+
+    resolveMediaMetadata(
+      handlerResult: ODataMediaWriteResult | undefined,
+      overrides?: { contentType?: string; contentLength?: number; etag?: string },
+    ): { contentType?: string; length?: number; etag?: string } {
+      const lengthCandidate = handlerResult?.length ?? overrides?.contentLength;
+      const length =
+        typeof lengthCandidate === 'number' && Number.isFinite(lengthCandidate)
+          ? lengthCandidate
+          : undefined;
+      const contentType = handlerResult?.contentType ?? overrides?.contentType;
+      const etag = handlerResult?.etag ?? overrides?.etag ?? this.generateMediaEtag();
+      return { contentType, length, etag };
+    }
+
+    async applyMediaMetadataUpdates(
+      id: unknown,
+      handlerResult: ODataMediaWriteResult | undefined,
+      overrides?: { contentType?: string; contentLength?: number; etag?: string },
+      resolved?: { contentType?: string; length?: number; etag?: string },
+    ): Promise<AnyObject | undefined> {
+      if (!hasStream) return undefined;
+      const entityId = this.coerceParentId(id);
+      const patch: AnyObject = {};
+      const updates: AnyObject = {};
+      const metadata = resolved ?? this.resolveMediaMetadata(handlerResult, overrides);
+      const { contentType, length, etag } = metadata;
+      if (mediaContentTypeField && contentType) {
+        patch[mediaContentTypeField] = contentType;
+        updates[mediaContentTypeField] = contentType;
+      }
+      if (mediaLengthField && typeof length === 'number' && Number.isFinite(length)) {
+        patch[mediaLengthField] = length;
+        updates[mediaLengthField] = length;
+      }
+      if (mediaEtagField && etag) {
+        patch[mediaEtagField] = etag;
+        updates[mediaEtagField] = etag;
+      }
+      if (Object.keys(patch).length) {
+        await this.repository.updateById(entityId as any, patch, this.repositoryOptions());
+      }
+      return Object.keys(updates).length ? updates : undefined;
+    }
+
+    async clearMediaMetadata(id: unknown): Promise<void> {
+      if (!hasStream) return;
+      const entityId = this.coerceParentId(id);
+      const patch: AnyObject = {};
+      if (mediaContentTypeField) patch[mediaContentTypeField] = null;
+      if (mediaLengthField) patch[mediaLengthField] = null;
+      if (mediaEtagField) patch[mediaEtagField] = null;
+      if (Object.keys(patch).length) {
+        await this.repository.updateById(entityId as any, patch, this.repositoryOptions());
+      }
+    }
+
+    setMediaEtagHeader(plain: AnyObject | undefined): void {
+      if (!hasStream) return;
+      const etag = this.readMediaEtag(plain);
+      if (etag) {
+        this.response.set('ETag', etag);
+      }
+    }
+
+    ensureMediaAccepts(contentType?: string): void {
+      if (!this.cfg?.strict) return;
+      const acceptHeader = this.request.get('Accept') ?? this.request.headers?.['accept'];
+      const accept = Array.isArray(acceptHeader) ? acceptHeader.join(',') : acceptHeader;
+      if (!accept?.trim()) return;
+      const normalized = this.normalizeMediaType(contentType);
+      const allowed = normalized
+        ? [normalized, 'application/octet-stream', '*/*']
+        : ['application/octet-stream', '*/*'];
+      const unique = Array.from(new Set(allowed));
+      if (!acceptsAnyMediaType(accept, unique)) {
+        const requirement = normalized ?? 'binary responses';
+        const err = new HttpErrors.NotAcceptable(
+          `Accept header must allow ${requirement} (${unique.join(', ')}).`,
+        );
+        (err as any).code = 'NotAcceptable';
+        throw err;
+      }
+    }
+
+    normalizeMediaType(value?: string): string | undefined {
+      if (!value) return undefined;
+      const [type] = value.split(';');
+      const normalized = type?.trim().toLowerCase();
+      if (!normalized || !normalized.includes('/')) return undefined;
+      return normalized;
+    }
+
+    ensureMediaContentType(): string {
+      const type =
+        this.request.get('Content-Type') ??
+        (this.request.headers?.['content-type'] as string | undefined);
+      if (!type || !type.trim()) {
+        const err = new HttpErrors.UnsupportedMediaType(
+          'Content-Type header is required for media requests.',
+        );
+        (err as any).code = 'UnsupportedMediaType';
+        throw err;
+      }
+      return type;
+    }
+
+    isJsonBodyRequest(): boolean {
+      const type =
+        this.request.get('Content-Type') ??
+        (this.request.headers?.['content-type'] as string | undefined);
+      if (!type) return false;
+      const lower = type.toLowerCase();
+      return lower.includes('application/json') || lower.endsWith('+json');
+    }
+
+    buildMediaSlugPayload(slug?: string): AnyObject | undefined {
+      if (!slug || !idProperties.length || idProperties.length > 1) return undefined;
+      const property = idProperties[0];
+      const propDef = modelDefinition?.properties?.[property] as PropertyDefinition | undefined;
+      const value = this.coerceSlugValue(slug, propDef);
+      if (value === undefined) return undefined;
+      return { [property]: value };
+    }
+
+    detectPrimitivePropertyType(
+      prop?: PropertyDefinition,
+    ): 'bigint' | 'number' | 'boolean' | undefined {
+      if (!prop) return undefined;
+      const raw = prop.type;
+      if (typeof raw === 'function') {
+        if (raw === Number) return 'number';
+        if (raw === Boolean) return 'boolean';
+        if ((raw as unknown) === BigInt) return 'bigint';
+        const lowered = raw.name?.toLowerCase();
+        if (lowered === 'bigint' || lowered === 'number' || lowered === 'boolean') {
+          return lowered as 'bigint' | 'number' | 'boolean';
+        }
+      } else if (typeof raw === 'string') {
+        const lowered = raw.toLowerCase();
+        if (lowered === 'bigint' || lowered === 'number' || lowered === 'boolean') {
+          return lowered as 'bigint' | 'number' | 'boolean';
+        }
+      }
+      const schema = (prop as AnyObject)?.jsonSchema as AnyObject | undefined;
+      const schemaType = typeof schema?.type === 'string' ? schema.type.toLowerCase() : undefined;
+      const schemaFormat =
+        typeof schema?.format === 'string' ? schema.format.toLowerCase() : undefined;
+      const schemaDataType =
+        typeof schema?.dataType === 'string' ? schema.dataType.toLowerCase() : undefined;
+      if (
+        schemaDataType === 'int64' ||
+        schemaDataType === 'long' ||
+        schemaFormat === 'int64' ||
+        schemaFormat === 'long'
+      ) {
+        return 'bigint';
+      }
+      if (schemaType === 'boolean') return 'boolean';
+      if (schemaType === 'number' || schemaType === 'integer') return 'number';
+      return undefined;
+    }
+
+    propertyDeclaresString(prop?: PropertyDefinition): boolean {
+      if (!prop) return false;
+      const raw = prop.type;
+      if (raw === String) return true;
+      if (typeof raw === 'function' && raw.name?.toLowerCase() === 'string') return true;
+      if (typeof raw === 'string' && raw.toLowerCase() === 'string') return true;
+      return false;
+    }
+
+    coerceSlugValue(value: string, prop?: PropertyDefinition): unknown | undefined {
+      const primitive = this.detectPrimitivePropertyType(prop);
+      const declaresString = this.propertyDeclaresString(prop);
+      if (primitive === 'bigint') {
+        try {
+          const parsed = BigInt(value);
+          return declaresString ? value : parsed;
+        } catch {
+          return undefined;
+        }
+      }
+      if (primitive === 'number') {
+        const num = Number(value);
+        if (Number.isNaN(num)) return undefined;
+        return num;
+      }
+      if (primitive === 'boolean') {
+        const normalized = value.toLowerCase();
+        if (normalized === 'true') return true;
+        if (normalized === 'false') return false;
+        return undefined;
+      }
+      return value;
+    }
+
+    coerceIdentifierLiteral(
+      literal: string,
+      prop?: PropertyDefinition,
+      descriptor = 'identifier',
+    ): unknown {
+      const primitive = this.detectPrimitivePropertyType(prop);
+      const declaresString = this.propertyDeclaresString(prop);
+      if (primitive === 'bigint') {
+        try {
+          const parsed = BigInt(literal);
+          return declaresString ? literal : parsed;
+        } catch {
+          throw new HttpErrors.BadRequest(`Invalid ${descriptor}: ${literal}`);
+        }
+      }
+      if (primitive === 'number') {
+        const num = Number(literal);
+        if (Number.isNaN(num)) {
+          throw new HttpErrors.BadRequest(`Invalid ${descriptor}: ${literal}`);
+        }
+        return num;
+      }
+      if (primitive === 'boolean') {
+        const normalized = literal.toLowerCase();
+        if (normalized === 'true') return true;
+        if (normalized === 'false') return false;
+        throw new HttpErrors.BadRequest(`Invalid ${descriptor}: ${literal}`);
+      }
+      return literal;
+    }
+
+    stripODataAnnotations(target: AnyObject | undefined): void {
+      if (!target || typeof target !== 'object') return;
+      for (const key of Object.keys(target)) {
+        if (key.includes('@odata.')) {
+          delete target[key];
+          continue;
+        }
+        const value = target[key];
+        if (Array.isArray(value)) {
+          for (const entry of value) {
+            if (entry && typeof entry === 'object') {
+              this.stripODataAnnotations(entry as AnyObject);
+            }
+          }
+        } else if (value && typeof value === 'object') {
+          this.stripODataAnnotations(value as AnyObject);
+        }
+      }
+    }
+
+    removeEntityIdProperties(target: AnyObject | undefined, repo?: CrudRepo | AnyObject): void {
+      if (!target || typeof target !== 'object' || !repo) return;
+      const entityClass = (repo as AnyObject).entityClass as typeof Entity | undefined;
+      const idProps = entityClass?.getIdProperties?.() ?? [];
+      for (const prop of idProps) {
+        if (prop && prop in target) {
+          delete target[prop];
+        }
+      }
+    }
+
+    getSlugHeader(): string | undefined {
+      const slug =
+        this.request.get('Slug') ?? (this.request.headers?.['slug'] as string | undefined);
+      if (!slug) return undefined;
+      const trimmed = slug.trim();
+      return trimmed.length ? trimmed : undefined;
+    }
+
+    coerceBodyToStream(body: unknown): Readable {
+      if (body instanceof Readable) return body;
+      if (Buffer.isBuffer(body)) return Readable.from(body);
+      if (body instanceof Uint8Array) return Readable.from(Buffer.from(body));
+      if (body instanceof ArrayBuffer) return Readable.from(Buffer.from(new Uint8Array(body)));
+      if (typeof body === 'string') return Readable.from(Buffer.from(body));
+      if (body == null) {
+        throw new HttpErrors.UnsupportedMediaType('Binary body must be provided as a stream.');
+      }
+      throw new HttpErrors.UnsupportedMediaType('Binary body must be provided as a stream.');
+    }
+
+    generateMediaEtag(): string {
+      const token = randomBytes(8).toString('hex');
+      return `W/"${Date.now().toString(36)}-${token}"`;
+    }
+
+    logMediaTelemetry(event: string, context?: Record<string, unknown>) {
+      this.emitTelemetry({
+        category: 'requests',
+        event,
+        context: {
+          entitySet: setName,
+          ...(context ?? {}),
+        },
+      });
+    }
+
+    async streamToResponse(stream: Readable): Promise<void> {
+      return new Promise<void>((resolve, reject) => {
+        stream.once('error', reject);
+        this.response.once('error', reject);
+        stream.once('end', resolve);
+        stream.pipe(this.response);
+      });
     }
 
     classifyTemporalProperty(
@@ -1923,6 +2444,8 @@ export function defineODataCrudController(def: EntitySetDef) {
         ctx.navigationTargetId = navId;
         ctx.navigationTargetEntity = existing;
         const plain = this.toPlainEntity(existing) ?? {};
+        this.stripODataAnnotations(plain);
+        this.removeEntityIdProperties(plain, navRepo);
         plain[keyTo] = ctx.id ?? parentId;
         await navRepo.replaceById(navId as any, plain as AnyObject, this.repositoryOptions());
         return undefined;
@@ -1999,6 +2522,8 @@ export function defineODataCrudController(def: EntitySetDef) {
           ctx.navigationTargetId = navId;
           ctx.navigationTargetEntity = existing;
           const plain = this.toPlainEntity(existing) ?? {};
+          this.stripODataAnnotations(plain);
+          this.removeEntityIdProperties(plain, navRepo);
           // Ensure the link actually exists (entity is linked to this parent); otherwise 404.
           if (plain[keyTo] == null || plain[keyTo] !== parentId) {
             throw new HttpErrors.NotFound('Navigation link does not exist.');
@@ -2021,6 +2546,8 @@ export function defineODataCrudController(def: EntitySetDef) {
         if (navId == null) throw new HttpErrors.NotFound('Navigation link does not exist.');
         ctx.navigationTargetId = navId;
         const plain = this.toPlainEntity(existing) ?? {};
+        this.stripODataAnnotations(plain);
+        this.removeEntityIdProperties(plain, navRepo);
         plain[keyTo] = null;
         await navRepo.replaceById(navId as any, plain as AnyObject, this.repositoryOptions());
       };
@@ -2404,39 +2931,17 @@ export function defineODataCrudController(def: EntitySetDef) {
       const entityClass = (targetRepo as AnyObject).entityClass as typeof Entity | undefined;
       const idProps = entityClass?.getIdProperties?.() ?? [];
       const idName = idProps[0] ?? 'id';
-      const idDef = (entityClass as AnyObject)?.definition?.properties?.[idName];
-      const type = idDef?.type;
-      if (type === Number || type === 'number') {
-        const num = Number(literal);
-        if (Number.isNaN(num)) {
-          throw new HttpErrors.BadRequest(`Invalid numeric identifier: ${literal}`);
-        }
-        return num;
-      }
-      if (type === Boolean || type === 'boolean') {
-        if (literal === 'true') return true;
-        if (literal === 'false') return false;
-      }
-      return literal;
+      const idDef = (entityClass as AnyObject)?.definition?.properties?.[idName] as
+        | PropertyDefinition
+        | undefined;
+      return this.coerceIdentifierLiteral(literal, idDef, 'identifier');
     }
 
     coerceParentId(raw: unknown): unknown {
       if (typeof raw !== 'string') return raw;
       const idName = idProperties[0];
-      const idDef = modelDefinition?.properties?.[idName];
-      const type = idDef?.type;
-      if (type === Number || type === 'number') {
-        const num = Number(raw);
-        if (Number.isNaN(num)) {
-          throw new HttpErrors.BadRequest(`Invalid identifier: ${raw}`);
-        }
-        return num;
-      }
-      if (type === Boolean || type === 'boolean') {
-        if (raw === 'true') return true;
-        if (raw === 'false') return false;
-      }
-      return raw;
+      const idDef = modelDefinition?.properties?.[idName] as PropertyDefinition | undefined;
+      return this.coerceIdentifierLiteral(raw, idDef, 'identifier');
     }
 
     extractEntityId(entity: CrudEntity | AnyObject | undefined): unknown {
@@ -2633,11 +3138,12 @@ export function defineODataCrudController(def: EntitySetDef) {
       where: Filter<CrudEntity>['where'] | undefined,
       options?: Options,
     ): Promise<AnyObject | undefined> {
+      const entityId = this.coerceParentId(id);
       if (where) {
         const existing = await this.repository.findOne({ where } as Filter<CrudEntity>, options);
         return this.toPlainEntity(existing ?? undefined);
       }
-      const entity = await this.repository.findById(id as any, undefined, options);
+      const entity = await this.repository.findById(entityId as any, undefined, options);
       return this.toPlainEntity(entity);
     }
 
@@ -7606,12 +8112,13 @@ export function defineODataCrudController(def: EntitySetDef) {
       this.validateFieldsStrict(baseFilter as Filter<CrudEntity>);
       this.enforceSkipLimit(baseFilter as Filter<CrudEntity>);
 
+      const entityId = this.coerceParentId(id);
       const op: CrudOperation = 'READ';
       const scope: CrudScope = 'entity';
       const ctx = this.buildHookContext({
         operation: op,
         scope,
-        id,
+        id: entityId,
         filter: baseFilter as any,
         options: this.repositoryOptions(),
       });
@@ -7620,7 +8127,7 @@ export function defineODataCrudController(def: EntitySetDef) {
 
       const execDefault = async () => {
         const options = this.repositoryOptions();
-        const entity = await this.repository.findById(id as any, baseFilter, options);
+        const entity = await this.repository.findById(entityId as any, baseFilter, options);
         const plain = this.toPlainEntity(entity) ?? {};
         if (postFilterExpr) {
           const matches = this.evaluatePredicate(postFilterExpr, plain, '', plain);
@@ -7657,6 +8164,341 @@ export function defineODataCrudController(def: EntitySetDef) {
         await this.runAfter(op, scope, ctx);
       }
       return ctx.result as AnyObject | undefined;
+    }
+
+    @get(
+      `/odata/${setName}/{id}/$value`,
+      withODataSpecMetadata(
+        {
+          responses: {
+            '200': {
+              description: `${setName} media stream`,
+              content: {
+                'application/octet-stream': {
+                  schema: { type: 'string', format: 'binary' },
+                },
+              },
+            },
+            '204': { description: 'Stream is empty.' },
+            '304': { description: 'Not Modified' },
+          },
+        },
+        operationVisibility,
+      ),
+    )
+    async getMediaValue(@idParam id: unknown) {
+      if (!hasStream) {
+        throw new HttpErrors.NotFound('Media stream is not configured for this entity set.');
+      }
+      const preferences = this.parsePreferenceHeader();
+      if (preferences.respondAsync) this.throwPreferenceNotSupported('respond-async');
+      const baseFilter: Filter<CrudEntity> = {
+        fields: this.buildMediaProjectionFields(),
+      };
+      this.ensureEtagField(baseFilter);
+      const ifNoneMatch = this.parseIfNoneMatchHeader();
+      const entityId = this.coerceParentId(id);
+      const op: CrudOperation = 'READ';
+      const scope: CrudScope = 'entity';
+      const ctx = this.buildHookContext({
+        operation: op,
+        scope,
+        id: entityId,
+        filter: baseFilter as any,
+        options: this.repositoryOptions(),
+      });
+      await this.enforceTenantLimit(op, scope);
+      await this.runBefore(op, scope, ctx);
+
+      const execDefault = async () => {
+        const options = this.repositoryOptions();
+        const entity = await this.repository.findById(entityId as any, baseFilter, options);
+        const plain = this.toPlainEntity(entity) ?? {};
+        const storedContentType = this.readMediaContentType(plain);
+        const mediaEtag = this.readMediaEtag(plain);
+
+        if (
+          ifNoneMatch &&
+          !ifNoneMatch.any &&
+          mediaEtag &&
+          matchesEtag(mediaEtag, ifNoneMatch.values)
+        ) {
+          this.ensureMediaAccepts(storedContentType);
+          this.ensureODataHeaders();
+          this.setMediaEtagHeader(plain);
+          this.response.status(304).end();
+          return undefined;
+        }
+
+        const handler = await this.requireMediaHandler();
+        const result = await handler.read({
+          id: entityId,
+          entitySet: def,
+          entity: plain,
+          repository: this.repository as unknown as DefaultCrudRepository<CrudEntity, unknown>,
+          options,
+        });
+
+        this.ensureODataHeaders();
+        this.setMediaEtagHeader(plain);
+
+        if (!result) {
+          this.response.status(204).end();
+          return undefined;
+        }
+
+        const contentType = result.contentType ?? storedContentType ?? 'application/octet-stream';
+        this.ensureMediaAccepts(contentType);
+        const length = result.length ?? this.readMediaLength(plain);
+        this.response.type(contentType);
+        if (typeof length === 'number' && Number.isFinite(length)) {
+          this.response.set('Content-Length', `${length}`);
+        }
+
+        await this.streamToResponse(result.stream);
+        this.logMediaTelemetry('media.read', {
+          entityId,
+          bytes: length,
+          contentType,
+        });
+        return undefined;
+      };
+
+      const result = await execDefault();
+      ctx.result = result;
+      if (!this.response.headersSent) {
+        await this.runAfter(op, scope, ctx);
+      }
+      return ctx.result as unknown;
+    }
+
+    @put(
+      `/odata/${setName}/{id}/$value`,
+      withODataSpecMetadata(
+        {
+          responses: {
+            '200': {
+              description: `${setName} media updated (representation)`,
+              content: { 'application/json': { schema: entityResponseSchema } },
+            },
+            '204': { description: `${setName} media updated.` },
+          },
+        },
+        operationVisibility,
+      ),
+    )
+    async replaceMediaValue(
+      @idParam id: unknown,
+      @requestBody({
+        required: true,
+        content: mediaRequestContent ?? {
+          'application/octet-stream': buildStreamEntry(),
+          'text/plain': buildStreamEntry(),
+          '*/*': buildStreamEntry(),
+        },
+      })
+      body: Buffer | Readable,
+    ) {
+      if (!hasStream) {
+        throw new HttpErrors.NotFound('Media stream is not configured for this entity set.');
+      }
+      const preferences = this.parsePreferenceHeader();
+      if (preferences.respondAsync) this.throwPreferenceNotSupported('respond-async');
+      const contentType = this.ensureMediaContentType();
+      const entityId = this.coerceParentId(id);
+      const op: CrudOperation = 'UPDATE';
+      const scope: CrudScope = 'entity';
+      const ctx = this.buildHookContext({
+        operation: op,
+        scope,
+        id: entityId,
+        options: this.repositoryOptions(),
+      });
+      await this.enforceTenantLimit(op, scope);
+      await this.runBefore(op, scope, ctx);
+
+      const execDefault = async () => {
+        const options = this.repositoryOptions();
+        const baseFilter: Filter<CrudEntity> = { fields: this.buildMediaProjectionFields() };
+        this.ensureEtagField(baseFilter);
+        const entity = await this.repository.findById(entityId as any, baseFilter, options);
+        let plain = this.toPlainEntity(entity) ?? {};
+        const ifMatch = this.parseIfMatchHeader();
+        const requireEtag = (this.etagEnabled() || Boolean(mediaEtagField)) && this.cfg?.strict;
+        const currentEtag = this.readMediaEtag(plain);
+        if (requireEtag && !ifMatch) {
+          const error = new HttpErrors.PreconditionRequired(
+            'If-Match header is required when ETags are enabled.',
+          );
+          (error as any).code = 'PreconditionRequired';
+          throw error;
+        }
+        if (
+          ifMatch &&
+          !ifMatch.any &&
+          currentEtag &&
+          !matchesEtag(currentEtag, ifMatch.values ?? [])
+        ) {
+          this.throwPreconditionFailed();
+        }
+
+        const handler = await this.requireMediaHandler();
+        const stream = this.coerceBodyToStream(body);
+        const contentLengthHeader = this.request.headers['content-length'];
+        const contentLengthValue =
+          typeof contentLengthHeader === 'string' && contentLengthHeader.trim()
+            ? Number(contentLengthHeader)
+            : undefined;
+        const httpContentLength = Number.isFinite(contentLengthValue)
+          ? Number(contentLengthValue)
+          : undefined;
+
+        const writeResult = await handler.write({
+          id: entityId,
+          entitySet: def,
+          entity: plain,
+          repository: this.repository as unknown as DefaultCrudRepository<CrudEntity, unknown>,
+          options,
+          stream,
+          contentType,
+          contentLength: httpContentLength,
+        });
+
+        const overrides = {
+          contentType,
+          contentLength: httpContentLength,
+        };
+        const resolvedMetadata = this.resolveMediaMetadata(writeResult, overrides);
+        const metadataUpdates = await this.applyMediaMetadataUpdates(
+          entityId,
+          writeResult,
+          overrides,
+          resolvedMetadata,
+        );
+        if (metadataUpdates) {
+          plain = this.mergeMediaMetadata(plain, metadataUpdates);
+        }
+
+        this.ensureODataHeaders();
+        this.setMediaEtagHeader(plain);
+        const reportedLength = resolvedMetadata.length;
+        const telemetryContentType = resolvedMetadata.contentType ?? contentType;
+        this.logMediaTelemetry('media.write', {
+          entityId,
+          bytes: reportedLength,
+          contentType: telemetryContentType,
+        });
+
+        const preference = preferences.returnPreference;
+        if (preference === 'representation') {
+          this.ensureAcceptsJson();
+          const reloaded = await this.repository.findById(entityId as any, undefined, options);
+          const responsePlain = this.toPlainEntity(reloaded) ?? plain;
+          const entityEtag = this.computeEtagFromPlain(responsePlain);
+          const decorated = this.decoratePlainEntity(responsePlain, entityEtag);
+          this.applyPreference(preference);
+          this.response.status(200);
+          this.setEtagHeaderFromPlain(responsePlain);
+          this.setMediaEtagHeader(responsePlain);
+          const result = {
+            '@odata.context': entityContext,
+            ...decorated,
+          } as AnyObject;
+          ctx.result = result;
+          return result;
+        }
+
+        this.response.status(204);
+        this.applyPreference(preference);
+        return undefined;
+      };
+
+      const result = await execDefault();
+      ctx.result = result;
+      if (!this.response.headersSent) {
+        await this.runAfter(op, scope, ctx);
+      }
+      return ctx.result as AnyObject | undefined;
+    }
+
+    @del(
+      `/odata/${setName}/{id}/$value`,
+      withODataSpecMetadata(
+        {
+          responses: {
+            '204': { description: `${setName} media deleted.` },
+          },
+        },
+        operationVisibility,
+      ),
+    )
+    async deleteMediaValue(@idParam id: unknown) {
+      if (!hasStream) {
+        throw new HttpErrors.NotFound('Media stream is not configured for this entity set.');
+      }
+      const preferences = this.parsePreferenceHeader();
+      if (preferences.respondAsync) this.throwPreferenceNotSupported('respond-async');
+      const entityId = this.coerceParentId(id);
+      const op: CrudOperation = 'DELETE';
+      const scope: CrudScope = 'entity';
+      const ctx = this.buildHookContext({
+        operation: op,
+        scope,
+        id: entityId,
+        options: this.repositoryOptions(),
+      });
+      await this.enforceTenantLimit(op, scope);
+      await this.runBefore(op, scope, ctx);
+
+      const execDefault = async () => {
+        const options = this.repositoryOptions();
+        const baseFilter: Filter<CrudEntity> = { fields: this.buildMediaProjectionFields() };
+        this.ensureEtagField(baseFilter);
+        const entity = await this.repository.findById(entityId as any, baseFilter, options);
+        const plain = this.toPlainEntity(entity) ?? {};
+        const ifMatch = this.parseIfMatchHeader();
+        const requireEtag = (this.etagEnabled() || Boolean(mediaEtagField)) && this.cfg?.strict;
+        const currentEtag = this.readMediaEtag(plain);
+        if (requireEtag && !ifMatch) {
+          const error = new HttpErrors.PreconditionRequired(
+            'If-Match header is required when ETags are enabled.',
+          );
+          (error as any).code = 'PreconditionRequired';
+          throw error;
+        }
+        if (
+          ifMatch &&
+          !ifMatch.any &&
+          currentEtag &&
+          !matchesEtag(currentEtag, ifMatch.values ?? [])
+        ) {
+          this.throwPreconditionFailed();
+        }
+
+        const handler = await this.requireMediaHandler();
+        if (typeof handler.delete !== 'function') {
+          throw new HttpErrors.NotImplemented('Media handler does not support delete.');
+        }
+        await handler.delete({
+          id: entityId,
+          entitySet: def,
+          entity: plain,
+          repository: this.repository as unknown as DefaultCrudRepository<CrudEntity, unknown>,
+          options,
+        });
+        await this.clearMediaMetadata(entityId);
+        this.ensureODataHeaders();
+        this.response.status(204).end();
+        this.logMediaTelemetry('media.delete', { entityId });
+        return undefined;
+      };
+
+      const result = await execDefault();
+      ctx.result = result;
+      if (!this.response.headersSent) {
+        await this.runAfter(op, scope, ctx);
+      }
+      return ctx.result as unknown;
     }
 
     @get(
@@ -7705,12 +8547,13 @@ export function defineODataCrudController(def: EntitySetDef) {
       this.ensureEtagField(baseFilter);
 
       const ifNoneMatch = this.parseIfNoneMatchHeader();
+      const entityId = this.coerceParentId(id);
       const op: CrudOperation = 'READ';
       const scope: CrudScope = 'entity';
       const ctx = this.buildHookContext({
         operation: op,
         scope,
-        id,
+        id: entityId,
         filter: baseFilter as any,
         options: this.repositoryOptions(),
       });
@@ -7719,7 +8562,7 @@ export function defineODataCrudController(def: EntitySetDef) {
 
       const execDefault = async () => {
         const options = this.repositoryOptions();
-        const entity = await this.repository.findById(id as any, baseFilter, options);
+        const entity = await this.repository.findById(entityId as any, baseFilter, options);
         const plain = this.toPlainEntity(entity) ?? {};
         const etag = this.computeEtagFromPlain(plain);
 
@@ -7773,29 +8616,43 @@ export function defineODataCrudController(def: EntitySetDef) {
     )
     async create(
       @requestBody({
-        content: {
-          'application/json': {
-            schema: getModelSchemaRef(modelCtor, {
-              title: `New${modelCtor.name ?? 'Entity'}`,
-              optional: optionalProperties as unknown as (keyof Entity)[],
-              includeRelations: deepInsertEnabledForSet,
-            }),
-          },
-        },
+        content: createRequestContent,
       })
-      payload: CrudEntity,
+      payload: CrudEntity | Buffer | Readable,
     ) {
       const preferences = this.parsePreferenceHeader();
       if (preferences.respondAsync) this.throwPreferenceNotSupported('respond-async');
       this.ensureAcceptsJson();
-      this.ensureJsonContentType();
+      const bodyIsBinary = hasStream && !this.isJsonBodyRequest();
+      const mediaContentType = bodyIsBinary ? this.ensureMediaContentType() : undefined;
+      const mediaStream = bodyIsBinary ? this.coerceBodyToStream(payload) : undefined;
+      if (!bodyIsBinary) {
+        this.ensureJsonContentType();
+      }
+      const slugHeader = bodyIsBinary ? this.getSlugHeader() : undefined;
+      const contentLengthHeader =
+        bodyIsBinary && typeof this.request.headers['content-length'] === 'string'
+          ? this.request.headers['content-length']
+          : undefined;
+      const contentLengthValue =
+        bodyIsBinary && contentLengthHeader && contentLengthHeader.trim()
+          ? Number(contentLengthHeader)
+          : undefined;
+      const mediaContentLength =
+        bodyIsBinary && Number.isFinite(contentLengthValue)
+          ? Number(contentLengthValue)
+          : undefined;
+      const initialPayload =
+        bodyIsBinary || !payload || typeof payload !== 'object'
+          ? (this.buildMediaSlugPayload(slugHeader) ?? {})
+          : ((payload as AnyObject) ?? {});
 
       const op: CrudOperation = 'CREATE';
       const scope: CrudScope | undefined = undefined;
       const ctx = this.buildHookContext({
         operation: op,
         scope,
-        payload: payload as AnyObject,
+        payload: initialPayload as AnyObject,
         options: this.repositoryOptions(),
       });
       await this.enforceTenantLimit(op);
@@ -7804,8 +8661,11 @@ export function defineODataCrudController(def: EntitySetDef) {
       const execDefault = async () => {
         const options = this.repositoryOptions();
         const preference = preferences.returnPreference;
-        const deepInsertEnabled = deepInsertEnabledForSet;
-        const payloadForCreate = this.coercePayloadToObject((ctx.payload ?? payload) as AnyObject);
+        const deepInsertEnabled = deepInsertEnabledForSet && !bodyIsBinary;
+        const payloadSource = bodyIsBinary
+          ? (ctx.payload ?? {})
+          : (ctx.payload ?? (payload as AnyObject));
+        const payloadForCreate = this.coercePayloadToObject(payloadSource as AnyObject);
         const visited = new Set<AnyObject>();
         const normalized = deepInsertEnabled
           ? this.normalizeDeepInsertPayload(payloadForCreate, modelCtor as typeof Entity)
@@ -7872,6 +8732,47 @@ export function defineODataCrudController(def: EntitySetDef) {
           }
           const reloaded = await this.reloadEntityForResponse(created, options);
           entityForResponse = this.toPlainEntity(reloaded ?? created);
+        }
+
+        if (bodyIsBinary && mediaStream) {
+          if (createdEntityId == null) {
+            throw new HttpErrors.InternalServerError(
+              'Unable to determine entity id for media upload.',
+            );
+          }
+          const handler = await this.requireMediaHandler();
+          const effectiveContentType = mediaContentType ?? 'application/octet-stream';
+          const writeResult = await handler.write({
+            id: createdEntityId,
+            entitySet: def,
+            entity: entityForResponse ?? {},
+            repository: this.repository as unknown as DefaultCrudRepository<CrudEntity, unknown>,
+            options,
+            stream: mediaStream,
+            contentType: effectiveContentType,
+            contentLength: mediaContentLength,
+            slug: slugHeader,
+          });
+          const createOverrides = {
+            contentType: effectiveContentType,
+            contentLength: mediaContentLength,
+          };
+          const resolvedMetadata = this.resolveMediaMetadata(writeResult, createOverrides);
+          const updates = await this.applyMediaMetadataUpdates(
+            createdEntityId,
+            writeResult,
+            createOverrides,
+            resolvedMetadata,
+          );
+          if (updates) {
+            entityForResponse = this.mergeMediaMetadata(entityForResponse, updates);
+          }
+          const telemetryContentType = resolvedMetadata.contentType ?? effectiveContentType;
+          this.logMediaTelemetry('media.write', {
+            entityId: createdEntityId,
+            bytes: resolvedMetadata.length,
+            contentType: telemetryContentType,
+          });
         }
 
         if (this.etagEnabled()) {
@@ -7958,12 +8859,13 @@ export function defineODataCrudController(def: EntitySetDef) {
         rootPayload = { ...(payload as AnyObject) };
       }
 
+      const entityId = this.coerceParentId(id);
       const op: CrudOperation = 'UPDATE';
       const scope: CrudScope | undefined = undefined;
       const ctx = this.buildHookContext({
         operation: op,
         scope,
-        id,
+        id: entityId,
         payload: rootPayload as AnyObject,
         options: this.repositoryOptions(),
       });
@@ -7975,7 +8877,7 @@ export function defineODataCrudController(def: EntitySetDef) {
         const preference = preferences.returnPreference;
         const ifMatch = this.parseIfMatchHeader();
         const workingPayload = ctx.payload ?? rootPayload ?? {};
-        const parentIdValue = this.coerceParentId(id);
+        const parentIdValue = entityId;
 
         if (this.etagEnabled() && this.cfg?.strict && !ifMatch) {
           const error = new HttpErrors.PreconditionRequired(
@@ -7991,7 +8893,7 @@ export function defineODataCrudController(def: EntitySetDef) {
             etagPropertyDefs,
           );
           if (invalidComposite || !values.length) this.throwPreconditionFailed();
-          const where = this.buildConditionalWhere(id, values, false);
+          const where = this.buildConditionalWhere(parentIdValue, values, false);
           const { count } = await this.repository.updateAll(
             workingPayload as AnyObject,
             where,
@@ -8000,11 +8902,15 @@ export function defineODataCrudController(def: EntitySetDef) {
           if (!count) this.throwPreconditionFailed();
         } else {
           if (Object.keys(workingPayload).length) {
-            await this.repository.updateById(id as any, workingPayload as AnyObject, options);
+            await this.repository.updateById(
+              parentIdValue as any,
+              workingPayload as AnyObject,
+              options,
+            );
           }
         }
 
-        let updated = await this.repository.findById(id as any, undefined, options);
+        let updated = await this.repository.findById(parentIdValue as any, undefined, options);
         if (deepUpdateEnabled && relationPayloads && Object.keys(relationPayloads).length) {
           await this.applyDeepUpdateRelations(
             parentIdValue,
@@ -8014,7 +8920,7 @@ export function defineODataCrudController(def: EntitySetDef) {
             options,
             0,
           );
-          updated = await this.repository.findById(id as any, undefined, options);
+          updated = await this.repository.findById(parentIdValue as any, undefined, options);
         }
 
         const plain = this.toPlainEntity(updated) ?? {};
@@ -8069,12 +8975,13 @@ export function defineODataCrudController(def: EntitySetDef) {
       const preferences = this.parsePreferenceHeader();
       if (preferences.respondAsync) this.throwPreferenceNotSupported('respond-async');
 
+      const entityId = this.coerceParentId(id);
       const op: CrudOperation = 'DELETE';
       const scope: CrudScope | undefined = undefined;
       const ctx = this.buildHookContext({
         operation: op,
         scope,
-        id,
+        id: entityId,
         options: this.repositoryOptions(),
       });
       await this.enforceTenantLimit(op);
@@ -8084,6 +8991,9 @@ export function defineODataCrudController(def: EntitySetDef) {
         const options = this.repositoryOptions();
         const ifMatch = this.parseIfMatchHeader();
         const preference = preferences.returnPreference;
+        if (preference === 'representation') {
+          this.ensureAcceptsJson();
+        }
         let entityForResponse: AnyObject | undefined;
 
         if (this.etagEnabled() && this.cfg?.strict && !ifMatch) {
@@ -8100,21 +9010,25 @@ export function defineODataCrudController(def: EntitySetDef) {
             etagPropertyDefs,
           );
           if (invalidComposite || !values.length) this.throwPreconditionFailed();
-          const where = this.buildConditionalWhere(id, values, false);
+          const where = this.buildConditionalWhere(entityId, values, false);
           if (preference === 'representation') {
-            entityForResponse = await this.findEntityForDeleteRepresentation(id, where, options);
+            entityForResponse = await this.findEntityForDeleteRepresentation(
+              entityId,
+              where,
+              options,
+            );
           }
           const { count } = await this.repository.deleteAll(where, options);
           if (!count) this.throwPreconditionFailed();
         } else {
           if (preference === 'representation') {
             entityForResponse = await this.findEntityForDeleteRepresentation(
-              id,
+              entityId,
               undefined,
               options,
             );
           }
-          await this.repository.deleteById(id as any, options);
+          await this.repository.deleteById(entityId as any, options);
         }
         this.ensureODataHeaders();
         if (preference === 'representation') {

@@ -1,4 +1,6 @@
 import 'reflect-metadata';
+import { Model } from '@loopback/repository';
+import { isModelCtor } from '../util/model-helpers';
 
 export type ODataBindingScope = 'collection' | 'entity' | 'unbound';
 
@@ -18,9 +20,12 @@ export interface OperationMeta extends Required<Omit<ODataOperationOptions, 'ret
   methodName: string;
 }
 
+export type OperationParameterType = string | typeof Model | (() => string | typeof Model);
+
 export interface OperationParameter {
   name: string;
-  type?: string;
+  type?: OperationParameterType;
+  modelCtor?: typeof Model;
 }
 
 function pushMetadata(target: any, key: string, entry: OperationMeta) {
@@ -38,7 +43,7 @@ export function odataAction(
       binding: options.binding ?? 'entity',
       rawResponse: options.rawResponse ?? false,
       returnType: options.returnType,
-      parameters: options.params,
+      parameters: normalizeOperationParameters(options.params),
     });
   };
 }
@@ -53,7 +58,7 @@ export function odataFunction(
       binding: options.binding ?? 'entity',
       rawResponse: options.rawResponse ?? false,
       returnType: options.returnType,
-      parameters: options.params,
+      parameters: normalizeOperationParameters(options.params),
     });
   };
 }
@@ -70,4 +75,37 @@ export function getODataFunctions(target: Function): OperationMeta[] {
     (Reflect.getMetadata(FUNCTION_METADATA_KEY, target.prototype) as OperationMeta[] | undefined) ??
     []
   );
+}
+
+function normalizeOperationParameters(
+  params?: OperationParameter[],
+): OperationParameter[] | undefined {
+  if (!params) return undefined;
+  return params.map((param) => {
+    const ctor = resolveOperationParameterCtor(param.type);
+    if (!ctor) return { ...param };
+    return { ...param, modelCtor: ctor };
+  });
+}
+
+function resolveOperationParameterCtor(
+  type: OperationParameterType | undefined,
+): typeof Model | undefined {
+  if (!type) return undefined;
+  if (typeof type === 'function') {
+    if (isModelConstructor(type)) {
+      return type as typeof Model;
+    }
+    try {
+      const resolved = (type as () => string | typeof Model)();
+      if (isModelConstructor(resolved)) return resolved;
+    } catch {
+      return undefined;
+    }
+  }
+  return undefined;
+}
+
+function isModelConstructor(value: unknown): value is typeof Model {
+  return isModelCtor(value);
 }

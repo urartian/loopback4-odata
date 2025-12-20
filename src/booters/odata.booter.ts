@@ -1,6 +1,8 @@
 import {
   Application,
   Binding,
+  BindingScope,
+  Context,
   CoreBindings,
   MetadataInspector,
   inject,
@@ -8,6 +10,7 @@ import {
   invokeMethod,
   describeInjectedArguments,
   describeInjectedProperties,
+  ResolutionContext,
 } from '@loopback/core';
 import { Booter } from '@loopback/boot';
 import {
@@ -27,9 +30,12 @@ import { getODataModelMeta, ODataModelOptions } from '../decorators/model.decora
 import { ODATA_BINDINGS, ODataLogger } from '../keys';
 import {
   AnyObject,
+  DefaultCrudRepository,
   Entity,
+  Model,
   ModelDefinition,
   MODEL_KEY,
+  buildModelDefinition,
   juggler,
   RelationDefinitionMap,
 } from '@loopback/repository';
@@ -37,6 +43,7 @@ import {
   getODataActions,
   getODataFunctions,
   OperationMeta,
+  OperationParameter,
 } from '../decorators/action.function.decorators';
 import { pluralize } from 'inflection';
 import { normalizeEtagProperties } from '../util/etag';
@@ -51,6 +58,12 @@ import { inferSqlMetadata } from '../util/sql-metadata';
 import { ODATA_VERSION } from '../constants';
 import { probeDataSourceTransactionalCapability } from '../util/datasource-transactions';
 import { normalizeBasePath } from '../util/base-path';
+import {
+  PropertyBackedMediaHandler,
+  RepositoryMediaAdapterTarget,
+  RepositoryMediaHandlerAdapter,
+} from '../services/odata-media-handler';
+import { isModelCtor, modelsRepresentSameEntity } from '../util/model-helpers';
 
 @injectable({ tags: { booters: 'odata' } })
 export class ODataBooter implements Booter {
@@ -111,7 +124,16 @@ export class ODataBooter implements Booter {
             typeof (relMeta as AnyObject).target === 'function'
               ? ((relMeta as AnyObject).target() as typeof Entity | undefined)
               : undefined;
-          if (relTargetCtor !== modelCtor) continue;
+          const relTargetDef = relTargetCtor
+            ? ((relTargetCtor as unknown as { definition?: ModelDefinition }).definition as
+                | ModelDefinition
+                | undefined)
+            : undefined;
+          const matchesSource = modelsRepresentSameEntity(relTargetCtor, modelCtor, {
+            leftDefinition: relTargetDef,
+            rightDefinition: modelDefinition,
+          });
+          if (!matchesSource) continue;
           const keyFrom = (relMeta as AnyObject).keyFrom as string | undefined;
           if (!keyFrom) continue;
           const targetProp = targetDef.properties?.[keyFrom];
@@ -250,6 +272,14 @@ export class ODataBooter implements Booter {
           entitySet: setName,
         });
       }
+      const hasStream = Boolean(modelMeta?.hasStream);
+      const mediaField = modelMeta?.mediaField;
+      const mediaContentTypeField = modelMeta?.mediaContentTypeField;
+      const mediaEtagField = modelMeta?.mediaEtagField;
+      const mediaLengthField = modelMeta?.mediaLengthField;
+      const mediaHandlerBindingKey = hasStream
+        ? (modelMeta?.mediaHandlerBindingKey ?? this.buildMediaHandlerBindingKey(setName))
+        : undefined;
       const def = this.registry.register({
         name: setName,
         modelCtor,
@@ -264,10 +294,19 @@ export class ODataBooter implements Booter {
         deltaEnabled,
         deltaField,
         documentInOpenApi,
+        hasStream,
+        mediaField,
+        mediaContentTypeField,
+        mediaEtagField,
+        mediaLengthField,
+        mediaHandlerBindingKey: mediaHandlerBindingKey ?? undefined,
       });
 
       await this.detectTransactionalCapability(def, repoBinding);
       await this.configureApplyPushdown(def, repoBinding, modelMeta, modelCtor);
+      if (hasStream) {
+        await this.configureMediaHandler(def, repoBinding);
+      }
 
       const CrudController = defineODataCrudController(def);
       def.controllerCtor = CrudController;
@@ -432,6 +471,79 @@ export class ODataBooter implements Booter {
         datasource: datasourceName,
       });
     }
+  }
+
+  private buildMediaHandlerBindingKey(entitySetName: string): string {
+    const trimmed = entitySetName.replace(/\s+/g, '');
+    return `${ODATA_BINDINGS.MEDIA_HANDLERS.key}.${trimmed}`;
+  }
+
+  private repositoryExposesMediaMethods(proto: AnyObject | undefined): boolean {
+    if (!proto) return false;
+    const hasGetter = typeof (proto as AnyObject).getMedia === 'function';
+    const hasSetter = typeof (proto as AnyObject).setMedia === 'function';
+    return hasGetter && hasSetter;
+  }
+
+  private async configureMediaHandler(
+    def: EntitySetDef,
+    repoBinding: Readonly<Binding<unknown>>,
+  ): Promise<void> {
+    if (!def.hasStream) return;
+    if (!def.mediaHandlerBindingKey) {
+      def.mediaHandlerBindingKey = this.buildMediaHandlerBindingKey(def.name);
+    }
+    const bindingKey = def.mediaHandlerBindingKey;
+    if (!bindingKey) return;
+    if (this.app.isBound(bindingKey)) return;
+
+    const repoCtor = repoBinding.valueConstructor as
+      | (new (...args: unknown[]) => unknown)
+      | undefined;
+    if (repoCtor && this.repositoryExposesMediaMethods(repoCtor.prototype as AnyObject)) {
+      this.app
+        .bind(bindingKey)
+        .toDynamicValue(async (resolutionCtx: ResolutionContext) => {
+          const repo = (await this.resolveMediaRepository(
+            repoBinding.key,
+            resolutionCtx,
+          )) as DefaultCrudRepository<Entity & AnyObject, unknown> & RepositoryMediaAdapterTarget;
+          return new RepositoryMediaHandlerAdapter(repo);
+        })
+        .inScope(BindingScope.REQUEST);
+      return;
+    }
+
+    if (def.mediaField) {
+      this.app
+        .bind(bindingKey)
+        .toDynamicValue(async (resolutionCtx: ResolutionContext) => {
+          const repo = (await this.resolveMediaRepository(
+            repoBinding.key,
+            resolutionCtx,
+          )) as DefaultCrudRepository<Entity & AnyObject, unknown>;
+          return new PropertyBackedMediaHandler(repo, def.mediaField!);
+        })
+        .inScope(BindingScope.REQUEST);
+      return;
+    }
+
+    this.logger.warn('hasStream entity set registered without a media handler.', {
+      entitySet: def.name,
+    });
+  }
+
+  private async resolveMediaRepository(
+    bindingKey: string,
+    resolutionCtx?: ResolutionContext,
+  ): Promise<DefaultCrudRepository<Entity & AnyObject, unknown>> {
+    const context = this.resolveMediaHandlerContext(resolutionCtx);
+    return (await context.get(bindingKey)) as DefaultCrudRepository<Entity & AnyObject, unknown>;
+  }
+
+  private resolveMediaHandlerContext(resolutionCtx?: ResolutionContext): Context {
+    const requestContext = (resolutionCtx as { context?: Context } | undefined)?.context;
+    return requestContext ?? this.app;
   }
 
   private async resolveRepositoryBindingForModel(
@@ -794,7 +906,9 @@ class ODataOperationRoute extends ControllerRoute<object> {
     }
 
     if (this.httpVerb === 'post') {
-      invocationArgs.push(requestContext.request.body);
+      const body = requestContext.request.body;
+      this.validateActionPayload(body);
+      invocationArgs.push(body);
     } else {
       invocationArgs.push(requestContext.request.query);
     }
@@ -828,6 +942,74 @@ class ODataOperationRoute extends ControllerRoute<object> {
       '@odata.context': context,
       value: result,
     };
+  }
+
+  private validateActionPayload(body: unknown) {
+    const params = this.operation.parameters;
+    if (!params?.length) return;
+    if (!body || typeof body !== 'object') return;
+
+    const payload = body as AnyObject;
+    const allowedParams = new Set(params.map((param) => param.name));
+    for (const key of Object.keys(payload)) {
+      if (!allowedParams.has(key)) {
+        throw new HttpErrors.BadRequest(
+          `Unknown parameter "${key}" on action "${this.operation.name}".`,
+        );
+      }
+    }
+
+    for (const param of params) {
+      const ctor = this.resolveParameterModelCtor(param);
+      if (!ctor) continue;
+      const value = payload[param.name];
+      if (value == null) continue;
+      if (typeof value !== 'object' || Array.isArray(value)) {
+        throw new HttpErrors.BadRequest(
+          `Parameter "${param.name}" must be an object matching the declared model.`,
+        );
+      }
+      this.rejectUnknownProperties(param, ctor, value as AnyObject);
+    }
+  }
+
+  private rejectUnknownProperties(param: OperationParameter, ctor: typeof Model, value: AnyObject) {
+    let definition = ctor.definition as ModelDefinition | undefined;
+    if (!definition) {
+      buildModelDefinition(ctor as typeof Model & { definition?: ModelDefinition });
+      definition = ctor.definition as ModelDefinition | undefined;
+    }
+    const props = definition?.properties ?? {};
+    for (const key of Object.keys(value)) {
+      if (!props[key]) {
+        throw new HttpErrors.BadRequest(`Unknown property "${key}" on parameter "${param.name}".`);
+      }
+    }
+  }
+
+  private resolveParameterModelCtor(param: OperationParameter): typeof Model | undefined {
+    if (param.modelCtor) return param.modelCtor;
+    const ctor = this.tryResolveParameterCtor(param.type);
+    if (ctor) param.modelCtor = ctor;
+    return ctor;
+  }
+
+  private tryResolveParameterCtor(type: OperationParameter['type']): typeof Model | undefined {
+    if (!type) return undefined;
+    if (typeof type === 'function') {
+      if (this.isModelConstructor(type)) return type as typeof Model;
+      try {
+        const resolved = (type as () => string | typeof Model)();
+        if (this.isModelConstructor(resolved)) return resolved;
+      } catch {
+        return undefined;
+      }
+    }
+    return undefined;
+  }
+
+  private isModelConstructor(value: unknown): value is typeof Model {
+    return isModelCtor(value);
   }
 }
 

@@ -1188,7 +1188,7 @@ describe('$batch controller', () => {
     assert.equal((r3.body as any)?.error?.code, 'FailedDependency');
   });
 
-  it('returns 501 when atomicity group cannot start a transaction', async () => {
+  it('rejects atomicity groups when datasource lacks transaction support', async () => {
     const registry = {
       findByName: (name: string) =>
         name === 'Products'
@@ -1208,6 +1208,11 @@ describe('$batch controller', () => {
       noopLogger,
       defaultConfig,
     );
+    (controller as any).executeSingle = async (request: { id: string }) => ({
+      id: request.id,
+      status: 200,
+      body: { ok: true },
+    });
 
     const result = (await controller.handleBatch(
       {
@@ -1218,13 +1223,15 @@ describe('$batch controller', () => {
     )) as BatchResponsePayload;
 
     assert.equal(result.responses.length, 1);
-    const failure = result.responses[0];
-    assert.equal(failure.atomicityGroup, 'no-tx');
-    assert.equal(failure.status, 501);
-    assert.equal((failure.body as any)?.error?.code, 'BatchExecutionError');
+    const response = result.responses[0];
+    assert.equal(response.atomicityGroup, 'no-tx');
+    assert.equal(response.status, 501);
+    const error = (response.body as any)?.error;
+    assert.equal(error?.code, 'BatchExecutionError');
+    assert.match(error?.message ?? '', /cannot be executed/i);
   });
 
-  it('short-circuits atomicity groups when entity set is marked non-transactional', async () => {
+  it('rejects atomicity groups when entity set is marked non-transactional', async () => {
     let resolvedRepository = false;
     const def = {
       name: 'Products',
@@ -1250,6 +1257,10 @@ describe('$batch controller', () => {
       noopLogger,
       defaultConfig,
     );
+    (controller as any).executeSingle = async (request: { id: string }) => ({
+      id: request.id,
+      status: 204,
+    });
 
     const result = (await controller.handleBatch(
       {
@@ -1261,10 +1272,12 @@ describe('$batch controller', () => {
 
     assert.equal(resolvedRepository, false);
     assert.equal(result.responses.length, 1);
-    const failure = result.responses[0];
-    assert.equal(failure.status, 501);
-    assert.equal(failure.atomicityGroup, 'locked');
-    assert.equal((failure.body as any)?.error?.code, 'BatchExecutionError');
+    const response = result.responses[0];
+    assert.equal(response.status, 501);
+    assert.equal(response.atomicityGroup, 'locked');
+    const error = (response.body as any)?.error;
+    assert.equal(error?.code, 'BatchExecutionError');
+    assert.match(error?.message ?? '', /cannot be executed/i);
   });
 
   it('locks entity sets after refresh confirms lack of transaction support', async () => {
@@ -1300,7 +1313,6 @@ describe('$batch controller', () => {
       ]),
       (err: unknown) => err instanceof HttpErrors.NotImplemented,
     );
-
     assert.equal(def.supportsTransactions, false);
     assert.equal(def.transactionCapabilityLocked, true);
     assert.equal(repositoryResolutions, 1);
@@ -1311,7 +1323,6 @@ describe('$batch controller', () => {
       ]),
       (err: unknown) => err instanceof HttpErrors.NotImplemented,
     );
-
     assert.equal(repositoryResolutions, 1);
   });
 
@@ -1421,7 +1432,6 @@ describe('$batch controller', () => {
       ]),
       (err: unknown) => err instanceof HttpErrors.NotImplemented,
     );
-
     assert.equal(def.supportsTransactions, false);
     assert.equal(def.transactionCapabilityLocked, true);
   });
@@ -1477,7 +1487,6 @@ describe('$batch controller', () => {
       ]),
       (err: unknown) => err instanceof HttpErrors.NotImplemented,
     );
-
     assert.equal(repositoryResolutions, 1);
   });
 
@@ -1516,7 +1525,6 @@ describe('$batch controller', () => {
       ]),
       (err: unknown) => err instanceof HttpErrors.NotImplemented,
     );
-
     assert.equal(def.supportsTransactions, false);
   });
 

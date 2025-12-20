@@ -2,9 +2,11 @@ import { BindingScope, inject, injectable } from '@loopback/core';
 import {
   AnyObject,
   Entity,
+  Model,
   ModelDefinition,
   PropertyDefinition,
   RelationDefinitionMap,
+  buildModelDefinition,
 } from '@loopback/repository';
 import { EntitySetDef, EntitySetRegistry } from '../registry/entityset-registry';
 import { ODATA_BINDINGS } from '../keys';
@@ -12,6 +14,8 @@ import {
   getODataActions,
   getODataFunctions,
   OperationMeta,
+  OperationParameter,
+  OperationParameterType,
 } from '../decorators/action.function.decorators';
 import {
   ODataConfig,
@@ -27,6 +31,7 @@ import {
 } from '../types';
 import { getODataSearchableProps } from '../decorators/search.decorators';
 import { stableStringify } from '../util/token-signing';
+import { isEntityCtor, isModelCtor } from '../util/model-helpers';
 
 const EDM_NAMESPACE = 'http://docs.oasis-open.org/odata/ns/edm';
 const EDMX_NAMESPACE = 'http://docs.oasis-open.org/odata/ns/edmx';
@@ -359,8 +364,13 @@ function ensureComplexType(
   const existing = context.complexTypes.get(ctor);
   if (existing) return existing;
   if (context.visitingComplex.has(ctor)) return undefined;
+  if (isEntityCtor(ctor as typeof Entity)) return undefined;
 
-  const definition = (ctor as typeof Entity).definition as ModelDefinition | undefined;
+  let definition = (ctor as typeof Model).definition as ModelDefinition | undefined;
+  if (!definition) {
+    buildModelDefinition(ctor as typeof Model & { definition?: ModelDefinition });
+    definition = (ctor as typeof Model).definition as ModelDefinition | undefined;
+  }
   if (!definition) return undefined;
 
   context.visitingComplex.add(ctor);
@@ -561,8 +571,7 @@ function resolveEdmType(
 
   if (typeof effectiveType === 'function') {
     const ctor = effectiveType as Function;
-    const proto = (ctor as any)?.prototype;
-    if (!(proto && proto instanceof Entity)) {
+    if (!isEntityCtor(ctor as typeof Entity)) {
       if ((ctor as any)?.definition) {
         const complex = ensureComplexType(ctor, context);
         if (complex) {
@@ -695,7 +704,23 @@ function buildEntityType(
 
   if (hasStream) {
     annotationLines.push('      <Annotation Term="Org.OData.Core.V1.HasStream" Bool="true"/>');
+    annotationLines.push(
+      '      <Annotation Term="Org.OData.Capabilities.V1.Streaming" Bool="true"/>',
+    );
     json['@Org.OData.Core.V1.HasStream'] = true;
+    json['@Org.OData.Capabilities.V1.Streaming'] = true;
+    if (def.mediaContentTypeField) {
+      annotationLines.push(
+        `      <Annotation Term="Org.OData.Core.V1.MediaType"><Path>${xmlEscape(def.mediaContentTypeField)}</Path></Annotation>`,
+      );
+      json['@Org.OData.Core.V1.MediaType'] = { $Path: def.mediaContentTypeField };
+    }
+    if (def.mediaEtagField) {
+      annotationLines.push(
+        `      <Annotation Term="Org.OData.Core.V1.MediaETag"><Path>${xmlEscape(def.mediaEtagField)}</Path></Annotation>`,
+      );
+      json['@Org.OData.Core.V1.MediaETag'] = { $Path: def.mediaEtagField };
+    }
   }
 
   const relations = (modelDefinition.relations ?? {}) as RelationDefinitionMap;
@@ -792,7 +817,7 @@ function buildEntityType(
 function resolveBaseEntityCtor(ctor: typeof Entity): typeof Entity | undefined {
   let current = Object.getPrototypeOf(ctor);
   while (current && current !== Entity && typeof current === 'function') {
-    if (current.prototype instanceof Entity) return current;
+    if (isEntityCtor(current)) return current as typeof Entity;
     current = Object.getPrototypeOf(current);
   }
   return undefined;
@@ -1475,7 +1500,7 @@ export class CsdlGenerator {
       const entityName = (set.modelCtor as typeof Entity).definition?.name ?? set.modelCtor.name;
       const actions = set.actions ?? [];
       for (const action of actions) {
-        const result = this.buildOperationSchema('Action', action, namespace, entityName);
+        const result = this.buildOperationSchema('Action', action, namespace, entityName, context);
         actionXml.push(result.xml);
         if (result.importXml) operationImportsXml.push(result.importXml);
         jsonActions[action.name] = result.json;
@@ -1484,7 +1509,7 @@ export class CsdlGenerator {
 
       const functions = set.functions ?? [];
       for (const fn of functions) {
-        const result = this.buildOperationSchema('Function', fn, namespace, entityName);
+        const result = this.buildOperationSchema('Function', fn, namespace, entityName, context);
         functionXml.push(result.xml);
         if (result.importXml) operationImportsXml.push(result.importXml);
         jsonFunctions[fn.name] = result.json;
@@ -1738,6 +1763,7 @@ export class CsdlGenerator {
     op: OperationMeta,
     namespace: string,
     entityName: string | undefined,
+    context: SchemaBuildContext,
   ) {
     const isBound = op.binding !== 'unbound';
     const lines: string[] = [];
@@ -1751,7 +1777,7 @@ export class CsdlGenerator {
     }
 
     for (const param of op.parameters ?? []) {
-      const type = param.type ?? 'Edm.String';
+      const type = this.resolveOperationParameterType(param, context);
       lines.push(`  <Parameter Name="${xmlEscape(param.name)}" Type="${xmlEscape(type)}" />`);
     }
 
@@ -1801,9 +1827,10 @@ export class CsdlGenerator {
       });
     }
     for (const param of op.parameters ?? []) {
+      const type = this.resolveOperationParameterType(param, context);
       parameters.push({
         $Name: param.name,
-        $Type: param.type ?? 'Edm.String',
+        $Type: type,
       });
     }
     if (parameters.length) {
@@ -1822,6 +1849,67 @@ export class CsdlGenerator {
       json: jsonOp,
       jsonImport,
     };
+  }
+
+  private resolveOperationParameterType(
+    param: OperationParameter,
+    context: SchemaBuildContext,
+  ): string {
+    const ctor = param.modelCtor;
+    if (ctor) {
+      if (isEntityCtor(ctor)) {
+        const definition = (ctor as typeof Entity).definition as ModelDefinition | undefined;
+        const entityName = definition?.name ?? ctor.name ?? 'Entity';
+        return `${context.namespace}.${entityName}`;
+      }
+      const complex = ensureComplexType(ctor, context);
+      if (complex) {
+        return `${context.namespace}.${complex.name}`;
+      }
+    }
+
+    const resolved = this.unwrapOperationParameterType(param.type);
+    if (!resolved) return 'Edm.String';
+    if (typeof resolved === 'string') return resolved;
+
+    const resolvedCtor = resolved;
+    if (isEntityCtor(resolvedCtor as typeof Entity)) {
+      const definition = (resolvedCtor as typeof Entity).definition as ModelDefinition | undefined;
+      const entityName = definition?.name ?? resolvedCtor.name ?? 'Entity';
+      return `${context.namespace}.${entityName}`;
+    }
+    if (isModelCtor(resolvedCtor)) {
+      const complex = ensureComplexType(resolvedCtor, context);
+      if (complex) {
+        return `${context.namespace}.${complex.name}`;
+      }
+    }
+    return 'Edm.String';
+  }
+
+  private unwrapOperationParameterType(
+    type: OperationParameterType | undefined,
+  ): string | typeof Model | undefined {
+    if (!type) return undefined;
+    if (typeof type === 'string') return type;
+    if (typeof type === 'function') {
+      if (this.isModelConstructor(type)) {
+        return type as typeof Model;
+      }
+      try {
+        const factory = type as () => string | typeof Model;
+        return this.unwrapOperationParameterType(factory());
+      } catch {
+        return undefined;
+      }
+    }
+    return undefined;
+  }
+
+  private isModelConstructor(value: unknown): value is typeof Model {
+    if (typeof value !== 'function') return false;
+    const proto = (value as any)?.prototype;
+    return Boolean(proto);
   }
 }
 function capitalize(name: string): string {
