@@ -51,7 +51,7 @@ export class MyAppApplication extends BootMixin(RepositoryMixin(RestApplication)
 }
 ```
 
-> **Production tip:** `tokenSecret` must be a strong, per-environment value. Rotate it the same way you would rotate signing keys; changing the secret invalidates existing `$skiptoken` / `$deltatoken` links.
+> **Production tip:** `tokenSecret` must be a strong, per-environment value. Set the `ODATA_TOKEN_SECRET` environment variable (or rebind `ODATA_BINDINGS.CONFIG`) before booting; the component falls back to a `'change-me'` placeholder and logs a warning if you forget. Rotate the secret the same way you would rotate signing keys because changing it invalidates existing `$skiptoken` / `$deltatoken` links.
 
 2. Define a model
 
@@ -1059,7 +1059,7 @@ const ProductsSet: EntitySetDef<Product> = {
 - `appendKeysForClientPaging`: When `true` (default) the controller appends the entity key columns to client-supplied `$orderby` clauses whenever requests use manual `$skip`. This keeps offset-based paging stable for frameworks that ignore `@odata.nextLink` (for example, SAPUI5 growing tables). Set to `false` only if you need the backend to preserve the original order verbatim even at the cost of potential duplicates across pages.
 - **Manual paging:** Supplying both `$skip` (even `0`) _and_ a positive `$top` switches the request into client-driven paging. In that mode the backend clamps `$top` to the configured page size, appends key columns for deterministic ordering, and suppresses `@odata.nextLink`. Clients must increment `$skip` themselves to fetch more rows. If `$skip` is sent without `$top`, the controller sticks with server-driven paging and still emits `@odata.nextLink`.
 - `enableDelta`: When `true`, collection responses include `@odata.deltaLink` so clients can poll only the rows that changed since the last snapshot.
-- `tokenSecret`: Required secret used to sign `$skiptoken` / `$deltatoken` payloads. Requests fail with `500` until a non-empty secret is configured. Inject it via environment variables or a vault-backed binding.
+- `tokenSecret`: Required secret used to sign `$skiptoken` / `$deltatoken` payloads. The component reads `process.env.ODATA_TOKEN_SECRET` automatically; when unset it falls back to a `'change-me'` placeholder and logs a warning. Override it via environment variables or a vault-backed binding before exposing the API, otherwise requests fail with `500` when the secret is missing or intentionally unset.
 - `skipTokenTtl`: Lifetime (in seconds) for issued `$skiptoken` links. Defaults to `900` (15 minutes). Expired tokens return `400 Invalid $skiptoken`.
 - `deltaTokenTtl`: Optional lifetime (seconds) for `$deltatoken` links. When omitted, delta tokens remain valid until you rotate the secret or prune their backing store.
 - `allowLegacyUnsignedTokens`: Set to `true` only while migrating from the unsigned (v1/v2) token format. New deployments should leave this `false` to reject tampered tokens outright.

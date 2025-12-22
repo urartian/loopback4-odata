@@ -1,6 +1,5 @@
 import { Component, Binding, BindingScope, createBindingFromClass } from '@loopback/core';
 import { RestBindings, createMiddlewareBinding } from '@loopback/rest';
-import { randomBytes } from 'crypto';
 import { ODataConfig } from './types';
 import { ODATA_BINDINGS } from './keys';
 import { CsdlGenerator } from './metadata/csdl-generator';
@@ -21,6 +20,16 @@ import { ODataLoggerProvider } from './providers/odata-logger.provider';
 import { ODataConfigValidatorObserver } from './observers/odata-config.validator';
 import { TenantThrottlerProvider } from './providers/tenant-throttler.provider';
 import { InMemoryTenantThrottleStore } from './services/tenant-throttle-store';
+import { DEFAULT_TOKEN_SECRET } from './constants';
+
+function resolveDefaultTokenSecret(): string {
+  const envValue = process.env.ODATA_TOKEN_SECRET;
+  if (typeof envValue === 'string') {
+    const trimmed = envValue.trim();
+    if (trimmed) return trimmed;
+  }
+  return DEFAULT_TOKEN_SECRET;
+}
 
 export class ODataComponent implements Component {
   bindings = [
@@ -84,7 +93,7 @@ export class ODataComponent implements Component {
         generateWhenMissing: true,
         propagateToRepositories: false,
       },
-      tokenSecret: randomBytes(32).toString('hex'),
+      tokenSecret: resolveDefaultTokenSecret(),
     } as ODataConfig),
     Binding.bind(ODATA_BINDINGS.CSDL_GEN).toClass(CsdlGenerator).inScope(BindingScope.SINGLETON),
     Binding.bind(ODATA_BINDINGS.ENTITY_SET_REGISTRY)

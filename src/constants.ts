@@ -3,3 +3,4 @@ export const ODATA_BATCH_DEPTH = Symbol.for('odata.batchDepth');
 export const ODATA_BATCH_DEPTH_PROP = '__odataBatchDepth';
 export const ODATA_BATCH_DEPTH_HEADER = 'x-odata-batch-depth';
 export const ODATA_VERSION = '4.0';
+export const DEFAULT_TOKEN_SECRET = 'change-me';
