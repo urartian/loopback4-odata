@@ -375,7 +375,7 @@ export class RequestLoggingProvider implements Provider<Middleware> {
     if (typeof payload === 'string') {
       const truncated = Buffer.byteLength(payload, 'utf8') > maxBytes;
       return {
-        body: truncated ? payload.slice(0, maxBytes) : payload,
+        body: truncated ? this.truncateStringByBytes(payload, maxBytes) : payload,
         truncated,
       };
     }
@@ -397,7 +397,7 @@ export class RequestLoggingProvider implements Provider<Middleware> {
     if (typeof payload === 'string') {
       const truncated = Buffer.byteLength(payload, 'utf8') > maxBytes;
       return {
-        body: truncated ? payload.slice(0, maxBytes) : payload,
+        body: truncated ? this.truncateStringByBytes(payload, maxBytes) : payload,
         truncated,
       };
     }

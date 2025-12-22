@@ -102,6 +102,16 @@ describe('request logging provider', () => {
     assert.equal(payload.data.length, 5000);
   });
 
+  it('respects max byte limits for UTF-8 request strings', () => {
+    const provider = new RequestLoggingProvider({ basePath: '/odata' } as any, noopLogger);
+    const payload = '漢😊suffix';
+    const capture = (provider as any).captureRequestBody(payload, { maxPayloadBytes: 5 });
+    assert.equal(capture?.truncated, true);
+    assert.equal(typeof capture?.body, 'string');
+    assert.ok(Buffer.byteLength(String(capture?.body), 'utf8') <= 5);
+    assert.ok(!String(capture?.body).includes('\uFFFD'));
+  });
+
   it('treats objects with custom prototypes as non-plain placeholders', () => {
     const provider = new RequestLoggingProvider({ basePath: '/odata' } as any, noopLogger);
     let getterCalls = 0;
@@ -288,5 +298,15 @@ describe('request logging provider', () => {
     const capture = (provider as any).captureResponseBody(payload, 512);
     assert.equal(capture?.truncated, true);
     assert.ok(Array.isArray(capture?.body?.records));
+  });
+
+  it('respects byte budgets for UTF-8 response strings', () => {
+    const provider = new RequestLoggingProvider({ basePath: '/odata' } as any, noopLogger);
+    const payload = 'emoji 😊漢';
+    const capture = (provider as any).captureResponseBody(payload, 6);
+    assert.equal(capture?.truncated, true);
+    assert.equal(typeof capture?.body, 'string');
+    assert.ok(Buffer.byteLength(String(capture?.body), 'utf8') <= 6);
+    assert.ok(!String(capture?.body).includes('\uFFFD'));
   });
 });
