@@ -294,6 +294,7 @@ export function defineODataCrudController(def: EntitySetDef) {
   const mediaEtagField = def.mediaEtagField;
   const mediaLengthField = def.mediaLengthField;
   const mediaHandlerBindingKey = def.mediaHandlerBindingKey;
+  const mediaMaxPayloadBytes = def.mediaMaxPayloadBytes;
 
   const collectionResponseSchema = {
     type: 'object',
@@ -900,6 +901,7 @@ export function defineODataCrudController(def: EntitySetDef) {
         const fallback = new PropertyBackedMediaHandler(
           this.repository as unknown as DefaultCrudRepository<CrudEntity, unknown>,
           mediaField,
+          { maxPayloadBytes: mediaMaxPayloadBytes },
         );
         this.mediaHandlerCache = fallback;
         return fallback;

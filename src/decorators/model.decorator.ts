@@ -16,6 +16,7 @@ export interface ODataModelOptions {
   mediaEtagField?: string;
   mediaLengthField?: string;
   mediaHandlerBindingKey?: string;
+  mediaMaxPayloadBytes?: number;
   delta?: {
     enabled?: boolean;
     field?: string;

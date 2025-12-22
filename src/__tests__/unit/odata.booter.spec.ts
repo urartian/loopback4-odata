@@ -12,6 +12,7 @@ import {
   RelationType,
 } from '@loopback/repository';
 import { expect } from '@loopback/testlab';
+import { Readable } from 'stream';
 import { ODataBooter } from '../../booters/odata.booter';
 import { EntitySetDef, EntitySetRegistry } from '../../registry/entityset-registry';
 import { odataModel } from '../../decorators/model.decorator';
@@ -575,6 +576,54 @@ describe('ODataBooter media handler bindings', () => {
     const handler = (await requestCtx.get(mediaBindingKey)) as AnyObject;
     expect(handler).to.be.Object();
     expect(handler.repository?.requestId).to.equal('request-xyz');
+  });
+
+  it('honors mediaMaxPayloadBytes when binding property-backed handlers', async () => {
+    const app = new Application();
+    const registry = new EntitySetRegistry();
+    const booter = new ODataBooter(
+      app,
+      registry,
+      {} as any,
+      new ODataApplyExecutorRegistry(),
+      noopLogger,
+    );
+
+    app
+      .bind('repositories.MediaRepository')
+      .toDynamicValue(async () => {
+        return {
+          async updateById() {
+            return undefined;
+          },
+        };
+      })
+      .inScope(BindingScope.REQUEST);
+
+    const repoBinding = app.getBinding('repositories.MediaRepository');
+    const def = {
+      name: 'MediaAssets',
+      hasStream: true,
+      mediaField: 'content',
+      mediaMaxPayloadBytes: 4,
+      modelCtor: Entity,
+    } as EntitySetDef;
+
+    await (booter as any).configureMediaHandler(def, repoBinding);
+
+    const handlerBindingKey = def.mediaHandlerBindingKey!;
+    const requestCtx = new Context(app);
+    const handler = (await requestCtx.get(handlerBindingKey)) as AnyObject;
+    const repository = (await requestCtx.get('repositories.MediaRepository')) as AnyObject;
+
+    await expect(
+      handler.write({
+        id: 1,
+        entitySet: def,
+        repository,
+        stream: Readable.from(['hello']),
+      }),
+    ).to.be.rejectedWith(/configured limit/i);
   });
 });
 const noopLogger: ODataLogger = {

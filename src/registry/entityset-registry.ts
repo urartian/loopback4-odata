@@ -34,6 +34,7 @@ export interface EntitySetDef<T extends Entity = Entity> {
   mediaEtagField?: string;
   mediaLengthField?: string;
   mediaHandlerBindingKey?: string;
+  mediaMaxPayloadBytes?: number;
   capabilities?: ODataCapabilitiesConfig;
   deepInsert?: boolean;
   deepUpdate?: boolean;
@@ -134,6 +135,9 @@ export class EntitySetRegistry {
     }
     if (!def.mediaHandlerBindingKey && existing?.mediaHandlerBindingKey) {
       next.mediaHandlerBindingKey = existing.mediaHandlerBindingKey;
+    }
+    if (def.mediaMaxPayloadBytes === undefined && existing?.mediaMaxPayloadBytes !== undefined) {
+      next.mediaMaxPayloadBytes = existing.mediaMaxPayloadBytes;
     }
     validatePaginationLimits(`EntitySet "${next.name}".pagination`, next.pagination);
     this.sets.set(def.modelCtor, next);

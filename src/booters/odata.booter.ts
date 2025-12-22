@@ -277,6 +277,7 @@ export class ODataBooter implements Booter {
       const mediaContentTypeField = modelMeta?.mediaContentTypeField;
       const mediaEtagField = modelMeta?.mediaEtagField;
       const mediaLengthField = modelMeta?.mediaLengthField;
+      const mediaMaxPayloadBytes = modelMeta?.mediaMaxPayloadBytes;
       const mediaHandlerBindingKey = hasStream
         ? (modelMeta?.mediaHandlerBindingKey ?? this.buildMediaHandlerBindingKey(setName))
         : undefined;
@@ -299,6 +300,7 @@ export class ODataBooter implements Booter {
         mediaContentTypeField,
         mediaEtagField,
         mediaLengthField,
+        mediaMaxPayloadBytes,
         mediaHandlerBindingKey: mediaHandlerBindingKey ?? undefined,
       });
 
@@ -522,7 +524,9 @@ export class ODataBooter implements Booter {
             repoBinding.key,
             resolutionCtx,
           )) as DefaultCrudRepository<Entity & AnyObject, unknown>;
-          return new PropertyBackedMediaHandler(repo, def.mediaField!);
+          return new PropertyBackedMediaHandler(repo, def.mediaField!, {
+            maxPayloadBytes: def.mediaMaxPayloadBytes,
+          });
         })
         .inScope(BindingScope.REQUEST);
       return;
