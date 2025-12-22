@@ -44,14 +44,14 @@ export class MyAppApplication extends BootMixin(RepositoryMixin(RestApplication)
     const current = this.getSync(ODATA_BINDINGS.CONFIG) as ODataConfig;
     this.bind(ODATA_BINDINGS.CONFIG).to({
       ...current,
-      tokenSecret: process.env.ODATA_TOKEN_SECRET ?? 'change-me',
+      tokenSecret: process.env.ODATA_TOKEN_SECRET ?? current.tokenSecret,
     });
     // Register datasources and repositories once they are defined (see Step 3).
   }
 }
 ```
 
-> **Production tip:** `tokenSecret` must be a strong, per-environment value. Set the `ODATA_TOKEN_SECRET` environment variable (or rebind `ODATA_BINDINGS.CONFIG`) before booting; the component falls back to a `'change-me'` placeholder and logs a warning if you forget. Rotate the secret the same way you would rotate signing keys because changing it invalidates existing `$skiptoken` / `$deltatoken` links.
+> **Production tip:** In production (`NODE_ENV=production` or `ODATA_ENV=production`) you **must** provide `ODATA_TOKEN_SECRET`; the component fails to boot when it’s missing. In non-production environments the component auto-generates a random per-boot secret when none is configured and logs an INFO message (`Generated per-boot OData token secret ...`). Set `ODATA_TOKEN_SECRET=$(openssl rand -hex 32)` locally if you need tokens to survive restarts. Rotating the secret (manually or via auto-generation) invalidates existing `$skiptoken` / `$deltatoken` links.
 
 2. Define a model
 
@@ -216,7 +216,7 @@ npm start
 
 For a quick demo, run `npm run dev`; this boots the example app in `examples/basic-app`, with an in-memory datasource pre-seeded with sample products and orders so you can experiment with the query options immediately.
 
-> The example binds `tokenSecret` from `process.env.ODATA_TOKEN_SECRET` and falls back to a development default. Set a unique value before exposing the sample app over a shared network. You can also tweak guardrails at runtime via environment variables such as `BATCH_MAX_OPERATIONS`, `BATCH_MAX_PART_BYTES`, `ODATA_MAX_TOP`, `ODATA_MAX_SKIP`, `ODATA_MAX_PAGE_SIZE`, and `ODATA_MAX_APPLY_PAGE_SIZE`.
+> The example binds `tokenSecret` from `process.env.ODATA_TOKEN_SECRET` but the component already enforces the same behavior internally. In production you must set that environment variable; in dev/test a random secret is generated per boot (logged at INFO) unless you override it. You can also tweak guardrails at runtime via environment variables such as `BATCH_MAX_OPERATIONS`, `BATCH_MAX_PART_BYTES`, `ODATA_MAX_TOP`, `ODATA_MAX_SKIP`, `ODATA_MAX_PAGE_SIZE`, and `ODATA_MAX_APPLY_PAGE_SIZE`.
 
 ##### Metadata
 
@@ -971,7 +971,7 @@ this.bind(ODATA_BINDINGS.CONFIG).to({
   namespace: 'Catalog', // default: 'Default'
   entityContainerName: 'CatalogService', // default: 'DefaultContainer'
   namespaceAlias: 'CatalogNS',
-  tokenSecret: process.env.ODATA_TOKEN_SECRET!, // required for signed paging/delta tokens
+  tokenSecret: process.env.ODATA_TOKEN_SECRET!, // required for signed paging/delta tokens (auto-generated per boot outside production when omitted)
   capabilities: {
     filterFunctions: ['contains', 'startswith', 'endswith'],
     countable: true,
@@ -1059,7 +1059,7 @@ const ProductsSet: EntitySetDef<Product> = {
 - `appendKeysForClientPaging`: When `true` (default) the controller appends the entity key columns to client-supplied `$orderby` clauses whenever requests use manual `$skip`. This keeps offset-based paging stable for frameworks that ignore `@odata.nextLink` (for example, SAPUI5 growing tables). Set to `false` only if you need the backend to preserve the original order verbatim even at the cost of potential duplicates across pages.
 - **Manual paging:** Supplying both `$skip` (even `0`) _and_ a positive `$top` switches the request into client-driven paging. In that mode the backend clamps `$top` to the configured page size, appends key columns for deterministic ordering, and suppresses `@odata.nextLink`. Clients must increment `$skip` themselves to fetch more rows. If `$skip` is sent without `$top`, the controller sticks with server-driven paging and still emits `@odata.nextLink`.
 - `enableDelta`: When `true`, collection responses include `@odata.deltaLink` so clients can poll only the rows that changed since the last snapshot.
-- `tokenSecret`: Required secret used to sign `$skiptoken` / `$deltatoken` payloads. The component reads `process.env.ODATA_TOKEN_SECRET` automatically; when unset it falls back to a `'change-me'` placeholder and logs a warning. Override it via environment variables or a vault-backed binding before exposing the API, otherwise requests fail with `500` when the secret is missing or intentionally unset.
+- `tokenSecret`: Required secret used to sign `$skiptoken` / `$deltatoken` payloads. When `NODE_ENV` or `ODATA_ENV` is `production`, `ODATA_TOKEN_SECRET` **must** be set or the app refuses to boot. In non-production environments the component auto-generates a per-boot random secret if none is provided and logs an INFO message; pagination/delta links expire on every restart until you set `ODATA_TOKEN_SECRET` yourself (for example `export ODATA_TOKEN_SECRET=$(openssl rand -hex 32)`).
 - `skipTokenTtl`: Lifetime (in seconds) for issued `$skiptoken` links. Defaults to `900` (15 minutes). Expired tokens return `400 Invalid $skiptoken`.
 - `deltaTokenTtl`: Optional lifetime (seconds) for `$deltatoken` links. When omitted, delta tokens remain valid until you rotate the secret or prune their backing store.
 - `allowLegacyUnsignedTokens`: Set to `true` only while migrating from the unsigned (v1/v2) token format. New deployments should leave this `false` to reject tampered tokens outright.

@@ -2,10 +2,6 @@ import 'reflect-metadata';
 import { expect } from '@loopback/testlab';
 import { validateODataConfig, validatePaginationLimits } from '../../util/config-validation';
 import { ODataConfig } from '../../types';
-import { EntitySetRegistry } from '../../registry/entityset-registry';
-import { ODataConfigValidatorObserver } from '../../observers/odata-config.validator';
-import { DEFAULT_TOKEN_SECRET } from '../../constants';
-import { ODataLogger } from '../../keys';
 
 describe('OData config validation', () => {
   it('normalizes numeric strings and accepts positive values', () => {
@@ -46,40 +42,4 @@ describe('OData config validation', () => {
       /tokenSecret/,
     );
   });
-});
-
-describe('ODataConfigValidatorObserver warnings', () => {
-  it('warns when the placeholder token secret is used', async () => {
-    const config: ODataConfig = { tokenSecret: DEFAULT_TOKEN_SECRET };
-    const registry = new EntitySetRegistry();
-    const logger = new LoggerStub();
-    const observer = new ODataConfigValidatorObserver(config, registry, logger);
-
-    await observer.start();
-
-    expect(logger.warnings).to.have.length(1);
-    expect(logger.warnings[0].message).to.match(/tokenSecret/i);
-  });
-
-  it('does not warn when token secret is customized', async () => {
-    const config: ODataConfig = { tokenSecret: 'custom-secret' };
-    const registry = new EntitySetRegistry();
-    const logger = new LoggerStub();
-    const observer = new ODataConfigValidatorObserver(config, registry, logger);
-
-    await observer.start();
-
-    expect(logger.warnings).to.have.length(0);
-  });
-
-  class LoggerStub implements ODataLogger {
-    warnings: Array<{ message: string; context?: Record<string, unknown> }> = [];
-    trace(_message: string, _context?: Record<string, unknown>): void {}
-    debug(_message: string, _context?: Record<string, unknown>): void {}
-    info(_message: string, _context?: Record<string, unknown>): void {}
-    warn(message: string, context?: Record<string, unknown>) {
-      this.warnings.push({ message, context });
-    }
-    error(_message: string, _context?: Record<string, unknown>, _error?: Error): void {}
-  }
 });
