@@ -89,6 +89,47 @@ describe('parseODataQuery basics', () => {
     );
   });
 
+  it('applies logical operator precedence (and > or)', () => {
+    const parsed = parseODataQuery({
+      $filter: 'a eq 1 or b eq 1 and c eq 1',
+    });
+
+    const expr = parsed.whereExpression;
+    assert(expr);
+    assert.equal(expr.operator, 'logical');
+    if (expr.operator === 'logical') {
+      assert.equal(expr.type, 'or');
+      assert.equal(expr.expressions[1]?.operator, 'logical');
+      const rhs = expr.expressions[1];
+      if (rhs.operator === 'logical') {
+        assert.equal(rhs.type, 'and');
+      }
+    }
+  });
+
+  it('applies logical operator precedence (not > and)', () => {
+    const parsed = parseODataQuery({
+      $filter: 'not a eq 1 and b eq 1',
+    });
+
+    const expr = parsed.whereExpression;
+    assert(expr);
+    assert.equal(expr.operator, 'logical');
+    if (expr.operator === 'logical') {
+      assert.equal(expr.type, 'and');
+      assert.equal(expr.expressions[0]?.operator, 'not');
+    }
+  });
+
+  it('parses lambda aliases without whitespace after ":"', () => {
+    const parsed = parseODataQuery({
+      $filter: 'orderItems/any(i:i/unitPrice gt 800)',
+    });
+
+    assert(parsed.lambda);
+    assert.equal(parsed.lambda?.alias, 'i');
+  });
+
   it('attaches simple $apply pipelines to the parsed query', () => {
     const parsed = parseODataQuery({
       $apply: 'groupby((total), aggregate(id with count as OrderCount))',

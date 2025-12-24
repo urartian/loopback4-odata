@@ -220,13 +220,19 @@ function tokenize(filter: string): string[] {
     const char = filter[i];
 
     if (char === "'") {
+      if (inString && filter[i + 1] === "'") {
+        // Escaped quote inside string literal (OData uses doubled quotes: '')
+        current += "''";
+        i++;
+        continue;
+      }
       inString = !inString;
-      current += char;
+      current += "'";
       continue;
     }
 
     if (!inString) {
-      if (char === '(' || char === ')' || char === ',') {
+      if (char === '(' || char === ')' || char === ',' || char === ':') {
         if (current) {
           tokens.push(current);
           current = '';
@@ -289,7 +295,7 @@ function parseOperand(tokens: string[], index: number): [Operand, number] {
   }
 
   if (token.startsWith("'") && token.endsWith("'")) {
-    return [{ kind: 'literal', value: token.slice(1, -1) }, index + 1];
+    return [{ kind: 'literal', value: token.slice(1, -1).replace(/''/g, "'") }, index + 1];
   }
 
   if (token === 'null') {
@@ -795,7 +801,14 @@ function tryParseLambda(
   if (!aliasToken) {
     throw new Error('Lambda expressions require an alias before the predicate.');
   }
-  const alias = aliasToken.endsWith(':') ? aliasToken.slice(0, -1) : aliasToken;
+  let alias = aliasToken;
+  if (alias.endsWith(':')) {
+    alias = alias.slice(0, -1);
+  } else if (innerTokens[0] === ':') {
+    innerTokens.shift();
+  } else {
+    throw new Error('Malformed lambda expression: expected ":" after alias.');
+  }
   if (!alias) {
     throw new Error('Lambda alias cannot be empty.');
   }
@@ -847,10 +860,6 @@ function parseLiteral(token: string): unknown {
 
 function parsePrimary(tokens: string[], index: number): [ParsedExpression, number] {
   const token = tokens[index];
-  if (token?.toLowerCase() === 'not') {
-    const [expr, nextIndex] = parsePrimary(tokens, index + 1);
-    return [{ operator: 'not', expr }, nextIndex];
-  }
   if (token === '(') {
     const [expr, nextIndex] = parseExpression(tokens, index + 1);
     if (tokens[nextIndex] !== ')') {
@@ -863,22 +872,40 @@ function parsePrimary(tokens: string[], index: number): [ParsedExpression, numbe
 }
 
 function parseExpression(tokens: string[], index: number): [ParsedExpression, number] {
-  let [left, nextIndex] = parsePrimary(tokens, index);
+  return parseOr(tokens, index);
+}
 
+function parseOr(tokens: string[], index: number): [ParsedExpression, number] {
+  let [left, nextIndex] = parseAnd(tokens, index);
   while (nextIndex < tokens.length) {
-    const logical = tokens[nextIndex]?.toLowerCase();
-    if (logical !== 'and' && logical !== 'or') break;
-
-    const [right, afterRight] = parsePrimary(tokens, nextIndex + 1);
-    left = {
-      operator: 'logical',
-      type: logical,
-      expressions: [left, right],
-    };
+    const token = tokens[nextIndex]?.toLowerCase();
+    if (token !== 'or') break;
+    const [right, afterRight] = parseAnd(tokens, nextIndex + 1);
+    left = { operator: 'logical', type: 'or', expressions: [left, right] };
     nextIndex = afterRight;
   }
-
   return [left, nextIndex];
+}
+
+function parseAnd(tokens: string[], index: number): [ParsedExpression, number] {
+  let [left, nextIndex] = parseUnary(tokens, index);
+  while (nextIndex < tokens.length) {
+    const token = tokens[nextIndex]?.toLowerCase();
+    if (token !== 'and') break;
+    const [right, afterRight] = parseUnary(tokens, nextIndex + 1);
+    left = { operator: 'logical', type: 'and', expressions: [left, right] };
+    nextIndex = afterRight;
+  }
+  return [left, nextIndex];
+}
+
+function parseUnary(tokens: string[], index: number): [ParsedExpression, number] {
+  const token = tokens[index]?.toLowerCase();
+  if (token === 'not') {
+    const [expr, nextIndex] = parseUnary(tokens, index + 1);
+    return [{ operator: 'not', expr }, nextIndex];
+  }
+  return parsePrimary(tokens, index);
 }
 
 function parseFilter(tokens: string[], startIndex = 0): [ParsedExpression, number] {

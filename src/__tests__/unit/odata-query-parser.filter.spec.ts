@@ -22,6 +22,15 @@ describe('parseODataQuery string functions', () => {
     });
   });
 
+  it('unescapes doubled quotes inside string function arguments', () => {
+    const parsed = parseODataQuery({
+      $filter: "contains(name,'a''b')",
+    });
+    assert.deepStrictEqual(parsed.where, {
+      name: { like: "%a'b%", options: 'i' },
+    });
+  });
+
   it('translates startswith() into like suffix wildcard', () => {
     const parsed = parseODataQuery({
       $filter: "startswith(code,'PR-')",
