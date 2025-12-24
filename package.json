@@ -25,7 +25,7 @@
   "author": "Artiom Sargesjan",
   "license": "MIT",
   "dependencies": {
-    "ipaddr.js": "^1.9.1",
+    "ipaddr.js": "^2.3.0",
     "inflection": "^3.0.2",
     "odata-v4-parser": "^0.1.29",
     "reflect-metadata": "^0.2.2",
