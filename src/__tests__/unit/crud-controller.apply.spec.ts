@@ -3,7 +3,11 @@ import { Entity, model, property } from '@loopback/repository';
 import { expect } from '@loopback/testlab';
 import { defineODataCrudController } from '../../controllers/crud-controller-factory';
 import { EntitySetDef } from '../../registry/entityset-registry';
-import { ApplyExecutionPlan } from '../../services/odata-apply-planner.service';
+import {
+  ApplyExecutionPlan,
+  buildApplyExecutionPlan,
+} from '../../services/odata-apply-planner.service';
+import { parseApplyPipeline } from '../../services/odata-query-parser.service';
 import { ODataLogger, ODataTenantThrottler } from '../../keys';
 import { ODataConfig } from '../../types';
 
@@ -12,6 +16,9 @@ describe('CRUD controller $apply fallback', () => {
   class Widget extends Entity {
     @property({ id: true })
     id!: number;
+
+    @property()
+    unitPrice?: number;
   }
 
   const baseDef: EntitySetDef = {
@@ -111,5 +118,53 @@ describe('CRUD controller $apply fallback', () => {
     );
 
     await expect(controller.list()).to.be.rejectedWith('$apply is disabled for this entity set.');
+  });
+
+  it('rejects $apply with unknown groupby fields even when strict mode is disabled', () => {
+    const controller = createController();
+    const pipeline = parseApplyPipeline('groupby((unknown), aggregate(id with count as Total))');
+    const plan = buildApplyExecutionPlan(pipeline, { modelCtor: Widget });
+
+    expect(() => (controller as any).validateApplyPlanFields(plan)).to.throw(
+      /Unknown property in \$apply/i,
+    );
+  });
+
+  it('rejects $apply with unknown aggregate fields', () => {
+    const controller = createController();
+    const pipeline = parseApplyPipeline('aggregate(unknown with sum as Total)');
+    const plan = buildApplyExecutionPlan(pipeline, { modelCtor: Widget });
+
+    expect(() => (controller as any).validateApplyPlanFields(plan)).to.throw(
+      /Unknown property in \$apply/i,
+    );
+  });
+
+  it('accepts $apply with known fields', () => {
+    const controller = createController();
+    const pipeline = parseApplyPipeline('groupby((id), aggregate(id with count as Total))');
+    const plan = buildApplyExecutionPlan(pipeline, { modelCtor: Widget });
+
+    expect(() => (controller as any).validateApplyPlanFields(plan)).to.not.throw();
+  });
+
+  it('accepts successive aggregate stages using prior aliases', () => {
+    const controller = createController();
+    const pipeline = parseApplyPipeline(
+      'groupby((id), aggregate(id with count as OrderCount))/aggregate(OrderCount with sum as OverallCount)',
+    );
+    const plan = buildApplyExecutionPlan(pipeline, { modelCtor: Widget });
+
+    expect(() => (controller as any).validateApplyPlanFields(plan)).to.not.throw();
+  });
+
+  it('accepts concat pipelines that reference aggregate aliases', () => {
+    const controller = createController();
+    const pipeline = parseApplyPipeline(
+      'concat(aggregate(unitPrice with sum as price),aggregate(unitPrice with sum as price)/concat(aggregate($count as UI5__count),top(5)))/filter(price ge 0)/orderby(price desc)',
+    );
+    const plan = buildApplyExecutionPlan(pipeline, { modelCtor: Widget });
+
+    expect(() => (controller as any).validateApplyPlanFields(plan)).to.not.throw();
   });
 });
