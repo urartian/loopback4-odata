@@ -1142,6 +1142,11 @@ Any custom store only needs to implement the `TenantThrottleStore` interface (al
 - `maxApplyNavigationFanout`: Maximum number of navigation combinations the in-memory fallback will materialize per stage before returning `400 Bad Request` (default: `1000`).
 - `enableApplyPushdown`: Opt-in switch that negotiates `$apply` pushdown with each datasource. When enabled, supported connectors (currently PostgreSQL and MySQL/MariaDB) execute `groupby()/aggregate()` pipelines in the database. Combine with `@odataModel({applyPushdown: true})` or `EntitySetRegistry.register({applyPushdown: true})` for per-entity control.
 - `maxExpandDepth`: Maximum allowed `$expand` nesting depth; requests that exceed it return `400 Bad Request`.
+- `maxFilterPatternLength`: Caps underscore patterns generated when translating supported `$filter` functions like `length()` and `substring()` into LoopBack `like` clauses (default: `10000`). Requests that exceed it return `400 Bad Request`.
+- `maxSubstringStart`: Maximum allowed `substring(field, start, ...)` start index when translating to patterns (default: `10000`). Requests that exceed it return `400 Bad Request`.
+- `maxSubstringLength`: Maximum allowed `substring(field, start, length)` length argument (default: `10000`). Requests that exceed it return `400 Bad Request`.
+- `maxFilterFieldNameLength`: Maximum allowed `$filter` field identifier length (default: `256`); dangerous keys like `__proto__`/`constructor`/`prototype` are always rejected.
+- `maxDecimalExponentAbs`: Caps the absolute exponent magnitude accepted when normalizing decimal strings (default: `1000`) to prevent pathological allocations.
 - `enableCount`:
   - When `false`, inline counts (`?$count=true`) return `400 Bad Request` with an OData error.
   - The standalone path (`GET <basePath>/<EntitySet>/$count`) returns `501 Not Implemented`.
@@ -1163,7 +1168,7 @@ Any custom store only needs to implement the `TenantThrottleStore` interface (al
   - Rejects unknown system query options (e.g., `$levels`, `$apply`) with `400 Bad Request`.
   - Validates `$select`, `$orderby`, `$filter` fields against model properties. Navigation segments still traverse declared relations and now structured (complex) properties are resolved segment-by-segment, so expressions such as `Customer/PrimaryAddress/City` stay valid while unknown members return `400 Bad Request`. Structured paths currently pass validation even though most connectors evaluate them in memory; SQL pushdown for nested properties will arrive in a future release.
   - Enforces content negotiation: `Accept` must allow `application/json` for CRUD; `$metadata` must allow `application/xml` (or JSON if configured); non‑JSON `Content-Type` on writes returns `415`.
-  - Limits & safety: `maxExpandDepth` always enforces a hard ceiling (400 when exceeded); `maxSkip` still caps offsets and escalates from clamp to 400 when strict mode is enabled.
+  - Limits & safety: `maxExpandDepth`, `maxFilterPatternLength`, `maxSubstringStart`, `maxSubstringLength`, and `maxFilterFieldNameLength` are hard ceilings (400 when exceeded); `maxSkip` still caps offsets and escalates from clamp to 400 when strict mode is enabled.
   - Search:
     - `searchMode`: `'annotated' | 'config-only' | 'all' | 'disabled'` (default: `annotated`)
     - `searchFields`: `{[entitySet: string]: string[]}` overrides decorator scope
