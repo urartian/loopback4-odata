@@ -179,4 +179,45 @@ describe('OData $apply planner', () => {
       stage.navigationPaths.some((path) => path.originalPath === 'product/price'),
     ).to.be.true();
   });
+
+  it('honors maxFilterPatternLength in filter() pushdown candidates', () => {
+    const pipeline = parseApplyPipeline('filter(length(code) eq 11)/aggregate(id with count as C)');
+    assert.throws(
+      () => buildApplyExecutionPlan(pipeline, { maxFilterPatternLength: 10 }),
+      /exceeds maximum/i,
+    );
+  });
+
+  it('honors maxSubstringStart and maxSubstringLength in filter() pushdown candidates', () => {
+    const startPipeline = parseApplyPipeline(
+      "filter(substring(code,11) eq 'A')/aggregate(id with count as C)",
+    );
+    assert.throws(
+      () => buildApplyExecutionPlan(startPipeline, { maxSubstringStart: 10 }),
+      /exceeds maximum/i,
+    );
+
+    const lengthPipeline = parseApplyPipeline(
+      "filter(substring(code,1,11) eq 'A')/aggregate(id with count as C)",
+    );
+    assert.throws(
+      () => buildApplyExecutionPlan(lengthPipeline, { maxSubstringLength: 10 }),
+      /exceeds maximum/i,
+    );
+  });
+
+  it('honors maxFilterFieldNameLength in filter() pushdown candidates', () => {
+    const pipeline = parseApplyPipeline(
+      'filter(veryLongFieldName gt 1)/aggregate(id with count as C)',
+    );
+    assert.throws(
+      () => buildApplyExecutionPlan(pipeline, { maxFilterFieldNameLength: 5 }),
+      /exceeds maximum/i,
+    );
+  });
+
+  it('rejects dangerous filter field names in filter() pushdown candidates', () => {
+    const pipeline = parseApplyPipeline('filter(__proto__ eq 1)/aggregate(id with count as C)');
+    assert.throws(() => buildApplyExecutionPlan(pipeline), /not allowed/i);
+  });
 });

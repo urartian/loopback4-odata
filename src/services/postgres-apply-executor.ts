@@ -21,6 +21,7 @@ import {
 } from './odata-apply-planner.service';
 import { EntitySqlMetadata } from '../registry/entityset-registry';
 import { inferSqlMetadata } from '../util/sql-metadata';
+import { ensureModelDefinition } from '../util/model-definition';
 import {
   resolveNavigationPath,
   NavigationPathError,
@@ -967,7 +968,7 @@ class NavigationJoinManager {
     if (!field.includes('/')) {
       const metadata = this.metadataProvider(this.baseModel);
       if (!metadata) return undefined;
-      const columnName = this.resolveColumnName(metadata, field);
+      const columnName = this.resolveColumnName(metadata, this.baseModel, field);
       if (!columnName) return undefined;
       const quoted = quoteIdentifier(columnName);
       return {
@@ -1010,7 +1011,7 @@ class NavigationJoinManager {
         this.lastErrorReason = 'structured-path-unsupported';
         return undefined;
       }
-      const columnName = this.resolveColumnName(metadata, structured.rootProperty);
+      const columnName = this.resolveColumnName(metadata, targetModel, structured.rootProperty);
       if (!columnName) return undefined;
       return this.buildStructuredColumnResolution(
         targetAlias,
@@ -1020,7 +1021,7 @@ class NavigationJoinManager {
       );
     }
 
-    const columnName = this.resolveColumnName(metadata, propertySegments[0]);
+    const columnName = this.resolveColumnName(metadata, targetModel, propertySegments[0]);
     if (!columnName) return undefined;
     const quoted = quoteIdentifier(columnName);
     return {
@@ -1056,11 +1057,30 @@ class NavigationJoinManager {
     return `${schemaPart}${quoteIdentifier(metadata.tableName ?? '')}`;
   }
 
-  private resolveColumnName(metadata: EntitySqlMetadata, property: string): string | undefined {
+  private resolveColumnName(
+    metadata: EntitySqlMetadata,
+    modelCtor: typeof Entity,
+    property: string,
+  ): string | undefined {
     if (!property) return undefined;
     const map = metadata.columnMap ?? {};
-    const candidate = map[property] ?? property;
-    return candidate;
+    const propertyDef = this.getModelPropertyDefinition(modelCtor, property);
+    if (!propertyDef) return undefined;
+    const columnName =
+      map[property] ??
+      (propertyDef?.postgresql as { columnName?: string } | undefined)?.columnName ??
+      propertyDef?.name ??
+      property;
+    return columnName;
+  }
+
+  private getModelPropertyDefinition(
+    modelCtor: typeof Entity,
+    property: string,
+  ): PropertyDefinition | undefined {
+    if (!modelCtor || !property) return undefined;
+    const definition = ensureModelDefinition(modelCtor);
+    return definition?.properties?.[property] as PropertyDefinition | undefined;
   }
 
   private buildStructuredColumnResolution(
@@ -1107,8 +1127,16 @@ class NavigationJoinManager {
         if (!sourceMetadata || !targetMetadata) return undefined;
         const alias = this.nextAlias();
         const tableRef = this.buildTableRef(targetMetadata);
-        const sourceColumn = this.resolveColumnName(sourceMetadata, segment.sourceKey);
-        const targetColumn = this.resolveColumnName(targetMetadata, segment.targetKey);
+        const sourceColumn = this.resolveColumnName(
+          sourceMetadata,
+          segment.sourceModel,
+          segment.sourceKey,
+        );
+        const targetColumn = this.resolveColumnName(
+          targetMetadata,
+          segment.targetModel,
+          segment.targetKey,
+        );
         if (!sourceColumn || !targetColumn) return undefined;
         const condition = `${currentAlias}.${quoteIdentifier(sourceColumn)} = ${alias}.${quoteIdentifier(targetColumn)}`;
         node = {

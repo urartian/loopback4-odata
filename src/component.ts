@@ -22,6 +22,38 @@ import { ODataConfigValidatorObserver } from './observers/odata-config.validator
 import { TenantThrottlerProvider } from './providers/tenant-throttler.provider';
 import { InMemoryTenantThrottleStore } from './services/tenant-throttle-store';
 
+let loggedGeneratedSecretTip = false;
+
+function detectRuntimeEnvironment(): string {
+  const raw = process.env.ODATA_ENV ?? process.env.NODE_ENV ?? 'development';
+  return raw.trim().toLowerCase();
+}
+
+function isProductionEnvironment(): boolean {
+  return detectRuntimeEnvironment() === 'production';
+}
+
+function resolveTokenSecretOrThrow(): string {
+  const envValue = process.env.ODATA_TOKEN_SECRET;
+  if (typeof envValue === 'string') {
+    const trimmed = envValue.trim();
+    if (trimmed) return trimmed;
+  }
+  if (isProductionEnvironment()) {
+    throw new Error(
+      'ODATA_TOKEN_SECRET is required in production. Please set it via environment variable before booting the OData component (see README tokenSecret section).',
+    );
+  }
+  const generated = randomBytes(32).toString('hex');
+  if (!loggedGeneratedSecretTip) {
+    loggedGeneratedSecretTip = true;
+    console.info(
+      `[OData] Generated per-boot OData token secret for ${detectRuntimeEnvironment()} env. Set ODATA_TOKEN_SECRET=$(openssl rand -hex 32) to keep paging/delta tokens stable across restarts.`,
+    );
+  }
+  return generated;
+}
+
 export class ODataComponent implements Component {
   bindings = [
     Binding.bind(ODATA_BINDINGS.CONFIG).to({
@@ -33,6 +65,11 @@ export class ODataComponent implements Component {
       maxSearchFields: 5,
       maxSearchTerms: 5,
       maxApplyResultSize: 2000,
+      maxFilterPatternLength: 10_000,
+      maxSubstringStart: 10_000,
+      maxSubstringLength: 10_000,
+      maxFilterFieldNameLength: 256,
+      maxDecimalExponentAbs: 1000,
       pageSize: 200,
       enableDelta: false,
       capabilities: {
@@ -84,7 +121,7 @@ export class ODataComponent implements Component {
         generateWhenMissing: true,
         propagateToRepositories: false,
       },
-      tokenSecret: randomBytes(32).toString('hex'),
+      tokenSecret: resolveTokenSecretOrThrow(),
     } as ODataConfig),
     Binding.bind(ODATA_BINDINGS.CSDL_GEN).toClass(CsdlGenerator).inScope(BindingScope.SINGLETON),
     Binding.bind(ODATA_BINDINGS.ENTITY_SET_REGISTRY)

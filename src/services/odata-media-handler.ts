@@ -62,11 +62,22 @@ export interface RepositoryMediaAdapterTarget {
   deleteMedia?: (id: unknown, options?: Options) => Promise<void> | void;
 }
 
+export interface PropertyBackedMediaHandlerOptions {
+  maxPayloadBytes?: number;
+}
+
+export const DEFAULT_PROPERTY_MEDIA_PAYLOAD_LIMIT = 10 * 1024 * 1024; // 10 MiB
+
 export class PropertyBackedMediaHandler implements ODataMediaHandler {
+  private readonly maxPayloadBytes: number;
+
   constructor(
     private readonly repository: MediaRepository,
     private readonly field: string,
-  ) {}
+    options?: PropertyBackedMediaHandlerOptions,
+  ) {
+    this.maxPayloadBytes = this.normalizeMaxPayloadBytes(options?.maxPayloadBytes);
+  }
 
   async read(ctx: ODataMediaReadContext): Promise<ODataMediaReadResult | undefined> {
     const entity = ctx.entity ?? (await this.loadEntity(ctx));
@@ -79,6 +90,7 @@ export class PropertyBackedMediaHandler implements ODataMediaHandler {
   }
 
   async write(ctx: ODataMediaWriteContext): Promise<ODataMediaWriteResult | undefined> {
+    this.enforceContentLengthLimit(ctx.contentLength);
     const buffer = await this.collectStream(ctx.stream);
     await this.repository.updateById(ctx.id as any, { [this.field]: buffer }, ctx.options);
     return { length: buffer.length };
@@ -124,12 +136,58 @@ export class PropertyBackedMediaHandler implements ODataMediaHandler {
   private collectStream(stream: Readable): Promise<Buffer> {
     return new Promise<Buffer>((resolve, reject) => {
       const chunks: Buffer[] = [];
+      let total = 0;
+      let rejected = false;
+
+      const handleError = (error: Error) => {
+        if (rejected) return;
+        rejected = true;
+        reject(error);
+      };
+
       stream.on('data', (chunk: Buffer | string) => {
-        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+        if (rejected) return;
+        const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+        total += buffer.length;
+        if (total > this.maxPayloadBytes) {
+          const error = this.buildPayloadTooLargeError();
+          stream.destroy(error);
+          return;
+        }
+        chunks.push(buffer);
       });
-      stream.once('error', reject);
-      stream.once('end', () => resolve(Buffer.concat(chunks)));
+      stream.once('error', handleError);
+      stream.once('end', () => {
+        if (rejected) return;
+        resolve(Buffer.concat(chunks, total));
+      });
     });
+  }
+
+  private enforceContentLengthLimit(contentLength?: number) {
+    if (
+      typeof contentLength === 'number' &&
+      Number.isFinite(contentLength) &&
+      contentLength > this.maxPayloadBytes
+    ) {
+      throw this.buildPayloadTooLargeError();
+    }
+  }
+
+  private buildPayloadTooLargeError(): HttpErrors.HttpError {
+    return new HttpErrors.PayloadTooLarge(
+      `Media payload exceeds the configured limit of ${this.maxPayloadBytes} bytes.`,
+    );
+  }
+
+  private normalizeMaxPayloadBytes(limit?: number): number {
+    if (limit === undefined || limit === null) return DEFAULT_PROPERTY_MEDIA_PAYLOAD_LIMIT;
+    if (!Number.isFinite(limit) || limit <= 0) {
+      throw new Error(
+        'PropertyBackedMediaHandler maxPayloadBytes must be a positive finite number.',
+      );
+    }
+    return limit;
   }
 }
 

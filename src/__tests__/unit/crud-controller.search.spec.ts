@@ -98,6 +98,26 @@ describe('CRUD controller $search guardrails', () => {
     });
   });
 
+  it('escapes backslashes before LIKE wildcards for $search terms', () => {
+    const controller = createController({
+      searchFields: {
+        Widgets: ['name'],
+      },
+    });
+    const baseFilter: Record<string, unknown> = {};
+
+    (controller as any).applySearch(baseFilter, 'a\\\\b');
+    expect(baseFilter.where).to.deepEqual({
+      name: { like: '%a\\\\b%' },
+    });
+
+    const negatedFilter: Record<string, unknown> = {};
+    (controller as any).applySearch(negatedFilter, 'NOT a\\\\b');
+    expect(negatedFilter.where).to.deepEqual({
+      or: [{ name: { nlike: '%a\\\\b%' } }, { name: null }],
+    });
+  });
+
   it('emits ilike/nilike operators only for Postgres connectors', () => {
     const controller = createController(
       {

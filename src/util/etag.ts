@@ -1,4 +1,5 @@
 import { AnyObject, Fields, PropertyDefinition } from '@loopback/repository';
+import { safeDecodeURIComponent } from './url-decoding';
 
 const HEADER_SPLIT = /\s*,\s*/g;
 
@@ -136,9 +137,11 @@ export function decodeEtagToken(
   for (const segment of inner.split('&')) {
     if (!segment) continue;
     const [rawKey, rawValue = ''] = segment.split('=');
-    const key = decodeURIComponent(rawKey);
+    const key = safeDecodeURIComponent(rawKey);
+    if (!key) return undefined;
     if (!props.includes(key)) continue;
-    const value = decodeURIComponent(rawValue);
+    const value = safeDecodeURIComponent(rawValue);
+    if (value === undefined) return undefined;
     result[key] = coerceToPropertyType(value, defs[key]);
   }
 

@@ -44,14 +44,14 @@ export class MyAppApplication extends BootMixin(RepositoryMixin(RestApplication)
     const current = this.getSync(ODATA_BINDINGS.CONFIG) as ODataConfig;
     this.bind(ODATA_BINDINGS.CONFIG).to({
       ...current,
-      tokenSecret: process.env.ODATA_TOKEN_SECRET ?? 'change-me',
+      tokenSecret: process.env.ODATA_TOKEN_SECRET ?? current.tokenSecret,
     });
     // Register datasources and repositories once they are defined (see Step 3).
   }
 }
 ```
 
-> **Production tip:** `tokenSecret` must be a strong, per-environment value. Rotate it the same way you would rotate signing keys; changing the secret invalidates existing `$skiptoken` / `$deltatoken` links.
+> **Production tip:** In production (`NODE_ENV=production` or `ODATA_ENV=production`) you **must** provide `ODATA_TOKEN_SECRET`; the component fails to boot when it’s missing. In non-production environments the component auto-generates a random per-boot secret when none is configured and logs an INFO message (`Generated per-boot OData token secret ...`). Set `ODATA_TOKEN_SECRET=$(openssl rand -hex 32)` locally if you need tokens to survive restarts. Rotating the secret (manually or via auto-generation) invalidates existing `$skiptoken` / `$deltatoken` links.
 
 2. Define a model
 
@@ -216,7 +216,7 @@ npm start
 
 For a quick demo, run `npm run dev`; this boots the example app in `examples/basic-app`, with an in-memory datasource pre-seeded with sample products and orders so you can experiment with the query options immediately.
 
-> The example binds `tokenSecret` from `process.env.ODATA_TOKEN_SECRET` and falls back to a development default. Set a unique value before exposing the sample app over a shared network. You can also tweak guardrails at runtime via environment variables such as `BATCH_MAX_OPERATIONS`, `BATCH_MAX_PART_BYTES`, `ODATA_MAX_TOP`, `ODATA_MAX_SKIP`, `ODATA_MAX_PAGE_SIZE`, and `ODATA_MAX_APPLY_PAGE_SIZE`.
+> The example binds `tokenSecret` from `process.env.ODATA_TOKEN_SECRET` but the component already enforces the same behavior internally. In production you must set that environment variable; in dev/test a random secret is generated per boot (logged at INFO) unless you override it. You can also tweak guardrails at runtime via environment variables such as `BATCH_MAX_OPERATIONS`, `BATCH_MAX_PART_BYTES`, `ODATA_MAX_TOP`, `ODATA_MAX_SKIP`, `ODATA_MAX_PAGE_SIZE`, and `ODATA_MAX_APPLY_PAGE_SIZE`.
 
 ##### Metadata
 
@@ -971,7 +971,7 @@ this.bind(ODATA_BINDINGS.CONFIG).to({
   namespace: 'Catalog', // default: 'Default'
   entityContainerName: 'CatalogService', // default: 'DefaultContainer'
   namespaceAlias: 'CatalogNS',
-  tokenSecret: process.env.ODATA_TOKEN_SECRET!, // required for signed paging/delta tokens
+  tokenSecret: process.env.ODATA_TOKEN_SECRET!, // required for signed paging/delta tokens (auto-generated per boot outside production when omitted)
   capabilities: {
     filterFunctions: ['contains', 'startswith', 'endswith'],
     countable: true,
@@ -1059,7 +1059,7 @@ const ProductsSet: EntitySetDef<Product> = {
 - `appendKeysForClientPaging`: When `true` (default) the controller appends the entity key columns to client-supplied `$orderby` clauses whenever requests use manual `$skip`. This keeps offset-based paging stable for frameworks that ignore `@odata.nextLink` (for example, SAPUI5 growing tables). Set to `false` only if you need the backend to preserve the original order verbatim even at the cost of potential duplicates across pages.
 - **Manual paging:** Supplying both `$skip` (even `0`) _and_ a positive `$top` switches the request into client-driven paging. In that mode the backend clamps `$top` to the configured page size, appends key columns for deterministic ordering, and suppresses `@odata.nextLink`. Clients must increment `$skip` themselves to fetch more rows. If `$skip` is sent without `$top`, the controller sticks with server-driven paging and still emits `@odata.nextLink`.
 - `enableDelta`: When `true`, collection responses include `@odata.deltaLink` so clients can poll only the rows that changed since the last snapshot.
-- `tokenSecret`: Required secret used to sign `$skiptoken` / `$deltatoken` payloads. Requests fail with `500` until a non-empty secret is configured. Inject it via environment variables or a vault-backed binding.
+- `tokenSecret`: Required secret used to sign `$skiptoken` / `$deltatoken` payloads. When `NODE_ENV` or `ODATA_ENV` is `production`, `ODATA_TOKEN_SECRET` **must** be set or the app refuses to boot. In non-production environments the component auto-generates a per-boot random secret if none is provided and logs an INFO message; pagination/delta links expire on every restart until you set `ODATA_TOKEN_SECRET` yourself (for example `export ODATA_TOKEN_SECRET=$(openssl rand -hex 32)`).
 - `skipTokenTtl`: Lifetime (in seconds) for issued `$skiptoken` links. Defaults to `900` (15 minutes). Expired tokens return `400 Invalid $skiptoken`.
 - `deltaTokenTtl`: Optional lifetime (seconds) for `$deltatoken` links. When omitted, delta tokens remain valid until you rotate the secret or prune their backing store.
 - `allowLegacyUnsignedTokens`: Set to `true` only while migrating from the unsigned (v1/v2) token format. New deployments should leave this `false` to reject tampered tokens outright.
@@ -1142,6 +1142,11 @@ Any custom store only needs to implement the `TenantThrottleStore` interface (al
 - `maxApplyNavigationFanout`: Maximum number of navigation combinations the in-memory fallback will materialize per stage before returning `400 Bad Request` (default: `1000`).
 - `enableApplyPushdown`: Opt-in switch that negotiates `$apply` pushdown with each datasource. When enabled, supported connectors (currently PostgreSQL and MySQL/MariaDB) execute `groupby()/aggregate()` pipelines in the database. Combine with `@odataModel({applyPushdown: true})` or `EntitySetRegistry.register({applyPushdown: true})` for per-entity control.
 - `maxExpandDepth`: Maximum allowed `$expand` nesting depth; requests that exceed it return `400 Bad Request`.
+- `maxFilterPatternLength`: Caps underscore patterns generated when translating supported `$filter` functions like `length()` and `substring()` (including inside `$apply=filter(...)`) into LoopBack `like` clauses (default: `10000`). Requests that exceed it return `400 Bad Request`.
+- `maxSubstringStart`: Maximum allowed `substring(field, start, ...)` start index when translating to patterns (default: `10000`). Requests that exceed it return `400 Bad Request`.
+- `maxSubstringLength`: Maximum allowed `substring(field, start, length)` length argument (default: `10000`). Requests that exceed it return `400 Bad Request`.
+- `maxFilterFieldNameLength`: Maximum allowed `$filter` field identifier length (default: `256`); dangerous keys like `__proto__`/`constructor`/`prototype` are always rejected.
+- `maxDecimalExponentAbs`: Caps the absolute exponent magnitude accepted when normalizing decimal strings (default: `1000`) to prevent pathological allocations.
 - `enableCount`:
   - When `false`, inline counts (`?$count=true`) return `400 Bad Request` with an OData error.
   - The standalone path (`GET <basePath>/<EntitySet>/$count`) returns `501 Not Implemented`.
@@ -1163,7 +1168,7 @@ Any custom store only needs to implement the `TenantThrottleStore` interface (al
   - Rejects unknown system query options (e.g., `$levels`, `$apply`) with `400 Bad Request`.
   - Validates `$select`, `$orderby`, `$filter` fields against model properties. Navigation segments still traverse declared relations and now structured (complex) properties are resolved segment-by-segment, so expressions such as `Customer/PrimaryAddress/City` stay valid while unknown members return `400 Bad Request`. Structured paths currently pass validation even though most connectors evaluate them in memory; SQL pushdown for nested properties will arrive in a future release.
   - Enforces content negotiation: `Accept` must allow `application/json` for CRUD; `$metadata` must allow `application/xml` (or JSON if configured); non‑JSON `Content-Type` on writes returns `415`.
-  - Limits & safety: `maxExpandDepth` always enforces a hard ceiling (400 when exceeded); `maxSkip` still caps offsets and escalates from clamp to 400 when strict mode is enabled.
+  - Limits & safety: `maxExpandDepth`, `maxFilterPatternLength`, `maxSubstringStart`, `maxSubstringLength`, and `maxFilterFieldNameLength` are hard ceilings (400 when exceeded); `maxSkip` still caps offsets and escalates from clamp to 400 when strict mode is enabled.
   - Search:
     - `searchMode`: `'annotated' | 'config-only' | 'all' | 'disabled'` (default: `annotated`)
     - `searchFields`: `{[entitySet: string]: string[]}` overrides decorator scope
@@ -1225,12 +1230,13 @@ LoopBack OData services can expose [$value media streams](https://www.odata.org/
 - `mediaEtagField`: Property holding the stream-specific ETag; enables conditional headers (`If-None-Match`, `If-Match`) for media operations.
 - `mediaLengthField`: Numeric property storing the byte length; when set the controller emits `Content-Length` without fully buffering the stream.
 - `mediaHandlerBindingKey`: Override the IoC binding key used to resolve the media handler (defaults to `ODATA_BINDINGS.MEDIA_HANDLERS.key.<EntitySet>`). Useful when multiple entity sets share a handler implementation.
+- `mediaMaxPayloadBytes`: Maximum number of bytes the default property-backed handler buffers in memory before rejecting the upload (defaults to 10 MiB).
 
 When `mediaEtagField` is configured the generated `$metadata` advertises `@Org.OData.Core.V1.MediaETag`, allowing clients to discover which property carries the stream ETag and rely on conditional caching headers automatically.
 
 When handling uploads the controller prefers metadata reported by the `ODataMediaHandler` over the incoming HTTP headers. Handlers can return `contentType`, `length`, and `etag` from their `write()` result to override the stored values. This enables sniffing binary payloads server-side, emitting custom weak ETags, or correcting bogus `Content-Type`/`Content-Length` headers before persisting the entity’s metadata and `@odata.mediaContentType`.
 
-When `mediaField` is configured the handler writes the uploaded stream directly into that property. Make sure the backing column is a binary type in your datasource (e.g., PostgreSQL `bytea`, MySQL `LONGBLOB`, MSSQL `VARBINARY`). Use the connector-specific metadata to request the correct type:
+When `mediaField` is configured the handler writes the uploaded stream directly into that property while enforcing `mediaMaxPayloadBytes` to guard against unbounded buffering. Make sure the backing column is a binary type in your datasource (e.g., PostgreSQL `bytea`, MySQL `LONGBLOB`, MSSQL `VARBINARY`). Use the connector-specific metadata to request the correct type:
 
 ```ts
 @property({

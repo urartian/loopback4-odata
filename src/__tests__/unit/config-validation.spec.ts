@@ -1,3 +1,4 @@
+import 'reflect-metadata';
 import { expect } from '@loopback/testlab';
 import { validateODataConfig, validatePaginationLimits } from '../../util/config-validation';
 import { ODataConfig } from '../../types';

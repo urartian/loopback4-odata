@@ -1,5 +1,6 @@
 import { Readable } from 'stream';
 import { HttpErrors } from '@loopback/rest';
+import { BufferQueue } from '../util/buffer-queue';
 
 export interface ParsedBatch {
   requests: ParsedBatchRequest[];
@@ -127,7 +128,7 @@ class StreamingBatchParser {
   private readonly boundaryMarker: Buffer;
   private readonly closingMarker: Buffer;
   private readonly boundaryHeadroom: number;
-  private buffer = Buffer.alloc(0);
+  private buffer = new BufferQueue();
   private firstBoundarySeen = false;
   private state: 'headers' | 'body' = 'headers';
   private currentHeaders: Record<string, string> | undefined;
@@ -135,6 +136,7 @@ class StreamingBatchParser {
   private ended = false;
   private readonly requests: ParsedBatchRequest[] = [];
   private changesetOperationIndex = 0;
+  private readonly allowLeadingCrlf = true;
 
   constructor(
     private readonly boundary: string,
@@ -151,9 +153,7 @@ class StreamingBatchParser {
   async parse(stream: Readable): Promise<ParsedBatchRequest[]> {
     for await (const chunk of stream) {
       const bufferChunk = this.toBuffer(chunk);
-      this.buffer = this.buffer.length
-        ? Buffer.concat([this.buffer, bufferChunk])
-        : Buffer.from(bufferChunk);
+      this.buffer.push(bufferChunk);
       this.processBuffer(false);
     }
     this.processBuffer(true);
@@ -167,7 +167,7 @@ class StreamingBatchParser {
 
   parseBuffer(buffer: Buffer): ParsedBatchRequest[] {
     const chunk = this.toBuffer(buffer);
-    this.buffer = this.buffer.length ? Buffer.concat([this.buffer, chunk]) : Buffer.from(chunk);
+    this.buffer.push(chunk);
     this.processBuffer(true);
 
     if (!this.ended) {
@@ -183,38 +183,40 @@ class StreamingBatchParser {
     // eslint-disable-next-line no-constant-condition
     while (true) {
       if (!this.firstBoundarySeen) {
-        const boundaryIndex = this.buffer.indexOf(this.boundaryPrefix);
-        if (boundaryIndex === -1) {
-          if (finalPass) {
-            throw new HttpErrors.BadRequest('Malformed batch payload: boundary not found.');
-          }
-          return;
-        }
-        this.buffer = this.buffer.slice(boundaryIndex + this.boundaryPrefix.length);
+        const consumed = this.consumeAnchoredFirstBoundary(finalPass);
+        if (!consumed) return;
         this.firstBoundarySeen = true;
         // Handle closing boundary immediately (empty payload)
-        if (this.buffer.length >= 2 && this.buffer[0] === 45 && this.buffer[1] === 45) {
-          this.buffer = this.buffer.slice(2);
+        if (
+          this.buffer.length >= 2 &&
+          this.buffer.byteAt(0) === 45 &&
+          this.buffer.byteAt(1) === 45
+        ) {
+          this.buffer.consume(2);
           this.ended = true;
           return;
         }
-        if (this.buffer.length >= 2 && this.buffer[0] === 13 && this.buffer[1] === 10) {
-          this.buffer = this.buffer.slice(2);
+        if (
+          this.buffer.length >= 2 &&
+          this.buffer.byteAt(0) === 13 &&
+          this.buffer.byteAt(1) === 10
+        ) {
+          this.buffer.consume(2);
         }
         this.state = 'headers';
       }
 
       if (this.state === 'headers') {
-        const headerIdx = indexOfDoubleCRLF(this.buffer);
-        if (headerIdx === -1) {
+        const headerInfo = findHeaderSeparatorInQueue(this.buffer);
+        if (!headerInfo) {
           if (finalPass) {
             throw new HttpErrors.BadRequest('Malformed multipart part: missing header separator.');
           }
           return;
         }
-        const headerBuffer = this.buffer.slice(0, headerIdx);
+        const headerBuffer = this.buffer.slice(0, headerInfo.index);
         this.currentHeaders = parseHeaders(headerBuffer.toString('utf-8'));
-        this.buffer = this.buffer.slice(headerIdx + 4);
+        this.buffer.consume(headerInfo.index + headerInfo.length);
         this.state = 'body';
         this.currentPartBytes = 0;
       }
@@ -238,18 +240,26 @@ class StreamingBatchParser {
         const markerLength = boundaryInfo.closing
           ? this.closingMarker.length
           : this.boundaryMarker.length;
-        this.buffer = this.buffer.slice(boundaryInfo.index + markerLength);
+        this.buffer.consume(boundaryInfo.index + markerLength);
 
         if (boundaryInfo.closing) {
-          if (this.buffer.length >= 2 && this.buffer[0] === 13 && this.buffer[1] === 10) {
-            this.buffer = this.buffer.slice(2);
+          if (
+            this.buffer.length >= 2 &&
+            this.buffer.byteAt(0) === 13 &&
+            this.buffer.byteAt(1) === 10
+          ) {
+            this.buffer.consume(2);
           }
           this.ended = true;
           return;
         }
 
-        if (this.buffer.length >= 2 && this.buffer[0] === 13 && this.buffer[1] === 10) {
-          this.buffer = this.buffer.slice(2);
+        if (
+          this.buffer.length >= 2 &&
+          this.buffer.byteAt(0) === 13 &&
+          this.buffer.byteAt(1) === 10
+        ) {
+          this.buffer.consume(2);
         }
         this.state = 'headers';
       }
@@ -278,6 +288,45 @@ class StreamingBatchParser {
     if (safeLength <= this.currentPartBytes) return;
     this.currentPartBytes = safeLength;
     this.context.ensurePartSize(this.currentPartBytes);
+  }
+
+  private consumeAnchoredFirstBoundary(finalPass: boolean): number | undefined {
+    if (
+      this.buffer.length >= this.boundaryPrefix.length &&
+      this.buffer.startsWith(this.boundaryPrefix, 0)
+    ) {
+      this.buffer.consume(this.boundaryPrefix.length);
+      return this.boundaryPrefix.length;
+    }
+
+    if (this.allowLeadingCrlf) {
+      if (this.buffer.length < 2) {
+        if (!finalPass) return undefined;
+      } else if (this.buffer.byteAt(0) === 13 && this.buffer.byteAt(1) === 10) {
+        const required = 2 + this.boundaryPrefix.length;
+        if (this.buffer.length < required) {
+          if (!finalPass) return undefined;
+        } else if (this.buffer.startsWith(this.boundaryPrefix, 2)) {
+          this.buffer.consume(required);
+          return required;
+        }
+      }
+    }
+
+    if (this.buffer.length === 0) {
+      if (!finalPass) return undefined;
+      throw new HttpErrors.BadRequest('Malformed batch payload: boundary not found.');
+    }
+
+    if (this.buffer.length < this.boundaryPrefix.length) {
+      const canStillBeBoundaryStart =
+        this.buffer.byteAt(0) === 45 || (this.allowLeadingCrlf && this.buffer.byteAt(0) === 13);
+      if (canStillBeBoundaryStart && !finalPass) return undefined;
+    }
+
+    throw new HttpErrors.BadRequest(
+      'Malformed batch payload: boundary must appear at start of payload.',
+    );
   }
 
   private handlePart(body: Buffer, headers: Record<string, string> | undefined) {
@@ -430,18 +479,17 @@ function findHeaderSeparator(buffer: Buffer): { index: number; length: number } 
   return undefined;
 }
 
-function indexOfDoubleCRLF(buffer: Buffer): number {
-  for (let i = 0; i <= buffer.length - 4; i++) {
-    if (buffer[i] === 13 && buffer[i + 1] === 10 && buffer[i + 2] === 13 && buffer[i + 3] === 10) {
-      return i;
-    }
+function findHeaderSeparatorInQueue(
+  queue: BufferQueue,
+): { index: number; length: number } | undefined {
+  const crlfIdx = queue.indexOf(Buffer.from('\r\n\r\n'));
+  const lfIdx = queue.indexOf(Buffer.from('\n\n'));
+
+  if (crlfIdx === -1) {
+    return lfIdx >= 0 ? { index: lfIdx, length: 2 } : undefined;
   }
-  for (let i = 0; i <= buffer.length - 2; i++) {
-    if (buffer[i] === 10 && buffer[i + 1] === 10) {
-      return i;
-    }
-  }
-  return -1;
+  if (lfIdx === -1) return { index: crlfIdx, length: 4 };
+  return crlfIdx <= lfIdx ? { index: crlfIdx, length: 4 } : { index: lfIdx, length: 2 };
 }
 
 function parseHeaders(raw: string): Record<string, string> {

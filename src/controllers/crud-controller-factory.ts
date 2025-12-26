@@ -60,6 +60,7 @@ import {
   parseIfNoneMatch,
   readEtagValue,
 } from '../util/etag';
+import { safeDecodeURIComponent } from '../util/url-decoding';
 import {
   encodeDeltaToken,
   decodeDeltaToken,
@@ -124,6 +125,7 @@ import {
 } from '../util/telemetry';
 import { acceptsAnyMediaType } from '../util/accept';
 import { normalizeBasePath } from '../util/base-path';
+import { escapeLikeLiteral } from '../util/like-escaping';
 import { Readable } from 'stream';
 import {
   ODataMediaHandler,
@@ -205,6 +207,14 @@ interface OrderDescriptor {
   field: string;
   direction: 'ASC' | 'DESC';
 }
+
+type ApplyFieldInput =
+  | { kind: 'model'; modelCtor: typeof Entity }
+  | { kind: 'columns'; columns: Set<string> };
+
+type ApplyFieldOutput =
+  | { kind: 'model'; modelCtor: typeof Entity; columns?: Set<string> }
+  | { kind: 'columns'; columns: Set<string> };
 
 interface PropertyNormalizationPlan {
   kind: 'datetimeoffset' | 'date' | 'timeOfDay' | 'duration' | 'int64' | 'decimal';
@@ -294,6 +304,7 @@ export function defineODataCrudController(def: EntitySetDef) {
   const mediaEtagField = def.mediaEtagField;
   const mediaLengthField = def.mediaLengthField;
   const mediaHandlerBindingKey = def.mediaHandlerBindingKey;
+  const mediaMaxPayloadBytes = def.mediaMaxPayloadBytes;
 
   const collectionResponseSchema = {
     type: 'object',
@@ -900,6 +911,7 @@ export function defineODataCrudController(def: EntitySetDef) {
         const fallback = new PropertyBackedMediaHandler(
           this.repository as unknown as DefaultCrudRepository<CrudEntity, unknown>,
           mediaField,
+          { maxPayloadBytes: mediaMaxPayloadBytes },
         );
         this.mediaHandlerCache = fallback;
         return fallback;
@@ -1787,6 +1799,10 @@ export function defineODataCrudController(def: EntitySetDef) {
       if (!mantissa) return undefined;
       const exponent = Number(exponentRaw);
       if (!Number.isFinite(exponent) || !Number.isInteger(exponent)) return undefined;
+      const exponentLimit = this.cfg?.maxDecimalExponentAbs ?? 1000;
+      if (exponentLimit > 0 && Math.abs(exponent) > exponentLimit) {
+        return undefined;
+      }
       const normalizedMantissa = mantissa.replace(/^[+-]/, '');
       const mantissaParts = normalizedMantissa.split('.');
       const whole = mantissaParts[0] ?? '';
@@ -2564,12 +2580,71 @@ export function defineODataCrudController(def: EntitySetDef) {
 
     parseODataIdReference(reference: string): { entitySet: string; keyExpression: string } {
       const path = this.normalizeReferencePath(reference);
-      const match = /\/([^/]+)\((.+)\)/.exec(path);
-      if (!match) {
+      const normalized = path.startsWith('/') ? path : `/${path}`;
+      const parts = normalized.split('/').filter(Boolean);
+      if (parts.length !== 1) {
+        throw new HttpErrors.BadRequest(
+          'Invalid @odata.id value: navigation-path references are not supported; use canonical EntitySet(key).',
+        );
+      }
+      const segment = parts[0];
+      if (!segment || segment.startsWith('$')) {
         throw new HttpErrors.BadRequest(`Invalid @odata.id value: ${reference}`);
       }
-      const entitySet = this.stripNamespacePrefix(match[1]);
-      return { entitySet, keyExpression: match[2] };
+      const openIndex = segment.indexOf('(');
+      if (openIndex <= 0) {
+        throw new HttpErrors.BadRequest(`Invalid @odata.id value: ${reference}`);
+      }
+
+      let inString = false;
+      let closeIndex = -1;
+      for (let i = openIndex + 1; i < segment.length; i++) {
+        const ch = segment[i];
+        if (inString) {
+          if (ch === "'") {
+            if (segment[i + 1] === "'") {
+              i += 1;
+              continue;
+            }
+            inString = false;
+            continue;
+          }
+          continue;
+        }
+        if (ch === "'") {
+          inString = true;
+          continue;
+        }
+        if (ch === ')') {
+          closeIndex = i;
+          break;
+        }
+      }
+
+      if (closeIndex < 0) {
+        if (inString) {
+          throw new HttpErrors.BadRequest(
+            'Invalid @odata.id value: unterminated string literal in key predicate.',
+          );
+        }
+        throw new HttpErrors.BadRequest(
+          'Invalid @odata.id value: missing closing parenthesis in key predicate.',
+        );
+      }
+
+      if (closeIndex !== segment.length - 1) {
+        throw new HttpErrors.BadRequest(
+          'Invalid @odata.id value: unexpected trailing characters after key predicate.',
+        );
+      }
+
+      const entitySetRaw = segment.slice(0, openIndex);
+      if (!entitySetRaw) {
+        throw new HttpErrors.BadRequest(`Invalid @odata.id value: ${reference}`);
+      }
+      const entitySet = this.stripNamespacePrefix(entitySetRaw);
+      const keyExpression = segment.slice(openIndex + 1, closeIndex);
+      return { entitySet, keyExpression };
     }
 
     normalizeReferencePath(reference: string): string {
@@ -2583,6 +2658,7 @@ export function defineODataCrudController(def: EntitySetDef) {
       const absolutePattern = /^[a-z][a-z0-9+.-]*:/i;
       const isAbsolute =
         Boolean(trimmed) && (absolutePattern.test(trimmed) || trimmed.startsWith('//'));
+      const isRelativePath = Boolean(trimmed) && !isAbsolute && !trimmed.startsWith('/');
       let path = trimmed;
 
       if (isAbsolute) {
@@ -2607,8 +2683,14 @@ export function defineODataCrudController(def: EntitySetDef) {
       }
       path = path.split('?')[0]?.split('#')[0] ?? path;
       path = path.replace(/^\/+/g, '/');
-      path = this.stripBasePath(path, normalizedBasePath);
-      path = this.stripBasePath(path, '/odata');
+
+      if (!isRelativePath) {
+        if (!this.matchesServiceRootPrefix(path, normalizedBasePath)) {
+          throw new HttpErrors.BadRequest(`Invalid @odata.id value: ${reference}`);
+        }
+        path = this.stripBasePath(path, normalizedBasePath);
+      }
+
       if (!path.startsWith('/')) {
         path = `/${path}`;
       }
@@ -2894,7 +2976,10 @@ export function defineODataCrudController(def: EntitySetDef) {
     }
 
     parseKeyLiteral(raw: string): string {
-      const decoded = decodeURIComponent(String(raw));
+      const decoded = safeDecodeURIComponent(String(raw));
+      if (decoded === undefined) {
+        throw new HttpErrors.BadRequest('Invalid key literal encoding.');
+      }
       let literal = decoded.trim();
       const guidPrefix = /^guid'/i;
       if (guidPrefix.test(literal)) {
@@ -4908,6 +4993,321 @@ export function defineODataCrudController(def: EntitySetDef) {
       }
     }
 
+    ensureApplyFieldAllowedOnModel(
+      modelCtor: typeof Entity,
+      field: string,
+      clause: string,
+      options?: { allowNavigationOnly?: boolean },
+    ) {
+      if (!field) {
+        throw new HttpErrors.BadRequest(`Unknown property in ${clause}: ${field}`);
+      }
+      let resolved: ResolvedNavigationPath;
+      try {
+        resolved = resolveNavigationPath(modelCtor, field, {
+          maxDepth: this.cfg?.maxExpandDepth ?? 5,
+        });
+      } catch (error) {
+        if (error instanceof NavigationPathError) {
+          throw new HttpErrors.BadRequest(`Unknown property in ${clause}: ${field}`);
+        }
+        throw error;
+      }
+      const propertyPath = resolved.propertyPath;
+      if (!propertyPath) {
+        if (options?.allowNavigationOnly && resolved.joins.length) {
+          return;
+        }
+        throw new HttpErrors.BadRequest(`Unknown property in ${clause}: ${field}`);
+      }
+      const segments = propertyPath.split('/').filter(Boolean);
+      if (!segments.length) {
+        if (options?.allowNavigationOnly && resolved.joins.length) {
+          return;
+        }
+        throw new HttpErrors.BadRequest(`Unknown property in ${clause}: ${field}`);
+      }
+      const targetModel = resolved.joins.length ? resolved.targetModel : modelCtor;
+      if (segments.length === 1) {
+        const propDef = this.getModelPropertyDefinition(targetModel, segments[0]);
+        if (!propDef) {
+          throw new HttpErrors.BadRequest(`Unknown property in ${clause}: ${field}`);
+        }
+        return;
+      }
+      const structured = resolveStructuredPropertySegments(targetModel, segments);
+      if (!structured) {
+        throw new HttpErrors.BadRequest(`Unknown property in ${clause}: ${field}`);
+      }
+    }
+
+    resolveApplyLambdaTargetModel(
+      modelCtor: typeof Entity,
+      path: string,
+      clause: string,
+    ): typeof Entity {
+      let resolved: ResolvedNavigationPath;
+      try {
+        resolved = resolveNavigationPath(modelCtor, path, {
+          maxDepth: this.cfg?.maxExpandDepth ?? 5,
+        });
+      } catch (error) {
+        if (error instanceof NavigationPathError) {
+          throw new HttpErrors.BadRequest(`Unknown property in ${clause}: ${path}`);
+        }
+        throw error;
+      }
+      if (!resolved.joins.length || resolved.propertyPath) {
+        throw new HttpErrors.BadRequest(`Unknown property in ${clause}: ${path}`);
+      }
+      return resolved.targetModel;
+    }
+
+    resolveApplyInputColumn(field: string, columns: Set<string>): string | undefined {
+      if (!field) return undefined;
+      if (columns.has(field)) return field;
+      const lowered = field.toLowerCase();
+      for (const candidate of columns) {
+        if (candidate.toLowerCase() === lowered) return candidate;
+      }
+      return undefined;
+    }
+
+    ensureApplyFieldAllowedOnInput(input: ApplyFieldInput, field: string, clause: string) {
+      if (input.kind === 'model') {
+        this.ensureApplyFieldAllowedOnModel(input.modelCtor, field, clause);
+        return;
+      }
+      const match = this.resolveApplyInputColumn(field, input.columns);
+      if (!match) {
+        throw new HttpErrors.BadRequest(`Unknown property in ${clause}: ${field}`);
+      }
+    }
+
+    validateApplyExpressionFields(
+      expr: ParsedExpression,
+      clause: string,
+      input: ApplyFieldInput,
+      options?: {
+        outputFields?: Set<string>;
+        restrictToOutput?: boolean;
+        lambdaContext?: { alias: string; modelCtor: typeof Entity };
+      },
+    ) {
+      const outputFields = options?.outputFields;
+      const restrictToOutput = options?.restrictToOutput === true;
+      const lambdaContext = options?.lambdaContext;
+      const validateField = (field: string) => {
+        if (!field) {
+          throw new HttpErrors.BadRequest(`Unknown property in ${clause}: ${field}`);
+        }
+        if (outputFields && this.resolveApplyInputColumn(field, outputFields)) return;
+        if (restrictToOutput) {
+          throw new HttpErrors.BadRequest(`Unknown property in ${clause}: ${field}`);
+        }
+        if (lambdaContext && field.startsWith(`${lambdaContext.alias}/`)) {
+          const stripped = field.slice(lambdaContext.alias.length + 1);
+          this.ensureApplyFieldAllowedOnModel(lambdaContext.modelCtor, stripped, clause);
+          return;
+        }
+        this.ensureApplyFieldAllowedOnInput(input, field, clause);
+      };
+
+      switch (expr.operator) {
+        case 'comparison':
+          validateField(expr.field);
+          return;
+        case 'logical':
+          for (const child of expr.expressions) {
+            this.validateApplyExpressionFields(child, clause, input, options);
+          }
+          return;
+        case 'not':
+          this.validateApplyExpressionFields(expr.expr, clause, input, options);
+          return;
+        case 'function':
+        case 'fncmp':
+        case 'datepart':
+        case 'indexofcmp':
+        case 'substrcmp':
+        case 'lengthcmp':
+          validateField(expr.field);
+          return;
+        case 'stringfncmp':
+          for (const arg of expr.args) {
+            if (arg.kind === 'field') {
+              validateField(arg.name);
+            }
+          }
+          return;
+        case 'lambda': {
+          if (input.kind !== 'model') {
+            const path = expr.path.join('/');
+            throw new HttpErrors.BadRequest(`Unknown property in ${clause}: ${path}`);
+          }
+          const path = expr.path.join('/');
+          const targetModel = this.resolveApplyLambdaTargetModel(input.modelCtor, path, clause);
+          this.validateApplyExpressionFields(expr.predicate, clause, input, {
+            outputFields,
+            restrictToOutput,
+            lambdaContext: { alias: expr.alias, modelCtor: targetModel },
+          });
+          return;
+        }
+        default:
+          return;
+      }
+    }
+
+    buildApplyStageOutputColumns(stage: ApplyAggregationStage): Set<string> {
+      const output = new Set<string>();
+      for (const field of stage.spec.groupBy ?? []) {
+        if (field) output.add(field);
+      }
+      for (const aggregate of stage.spec.aggregates ?? []) {
+        if (aggregate.alias) output.add(aggregate.alias);
+      }
+      return output;
+    }
+
+    resolveApplyPlanOutputFields(
+      plan: ApplyExecutionPlan,
+      input: ApplyFieldInput,
+    ): ApplyFieldOutput {
+      let stageInput: ApplyFieldInput = input;
+      if (plan.stages.length) {
+        const stageColumns = this.buildApplyStageOutputColumns(plan.stages[plan.stages.length - 1]);
+        stageInput = { kind: 'columns', columns: stageColumns };
+      }
+
+      if (plan.concat?.length) {
+        const columns = new Set<string>();
+        let allowModel = false;
+        for (const branch of plan.concat) {
+          const output = this.resolveApplyPlanOutputFields(branch, stageInput);
+          if (output.kind === 'model') {
+            allowModel = true;
+          }
+          if (output.kind === 'columns') {
+            output.columns.forEach((col) => columns.add(col));
+          } else if (output.columns) {
+            output.columns.forEach((col) => columns.add(col));
+          }
+        }
+        if (allowModel && stageInput.kind === 'model') {
+          return {
+            kind: 'model',
+            modelCtor: stageInput.modelCtor,
+            columns: columns.size ? columns : undefined,
+          };
+        }
+        if (columns.size) {
+          return { kind: 'columns', columns };
+        }
+        return stageInput.kind === 'model'
+          ? { kind: 'model', modelCtor: stageInput.modelCtor }
+          : { kind: 'columns', columns: stageInput.columns };
+      }
+
+      return stageInput.kind === 'model'
+        ? { kind: 'model', modelCtor: stageInput.modelCtor }
+        : { kind: 'columns', columns: stageInput.columns };
+    }
+
+    validateApplyPlanFields(plan: ApplyExecutionPlan, input?: ApplyFieldInput) {
+      const clause = '$apply';
+      const baseInput = input ?? ({ kind: 'model', modelCtor: this.entityCtor } as const);
+      const validateStage = (
+        stage: ApplyAggregationStage,
+        input: ApplyFieldInput,
+      ): ApplyFieldInput => {
+        const output = this.buildApplyStageOutputColumns(stage);
+        for (const field of stage.spec.groupBy ?? []) {
+          this.ensureApplyFieldAllowedOnInput(input, field, clause);
+        }
+        for (const aggregate of stage.spec.aggregates ?? []) {
+          if (aggregate.field) {
+            this.ensureApplyFieldAllowedOnInput(input, aggregate.field, clause);
+          }
+          if (aggregate.expression) {
+            this.collectPathsFromComputeNode(aggregate.expression, (path) =>
+              this.ensureApplyFieldAllowedOnInput(input, path, clause),
+            );
+          }
+        }
+        const outputInput = { kind: 'columns', columns: output } as const;
+        for (const expr of stage.postAggregationFilters ?? []) {
+          this.validateApplyExpressionFields(expr, clause, outputInput, {
+            outputFields: output,
+            restrictToOutput: true,
+          });
+        }
+        for (const item of stage.orderBy ?? []) {
+          if (!item.field || !this.resolveApplyInputColumn(item.field, output)) {
+            throw new HttpErrors.BadRequest(`Unknown property in ${clause}: ${item.field}`);
+          }
+        }
+        return outputInput;
+      };
+
+      for (const expr of plan.preAggregationFilters ?? []) {
+        this.validateApplyExpressionFields(expr, clause, baseInput);
+      }
+
+      let finalInput: ApplyFieldInput = baseInput;
+      for (const stage of plan.stages ?? []) {
+        finalInput = validateStage(stage, finalInput);
+      }
+
+      if (plan.concat?.length) {
+        for (const branch of plan.concat) {
+          this.validateApplyPlanFields(branch, finalInput);
+        }
+      }
+
+      const output = this.resolveApplyPlanOutputFields(plan, baseInput);
+      const outputInput =
+        output.kind === 'columns'
+          ? ({ kind: 'columns', columns: output.columns } as const)
+          : ({ kind: 'model', modelCtor: output.modelCtor } as const);
+
+      if (plan.postOrderBy?.length) {
+        for (const item of plan.postOrderBy) {
+          if (output.columns && this.resolveApplyInputColumn(item.field, output.columns)) {
+            continue;
+          }
+          this.ensureApplyFieldAllowedOnInput(outputInput, item.field, clause);
+        }
+      }
+
+      if (plan.postFilters?.length) {
+        for (const expr of plan.postFilters) {
+          this.validateApplyExpressionFields(expr, clause, outputInput, {
+            outputFields: output.columns,
+            restrictToOutput: output.kind === 'columns',
+          });
+        }
+      }
+    }
+
+    collectPathsFromComputeNode(node: ComputeNode, visit: (path: string) => void) {
+      switch (node.type) {
+        case 'path':
+          visit(node.path.join('/'));
+          return;
+        case 'binary':
+          this.collectPathsFromComputeNode(node.left, visit);
+          this.collectPathsFromComputeNode(node.right, visit);
+          return;
+        case 'function':
+          node.args.forEach((arg) => this.collectPathsFromComputeNode(arg, visit));
+          return;
+        case 'literal':
+        default:
+          return;
+      }
+    }
+
     serializePrimitiveValue(
       value: unknown,
       kind: PrimitivePropertyKind,
@@ -5545,7 +5945,7 @@ export function defineODataCrudController(def: EntitySetDef) {
     }
 
     escapeSearchTerm(term: string): string {
-      return term.replace(/[%_]/g, (ch) => `\\${ch}`);
+      return escapeLikeLiteral(term);
     }
 
     combineWithAnd(parts: (CrudWhere | undefined)[]): CrudWhere | undefined {
@@ -6435,6 +6835,10 @@ export function defineODataCrudController(def: EntitySetDef) {
           for (const entry of list) this.collectWhereFields(entry as AnyObject, out);
           continue;
         }
+        if (key === 'not') {
+          this.collectWhereFields(value as AnyObject, out);
+          continue;
+        }
         out.add(key);
       }
     }
@@ -7080,7 +7484,14 @@ export function defineODataCrudController(def: EntitySetDef) {
       try {
         const parsed = parseODataQuery(
           this.request.query as Record<string, string | string[] | undefined>,
-          { relations: modelRelations, strict: Boolean(this.cfg?.strict) },
+          {
+            relations: modelRelations,
+            strict: Boolean(this.cfg?.strict),
+            maxFilterPatternLength: this.cfg?.maxFilterPatternLength,
+            maxSubstringStart: this.cfg?.maxSubstringStart,
+            maxSubstringLength: this.cfg?.maxSubstringLength,
+            maxFilterFieldNameLength: this.cfg?.maxFilterFieldNameLength,
+          },
         );
         inlineCountRequested = parsed.inlineCount === true;
         if (inlineCountRequested && this.cfg && this.cfg.enableCount === false) {
@@ -7095,6 +7506,10 @@ export function defineODataCrudController(def: EntitySetDef) {
             strict: Boolean(this.cfg?.strict),
             modelCtor,
             maxNavigationDepth: this.cfg?.maxExpandDepth ?? 5,
+            maxFilterPatternLength: this.cfg?.maxFilterPatternLength,
+            maxSubstringStart: this.cfg?.maxSubstringStart,
+            maxSubstringLength: this.cfg?.maxSubstringLength,
+            maxFilterFieldNameLength: this.cfg?.maxFilterFieldNameLength,
           });
           const pipelineHasOrder = this.planHasInternalOrder(applyPlan);
           if (
@@ -7106,6 +7521,7 @@ export function defineODataCrudController(def: EntitySetDef) {
               'Combining $orderby outside $apply with orderby() inside the pipeline is not supported.',
             );
           }
+          this.validateApplyPlanFields(applyPlan);
         }
         computeExpressions = parsed.compute;
         const primaryStage = this.findFirstPlanStage(applyPlan);
@@ -7158,7 +7574,12 @@ export function defineODataCrudController(def: EntitySetDef) {
         }
         if (splitWhere.repoExpr) {
           try {
-            parsed.where = buildWhereFromParsedExpression(splitWhere.repoExpr) as CrudWhere;
+            parsed.where = buildWhereFromParsedExpression(splitWhere.repoExpr, {
+              maxFilterPatternLength: this.cfg?.maxFilterPatternLength,
+              maxSubstringStart: this.cfg?.maxSubstringStart,
+              maxSubstringLength: this.cfg?.maxSubstringLength,
+              maxFilterFieldNameLength: this.cfg?.maxFilterFieldNameLength,
+            }) as CrudWhere;
           } catch (error) {
             if (error instanceof UnsupportedFilterError) {
               postFilterExpr = this.combinePostFilterExpressions(
@@ -7928,7 +8349,14 @@ export function defineODataCrudController(def: EntitySetDef) {
       try {
         const parsed = parseODataQuery(
           this.request.query as Record<string, string | string[] | undefined>,
-          { relations: modelRelations, strict: Boolean(this.cfg?.strict) },
+          {
+            relations: modelRelations,
+            strict: Boolean(this.cfg?.strict),
+            maxFilterPatternLength: this.cfg?.maxFilterPatternLength,
+            maxSubstringStart: this.cfg?.maxSubstringStart,
+            maxSubstringLength: this.cfg?.maxSubstringLength,
+            maxFilterFieldNameLength: this.cfg?.maxFilterFieldNameLength,
+          },
         );
         this.enforceApplyCapability(applySupported, parsed);
         if (parsed.format) {
@@ -7953,7 +8381,12 @@ export function defineODataCrudController(def: EntitySetDef) {
         }
         if (splitWhere.repoExpr) {
           try {
-            parsed.where = buildWhereFromParsedExpression(splitWhere.repoExpr) as CrudWhere;
+            parsed.where = buildWhereFromParsedExpression(splitWhere.repoExpr, {
+              maxFilterPatternLength: this.cfg?.maxFilterPatternLength,
+              maxSubstringStart: this.cfg?.maxSubstringStart,
+              maxSubstringLength: this.cfg?.maxSubstringLength,
+              maxFilterFieldNameLength: this.cfg?.maxFilterFieldNameLength,
+            }) as CrudWhere;
           } catch (error) {
             if (error instanceof UnsupportedFilterError) {
               postFilterExpr = this.combinePostFilterExpressions(
@@ -8071,7 +8504,14 @@ export function defineODataCrudController(def: EntitySetDef) {
       try {
         const parsed = parseODataQuery(
           this.request.query as Record<string, string | string[] | undefined>,
-          { relations: modelRelations, strict: Boolean(this.cfg?.strict) },
+          {
+            relations: modelRelations,
+            strict: Boolean(this.cfg?.strict),
+            maxFilterPatternLength: this.cfg?.maxFilterPatternLength,
+            maxSubstringStart: this.cfg?.maxSubstringStart,
+            maxSubstringLength: this.cfg?.maxSubstringLength,
+            maxFilterFieldNameLength: this.cfg?.maxFilterFieldNameLength,
+          },
         );
         this.enforceApplyCapability(applySupported, parsed);
         this.applyFormatPreference(parsed.format);

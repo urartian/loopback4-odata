@@ -201,6 +201,12 @@ describe('CRUD controller response normalization', () => {
     expect(controller.normalizeDecimalString('000123.4500e2')).to.equal('12345');
   });
 
+  it('rejects scientific decimals with excessive exponent magnitude', () => {
+    const controller = createController();
+    expect(controller.normalizeDecimalString('1e1001')).to.equal(undefined);
+    expect(controller.normalizeDecimalString('1e-1001')).to.equal(undefined);
+  });
+
   it('merges field selections without mutating array inputs', () => {
     const controller = createController();
     const target: Filter<Invoice> = { fields: ['id'] };

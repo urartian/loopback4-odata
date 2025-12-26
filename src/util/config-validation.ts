@@ -51,6 +51,11 @@ export function validateODataConfig(config: ODataConfig): void {
   assignPositive(config as AnyObject, 'pageSize');
   assignPositive(config as AnyObject, 'maxTop');
   assignPositive(config as AnyObject, 'maxSkip');
+  assignPositive(config as AnyObject, 'maxFilterPatternLength');
+  assignPositive(config as AnyObject, 'maxSubstringStart');
+  assignPositive(config as AnyObject, 'maxSubstringLength');
+  assignPositive(config as AnyObject, 'maxFilterFieldNameLength');
+  assignPositive(config as AnyObject, 'maxDecimalExponentAbs');
   assignPositive(config as AnyObject, 'maxApplyResultSize');
   assignPositive(config as AnyObject, 'maxApplyNavigationFanout');
   assignPositive(config as AnyObject, 'maxSearchFields');

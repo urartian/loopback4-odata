@@ -99,10 +99,11 @@ describe('CRUD controller navigation reference parsing', () => {
     expect(result).to.deepEqual({ entitySet: 'Products', keyExpression: '42' });
   });
 
-  it('accepts /odata prefixes even when basePath differs', () => {
+  it('rejects /odata prefixes when basePath differs', () => {
     const controller = createController({ basePath: '/api/odata' });
-    const result = (controller as any).parseODataIdReference('/odata/Products(7)');
-    expect(result).to.deepEqual({ entitySet: 'Products', keyExpression: '7' });
+    expect(() => (controller as any).parseODataIdReference('/odata/Products(7)')).to.throw(
+      /Invalid @odata\.id value/,
+    );
   });
 
   it('strips namespace and alias prefixes', () => {
@@ -138,6 +139,39 @@ describe('CRUD controller navigation reference parsing', () => {
     const controller = createController();
     const result = (controller as any).parseODataIdReference('/odata/Products(6)#foo');
     expect(result).to.deepEqual({ entitySet: 'Products', keyExpression: '6' });
+  });
+
+  it('rejects navigation path references in @odata.id', () => {
+    const controller = createController();
+    expect(() =>
+      (controller as any).parseODataIdReference('/odata/Orders(1)/Customer(2)'),
+    ).to.throw(/navigation-path/i);
+  });
+
+  it('accepts string keys containing closing parentheses', () => {
+    const controller = createController();
+    const result = (controller as any).parseODataIdReference("/odata/Products('A)B')");
+    expect(result).to.deepEqual({ entitySet: 'Products', keyExpression: "'A)B'" });
+  });
+
+  it('accepts string keys containing escaped single quotes', () => {
+    const controller = createController();
+    const result = (controller as any).parseODataIdReference("/odata/Products('A'')B')");
+    expect(result).to.deepEqual({ entitySet: 'Products', keyExpression: "'A'')B'" });
+  });
+
+  it('rejects trailing garbage after closing parenthesis', () => {
+    const controller = createController();
+    expect(() => (controller as any).parseODataIdReference('/odata/Products(1)junk')).to.throw(
+      /trailing/i,
+    );
+  });
+
+  it('rejects unterminated string literals in key predicates', () => {
+    const controller = createController();
+    expect(() => (controller as any).parseODataIdReference("/odata/Products('A)")).to.throw(
+      /unterminated/i,
+    );
   });
 
   it('accepts absolute references that match the current service root', () => {

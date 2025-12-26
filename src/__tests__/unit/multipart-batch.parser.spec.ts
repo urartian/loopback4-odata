@@ -232,6 +232,86 @@ describe('multipart batch parser', () => {
     expect(request.rawBody?.equals(binaryPayload)).to.be.true();
     expect(request.body).to.be.undefined();
   });
+
+  it('rejects batch preamble before first boundary', async () => {
+    const boundary = 'batch_preamble';
+    const body = [
+      `--${boundary}`,
+      'Content-Type: application/http',
+      'Content-Transfer-Encoding: binary',
+      '',
+      'GET /odata/Products HTTP/1.1',
+      '',
+      '',
+      `--${boundary}--`,
+      '',
+    ].join('\r\n');
+    const stream = Readable.from(`x${body}`);
+    await expect(parseMultipartBatch(stream, boundary)).to.be.rejectedWith(
+      /boundary must appear at start of payload/i,
+    );
+  });
+
+  it('accepts leading CRLF before first boundary', async () => {
+    const boundary = 'batch_leading_crlf';
+    const body = [
+      `--${boundary}`,
+      'Content-Type: application/http',
+      'Content-Transfer-Encoding: binary',
+      '',
+      'GET /odata/Products HTTP/1.1',
+      '',
+      '',
+      `--${boundary}--`,
+      '',
+    ].join('\r\n');
+    const stream = Readable.from(`\r\n${body}`);
+    const result = await parseMultipartBatch(stream, boundary);
+    expect(result.requests).to.have.length(1);
+    expect(result.requests[0].method).to.equal('GET');
+  });
+
+  it('detects boundaries split across chunks', async () => {
+    const boundary = 'batch_split';
+    const body = Buffer.from(
+      [
+        `--${boundary}`,
+        'Content-Type: application/http',
+        'Content-Transfer-Encoding: binary',
+        '',
+        'GET /odata/Products HTTP/1.1',
+        '',
+        '',
+        `--${boundary}--`,
+        '',
+      ].join('\r\n'),
+      'utf-8',
+    );
+    const closingMarker = Buffer.from(`\r\n--${boundary}--`, 'utf-8');
+    const closingIndex = body.indexOf(closingMarker);
+    expect(closingIndex).to.be.greaterThan(-1);
+    const splitIndex = closingIndex + Math.floor(closingMarker.length / 2);
+    const stream = Readable.from([body.slice(0, splitIndex), body.slice(splitIndex)]);
+    const result = await parseMultipartBatch(stream, boundary);
+    expect(result.requests).to.have.length(1);
+    expect(result.requests[0].method).to.equal('GET');
+  });
+
+  it('parses multipart headers with LF-only header separators', async () => {
+    const boundary = 'batch_lf_headers';
+    const body =
+      `--${boundary}\r\n` +
+      `Content-Type: application/http\n` +
+      `Content-Transfer-Encoding: binary\n` +
+      `\n` +
+      `GET /odata/Products HTTP/1.1\r\n` +
+      `\r\n` +
+      `\r\n--${boundary}--\r\n`;
+    const stream = Readable.from(body);
+    const result = await parseMultipartBatch(stream, boundary);
+    expect(result.requests).to.have.length(1);
+    expect(result.requests[0].method).to.equal('GET');
+  });
 });
 
 function buildBatchBody({

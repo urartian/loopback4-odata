@@ -22,6 +22,24 @@ describe('parseODataQuery string functions', () => {
     });
   });
 
+  it('unescapes doubled quotes inside string function arguments', () => {
+    const parsed = parseODataQuery({
+      $filter: "contains(name,'a''b')",
+    });
+    assert.deepStrictEqual(parsed.where, {
+      name: { like: "%a'b%", options: 'i' },
+    });
+  });
+
+  it('escapes backslashes before LIKE wildcards in contains()', () => {
+    const parsed = parseODataQuery({
+      $filter: "contains(name,'a\\b')",
+    });
+    assert.deepStrictEqual(parsed.where, {
+      name: { like: '%a\\\\b%', options: 'i' },
+    });
+  });
+
   it('translates startswith() into like suffix wildcard', () => {
     const parsed = parseODataQuery({
       $filter: "startswith(code,'PR-')",
@@ -116,6 +134,11 @@ describe('parseODataQuery extended filter grammar', () => {
     assert.deepStrictEqual(absent.where, { name: { nlike: '%Lap%', options: 'i' } });
   });
 
+  it('escapes backslashes before LIKE wildcards in indexof()', () => {
+    const parsed = parseODataQuery({ $filter: "indexof(name,'a\\b') ge 0" });
+    assert.deepStrictEqual(parsed.where, { name: { like: '%a\\\\b%', options: 'i' } });
+  });
+
   it('supports negated indexof comparisons', () => {
     const parsed = parseODataQuery({ $filter: "not indexof(name,'Lap') eq -1" });
     assert.deepStrictEqual(parsed.where, { name: { like: '%Lap%', options: 'i' } });
@@ -126,6 +149,11 @@ describe('parseODataQuery extended filter grammar', () => {
     assert.deepStrictEqual(eqStart.where, { code: { like: '__ABC' } });
     const neStartLen = parseODataQuery({ $filter: "substring(code,4,3) ne 'XYZ'" });
     assert.deepStrictEqual(neStartLen.where, { code: { nlike: '____XYZ%' } });
+  });
+
+  it('escapes backslashes before LIKE wildcards in substring()', () => {
+    const parsed = parseODataQuery({ $filter: "substring(code,1) eq 'a\\b'" });
+    assert.deepStrictEqual(parsed.where, { code: { like: '_a\\\\b' } });
   });
 
   it('supports negated substring comparisons', () => {
@@ -175,5 +203,28 @@ describe('parseODataQuery extended filter grammar', () => {
     assert.equal(parsed.where, undefined);
     assert(parsed.postFilter, 'Expected postFilter expression');
     assert.deepStrictEqual(parsed.unsupportedFunctions, ['month']);
+  });
+});
+
+describe('parseODataQuery filter safety limits', () => {
+  it('rejects excessive length() patterns', () => {
+    assert.throws(() => parseODataQuery({ $filter: 'length(code) eq 10001' }), /exceeds maximum/i);
+    assert.throws(() => parseODataQuery({ $filter: 'length(code) gt 10000' }), /exceeds maximum/i);
+  });
+
+  it('rejects excessive substring() start/length', () => {
+    assert.throws(
+      () => parseODataQuery({ $filter: "substring(code,10001) eq 'ABC'" }),
+      /exceeds maximum/i,
+    );
+    assert.throws(
+      () => parseODataQuery({ $filter: "substring(code,1,10001) eq 'ABC'" }),
+      /exceeds maximum/i,
+    );
+  });
+
+  it('rejects dangerous $filter field names', () => {
+    assert.throws(() => parseODataQuery({ $filter: '__proto__ eq 1' }), /not allowed/i);
+    assert.throws(() => parseODataQuery({ $filter: 'constructor eq 1' }), /not allowed/i);
   });
 });

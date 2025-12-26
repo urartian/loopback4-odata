@@ -58,4 +58,10 @@ describe('delta token encode/decode', () => {
       keyValues: { id: 1 },
     });
   });
+
+  it('rejects malformed percent-encoding in legacy token key payloads', () => {
+    const legacyPayload = Buffer.from('Products|cursor|id=%ZZ', 'utf8').toString('base64');
+    const token = `v1:${legacyPayload}`;
+    expect(() => decodeDeltaToken(token, { ...options, allowLegacyUnsigned: true })).to.throw();
+  });
 });
