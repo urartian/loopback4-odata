@@ -44,6 +44,10 @@ export interface ApplyPlannerOptions {
   strict?: boolean;
   modelCtor?: typeof Entity;
   maxNavigationDepth?: number;
+  maxFilterPatternLength?: number;
+  maxSubstringStart?: number;
+  maxSubstringLength?: number;
+  maxFilterFieldNameLength?: number;
 }
 
 const DEFAULT_MAX_NAVIGATION_DEPTH = 5;
@@ -229,7 +233,13 @@ function buildWhereCandidate(
   options: ApplyPlannerOptions,
 ): Where<AnyObject> | undefined {
   try {
-    return buildWhereFromParsedExpression(expression);
+    return buildWhereFromParsedExpression(expression, {
+      strict: options.strict,
+      maxFilterPatternLength: options.maxFilterPatternLength,
+      maxSubstringStart: options.maxSubstringStart,
+      maxSubstringLength: options.maxSubstringLength,
+      maxFilterFieldNameLength: options.maxFilterFieldNameLength,
+    });
   } catch (err) {
     if (err instanceof UnsupportedFilterError) {
       if (options.strict) {

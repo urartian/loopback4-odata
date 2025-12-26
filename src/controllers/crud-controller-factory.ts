@@ -7439,6 +7439,10 @@ export function defineODataCrudController(def: EntitySetDef) {
             strict: Boolean(this.cfg?.strict),
             modelCtor,
             maxNavigationDepth: this.cfg?.maxExpandDepth ?? 5,
+            maxFilterPatternLength: this.cfg?.maxFilterPatternLength,
+            maxSubstringStart: this.cfg?.maxSubstringStart,
+            maxSubstringLength: this.cfg?.maxSubstringLength,
+            maxFilterFieldNameLength: this.cfg?.maxFilterFieldNameLength,
           });
           const pipelineHasOrder = this.planHasInternalOrder(applyPlan);
           if (
