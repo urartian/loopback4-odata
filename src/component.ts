@@ -65,6 +65,11 @@ export class ODataComponent implements Component {
       maxSearchFields: 5,
       maxSearchTerms: 5,
       maxApplyResultSize: 2000,
+      maxFilterPatternLength: 10_000,
+      maxSubstringStart: 10_000,
+      maxSubstringLength: 10_000,
+      maxFilterFieldNameLength: 256,
+      maxDecimalExponentAbs: 1000,
       pageSize: 200,
       enableDelta: false,
       capabilities: {

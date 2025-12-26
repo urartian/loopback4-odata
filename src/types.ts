@@ -39,6 +39,11 @@ export interface ODataConfig {
   // Limits & safety
   maxExpandDepth?: number; // maximum allowed $expand nesting depth (strict enforced)
   maxSkip?: number; // maximum allowed $skip (strict enforced)
+  maxFilterPatternLength?: number; // caps underscore patterns generated for some $filter functions
+  maxSubstringStart?: number; // caps substring() start used for pattern translation
+  maxSubstringLength?: number; // caps substring() length argument
+  maxFilterFieldNameLength?: number; // caps length of field identifiers in $filter
+  maxDecimalExponentAbs?: number; // caps absolute exponent in decimal scientific notation normalization
   // $apply pushdown
   enableApplyPushdown?: boolean; // opt-in for datastore-backed $apply execution
   pageSize?: number; // default page size for server-driven paging

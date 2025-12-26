@@ -60,6 +60,7 @@ import {
   parseIfNoneMatch,
   readEtagValue,
 } from '../util/etag';
+import { safeDecodeURIComponent } from '../util/url-decoding';
 import {
   encodeDeltaToken,
   decodeDeltaToken,
@@ -1797,6 +1798,10 @@ export function defineODataCrudController(def: EntitySetDef) {
       if (!mantissa) return undefined;
       const exponent = Number(exponentRaw);
       if (!Number.isFinite(exponent) || !Number.isInteger(exponent)) return undefined;
+      const exponentLimit = this.cfg?.maxDecimalExponentAbs ?? 1000;
+      if (exponentLimit > 0 && Math.abs(exponent) > exponentLimit) {
+        return undefined;
+      }
       const normalizedMantissa = mantissa.replace(/^[+-]/, '');
       const mantissaParts = normalizedMantissa.split('.');
       const whole = mantissaParts[0] ?? '';
@@ -2904,7 +2909,10 @@ export function defineODataCrudController(def: EntitySetDef) {
     }
 
     parseKeyLiteral(raw: string): string {
-      const decoded = decodeURIComponent(String(raw));
+      const decoded = safeDecodeURIComponent(String(raw));
+      if (decoded === undefined) {
+        throw new HttpErrors.BadRequest('Invalid key literal encoding.');
+      }
       let literal = decoded.trim();
       const guidPrefix = /^guid'/i;
       if (guidPrefix.test(literal)) {
@@ -6760,6 +6768,10 @@ export function defineODataCrudController(def: EntitySetDef) {
           for (const entry of list) this.collectWhereFields(entry as AnyObject, out);
           continue;
         }
+        if (key === 'not') {
+          this.collectWhereFields(value as AnyObject, out);
+          continue;
+        }
         out.add(key);
       }
     }
@@ -7405,7 +7417,14 @@ export function defineODataCrudController(def: EntitySetDef) {
       try {
         const parsed = parseODataQuery(
           this.request.query as Record<string, string | string[] | undefined>,
-          { relations: modelRelations, strict: Boolean(this.cfg?.strict) },
+          {
+            relations: modelRelations,
+            strict: Boolean(this.cfg?.strict),
+            maxFilterPatternLength: this.cfg?.maxFilterPatternLength,
+            maxSubstringStart: this.cfg?.maxSubstringStart,
+            maxSubstringLength: this.cfg?.maxSubstringLength,
+            maxFilterFieldNameLength: this.cfg?.maxFilterFieldNameLength,
+          },
         );
         inlineCountRequested = parsed.inlineCount === true;
         if (inlineCountRequested && this.cfg && this.cfg.enableCount === false) {
@@ -7484,7 +7503,12 @@ export function defineODataCrudController(def: EntitySetDef) {
         }
         if (splitWhere.repoExpr) {
           try {
-            parsed.where = buildWhereFromParsedExpression(splitWhere.repoExpr) as CrudWhere;
+            parsed.where = buildWhereFromParsedExpression(splitWhere.repoExpr, {
+              maxFilterPatternLength: this.cfg?.maxFilterPatternLength,
+              maxSubstringStart: this.cfg?.maxSubstringStart,
+              maxSubstringLength: this.cfg?.maxSubstringLength,
+              maxFilterFieldNameLength: this.cfg?.maxFilterFieldNameLength,
+            }) as CrudWhere;
           } catch (error) {
             if (error instanceof UnsupportedFilterError) {
               postFilterExpr = this.combinePostFilterExpressions(
@@ -8254,7 +8278,14 @@ export function defineODataCrudController(def: EntitySetDef) {
       try {
         const parsed = parseODataQuery(
           this.request.query as Record<string, string | string[] | undefined>,
-          { relations: modelRelations, strict: Boolean(this.cfg?.strict) },
+          {
+            relations: modelRelations,
+            strict: Boolean(this.cfg?.strict),
+            maxFilterPatternLength: this.cfg?.maxFilterPatternLength,
+            maxSubstringStart: this.cfg?.maxSubstringStart,
+            maxSubstringLength: this.cfg?.maxSubstringLength,
+            maxFilterFieldNameLength: this.cfg?.maxFilterFieldNameLength,
+          },
         );
         this.enforceApplyCapability(applySupported, parsed);
         if (parsed.format) {
@@ -8279,7 +8310,12 @@ export function defineODataCrudController(def: EntitySetDef) {
         }
         if (splitWhere.repoExpr) {
           try {
-            parsed.where = buildWhereFromParsedExpression(splitWhere.repoExpr) as CrudWhere;
+            parsed.where = buildWhereFromParsedExpression(splitWhere.repoExpr, {
+              maxFilterPatternLength: this.cfg?.maxFilterPatternLength,
+              maxSubstringStart: this.cfg?.maxSubstringStart,
+              maxSubstringLength: this.cfg?.maxSubstringLength,
+              maxFilterFieldNameLength: this.cfg?.maxFilterFieldNameLength,
+            }) as CrudWhere;
           } catch (error) {
             if (error instanceof UnsupportedFilterError) {
               postFilterExpr = this.combinePostFilterExpressions(
@@ -8397,7 +8433,14 @@ export function defineODataCrudController(def: EntitySetDef) {
       try {
         const parsed = parseODataQuery(
           this.request.query as Record<string, string | string[] | undefined>,
-          { relations: modelRelations, strict: Boolean(this.cfg?.strict) },
+          {
+            relations: modelRelations,
+            strict: Boolean(this.cfg?.strict),
+            maxFilterPatternLength: this.cfg?.maxFilterPatternLength,
+            maxSubstringStart: this.cfg?.maxSubstringStart,
+            maxSubstringLength: this.cfg?.maxSubstringLength,
+            maxFilterFieldNameLength: this.cfg?.maxFilterFieldNameLength,
+          },
         );
         this.enforceApplyCapability(applySupported, parsed);
         this.applyFormatPreference(parsed.format);

@@ -186,3 +186,26 @@ describe('parseODataQuery extended filter grammar', () => {
     assert.deepStrictEqual(parsed.unsupportedFunctions, ['month']);
   });
 });
+
+describe('parseODataQuery filter safety limits', () => {
+  it('rejects excessive length() patterns', () => {
+    assert.throws(() => parseODataQuery({ $filter: 'length(code) eq 10001' }), /exceeds maximum/i);
+    assert.throws(() => parseODataQuery({ $filter: 'length(code) gt 10000' }), /exceeds maximum/i);
+  });
+
+  it('rejects excessive substring() start/length', () => {
+    assert.throws(
+      () => parseODataQuery({ $filter: "substring(code,10001) eq 'ABC'" }),
+      /exceeds maximum/i,
+    );
+    assert.throws(
+      () => parseODataQuery({ $filter: "substring(code,1,10001) eq 'ABC'" }),
+      /exceeds maximum/i,
+    );
+  });
+
+  it('rejects dangerous $filter field names', () => {
+    assert.throws(() => parseODataQuery({ $filter: '__proto__ eq 1' }), /not allowed/i);
+    assert.throws(() => parseODataQuery({ $filter: 'constructor eq 1' }), /not allowed/i);
+  });
+});

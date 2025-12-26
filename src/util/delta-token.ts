@@ -4,6 +4,7 @@ import {
   signDeltaToken,
   verifyDeltaToken,
 } from './token-signing';
+import { safeDecodeURIComponent } from './url-decoding';
 
 export interface DeltaTokenBucketState {
   key: Record<string, unknown>;
@@ -189,8 +190,11 @@ function decodeLegacyToken(token: string): DeltaTokenPayload {
         if (!pair) return acc;
         const [keyRaw, valueRaw] = pair.split('=');
         if (!keyRaw) return acc;
-        const key = decodeURIComponent(keyRaw);
-        const value = valueRaw ? decodeURIComponent(valueRaw) : '';
+        const key = safeDecodeURIComponent(keyRaw);
+        const value = valueRaw ? safeDecodeURIComponent(valueRaw) : '';
+        if (!key || value === undefined) {
+          throw new Error('Invalid delta token payload.');
+        }
         acc[key] = coerceLegacyValue(value);
         return acc;
       }, {})
