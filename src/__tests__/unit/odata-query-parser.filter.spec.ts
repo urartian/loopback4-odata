@@ -31,6 +31,15 @@ describe('parseODataQuery string functions', () => {
     });
   });
 
+  it('escapes backslashes before LIKE wildcards in contains()', () => {
+    const parsed = parseODataQuery({
+      $filter: "contains(name,'a\\b')",
+    });
+    assert.deepStrictEqual(parsed.where, {
+      name: { like: '%a\\\\b%', options: 'i' },
+    });
+  });
+
   it('translates startswith() into like suffix wildcard', () => {
     const parsed = parseODataQuery({
       $filter: "startswith(code,'PR-')",
@@ -125,6 +134,11 @@ describe('parseODataQuery extended filter grammar', () => {
     assert.deepStrictEqual(absent.where, { name: { nlike: '%Lap%', options: 'i' } });
   });
 
+  it('escapes backslashes before LIKE wildcards in indexof()', () => {
+    const parsed = parseODataQuery({ $filter: "indexof(name,'a\\b') ge 0" });
+    assert.deepStrictEqual(parsed.where, { name: { like: '%a\\\\b%', options: 'i' } });
+  });
+
   it('supports negated indexof comparisons', () => {
     const parsed = parseODataQuery({ $filter: "not indexof(name,'Lap') eq -1" });
     assert.deepStrictEqual(parsed.where, { name: { like: '%Lap%', options: 'i' } });
@@ -135,6 +149,11 @@ describe('parseODataQuery extended filter grammar', () => {
     assert.deepStrictEqual(eqStart.where, { code: { like: '__ABC' } });
     const neStartLen = parseODataQuery({ $filter: "substring(code,4,3) ne 'XYZ'" });
     assert.deepStrictEqual(neStartLen.where, { code: { nlike: '____XYZ%' } });
+  });
+
+  it('escapes backslashes before LIKE wildcards in substring()', () => {
+    const parsed = parseODataQuery({ $filter: "substring(code,1) eq 'a\\b'" });
+    assert.deepStrictEqual(parsed.where, { code: { like: '_a\\\\b' } });
   });
 
   it('supports negated substring comparisons', () => {

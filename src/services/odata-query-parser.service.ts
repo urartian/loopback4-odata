@@ -6,6 +6,7 @@ import {
   RelationDefinitionMap,
   Entity,
 } from '@loopback/repository';
+import { escapeLikeLiteral } from '../util/like-escaping';
 
 const comparisonOperators: Record<string, string> = {
   eq: 'eq',
@@ -1207,7 +1208,7 @@ function buildWhere(expr: ParsedExpression, options?: ParseOptions): Where<AnyOb
     if (typeof value !== 'string') {
       throw new Error(`${expr.name} requires a string literal argument.`);
     }
-    const escaped = value.replace(/%/g, '\\%').replace(/_/g, '\\_');
+    const escaped = escapeLikeLiteral(value);
     const pattern =
       expr.name === 'contains'
         ? `%${escaped}%`
@@ -1225,11 +1226,11 @@ function buildWhere(expr: ParsedExpression, options?: ParseOptions): Where<AnyOb
     const { field, comparator, value, needle } = expr;
     assertSafeFilterFieldName(field, options);
     if ((comparator === 'gte' && value >= 0) || (comparator === 'gt' && value > -1)) {
-      const lit = needle.replace(/%/g, '\\%').replace(/_/g, '\\_');
+      const lit = escapeLikeLiteral(needle);
       return { [field]: { like: `%${lit}%`, options: 'i' } } as Where<AnyObject>;
     }
     if (comparator === 'eq' && value === -1) {
-      const lit = needle.replace(/%/g, '\\%').replace(/_/g, '\\_');
+      const lit = escapeLikeLiteral(needle);
       return { [field]: { nlike: `%${lit}%`, options: 'i' } } as Where<AnyObject>;
     }
     throw new Error('Unsupported indexof comparison. Supported: ge 0, gt -1, eq -1.');
@@ -1253,7 +1254,7 @@ function buildWhere(expr: ParsedExpression, options?: ParseOptions): Where<AnyOb
         throw new Error(`substring length exceeds maximum of ${limits.maxSubstringLength}.`);
       }
     }
-    const lit = literal.replace(/%/g, '\\%').replace(/_/g, '\\_');
+    const lit = escapeLikeLiteral(literal);
     const underscores = '_'.repeat(start);
     const pattern = length !== undefined ? `${underscores}${lit}%` : `${underscores}${lit}`;
     const clause: AnyObject = comparator === 'eq' ? { like: pattern } : { nlike: pattern };

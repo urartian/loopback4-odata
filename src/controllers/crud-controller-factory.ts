@@ -125,6 +125,7 @@ import {
 } from '../util/telemetry';
 import { acceptsAnyMediaType } from '../util/accept';
 import { normalizeBasePath } from '../util/base-path';
+import { escapeLikeLiteral } from '../util/like-escaping';
 import { Readable } from 'stream';
 import {
   ODataMediaHandler,
@@ -2579,12 +2580,71 @@ export function defineODataCrudController(def: EntitySetDef) {
 
     parseODataIdReference(reference: string): { entitySet: string; keyExpression: string } {
       const path = this.normalizeReferencePath(reference);
-      const match = /\/([^/]+)\((.+)\)/.exec(path);
-      if (!match) {
+      const normalized = path.startsWith('/') ? path : `/${path}`;
+      const parts = normalized.split('/').filter(Boolean);
+      if (parts.length !== 1) {
+        throw new HttpErrors.BadRequest(
+          'Invalid @odata.id value: navigation-path references are not supported; use canonical EntitySet(key).',
+        );
+      }
+      const segment = parts[0];
+      if (!segment || segment.startsWith('$')) {
         throw new HttpErrors.BadRequest(`Invalid @odata.id value: ${reference}`);
       }
-      const entitySet = this.stripNamespacePrefix(match[1]);
-      return { entitySet, keyExpression: match[2] };
+      const openIndex = segment.indexOf('(');
+      if (openIndex <= 0) {
+        throw new HttpErrors.BadRequest(`Invalid @odata.id value: ${reference}`);
+      }
+
+      let inString = false;
+      let closeIndex = -1;
+      for (let i = openIndex + 1; i < segment.length; i++) {
+        const ch = segment[i];
+        if (inString) {
+          if (ch === "'") {
+            if (segment[i + 1] === "'") {
+              i += 1;
+              continue;
+            }
+            inString = false;
+            continue;
+          }
+          continue;
+        }
+        if (ch === "'") {
+          inString = true;
+          continue;
+        }
+        if (ch === ')') {
+          closeIndex = i;
+          break;
+        }
+      }
+
+      if (closeIndex < 0) {
+        if (inString) {
+          throw new HttpErrors.BadRequest(
+            'Invalid @odata.id value: unterminated string literal in key predicate.',
+          );
+        }
+        throw new HttpErrors.BadRequest(
+          'Invalid @odata.id value: missing closing parenthesis in key predicate.',
+        );
+      }
+
+      if (closeIndex !== segment.length - 1) {
+        throw new HttpErrors.BadRequest(
+          'Invalid @odata.id value: unexpected trailing characters after key predicate.',
+        );
+      }
+
+      const entitySetRaw = segment.slice(0, openIndex);
+      if (!entitySetRaw) {
+        throw new HttpErrors.BadRequest(`Invalid @odata.id value: ${reference}`);
+      }
+      const entitySet = this.stripNamespacePrefix(entitySetRaw);
+      const keyExpression = segment.slice(openIndex + 1, closeIndex);
+      return { entitySet, keyExpression };
     }
 
     normalizeReferencePath(reference: string): string {
@@ -2598,6 +2658,7 @@ export function defineODataCrudController(def: EntitySetDef) {
       const absolutePattern = /^[a-z][a-z0-9+.-]*:/i;
       const isAbsolute =
         Boolean(trimmed) && (absolutePattern.test(trimmed) || trimmed.startsWith('//'));
+      const isRelativePath = Boolean(trimmed) && !isAbsolute && !trimmed.startsWith('/');
       let path = trimmed;
 
       if (isAbsolute) {
@@ -2622,8 +2683,14 @@ export function defineODataCrudController(def: EntitySetDef) {
       }
       path = path.split('?')[0]?.split('#')[0] ?? path;
       path = path.replace(/^\/+/g, '/');
-      path = this.stripBasePath(path, normalizedBasePath);
-      path = this.stripBasePath(path, '/odata');
+
+      if (!isRelativePath) {
+        if (!this.matchesServiceRootPrefix(path, normalizedBasePath)) {
+          throw new HttpErrors.BadRequest(`Invalid @odata.id value: ${reference}`);
+        }
+        path = this.stripBasePath(path, normalizedBasePath);
+      }
+
       if (!path.startsWith('/')) {
         path = `/${path}`;
       }
@@ -5878,7 +5945,7 @@ export function defineODataCrudController(def: EntitySetDef) {
     }
 
     escapeSearchTerm(term: string): string {
-      return term.replace(/[%_]/g, (ch) => `\\${ch}`);
+      return escapeLikeLiteral(term);
     }
 
     combineWithAnd(parts: (CrudWhere | undefined)[]): CrudWhere | undefined {
