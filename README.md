@@ -9,7 +9,7 @@ An extension for [LoopBack 4](https://loopback.io/doc/en/lb4/) that adds **OData
 - Advanced `$apply` support including chained transformations, navigation-path aggregates, and safe in-memory fallbacks when connector pushdown is unavailable.
 - Streams `$batch` multipart payloads end-to-end, preserving binary sub-responses (PDFs, CSV exports, etc.) without re-encoding them (JSON batches base64-encode binary bodies and include their `Content-Type`).
 
-Currently in **phase 4** — CRUD endpoints are stable and advanced features like `$expand`, `$count`, `$batch`, and Actions/Functions are available. Focus is now on rounding out the filter grammar, improving configurability, enriching the CSDL, and hardening path rewriting.
+Currently in **phase 4** — CRUD endpoints are stable and advanced features like `$expand`, `$count`, `$batch`, Actions/Functions, server-driven paging (`$skiptoken`), and delta links (`$deltatoken`) are available. Focus is now on rounding out the filter grammar, improving configurability, enriching the CSDL, and hardening path rewriting.
 
 ---
 
@@ -945,6 +945,8 @@ Run `npm test` to compile the TypeScript specs and execute the unit suite. Accep
 - [x] Deep insert support for `hasOne`/`hasMany` relations (opt-in per entity set, multi-level traversal)
 - [x] Navigation `$ref` endpoints for `hasOne`/`hasMany` relations (link/unlink existing entities)
 - [x] OpenAPI visibility controls via per-model `documentInOpenApi` flags and global policies (`documentInOpenApiDefault`, `removeUndocumentedFromSpec`)
+- [x] Media streams via `$value` routes for `HasStream` entity sets (property-backed binary fields or custom repository adapters)
+- [x] Structured telemetry with request logging, apply/rewrite diagnostics, hook traces, and correlation IDs (opt-in via config)
 
 Queries can now combine boolean operators and phrases:
 
@@ -1757,8 +1759,6 @@ Telemetry respects LoopBack’s logging pipeline—you can forward the enriched 
 - [ ] Opt-in cascade delete for composition-style relations (hook/transaction-aware)
 - [ ] Rich lambda grammar with nested `any` / `all` and mixed logical operators
 - [ ] Virtual/calculated field exposure with CSDL annotations
-- [ ] Media stream and attachment handling via `$value` routes and `HasStream` entity sets
-- [ ] Structured telemetry / debug mode for production monitoring (pushdown vs fallback, rewrite diagnostics, hook execution traces)
 
 ## Contributing
 
