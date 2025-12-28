@@ -121,6 +121,11 @@ export class ODataComponent implements Component {
         generateWhenMissing: true,
         propagateToRepositories: false,
       },
+      writeTransactions: {
+        enabled: false,
+        isolationLevel: 'READ_COMMITTED',
+        rejectMultiDataSource: true,
+      },
       tokenSecret: resolveTokenSecretOrThrow(),
     } as ODataConfig),
     Binding.bind(ODATA_BINDINGS.CSDL_GEN).toClass(CsdlGenerator).inScope(BindingScope.SINGLETON),

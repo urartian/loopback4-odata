@@ -62,6 +62,14 @@ export interface ODataConfig {
   telemetry?: ODataTelemetryConfig;
   correlation?: ODataCorrelationConfig;
   appendKeysForClientPaging?: boolean; // default true - stabilize manual $skip order
+  writeTransactions?: ODataWriteTransactionsConfig;
+}
+
+export interface ODataWriteTransactionsConfig {
+  enabled?: boolean; // default false
+  isolationLevel?: 'READ_COMMITTED' | 'REPEATABLE_READ' | 'SERIALIZABLE'; // default READ_COMMITTED
+  requireTransactionSupport?: boolean; // default: true when strict=true, else false
+  rejectMultiDataSource?: boolean; // default true
 }
 
 export interface ODataNavigationRestriction {

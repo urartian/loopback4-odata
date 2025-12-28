@@ -30,6 +30,8 @@ import {
   AnyObject,
   ModelDefinition,
   EntityNotFoundError,
+  IsolationLevel,
+  Transaction,
   juggler,
 } from '@loopback/repository';
 import { EntitySetDef } from '../registry/entityset-registry';
@@ -47,7 +49,7 @@ import {
   ComputeExpression,
   ComputeNode,
 } from '../services/odata-query-parser.service';
-import { ODATA_ATOMICITY_STATE, ODATA_VERSION } from '../constants';
+import { ODATA_ATOMICITY_STATE, ODATA_VERSION, ODATA_WRITE_TX_STATE } from '../constants';
 import { AtomicityRequestState } from '../types/batch';
 import { Response } from '@loopback/rest';
 import {
@@ -117,6 +119,7 @@ import {
 } from '../util/token-signing';
 import { validateDeltaToken, DeltaTokenValidationResult } from '../util/delta-token-validation';
 import { ensureConfigValidated } from '../util/config-validation';
+import { dataSourceSupportsTransactions } from '../util/datasource-transactions';
 import {
   emitTelemetryEvent,
   recordStatistics,
@@ -133,6 +136,11 @@ import {
   ODataMediaWriteResult,
   PropertyBackedMediaHandler,
 } from '../services/odata-media-handler';
+
+type WriteTxState = {
+  dataSource: juggler.DataSource;
+  transaction?: Transaction;
+};
 type CrudEntity = Entity & { [key: string]: unknown };
 type CrudRepo = DefaultCrudRepository<CrudEntity, unknown>;
 type NormalizedInclusion = Exclude<InclusionFilter, string>;
@@ -1911,6 +1919,7 @@ export function defineODataCrudController(def: EntitySetDef) {
         visited.add(payload);
 
         const { root, children } = this.normalizeDeepInsertPayload(payload, targetCtor);
+        this.assertWriteDataSource(relationRepository, `deep-insert:${relationName}`);
         const createdChild = await relationRepository.create(root, options);
 
         if (children && Object.keys(children).length) {
@@ -2237,6 +2246,7 @@ export function defineODataCrudController(def: EntitySetDef) {
         // Deletions must be executed explicitly via DELETE/$ref unlink.
 
         if (!idValues || !idKey) {
+          this.assertWriteDataSource(relationRepository, `deep-update:${relationName}`);
           const created = await relationRepository.create(childRoot, options);
           const createdPlain = this.toPlainEntity(created) ?? childRoot;
           const createdIdValues = this.extractIdValues(createdPlain, idProps);
@@ -2263,6 +2273,7 @@ export function defineODataCrudController(def: EntitySetDef) {
               `Unable to update related ${relationName}: missing identifier.`,
             );
           }
+          this.assertWriteDataSource(relationRepository, `deep-update:${relationName}`);
           await relationRepository.patch(updateData, where, options);
         }
 
@@ -2338,6 +2349,7 @@ export function defineODataCrudController(def: EntitySetDef) {
       }
 
       if (!existing) {
+        this.assertWriteDataSource(relationRepository, `deep-update:${relationName}`);
         const created = await relationRepository.create(childRoot, options);
         const createdPlain = this.toPlainEntity(created) ?? childRoot;
         const createdIdValues = this.extractIdValues(createdPlain, idProps);
@@ -2362,6 +2374,7 @@ export function defineODataCrudController(def: EntitySetDef) {
         this.removeIdProperties(updateData, idProps);
       }
       if (Object.keys(updateData).length) {
+        this.assertWriteDataSource(relationRepository, `deep-update:${relationName}`);
         await relationRepository.patch(updateData, options);
       }
 
@@ -2433,100 +2446,26 @@ export function defineODataCrudController(def: EntitySetDef) {
       const relationRepo = factory(parentId, this.repositoryOptions());
       const targetRepo = await this.resolveTargetRepository(relationRepo, relationMeta);
       const targetId = this.coerceTargetId(targetRepo, targetKeyLiteral);
-
-      const op: CrudOperation = 'LINK_NAVIGATION';
-      const ctx = this.buildHookContext({
-        operation: op,
-        id: parentId,
-        options: this.repositoryOptions(),
-      });
-      ctx.relationName = relationName;
-      ctx.navigationTargetUri = targetUri;
-      ctx.navigationTargetKey = targetKeyLiteral;
-      ctx.navigationTargetId = targetId;
-      ctx.navigationRelationRepository = relationRepo;
-      ctx.navigationTargetRepository = targetRepo;
-
-      await this.enforceTenantLimit(op);
-      await this.runBefore(op, undefined, ctx);
-
-      const execDefault = async () => {
-        const navRepo = (ctx.navigationTargetRepository ?? targetRepo) as AnyObject;
-        const navId = ctx.navigationTargetId ?? targetId;
-        if (navId == null) {
-          throw new HttpErrors.BadRequest('Navigation target identifier is required.');
-        }
-        const existing = await navRepo.findById(navId as any, undefined, this.repositoryOptions());
-        ctx.navigationTargetId = navId;
-        ctx.navigationTargetEntity = existing;
-        const plain = this.toPlainEntity(existing) ?? {};
-        this.stripODataAnnotations(plain);
-        this.removeEntityIdProperties(plain, navRepo);
-        plain[keyTo] = ctx.id ?? parentId;
-        await navRepo.replaceById(navId as any, plain as AnyObject, this.repositoryOptions());
-        return undefined;
-      };
-
-      const helpers = this.helpersForEntity(entityContext, op);
-      const onCtx = this.buildOnContext(ctx, helpers);
-      const res = await this.runOn(op, undefined, onCtx, execDefault);
-      ctx.result = res;
-      if (!this.response.headersSent) {
-        await this.runAfter(op, undefined, ctx);
-      }
-      return ctx.result as AnyObject | undefined;
-    }
-
-    async unlinkNavigationRef(
-      relationName: string,
-      parentIdRaw: unknown,
-      targetKeyRaw: string | undefined,
-    ) {
-      const parentId = this.coerceParentId(parentIdRaw);
-      const relationMeta = this.resolveNavigationRelationMetadata(relationName);
-      const keyTo = relationMeta.keyTo as string;
-
-      const repoWithRelations = this.repository as AnyObject;
-      const factory = repoWithRelations[relationName];
-      if (typeof factory !== 'function') {
-        throw new HttpErrors.BadRequest(
-          `Repository for ${setName} does not expose a relation factory for ${relationName}.`,
-        );
-      }
-
-      const relationRepo = factory(parentId, this.repositoryOptions());
-      const targetRepo = await this.resolveTargetRepository(relationRepo, relationMeta);
-
-      const op: CrudOperation = 'UNLINK_NAVIGATION';
-      const ctx = this.buildHookContext({
-        operation: op,
-        id: parentId,
-        options: this.repositoryOptions(),
-      });
-      ctx.relationName = relationName;
-      ctx.navigationTargetKey = targetKeyRaw;
-      ctx.navigationRelationRepository = relationRepo;
-      ctx.navigationTargetRepository = targetRepo;
-
-      if (relationMeta.targetsMany) {
-        if (!targetKeyRaw) {
-          throw new HttpErrors.BadRequest(
-            'Target key is required to remove a reference from a collection.',
-          );
-        }
-        const keyLiteral = this.parseKeyLiteral(targetKeyRaw);
-        const targetId = this.coerceTargetId(targetRepo, keyLiteral);
-        ctx.navigationTargetKey = keyLiteral;
+      return this.withWriteTransaction(async () => {
+        const op: CrudOperation = 'LINK_NAVIGATION';
+        const ctx = this.buildHookContext({
+          operation: op,
+          id: parentId,
+          options: this.repositoryOptions(),
+        });
+        ctx.relationName = relationName;
+        ctx.navigationTargetUri = targetUri;
+        ctx.navigationTargetKey = targetKeyLiteral;
         ctx.navigationTargetId = targetId;
-      }
+        ctx.navigationRelationRepository = relationRepo;
+        ctx.navigationTargetRepository = targetRepo;
 
-      await this.enforceTenantLimit(op);
-      await this.runBefore(op, undefined, ctx);
+        await this.enforceTenantLimit(op);
+        await this.runBefore(op, undefined, ctx);
 
-      const execDefault = async () => {
-        const navRepo = (ctx.navigationTargetRepository ?? targetRepo) as AnyObject;
-        if (relationMeta.targetsMany) {
-          const navId = ctx.navigationTargetId;
+        const execDefault = async () => {
+          const navRepo = (ctx.navigationTargetRepository ?? targetRepo) as AnyObject;
+          const navId = ctx.navigationTargetId ?? targetId;
           if (navId == null) {
             throw new HttpErrors.BadRequest('Navigation target identifier is required.');
           }
@@ -2540,42 +2479,127 @@ export function defineODataCrudController(def: EntitySetDef) {
           const plain = this.toPlainEntity(existing) ?? {};
           this.stripODataAnnotations(plain);
           this.removeEntityIdProperties(plain, navRepo);
-          // Ensure the link actually exists (entity is linked to this parent); otherwise 404.
-          if (plain[keyTo] == null || plain[keyTo] !== parentId) {
-            throw new HttpErrors.NotFound('Navigation link does not exist.');
-          }
-          plain[keyTo] = null;
+          plain[keyTo] = ctx.id ?? parentId;
+          this.assertWriteDataSource(navRepo, `link-navigation-ref:${relationName}`);
           await navRepo.replaceById(navId as any, plain as AnyObject, this.repositoryOptions());
-          return;
+          return undefined;
+        };
+
+        const helpers = this.helpersForEntity(entityContext, op);
+        const onCtx = this.buildOnContext(ctx, helpers);
+        const res = await this.runOn(op, undefined, onCtx, execDefault);
+        ctx.result = res;
+        if (!this.response.headersSent) {
+          await this.runAfter(op, undefined, ctx);
+        }
+        return ctx.result as AnyObject | undefined;
+      });
+    }
+
+    async unlinkNavigationRef(
+      relationName: string,
+      parentIdRaw: unknown,
+      targetKeyRaw: string | undefined,
+    ) {
+      const parentId = this.coerceParentId(parentIdRaw);
+      const relationMeta = this.resolveNavigationRelationMetadata(relationName);
+      const keyTo = relationMeta.keyTo as string;
+
+      return this.withWriteTransaction(async () => {
+        const repoWithRelations = this.repository as AnyObject;
+        const factory = repoWithRelations[relationName];
+        if (typeof factory !== 'function') {
+          throw new HttpErrors.BadRequest(
+            `Repository for ${setName} does not expose a relation factory for ${relationName}.`,
+          );
         }
 
-        const relationRepository = (ctx.navigationRelationRepository ?? relationRepo) as AnyObject;
-        const existing = await relationRepository
-          .get?.(undefined, this.repositoryOptions())
-          .catch((err: unknown) => {
-            // Surface 404 when hasOne target does not exist
-            throw new HttpErrors.NotFound('Navigation link does not exist.');
-          });
-        if (!existing) throw new HttpErrors.NotFound('Navigation link does not exist.');
-        ctx.navigationTargetEntity = existing;
-        const navId = ctx.navigationTargetId ?? this.extractEntityId(existing);
-        if (navId == null) throw new HttpErrors.NotFound('Navigation link does not exist.');
-        ctx.navigationTargetId = navId;
-        const plain = this.toPlainEntity(existing) ?? {};
-        this.stripODataAnnotations(plain);
-        this.removeEntityIdProperties(plain, navRepo);
-        plain[keyTo] = null;
-        await navRepo.replaceById(navId as any, plain as AnyObject, this.repositoryOptions());
-      };
+        const relationRepo = factory(parentId, this.repositoryOptions());
+        const targetRepo = await this.resolveTargetRepository(relationRepo, relationMeta);
 
-      const helpers = this.helpersForEntity(entityContext, op);
-      const onCtx = this.buildOnContext(ctx, helpers);
-      const res = await this.runOn(op, undefined, onCtx, execDefault);
-      ctx.result = res;
-      if (!this.response.headersSent) {
-        await this.runAfter(op, undefined, ctx);
-      }
-      return ctx.result as AnyObject | undefined;
+        const op: CrudOperation = 'UNLINK_NAVIGATION';
+        const ctx = this.buildHookContext({
+          operation: op,
+          id: parentId,
+          options: this.repositoryOptions(),
+        });
+        ctx.relationName = relationName;
+        ctx.navigationTargetKey = targetKeyRaw;
+        ctx.navigationRelationRepository = relationRepo;
+        ctx.navigationTargetRepository = targetRepo;
+
+        if (relationMeta.targetsMany) {
+          if (!targetKeyRaw) {
+            throw new HttpErrors.BadRequest(
+              'Target key is required to remove a reference from a collection.',
+            );
+          }
+          const keyLiteral = this.parseKeyLiteral(targetKeyRaw);
+          const targetId = this.coerceTargetId(targetRepo, keyLiteral);
+          ctx.navigationTargetKey = keyLiteral;
+          ctx.navigationTargetId = targetId;
+        }
+
+        await this.enforceTenantLimit(op);
+        await this.runBefore(op, undefined, ctx);
+
+        const execDefault = async () => {
+          const navRepo = (ctx.navigationTargetRepository ?? targetRepo) as AnyObject;
+          if (relationMeta.targetsMany) {
+            const navId = ctx.navigationTargetId;
+            if (navId == null) {
+              throw new HttpErrors.BadRequest('Navigation target identifier is required.');
+            }
+            const existing = await navRepo.findById(
+              navId as any,
+              undefined,
+              this.repositoryOptions(),
+            );
+            ctx.navigationTargetId = navId;
+            ctx.navigationTargetEntity = existing;
+            const plain = this.toPlainEntity(existing) ?? {};
+            this.stripODataAnnotations(plain);
+            this.removeEntityIdProperties(plain, navRepo);
+            // Ensure the link actually exists (entity is linked to this parent); otherwise 404.
+            if (plain[keyTo] == null || plain[keyTo] !== parentId) {
+              throw new HttpErrors.NotFound('Navigation link does not exist.');
+            }
+            plain[keyTo] = null;
+            this.assertWriteDataSource(navRepo, `unlink-navigation-ref:${relationName}`);
+            await navRepo.replaceById(navId as any, plain as AnyObject, this.repositoryOptions());
+            return;
+          }
+
+          const relationRepository = (ctx.navigationRelationRepository ??
+            relationRepo) as AnyObject;
+          const existing = await relationRepository
+            .get?.(undefined, this.repositoryOptions())
+            .catch((_err: unknown) => {
+              // Surface 404 when hasOne target does not exist
+              throw new HttpErrors.NotFound('Navigation link does not exist.');
+            });
+          if (!existing) throw new HttpErrors.NotFound('Navigation link does not exist.');
+          ctx.navigationTargetEntity = existing;
+          const navId = ctx.navigationTargetId ?? this.extractEntityId(existing);
+          if (navId == null) throw new HttpErrors.NotFound('Navigation link does not exist.');
+          ctx.navigationTargetId = navId;
+          const plain = this.toPlainEntity(existing) ?? {};
+          this.stripODataAnnotations(plain);
+          this.removeEntityIdProperties(plain, navRepo);
+          plain[keyTo] = null;
+          this.assertWriteDataSource(navRepo, `unlink-navigation-ref:${relationName}`);
+          await navRepo.replaceById(navId as any, plain as AnyObject, this.repositoryOptions());
+        };
+
+        const helpers = this.helpersForEntity(entityContext, op);
+        const onCtx = this.buildOnContext(ctx, helpers);
+        const res = await this.runOn(op, undefined, onCtx, execDefault);
+        ctx.result = res;
+        if (!this.response.headersSent) {
+          await this.runAfter(op, undefined, ctx);
+        }
+        return ctx.result as AnyObject | undefined;
+      });
     }
 
     parseODataIdReference(reference: string): { entitySet: string; keyExpression: string } {
@@ -8746,119 +8770,121 @@ export function defineODataCrudController(def: EntitySetDef) {
       if (preferences.respondAsync) this.throwPreferenceNotSupported('respond-async');
       const contentType = this.ensureMediaContentType();
       const entityId = this.coerceParentId(id);
-      const op: CrudOperation = 'UPDATE';
-      const scope: CrudScope = 'entity';
-      const ctx = this.buildHookContext({
-        operation: op,
-        scope,
-        id: entityId,
-        options: this.repositoryOptions(),
-      });
-      await this.enforceTenantLimit(op, scope);
-      await this.runBefore(op, scope, ctx);
-
-      const execDefault = async () => {
-        const options = this.repositoryOptions();
-        const baseFilter: Filter<CrudEntity> = { fields: this.buildMediaProjectionFields() };
-        this.ensureEtagField(baseFilter);
-        const entity = await this.repository.findById(entityId as any, baseFilter, options);
-        let plain = this.toPlainEntity(entity) ?? {};
-        const ifMatch = this.parseIfMatchHeader();
-        const requireEtag = (this.etagEnabled() || Boolean(mediaEtagField)) && this.cfg?.strict;
-        const currentEtag = this.readMediaEtag(plain);
-        if (requireEtag && !ifMatch) {
-          const error = new HttpErrors.PreconditionRequired(
-            'If-Match header is required when ETags are enabled.',
-          );
-          (error as any).code = 'PreconditionRequired';
-          throw error;
-        }
-        if (
-          ifMatch &&
-          !ifMatch.any &&
-          currentEtag &&
-          !matchesEtag(currentEtag, ifMatch.values ?? [])
-        ) {
-          this.throwPreconditionFailed();
-        }
-
-        const handler = await this.requireMediaHandler();
-        const stream = this.coerceBodyToStream(body);
-        const contentLengthHeader = this.request.headers['content-length'];
-        const contentLengthValue =
-          typeof contentLengthHeader === 'string' && contentLengthHeader.trim()
-            ? Number(contentLengthHeader)
-            : undefined;
-        const httpContentLength = Number.isFinite(contentLengthValue)
-          ? Number(contentLengthValue)
-          : undefined;
-
-        const writeResult = await handler.write({
+      return this.withWriteTransaction(async () => {
+        const op: CrudOperation = 'UPDATE';
+        const scope: CrudScope = 'entity';
+        const ctx = this.buildHookContext({
+          operation: op,
+          scope,
           id: entityId,
-          entitySet: def,
-          entity: plain,
-          repository: this.repository as unknown as DefaultCrudRepository<CrudEntity, unknown>,
-          options,
-          stream,
-          contentType,
-          contentLength: httpContentLength,
+          options: this.repositoryOptions(),
         });
+        await this.enforceTenantLimit(op, scope);
+        await this.runBefore(op, scope, ctx);
 
-        const overrides = {
-          contentType,
-          contentLength: httpContentLength,
-        };
-        const resolvedMetadata = this.resolveMediaMetadata(writeResult, overrides);
-        const metadataUpdates = await this.applyMediaMetadataUpdates(
-          entityId,
-          writeResult,
-          overrides,
-          resolvedMetadata,
-        );
-        if (metadataUpdates) {
-          plain = this.mergeMediaMetadata(plain, metadataUpdates);
-        }
+        const execDefault = async () => {
+          const options = this.repositoryOptions();
+          const baseFilter: Filter<CrudEntity> = { fields: this.buildMediaProjectionFields() };
+          this.ensureEtagField(baseFilter);
+          const entity = await this.repository.findById(entityId as any, baseFilter, options);
+          let plain = this.toPlainEntity(entity) ?? {};
+          const ifMatch = this.parseIfMatchHeader();
+          const requireEtag = (this.etagEnabled() || Boolean(mediaEtagField)) && this.cfg?.strict;
+          const currentEtag = this.readMediaEtag(plain);
+          if (requireEtag && !ifMatch) {
+            const error = new HttpErrors.PreconditionRequired(
+              'If-Match header is required when ETags are enabled.',
+            );
+            (error as any).code = 'PreconditionRequired';
+            throw error;
+          }
+          if (
+            ifMatch &&
+            !ifMatch.any &&
+            currentEtag &&
+            !matchesEtag(currentEtag, ifMatch.values ?? [])
+          ) {
+            this.throwPreconditionFailed();
+          }
 
-        this.ensureODataHeaders();
-        this.setMediaEtagHeader(plain);
-        const reportedLength = resolvedMetadata.length;
-        const telemetryContentType = resolvedMetadata.contentType ?? contentType;
-        this.logMediaTelemetry('media.write', {
-          entityId,
-          bytes: reportedLength,
-          contentType: telemetryContentType,
-        });
+          const handler = await this.requireMediaHandler();
+          const stream = this.coerceBodyToStream(body);
+          const contentLengthHeader = this.request.headers['content-length'];
+          const contentLengthValue =
+            typeof contentLengthHeader === 'string' && contentLengthHeader.trim()
+              ? Number(contentLengthHeader)
+              : undefined;
+          const httpContentLength = Number.isFinite(contentLengthValue)
+            ? Number(contentLengthValue)
+            : undefined;
 
-        const preference = preferences.returnPreference;
-        if (preference === 'representation') {
-          this.ensureAcceptsJson();
-          const reloaded = await this.repository.findById(entityId as any, undefined, options);
-          const responsePlain = this.toPlainEntity(reloaded) ?? plain;
-          const entityEtag = this.computeEtagFromPlain(responsePlain);
-          const decorated = this.decoratePlainEntity(responsePlain, entityEtag);
+          const writeResult = await handler.write({
+            id: entityId,
+            entitySet: def,
+            entity: plain,
+            repository: this.repository as unknown as DefaultCrudRepository<CrudEntity, unknown>,
+            options,
+            stream,
+            contentType,
+            contentLength: httpContentLength,
+          });
+
+          const overrides = {
+            contentType,
+            contentLength: httpContentLength,
+          };
+          const resolvedMetadata = this.resolveMediaMetadata(writeResult, overrides);
+          const metadataUpdates = await this.applyMediaMetadataUpdates(
+            entityId,
+            writeResult,
+            overrides,
+            resolvedMetadata,
+          );
+          if (metadataUpdates) {
+            plain = this.mergeMediaMetadata(plain, metadataUpdates);
+          }
+
+          this.ensureODataHeaders();
+          this.setMediaEtagHeader(plain);
+          const reportedLength = resolvedMetadata.length;
+          const telemetryContentType = resolvedMetadata.contentType ?? contentType;
+          this.logMediaTelemetry('media.write', {
+            entityId,
+            bytes: reportedLength,
+            contentType: telemetryContentType,
+          });
+
+          const preference = preferences.returnPreference;
+          if (preference === 'representation') {
+            this.ensureAcceptsJson();
+            const reloaded = await this.repository.findById(entityId as any, undefined, options);
+            const responsePlain = this.toPlainEntity(reloaded) ?? plain;
+            const entityEtag = this.computeEtagFromPlain(responsePlain);
+            const decorated = this.decoratePlainEntity(responsePlain, entityEtag);
+            this.applyPreference(preference);
+            this.response.status(200);
+            this.setEtagHeaderFromPlain(responsePlain);
+            this.setMediaEtagHeader(responsePlain);
+            const result = {
+              '@odata.context': entityContext,
+              ...decorated,
+            } as AnyObject;
+            ctx.result = result;
+            return result;
+          }
+
+          this.response.status(204);
           this.applyPreference(preference);
-          this.response.status(200);
-          this.setEtagHeaderFromPlain(responsePlain);
-          this.setMediaEtagHeader(responsePlain);
-          const result = {
-            '@odata.context': entityContext,
-            ...decorated,
-          } as AnyObject;
-          ctx.result = result;
-          return result;
+          return undefined;
+        };
+
+        const result = await execDefault();
+        ctx.result = result;
+        if (!this.response.headersSent) {
+          await this.runAfter(op, scope, ctx);
         }
-
-        this.response.status(204);
-        this.applyPreference(preference);
-        return undefined;
-      };
-
-      const result = await execDefault();
-      ctx.result = result;
-      if (!this.response.headersSent) {
-        await this.runAfter(op, scope, ctx);
-      }
-      return ctx.result as AnyObject | undefined;
+        return ctx.result as AnyObject | undefined;
+      });
     }
 
     @del(
@@ -8879,66 +8905,68 @@ export function defineODataCrudController(def: EntitySetDef) {
       const preferences = this.parsePreferenceHeader();
       if (preferences.respondAsync) this.throwPreferenceNotSupported('respond-async');
       const entityId = this.coerceParentId(id);
-      const op: CrudOperation = 'DELETE';
-      const scope: CrudScope = 'entity';
-      const ctx = this.buildHookContext({
-        operation: op,
-        scope,
-        id: entityId,
-        options: this.repositoryOptions(),
-      });
-      await this.enforceTenantLimit(op, scope);
-      await this.runBefore(op, scope, ctx);
-
-      const execDefault = async () => {
-        const options = this.repositoryOptions();
-        const baseFilter: Filter<CrudEntity> = { fields: this.buildMediaProjectionFields() };
-        this.ensureEtagField(baseFilter);
-        const entity = await this.repository.findById(entityId as any, baseFilter, options);
-        const plain = this.toPlainEntity(entity) ?? {};
-        const ifMatch = this.parseIfMatchHeader();
-        const requireEtag = (this.etagEnabled() || Boolean(mediaEtagField)) && this.cfg?.strict;
-        const currentEtag = this.readMediaEtag(plain);
-        if (requireEtag && !ifMatch) {
-          const error = new HttpErrors.PreconditionRequired(
-            'If-Match header is required when ETags are enabled.',
-          );
-          (error as any).code = 'PreconditionRequired';
-          throw error;
-        }
-        if (
-          ifMatch &&
-          !ifMatch.any &&
-          currentEtag &&
-          !matchesEtag(currentEtag, ifMatch.values ?? [])
-        ) {
-          this.throwPreconditionFailed();
-        }
-
-        const handler = await this.requireMediaHandler();
-        if (typeof handler.delete !== 'function') {
-          throw new HttpErrors.NotImplemented('Media handler does not support delete.');
-        }
-        await handler.delete({
+      return this.withWriteTransaction(async () => {
+        const op: CrudOperation = 'DELETE';
+        const scope: CrudScope = 'entity';
+        const ctx = this.buildHookContext({
+          operation: op,
+          scope,
           id: entityId,
-          entitySet: def,
-          entity: plain,
-          repository: this.repository as unknown as DefaultCrudRepository<CrudEntity, unknown>,
-          options,
+          options: this.repositoryOptions(),
         });
-        await this.clearMediaMetadata(entityId);
-        this.ensureODataHeaders();
-        this.response.status(204).end();
-        this.logMediaTelemetry('media.delete', { entityId });
-        return undefined;
-      };
+        await this.enforceTenantLimit(op, scope);
+        await this.runBefore(op, scope, ctx);
 
-      const result = await execDefault();
-      ctx.result = result;
-      if (!this.response.headersSent) {
-        await this.runAfter(op, scope, ctx);
-      }
-      return ctx.result as unknown;
+        const execDefault = async () => {
+          const options = this.repositoryOptions();
+          const baseFilter: Filter<CrudEntity> = { fields: this.buildMediaProjectionFields() };
+          this.ensureEtagField(baseFilter);
+          const entity = await this.repository.findById(entityId as any, baseFilter, options);
+          const plain = this.toPlainEntity(entity) ?? {};
+          const ifMatch = this.parseIfMatchHeader();
+          const requireEtag = (this.etagEnabled() || Boolean(mediaEtagField)) && this.cfg?.strict;
+          const currentEtag = this.readMediaEtag(plain);
+          if (requireEtag && !ifMatch) {
+            const error = new HttpErrors.PreconditionRequired(
+              'If-Match header is required when ETags are enabled.',
+            );
+            (error as any).code = 'PreconditionRequired';
+            throw error;
+          }
+          if (
+            ifMatch &&
+            !ifMatch.any &&
+            currentEtag &&
+            !matchesEtag(currentEtag, ifMatch.values ?? [])
+          ) {
+            this.throwPreconditionFailed();
+          }
+
+          const handler = await this.requireMediaHandler();
+          if (typeof handler.delete !== 'function') {
+            throw new HttpErrors.NotImplemented('Media handler does not support delete.');
+          }
+          await handler.delete({
+            id: entityId,
+            entitySet: def,
+            entity: plain,
+            repository: this.repository as unknown as DefaultCrudRepository<CrudEntity, unknown>,
+            options,
+          });
+          await this.clearMediaMetadata(entityId);
+          this.ensureODataHeaders();
+          this.response.status(204);
+          this.logMediaTelemetry('media.delete', { entityId });
+          return undefined;
+        };
+
+        const result = await execDefault();
+        ctx.result = result;
+        if (!this.response.headersSent) {
+          await this.runAfter(op, scope, ctx);
+        }
+        return ctx.result as unknown;
+      });
     }
 
     @get(
@@ -9087,174 +9115,177 @@ export function defineODataCrudController(def: EntitySetDef) {
           ? (this.buildMediaSlugPayload(slugHeader) ?? {})
           : ((payload as AnyObject) ?? {});
 
-      const op: CrudOperation = 'CREATE';
-      const scope: CrudScope | undefined = undefined;
-      const ctx = this.buildHookContext({
-        operation: op,
-        scope,
-        payload: initialPayload as AnyObject,
-        options: this.repositoryOptions(),
-      });
-      await this.enforceTenantLimit(op);
-      await this.runBefore(op, scope, ctx);
+      return this.withWriteTransaction(async () => {
+        const op: CrudOperation = 'CREATE';
+        const scope: CrudScope | undefined = undefined;
+        const ctx = this.buildHookContext({
+          operation: op,
+          scope,
+          payload: initialPayload as AnyObject,
+          options: this.repositoryOptions(),
+        });
+        await this.enforceTenantLimit(op);
+        await this.runBefore(op, scope, ctx);
 
-      const execDefault = async () => {
-        const options = this.repositoryOptions();
-        const preference = preferences.returnPreference;
-        const deepInsertEnabled = deepInsertEnabledForSet && !bodyIsBinary;
-        const payloadSource = bodyIsBinary
-          ? (ctx.payload ?? {})
-          : (ctx.payload ?? (payload as AnyObject));
-        const payloadForCreate = this.coercePayloadToObject(payloadSource as AnyObject);
-        const visited = new Set<AnyObject>();
-        const normalized = deepInsertEnabled
-          ? this.normalizeDeepInsertPayload(payloadForCreate, modelCtor as typeof Entity)
-          : { root: payloadForCreate, children: undefined };
-        ctx.payload = normalized.root;
+        const execDefault = async () => {
+          const options = this.repositoryOptions();
+          const preference = preferences.returnPreference;
+          const deepInsertEnabled = deepInsertEnabledForSet && !bodyIsBinary;
+          const payloadSource = bodyIsBinary
+            ? (ctx.payload ?? {})
+            : (ctx.payload ?? (payload as AnyObject));
+          const payloadForCreate = this.coercePayloadToObject(payloadSource as AnyObject);
+          const visited = new Set<AnyObject>();
+          const normalized = deepInsertEnabled
+            ? this.normalizeDeepInsertPayload(payloadForCreate, modelCtor as typeof Entity)
+            : { root: payloadForCreate, children: undefined };
+          ctx.payload = normalized.root;
 
-        const created = await this.repository.create(normalized.root as any, options);
-        let entityForResponse: AnyObject | undefined = this.toPlainEntity(created);
-        const createdEntityId = this.extractEntityId(created);
-        const entityLocationUrl = this.buildEntityLocationUrl(createdEntityId, entityForResponse);
-        if (entityLocationUrl) {
-          this.setEntityLocationHeaders(entityLocationUrl);
-        }
-
-        if (deepInsertEnabled && normalized.children && Object.keys(normalized.children).length) {
-          const parentId = this.extractEntityId(created);
-          if (parentId == null) {
-            throw new HttpErrors.InternalServerError(
-              'Unable to determine entity id for deep insert.',
-            );
+          const created = await this.repository.create(normalized.root as any, options);
+          let entityForResponse: AnyObject | undefined = this.toPlainEntity(created);
+          const createdEntityId = this.extractEntityId(created);
+          const entityLocationUrl = this.buildEntityLocationUrl(createdEntityId, entityForResponse);
+          if (entityLocationUrl) {
+            this.setEntityLocationHeaders(entityLocationUrl);
           }
-          const repoWithRelations = this.repository as AnyObject;
-          for (const [relationName, relationValue] of Object.entries(normalized.children)) {
-            if (relationValue == null) continue;
-            const relationMeta = modelRelations?.[relationName] as AnyObject | undefined;
-            if (!relationMeta) continue;
-            const factory = repoWithRelations[relationName];
-            if (typeof factory !== 'function') {
-              throw new HttpErrors.BadRequest(
-                `Repository for ${setName} does not expose a relation factory for ${relationName}.`,
+
+          if (deepInsertEnabled && normalized.children && Object.keys(normalized.children).length) {
+            const parentId = this.extractEntityId(created);
+            if (parentId == null) {
+              throw new HttpErrors.InternalServerError(
+                'Unable to determine entity id for deep insert.',
               );
             }
-            const relationRepo = factory(parentId, options);
-            if (!relationRepo || typeof relationRepo.create !== 'function') {
-              throw new HttpErrors.BadRequest(
-                `Relation ${relationName} does not support create operations required for deep insert.`,
-              );
-            }
-            if (relationMeta.targetsMany) {
-              const arrayValues = Array.isArray(relationValue) ? relationValue : [relationValue];
-              for (const arrEntry of arrayValues) {
-                if (arrEntry == null) continue;
+            const repoWithRelations = this.repository as AnyObject;
+            for (const [relationName, relationValue] of Object.entries(normalized.children)) {
+              if (relationValue == null) continue;
+              const relationMeta = modelRelations?.[relationName] as AnyObject | undefined;
+              if (!relationMeta) continue;
+              const factory = repoWithRelations[relationName];
+              if (typeof factory !== 'function') {
+                throw new HttpErrors.BadRequest(
+                  `Repository for ${setName} does not expose a relation factory for ${relationName}.`,
+                );
+              }
+              const relationRepo = factory(parentId, options);
+              if (!relationRepo || typeof relationRepo.create !== 'function') {
+                throw new HttpErrors.BadRequest(
+                  `Relation ${relationName} does not support create operations required for deep insert.`,
+                );
+              }
+              this.assertWriteDataSource(relationRepo, `deep-insert:${relationName}`);
+              if (relationMeta.targetsMany) {
+                const arrayValues = Array.isArray(relationValue) ? relationValue : [relationValue];
+                for (const arrEntry of arrayValues) {
+                  if (arrEntry == null) continue;
+                  await this.persistDeepInsertGraph(
+                    relationName,
+                    relationMeta,
+                    relationRepo,
+                    arrEntry,
+                    options,
+                    visited,
+                    1,
+                  );
+                }
+              } else {
                 await this.persistDeepInsertGraph(
                   relationName,
                   relationMeta,
                   relationRepo,
-                  arrEntry,
+                  relationValue,
                   options,
                   visited,
                   1,
                 );
               }
-            } else {
-              await this.persistDeepInsertGraph(
-                relationName,
-                relationMeta,
-                relationRepo,
-                relationValue,
-                options,
-                visited,
-                1,
+            }
+            const reloaded = await this.reloadEntityForResponse(created, options);
+            entityForResponse = this.toPlainEntity(reloaded ?? created);
+          }
+
+          if (bodyIsBinary && mediaStream) {
+            if (createdEntityId == null) {
+              throw new HttpErrors.InternalServerError(
+                'Unable to determine entity id for media upload.',
               );
             }
-          }
-          const reloaded = await this.reloadEntityForResponse(created, options);
-          entityForResponse = this.toPlainEntity(reloaded ?? created);
-        }
-
-        if (bodyIsBinary && mediaStream) {
-          if (createdEntityId == null) {
-            throw new HttpErrors.InternalServerError(
-              'Unable to determine entity id for media upload.',
-            );
-          }
-          const handler = await this.requireMediaHandler();
-          const effectiveContentType = mediaContentType ?? 'application/octet-stream';
-          const writeResult = await handler.write({
-            id: createdEntityId,
-            entitySet: def,
-            entity: entityForResponse ?? {},
-            repository: this.repository as unknown as DefaultCrudRepository<CrudEntity, unknown>,
-            options,
-            stream: mediaStream,
-            contentType: effectiveContentType,
-            contentLength: mediaContentLength,
-            slug: slugHeader,
-          });
-          const createOverrides = {
-            contentType: effectiveContentType,
-            contentLength: mediaContentLength,
-          };
-          const resolvedMetadata = this.resolveMediaMetadata(writeResult, createOverrides);
-          const updates = await this.applyMediaMetadataUpdates(
-            createdEntityId,
-            writeResult,
-            createOverrides,
-            resolvedMetadata,
-          );
-          if (updates) {
-            entityForResponse = this.mergeMediaMetadata(entityForResponse, updates);
-          }
-          const telemetryContentType = resolvedMetadata.contentType ?? effectiveContentType;
-          this.logMediaTelemetry('media.write', {
-            entityId: createdEntityId,
-            bytes: resolvedMetadata.length,
-            contentType: telemetryContentType,
-          });
-        }
-
-        if (this.etagEnabled()) {
-          const hasEtag = this.computeEtagFromPlain(entityForResponse);
-          if (!hasEtag) {
-            const reloaded = await this.reloadEntityForResponse(
-              entityForResponse ?? created,
+            const handler = await this.requireMediaHandler();
+            const effectiveContentType = mediaContentType ?? 'application/octet-stream';
+            const writeResult = await handler.write({
+              id: createdEntityId,
+              entitySet: def,
+              entity: entityForResponse ?? {},
+              repository: this.repository as unknown as DefaultCrudRepository<CrudEntity, unknown>,
               options,
+              stream: mediaStream,
+              contentType: effectiveContentType,
+              contentLength: mediaContentLength,
+              slug: slugHeader,
+            });
+            const createOverrides = {
+              contentType: effectiveContentType,
+              contentLength: mediaContentLength,
+            };
+            const resolvedMetadata = this.resolveMediaMetadata(writeResult, createOverrides);
+            const updates = await this.applyMediaMetadataUpdates(
+              createdEntityId,
+              writeResult,
+              createOverrides,
+              resolvedMetadata,
             );
-            entityForResponse = this.toPlainEntity(reloaded ?? entityForResponse);
+            if (updates) {
+              entityForResponse = this.mergeMediaMetadata(entityForResponse, updates);
+            }
+            const telemetryContentType = resolvedMetadata.contentType ?? effectiveContentType;
+            this.logMediaTelemetry('media.write', {
+              entityId: createdEntityId,
+              bytes: resolvedMetadata.length,
+              contentType: telemetryContentType,
+            });
           }
-        }
 
-        const etag = this.computeEtagFromPlain(entityForResponse);
-        const decorated = this.decoratePlainEntity(entityForResponse ?? {}, etag);
-        this.ensureODataHeaders();
-        this.setEtagHeaderFromPlain(entityForResponse);
+          if (this.etagEnabled()) {
+            const hasEtag = this.computeEtagFromPlain(entityForResponse);
+            if (!hasEtag) {
+              const reloaded = await this.reloadEntityForResponse(
+                entityForResponse ?? created,
+                options,
+              );
+              entityForResponse = this.toPlainEntity(reloaded ?? entityForResponse);
+            }
+          }
 
-        if (preference === 'minimal') {
+          const etag = this.computeEtagFromPlain(entityForResponse);
+          const decorated = this.decoratePlainEntity(entityForResponse ?? {}, etag);
+          this.ensureODataHeaders();
+          this.setEtagHeaderFromPlain(entityForResponse);
+
+          if (preference === 'minimal') {
+            this.applyPreference(preference);
+            this.response.status(204);
+            return undefined;
+          }
+
+          this.response.status(201);
           this.applyPreference(preference);
-          this.response.status(204).end();
-          return undefined;
+          const result = {
+            '@odata.context': entityContext,
+            ...decorated,
+          } as AnyObject;
+          ctx.result = result;
+          return result;
+        };
+
+        const helpers = this.helpersForEntity(entityContext, op);
+        const onCtx = this.buildOnContext(ctx, helpers);
+        const res = await this.runOn(op, scope, onCtx, execDefault);
+        ctx.result = res;
+        if (!this.response.headersSent) {
+          await this.runAfter(op, scope, ctx);
         }
-
-        this.response.status(201);
-        this.applyPreference(preference);
-        const result = {
-          '@odata.context': entityContext,
-          ...decorated,
-        } as AnyObject;
-        ctx.result = result;
-        return result;
-      };
-
-      const helpers = this.helpersForEntity(entityContext, op);
-      const onCtx = this.buildOnContext(ctx, helpers);
-      const res = await this.runOn(op, scope, onCtx, execDefault);
-      ctx.result = res;
-      if (!this.response.headersSent) {
-        await this.runAfter(op, scope, ctx);
-      }
-      return ctx.result as AnyObject | undefined;
+        return ctx.result as AnyObject | undefined;
+      });
     }
 
     @patch(
@@ -9300,98 +9331,100 @@ export function defineODataCrudController(def: EntitySetDef) {
       }
 
       const entityId = this.coerceParentId(id);
-      const op: CrudOperation = 'UPDATE';
-      const scope: CrudScope | undefined = undefined;
-      const ctx = this.buildHookContext({
-        operation: op,
-        scope,
-        id: entityId,
-        payload: rootPayload as AnyObject,
-        options: this.repositoryOptions(),
-      });
-      await this.enforceTenantLimit(op);
-      await this.runBefore(op, scope, ctx);
+      return this.withWriteTransaction(async () => {
+        const op: CrudOperation = 'UPDATE';
+        const scope: CrudScope | undefined = undefined;
+        const ctx = this.buildHookContext({
+          operation: op,
+          scope,
+          id: entityId,
+          payload: rootPayload as AnyObject,
+          options: this.repositoryOptions(),
+        });
+        await this.enforceTenantLimit(op);
+        await this.runBefore(op, scope, ctx);
 
-      const execDefault = async () => {
-        const options = this.repositoryOptions();
-        const preference = preferences.returnPreference;
-        const ifMatch = this.parseIfMatchHeader();
-        const workingPayload = ctx.payload ?? rootPayload ?? {};
-        const parentIdValue = entityId;
+        const execDefault = async () => {
+          const options = this.repositoryOptions();
+          const preference = preferences.returnPreference;
+          const ifMatch = this.parseIfMatchHeader();
+          const workingPayload = ctx.payload ?? rootPayload ?? {};
+          const parentIdValue = entityId;
 
-        if (this.etagEnabled() && this.cfg?.strict && !ifMatch) {
-          const error = new HttpErrors.PreconditionRequired(
-            'If-Match header is required when ETags are enabled.',
-          );
-          (error as any).code = 'PreconditionRequired';
-          throw error;
-        }
-        if (ifMatch && !ifMatch.any) {
-          const { values, invalidComposite } = decodeIfMatchValues(
-            ifMatch.values ?? [],
-            etagProperties,
-            etagPropertyDefs,
-          );
-          if (invalidComposite || !values.length) this.throwPreconditionFailed();
-          const where = this.buildConditionalWhere(parentIdValue, values, false);
-          const { count } = await this.repository.updateAll(
-            workingPayload as AnyObject,
-            where,
-            options,
-          );
-          if (!count) this.throwPreconditionFailed();
-        } else {
-          if (Object.keys(workingPayload).length) {
-            await this.repository.updateById(
-              parentIdValue as any,
+          if (this.etagEnabled() && this.cfg?.strict && !ifMatch) {
+            const error = new HttpErrors.PreconditionRequired(
+              'If-Match header is required when ETags are enabled.',
+            );
+            (error as any).code = 'PreconditionRequired';
+            throw error;
+          }
+          if (ifMatch && !ifMatch.any) {
+            const { values, invalidComposite } = decodeIfMatchValues(
+              ifMatch.values ?? [],
+              etagProperties,
+              etagPropertyDefs,
+            );
+            if (invalidComposite || !values.length) this.throwPreconditionFailed();
+            const where = this.buildConditionalWhere(parentIdValue, values, false);
+            const { count } = await this.repository.updateAll(
               workingPayload as AnyObject,
+              where,
               options,
             );
+            if (!count) this.throwPreconditionFailed();
+          } else {
+            if (Object.keys(workingPayload).length) {
+              await this.repository.updateById(
+                parentIdValue as any,
+                workingPayload as AnyObject,
+                options,
+              );
+            }
           }
-        }
 
-        let updated = await this.repository.findById(parentIdValue as any, undefined, options);
-        if (deepUpdateEnabled && relationPayloads && Object.keys(relationPayloads).length) {
-          await this.applyDeepUpdateRelations(
-            parentIdValue,
-            relationPayloads,
-            this.repository as AnyObject,
-            modelCtor as typeof Entity,
-            options,
-            0,
-          );
-          updated = await this.repository.findById(parentIdValue as any, undefined, options);
-        }
+          let updated = await this.repository.findById(parentIdValue as any, undefined, options);
+          if (deepUpdateEnabled && relationPayloads && Object.keys(relationPayloads).length) {
+            await this.applyDeepUpdateRelations(
+              parentIdValue,
+              relationPayloads,
+              this.repository as AnyObject,
+              modelCtor as typeof Entity,
+              options,
+              0,
+            );
+            updated = await this.repository.findById(parentIdValue as any, undefined, options);
+          }
 
-        const plain = this.toPlainEntity(updated) ?? {};
-        const etag = this.computeEtagFromPlain(plain);
-        const decorated = this.decoratePlainEntity(plain, etag);
-        this.ensureODataHeaders();
-        this.setEtagHeaderFromPlain(plain);
+          const plain = this.toPlainEntity(updated) ?? {};
+          const etag = this.computeEtagFromPlain(plain);
+          const decorated = this.decoratePlainEntity(plain, etag);
+          this.ensureODataHeaders();
+          this.setEtagHeaderFromPlain(plain);
 
-        if (preference === 'minimal') {
+          if (preference === 'minimal') {
+            this.applyPreference(preference);
+            this.response.status(204);
+            return undefined;
+          }
+
           this.applyPreference(preference);
-          this.response.status(204).end();
-          return undefined;
+          const result = {
+            '@odata.context': entityContext,
+            ...decorated,
+          } as AnyObject;
+          ctx.result = result;
+          return result;
+        };
+
+        const helpers = this.helpersForEntity(entityContext, op);
+        const onCtx = this.buildOnContext(ctx, helpers);
+        const res = await this.runOn(op, scope, onCtx, execDefault);
+        ctx.result = res;
+        if (!this.response.headersSent) {
+          await this.runAfter(op, scope, ctx);
         }
-
-        this.applyPreference(preference);
-        const result = {
-          '@odata.context': entityContext,
-          ...decorated,
-        } as AnyObject;
-        ctx.result = result;
-        return result;
-      };
-
-      const helpers = this.helpersForEntity(entityContext, op);
-      const onCtx = this.buildOnContext(ctx, helpers);
-      const res = await this.runOn(op, scope, onCtx, execDefault);
-      ctx.result = res;
-      if (!this.response.headersSent) {
-        await this.runAfter(op, scope, ctx);
-      }
-      return ctx.result as AnyObject | undefined;
+        return ctx.result as AnyObject | undefined;
+      });
     }
 
     @del(
@@ -9416,104 +9449,279 @@ export function defineODataCrudController(def: EntitySetDef) {
       if (preferences.respondAsync) this.throwPreferenceNotSupported('respond-async');
 
       const entityId = this.coerceParentId(id);
-      const op: CrudOperation = 'DELETE';
-      const scope: CrudScope | undefined = undefined;
-      const ctx = this.buildHookContext({
-        operation: op,
-        scope,
-        id: entityId,
-        options: this.repositoryOptions(),
+      return this.withWriteTransaction(async () => {
+        const op: CrudOperation = 'DELETE';
+        const scope: CrudScope | undefined = undefined;
+        const ctx = this.buildHookContext({
+          operation: op,
+          scope,
+          id: entityId,
+          options: this.repositoryOptions(),
+        });
+        await this.enforceTenantLimit(op);
+        await this.runBefore(op, scope, ctx);
+
+        const execDefault = async () => {
+          const options = this.repositoryOptions();
+          const ifMatch = this.parseIfMatchHeader();
+          const preference = preferences.returnPreference;
+          if (preference === 'representation') {
+            this.ensureAcceptsJson();
+          }
+          let entityForResponse: AnyObject | undefined;
+
+          if (this.etagEnabled() && this.cfg?.strict && !ifMatch) {
+            const error = new HttpErrors.PreconditionRequired(
+              'If-Match header is required when ETags are enabled.',
+            );
+            (error as any).code = 'PreconditionRequired';
+            throw error;
+          }
+          if (ifMatch && !ifMatch.any) {
+            const { values, invalidComposite } = decodeIfMatchValues(
+              ifMatch.values ?? [],
+              etagProperties,
+              etagPropertyDefs,
+            );
+            if (invalidComposite || !values.length) this.throwPreconditionFailed();
+            const where = this.buildConditionalWhere(entityId, values, false);
+            if (preference === 'representation') {
+              entityForResponse = await this.findEntityForDeleteRepresentation(
+                entityId,
+                where,
+                options,
+              );
+            }
+            const { count } = await this.repository.deleteAll(where, options);
+            if (!count) this.throwPreconditionFailed();
+          } else {
+            if (preference === 'representation') {
+              entityForResponse = await this.findEntityForDeleteRepresentation(
+                entityId,
+                undefined,
+                options,
+              );
+            }
+            await this.repository.deleteById(entityId as any, options);
+          }
+          this.ensureODataHeaders();
+          if (preference === 'representation') {
+            if (!entityForResponse) {
+              throw new HttpErrors.InternalServerError(
+                'Unable to load deleted entity for representation response.',
+              );
+            }
+            const etag = this.computeEtagFromPlain(entityForResponse);
+            const decorated = this.decoratePlainEntity(entityForResponse, etag);
+            this.setEtagHeaderFromPlain(entityForResponse);
+            this.applyPreference(preference);
+            this.response.status(200);
+            const result = {
+              '@odata.context': entityContext,
+              ...decorated,
+            } as AnyObject;
+            ctx.result = result;
+            return result;
+          }
+          if (preference === 'minimal') {
+            this.applyPreference(preference);
+          }
+          this.response.status(204);
+          return undefined;
+        };
+
+        const helpers = this.helpersForEntity(entityContext, op);
+        const onCtx = this.buildOnContext(ctx, helpers);
+        const res = await this.runOn(op, scope, onCtx, execDefault);
+        ctx.result = res;
+        if (!this.response.headersSent) {
+          await this.runAfter(op, scope, ctx);
+        }
+        return ctx.result as AnyObject | undefined;
       });
-      await this.enforceTenantLimit(op);
-      await this.runBefore(op, scope, ctx);
-
-      const execDefault = async () => {
-        const options = this.repositoryOptions();
-        const ifMatch = this.parseIfMatchHeader();
-        const preference = preferences.returnPreference;
-        if (preference === 'representation') {
-          this.ensureAcceptsJson();
-        }
-        let entityForResponse: AnyObject | undefined;
-
-        if (this.etagEnabled() && this.cfg?.strict && !ifMatch) {
-          const error = new HttpErrors.PreconditionRequired(
-            'If-Match header is required when ETags are enabled.',
-          );
-          (error as any).code = 'PreconditionRequired';
-          throw error;
-        }
-        if (ifMatch && !ifMatch.any) {
-          const { values, invalidComposite } = decodeIfMatchValues(
-            ifMatch.values ?? [],
-            etagProperties,
-            etagPropertyDefs,
-          );
-          if (invalidComposite || !values.length) this.throwPreconditionFailed();
-          const where = this.buildConditionalWhere(entityId, values, false);
-          if (preference === 'representation') {
-            entityForResponse = await this.findEntityForDeleteRepresentation(
-              entityId,
-              where,
-              options,
-            );
-          }
-          const { count } = await this.repository.deleteAll(where, options);
-          if (!count) this.throwPreconditionFailed();
-        } else {
-          if (preference === 'representation') {
-            entityForResponse = await this.findEntityForDeleteRepresentation(
-              entityId,
-              undefined,
-              options,
-            );
-          }
-          await this.repository.deleteById(entityId as any, options);
-        }
-        this.ensureODataHeaders();
-        if (preference === 'representation') {
-          if (!entityForResponse) {
-            throw new HttpErrors.InternalServerError(
-              'Unable to load deleted entity for representation response.',
-            );
-          }
-          const etag = this.computeEtagFromPlain(entityForResponse);
-          const decorated = this.decoratePlainEntity(entityForResponse, etag);
-          this.setEtagHeaderFromPlain(entityForResponse);
-          this.applyPreference(preference);
-          this.response.status(200);
-          const result = {
-            '@odata.context': entityContext,
-            ...decorated,
-          } as AnyObject;
-          ctx.result = result;
-          return result;
-        }
-        if (preference === 'minimal') {
-          this.applyPreference(preference);
-        }
-        this.response.status(204);
-        return undefined;
-      };
-
-      const helpers = this.helpersForEntity(entityContext, op);
-      const onCtx = this.buildOnContext(ctx, helpers);
-      const res = await this.runOn(op, scope, onCtx, execDefault);
-      ctx.result = res;
-      if (!this.response.headersSent) {
-        await this.runAfter(op, scope, ctx);
-      }
-      return ctx.result as AnyObject | undefined;
     }
 
     atomicityState(): AtomicityRequestState | undefined {
       return (this.request as any)[ODATA_ATOMICITY_STATE] as AtomicityRequestState | undefined;
     }
 
+    writeTxState(): WriteTxState | undefined {
+      return (this.request as any)[ODATA_WRITE_TX_STATE] as WriteTxState | undefined;
+    }
+
+    clearWriteTxState(): void {
+      delete (this.request as any)[ODATA_WRITE_TX_STATE];
+    }
+
     repositoryOptions(): Options | undefined {
       const state = this.atomicityState();
-      const transaction = state?.getTransaction(setName);
+      const transaction = state?.getTransaction(setName) ?? this.writeTxState()?.transaction;
       return transaction ? { transaction } : undefined;
+    }
+
+    assertWriteDataSource(repo: AnyObject | undefined, hint: string): void {
+      const state = this.writeTxState();
+      if (!state) return;
+      const cfg = this.cfg?.writeTransactions;
+      if (!cfg?.enabled) return;
+      if (cfg.rejectMultiDataSource === false) return;
+      const repoDs = (repo as AnyObject | undefined)?.dataSource as juggler.DataSource | undefined;
+      if (!repoDs || repoDs === state.dataSource) return;
+      const err = new HttpErrors.NotImplemented(
+        `Atomic writes across multiple datasources are not supported (${hint}).`,
+      );
+      (err as any).code = 'NotImplemented';
+      throw err;
+    }
+
+    resolveWriteTxIsolationLevel(): IsolationLevel {
+      const raw = this.cfg?.writeTransactions?.isolationLevel ?? 'READ_COMMITTED';
+      const normalized = String(raw).trim().toUpperCase();
+      if (normalized === 'SERIALIZABLE') return IsolationLevel.SERIALIZABLE;
+      if (normalized === 'REPEATABLE_READ') return IsolationLevel.REPEATABLE_READ;
+      return IsolationLevel.READ_COMMITTED;
+    }
+
+    requireTransactionSupport(): boolean {
+      const cfg = this.cfg?.writeTransactions;
+      if (!cfg?.enabled) return false;
+      return cfg.requireTransactionSupport ?? Boolean(this.cfg?.strict);
+    }
+
+    buildWriteTxNotSupportedError(reason?: unknown): HttpErrors.HttpError {
+      const message =
+        reason && (reason as Error).message
+          ? `Datasource does not support transactions: ${(reason as Error).message}`
+          : 'Datasource does not support transactions.';
+      const err = new HttpErrors.NotImplemented(
+        `${message} Enable $batch changesets for atomic writes or use a transactional connector (for example PostgreSQL).`,
+      );
+      (err as any).code = 'NotImplemented';
+      return err;
+    }
+
+    async withWriteTransaction<T>(fn: () => Promise<T>): Promise<T> {
+      const cfg = this.cfg?.writeTransactions;
+      if (!cfg?.enabled) return fn();
+      ensureConfigValidated(this.cfg);
+      if (this.atomicityState()) return fn();
+      if (this.writeTxState()) return fn();
+
+      const repositoryDs = (this.repository as AnyObject | undefined)?.dataSource as
+        | juggler.DataSource
+        | undefined;
+      const requireSupport = this.requireTransactionSupport();
+      if (!repositoryDs || !dataSourceSupportsTransactions(repositoryDs)) {
+        if (requireSupport) {
+          throw this.buildWriteTxNotSupportedError();
+        }
+        this.logger.warn('Write transaction requested but datasource does not support it.', {
+          event: 'write-tx-unavailable',
+          entitySet: setName,
+        });
+        this.emitTelemetry({
+          category: 'requests',
+          event: 'tx.unavailable',
+          level: 'warn',
+          requireSample: false,
+          context: {
+            entitySet: setName,
+            reason: 'unsupported',
+          },
+        });
+        if (!repositoryDs) {
+          return fn();
+        }
+        (this.request as any)[ODATA_WRITE_TX_STATE] = {
+          dataSource: repositoryDs,
+        } satisfies WriteTxState;
+        try {
+          return await fn();
+        } finally {
+          this.clearWriteTxState();
+        }
+      }
+
+      const isolation = this.resolveWriteTxIsolationLevel();
+      let transaction: Transaction;
+      try {
+        transaction = (await repositoryDs.beginTransaction(isolation)) as Transaction;
+      } catch (error) {
+        if (requireSupport) {
+          throw this.buildWriteTxNotSupportedError(error);
+        }
+        this.logger.warn('Write transaction requested but beginTransaction failed.', {
+          event: 'write-tx-unavailable',
+          entitySet: setName,
+          error: (error as Error)?.message ?? String(error),
+        });
+        this.emitTelemetry({
+          category: 'requests',
+          event: 'tx.unavailable',
+          level: 'warn',
+          requireSample: false,
+          context: {
+            entitySet: setName,
+            reason: 'beginTransaction-failed',
+          },
+          error: error as Error,
+        });
+        (this.request as any)[ODATA_WRITE_TX_STATE] = {
+          dataSource: repositoryDs,
+        } satisfies WriteTxState;
+        try {
+          return await fn();
+        } finally {
+          this.clearWriteTxState();
+        }
+      }
+
+      (this.request as any)[ODATA_WRITE_TX_STATE] = {
+        transaction,
+        dataSource: repositoryDs,
+      } satisfies WriteTxState;
+
+      let rolledBack = false;
+      try {
+        const result = await fn();
+        try {
+          await transaction.commit();
+        } catch (commitError) {
+          try {
+            await transaction.rollback();
+            rolledBack = true;
+          } catch {
+            /* ignore rollback errors to surface commit failure */
+          }
+          this.emitTelemetry({
+            category: 'requests',
+            event: 'tx.commit-failed',
+            level: 'error',
+            requireSample: false,
+            context: {
+              entitySet: setName,
+            },
+            error: commitError as Error,
+          });
+          const err = new HttpErrors.InternalServerError(
+            'Failed to commit datasource transaction.',
+          );
+          (err as any).code = 'TransactionCommitFailed';
+          throw err;
+        }
+        return result;
+      } catch (error) {
+        if (!rolledBack) {
+          try {
+            await transaction.rollback();
+          } catch {
+            /* ignore rollback errors */
+          }
+        }
+        throw error;
+      } finally {
+        this.clearWriteTxState();
+      }
     }
 
     parsePreferenceHeader(): {
