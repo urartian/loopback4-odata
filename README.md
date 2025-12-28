@@ -1569,7 +1569,7 @@ Validation and behavior:
 - PATCH schema is strict. Only model fields and supported relation keys (hasOne/hasMany, excluding through) are accepted at the top level and recursively; unknown properties are rejected.
 - Child without key → inserted. Child with key → patched. Deletions are explicit operations (see below); use `DELETE /EntitySet(key)` or `$ref` unlink endpoints.
 - Nested relations are traversed depth-first, obeying `maxDeepUpdateDepth`, and the entire graph is mutated inside the same transaction.
-- BelongsTo and many-to-many (`through`) relations are not accepted inline; link/unlink via navigation `$ref` endpoints or foreign keys.
+- BelongsTo and many-to-many (`through`) relations are not accepted inline; manage them via foreign keys or explicit join entities (see “Many-to-many (`hasManyThrough`) writes” below).
 
 Validation notes:
 
@@ -1620,6 +1620,48 @@ Error handling:
 
 - `DELETE /EntitySet(key)` returns `404 Not Found` when the entity does not exist.
 - `DELETE /EntitySet(key)/Relation(key)/$ref` returns `404 Not Found` when the link does not exist (target missing, already unlinked, or linked to a different parent).
+
+### Many-to-many (`hasManyThrough`) writes
+
+LoopBack’s many-to-many relations are typically modeled as `hasManyThrough` via an explicit join entity (for example `OrderItems` linking `Orders` and `Products`). This project intentionally does **not** generate navigation `$ref` routes for `hasManyThrough` relations, because linking/unlinking is equivalent to creating/deleting join rows (often with payload like `quantity`, `unitPrice`, etc.). The join entity is the write surface.
+
+Assume `Orders` and `Products` are linked through `OrderItems`:
+
+- Read an order and its products via the join rows:
+
+  ```http
+  GET /odata/Orders(9802)?$expand=items($expand=product)
+  ```
+
+- Add a product to an order (create the association):
+
+  ```http
+  POST /odata/OrderItems
+  Content-Type: application/json
+
+  {"orderId":9802,"productId":5,"quantity":1,"unitPrice":799}
+  ```
+
+- Update the association payload:
+
+  ```http
+  PATCH /odata/OrderItems(20002)
+  Content-Type: application/json
+
+  {"quantity":2}
+  ```
+
+- Remove a product from an order (delete the join row):
+
+  ```http
+  DELETE /odata/OrderItems(20002)
+  ```
+
+- If you don’t know the join row key yet, query for it first:
+
+  ```http
+  GET /odata/OrderItems?$filter=orderId eq 9802 and productId eq 5&$select=id
+  ```
 
 #### Atomic `$batch` changeset example (unlink + patch + insert)
 
