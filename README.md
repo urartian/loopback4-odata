@@ -1000,6 +1000,10 @@ this.bind(ODATA_BINDINGS.CONFIG).to({
     allowedSubRequestHeaders: ['if-match', 'prefer'], // optional extra headers sub-requests may override
     subRequestTimeoutMs: 30_000, // abort sub-requests that exceed this duration
   },
+  writeTransactions: {
+    enabled: true, // wrap non-$batch writes in a datasource transaction when supported
+    rejectMultiDataSource: true, // default: true (reject writes spanning multiple datasources)
+  },
   onLog(entry) {
     myTelemetryClient.trackEvent({
       name: 'odata-log',
@@ -1072,6 +1076,7 @@ const ProductsSet: EntitySetDef<Product> = {
 - When the combined buffered responses and the serialized JSON/multipart payload would exceed `maxResponsePayloadBytes`, the controller rejects the entire batch with `413 Payload Too Large` before serialization begins, preventing attackers from flooding the process with many near-limit responses in a single request.
 - `$batch` limits are enforced while parsing the stream: once the cumulative payload or a single part exceeds the configured budget the server aborts immediately with `413 Payload Too Large`.
 - `$batch` atomicity detection is connector-aware: entity sets backed by datasources that expose `beginTransaction` (for example PostgreSQL or MySQL) are marked as transactional after the first successful changeset, while datasources without transactions (such as the in-memory connector) are marked as non-transactional and future atomicity groups targeting them are rejected immediately with `501 Not Implemented`. The generated CSDL advertises the service-wide capability (per spec) on the EntityContainer via `Org.OData.Capabilities.V1.BatchSupported/ChangeSetsSupported`, which flips to `true` only when every registered entity set is backed by a transactional datasource, and emits per-entity-set annotations under `LoopBack.V1.BatchCapabilities.ChangeSetsSupported` so tools can decide which entity sets allow change sets.
+- `writeTransactions`: When enabled, non-`$batch` write requests (create/update/delete, deep insert/update, `$ref` link/unlink, `$value` media metadata updates) run inside a datasource transaction when the connector supports `beginTransaction` (recommended for PostgreSQL). Writes spanning multiple datasources are rejected by default (`rejectMultiDataSource: true`). External media stores (e.g., S3) remain best-effort side effects; the database transaction only covers repository writes.
 - `onDeltaTokenInvalid(event)`: Optional callback fired whenever a client supplies an expired, tampered, or mismatched `$deltatoken`. Useful for alerting/telemetry when secrets rotate.
 - `tenantResolver(request)`: Function that extracts a tenant/customer identifier from an incoming request (for example `req.user?.tenantId` or `req.get('x-tenant-id')`). When combined with `tenantQuotas`, the server enforces per-tenant throttling. If the resolver throws, the request now fails fast with `400 TenantResolutionFailed` so malformed or malicious headers cannot fall back to the unrestricted default bucket.
 - `tenantQuotas`: `{ maxRequestsPerMinute?: number; maxConcurrentRequests?: number; maxLeaseRefreshers?: number; overrides?: Record<string, { maxRequestsPerMinute?: number; maxConcurrentRequests?: number }> }`. Leave undefined to disable throttling or specify per-tenant overrides to grant premium customers higher limits. `maxLeaseRefreshers` caps how many concurrent lease refresh timers the server maintains globally (default 1000) so a burst of unique tenants cannot exhaust the process.

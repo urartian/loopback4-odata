@@ -7,6 +7,7 @@ import {
   ODataTelemetryConfig,
   ODataTelemetryLevel,
   ODataTenantQuotaConfig,
+  ODataWriteTransactionsConfig,
 } from '../types';
 
 const validatedConfigs = new WeakSet<ODataConfig>();
@@ -82,6 +83,9 @@ export function validateODataConfig(config: ODataConfig): void {
   }
   if (config.tenantQuotas) {
     validateTenantQuotas('ODataConfig.tenantQuotas', config.tenantQuotas);
+  }
+  if (config.writeTransactions) {
+    validateWriteTransactionsConfig(config.writeTransactions);
   }
 }
 
@@ -205,5 +209,43 @@ function validateTenantQuotas(label: string, quotas: ODataTenantQuotaConfig): vo
     const overrideLabel = `${label}.overrides["${tenant}"]`;
     assignPositive(override as AnyObject, 'maxRequestsPerMinute', overrideLabel);
     assignPositive(override as AnyObject, 'maxConcurrentRequests', overrideLabel);
+  }
+}
+
+function validateWriteTransactionsConfig(cfg: ODataWriteTransactionsConfig): void {
+  const target = cfg as AnyObject;
+  if (
+    target.enabled !== undefined &&
+    target.enabled !== null &&
+    typeof target.enabled !== 'boolean'
+  ) {
+    throw new Error('ODataConfig.writeTransactions.enabled must be a boolean.');
+  }
+  if (
+    target.requireTransactionSupport !== undefined &&
+    target.requireTransactionSupport !== null &&
+    typeof target.requireTransactionSupport !== 'boolean'
+  ) {
+    throw new Error('ODataConfig.writeTransactions.requireTransactionSupport must be a boolean.');
+  }
+  if (
+    target.rejectMultiDataSource !== undefined &&
+    target.rejectMultiDataSource !== null &&
+    typeof target.rejectMultiDataSource !== 'boolean'
+  ) {
+    throw new Error('ODataConfig.writeTransactions.rejectMultiDataSource must be a boolean.');
+  }
+  if (target.isolationLevel !== undefined && target.isolationLevel !== null) {
+    if (typeof target.isolationLevel !== 'string' || !target.isolationLevel.trim()) {
+      throw new Error('ODataConfig.writeTransactions.isolationLevel must be a non-empty string.');
+    }
+    const normalized = target.isolationLevel.trim().toUpperCase();
+    const allowed = new Set(['READ_COMMITTED', 'REPEATABLE_READ', 'SERIALIZABLE']);
+    if (!allowed.has(normalized)) {
+      throw new Error(
+        `ODataConfig.writeTransactions.isolationLevel must be one of ${Array.from(allowed).join(', ')}.`,
+      );
+    }
+    target.isolationLevel = normalized;
   }
 }

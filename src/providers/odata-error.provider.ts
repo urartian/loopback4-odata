@@ -101,6 +101,7 @@ export class ODataErrorProvider implements Provider<Reject> {
     switch (code) {
       case 'PreferenceNotSupported':
       case 'TenantResolutionFailed':
+      case 'TransactionCommitFailed':
         return code;
       default:
         return undefined;
