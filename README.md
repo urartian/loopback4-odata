@@ -1613,6 +1613,11 @@ this.bind(ODATA_BINDINGS.CONFIG).to({
 } as ODataConfig);
 ```
 
+How to configure cascade/restrict in LB4:
+
+- LoopBack model/relation decorators (`@hasMany`, `@belongsTo`) describe API shape and repositories, but they do **not** reliably create Postgres foreign keys with `ON DELETE ...` by configuration alone.
+- To get DB-enforced cascade/restrict you must apply DDL via migrations (Knex/Flyway/etc.) or execute SQL yourself (e.g. `ds.execute(...)` after `app.migrateSchema()` in `examples/basic-app/migrations/migrate.ts`).
+
 Example (Postgres DDL for `Orders -> OrderItems -> OrderItemNotes` cascade):
 
 ```sql
