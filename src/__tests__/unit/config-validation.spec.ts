@@ -42,4 +42,52 @@ describe('OData config validation', () => {
       /tokenSecret/,
     );
   });
+
+  it('normalizes composition boolean flags', () => {
+    const config: ODataConfig = {
+      tokenSecret: 'test-secret',
+      composition: {
+        requireTransactionSupport: 'false' as unknown as boolean,
+      },
+    };
+
+    validateODataConfig(config);
+
+    expect(config.composition?.requireTransactionSupport).to.equal(false);
+  });
+
+  it('throws for invalid composition boolean flags', () => {
+    const config: ODataConfig = {
+      tokenSecret: 'test-secret',
+      composition: {
+        requireTransactionSupport: 'nope' as unknown as boolean,
+      },
+    };
+
+    expect(() => validateODataConfig(config)).to.throw(/composition\.requireTransactionSupport/);
+  });
+
+  it('normalizes composition enforcement', () => {
+    const config: ODataConfig = {
+      tokenSecret: 'test-secret',
+      composition: {
+        enforcement: 'APPLICATION' as any,
+      },
+    };
+
+    validateODataConfig(config);
+
+    expect(config.composition?.enforcement).to.equal('application');
+  });
+
+  it('throws for invalid composition enforcement', () => {
+    const config: ODataConfig = {
+      tokenSecret: 'test-secret',
+      composition: {
+        enforcement: 'nope' as any,
+      },
+    };
+
+    expect(() => validateODataConfig(config)).to.throw(/composition\.enforcement/);
+  });
 });
