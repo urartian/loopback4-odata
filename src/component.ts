@@ -126,6 +126,13 @@ export class ODataComponent implements Component {
         isolationLevel: 'READ_COMMITTED',
         rejectMultiDataSource: true,
       },
+      composition: {
+        enforcement: 'database',
+        defaultDeletePolicy: 'restrict',
+        requireTransactionSupport: true,
+        maxDepth: 8,
+        maxEntities: 5000,
+      },
       tokenSecret: resolveTokenSecretOrThrow(),
     } as ODataConfig),
     Binding.bind(ODATA_BINDINGS.CSDL_GEN).toClass(CsdlGenerator).inScope(BindingScope.SINGLETON),

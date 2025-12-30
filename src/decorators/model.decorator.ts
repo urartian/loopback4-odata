@@ -1,6 +1,7 @@
 import 'reflect-metadata';
 import { MetadataInspector } from '@loopback/core';
 import { model as applyModel, Model, MODEL_KEY } from '@loopback/repository';
+import { ODataCompositionEntitySetConfig } from '../types';
 const ODATA_MODEL_KEY = 'odata:model';
 
 export interface ODataModelOptions {
@@ -10,6 +11,7 @@ export interface ODataModelOptions {
   deepUpdate?: boolean;
   applyPushdown?: boolean;
   documentInOpenApi?: boolean;
+  composition?: ODataCompositionEntitySetConfig;
   hasStream?: boolean;
   mediaField?: string;
   mediaContentTypeField?: string;

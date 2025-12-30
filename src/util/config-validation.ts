@@ -1,6 +1,9 @@
 import { AnyObject } from '@loopback/repository';
 import {
   ODataConfig,
+  ODataCompositionConfig,
+  ODataCompositionEnforcement,
+  ODataCompositionDeletePolicy,
   ODataCorrelationConfig,
   ODataPaginationConfig,
   ODataTelemetryCategory,
@@ -86,6 +89,9 @@ export function validateODataConfig(config: ODataConfig): void {
   }
   if (config.writeTransactions) {
     validateWriteTransactionsConfig(config.writeTransactions);
+  }
+  if (config.composition) {
+    validateCompositionConfig(config.composition);
   }
 }
 
@@ -196,6 +202,103 @@ function validateRequestLoggingConfig(config: AnyObject): void {
       throw new Error('ODataConfig.telemetry.requestLogging.maskBodyPaths must be an array.');
     }
   }
+}
+
+function validateCompositionConfig(config: ODataCompositionConfig): void {
+  if (!config) return;
+  if ('enforcement' in (config as AnyObject)) {
+    const normalized = normalizeCompositionEnforcement(
+      (config as AnyObject).enforcement,
+      'ODataConfig.composition.enforcement',
+    );
+    if (normalized !== undefined) {
+      config.enforcement = normalized;
+    }
+  }
+  if (config.defaultDeletePolicy) {
+    validateCompositionDeletePolicy(
+      'ODataConfig.composition.defaultDeletePolicy',
+      config.defaultDeletePolicy,
+    );
+  }
+  if ('requireTransactionSupport' in (config as AnyObject)) {
+    const normalized = normalizeBoolean(
+      (config as AnyObject).requireTransactionSupport,
+      'ODataConfig.composition.requireTransactionSupport',
+    );
+    if (normalized !== undefined) {
+      config.requireTransactionSupport = normalized;
+    }
+  }
+  assignPositive(config as AnyObject, 'maxDepth', 'ODataConfig.composition');
+  assignPositive(config as AnyObject, 'maxEntities', 'ODataConfig.composition');
+  if (config.entitySets) {
+    const entitySets = config.entitySets as AnyObject;
+    if (typeof entitySets !== 'object' || Array.isArray(entitySets)) {
+      throw new Error('ODataConfig.composition.entitySets must be an object.');
+    }
+    for (const [setName, setCfgRaw] of Object.entries(entitySets)) {
+      const setCfg = setCfgRaw as AnyObject;
+      if (!setCfg || typeof setCfg !== 'object') {
+        throw new Error(`ODataConfig.composition.entitySets[${setName}] must be an object.`);
+      }
+      if (!setCfg.relations) continue;
+      const relations = setCfg.relations as AnyObject;
+      if (typeof relations !== 'object' || Array.isArray(relations)) {
+        throw new Error(
+          `ODataConfig.composition.entitySets[${setName}].relations must be an object.`,
+        );
+      }
+      for (const [relName, relCfgRaw] of Object.entries(relations)) {
+        const relCfg = relCfgRaw as AnyObject;
+        if (!relCfg || typeof relCfg !== 'object') {
+          throw new Error(
+            `ODataConfig.composition.entitySets[${setName}].relations[${relName}] must be an object.`,
+          );
+        }
+        if (relCfg.delete) {
+          validateCompositionDeletePolicy(
+            `ODataConfig.composition.entitySets[${setName}].relations[${relName}].delete`,
+            relCfg.delete,
+          );
+        }
+      }
+    }
+  }
+}
+
+function validateCompositionDeletePolicy(
+  label: string,
+  value: unknown,
+): asserts value is ODataCompositionDeletePolicy {
+  if (value === 'restrict' || value === 'cascade') return;
+  throw new Error(`${label} must be "restrict" or "cascade".`);
+}
+
+function normalizeCompositionEnforcement(
+  value: unknown,
+  label: string,
+): ODataCompositionEnforcement | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== 'string') {
+    throw new Error(`${label} must be a string.`);
+  }
+  const normalized = value.trim().toLowerCase();
+  if (normalized === 'database' || normalized === 'application') {
+    return normalized;
+  }
+  throw new Error(`${label} must be "database" or "application".`);
+}
+
+function normalizeBoolean(value: unknown, label: string): boolean | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase();
+    if (normalized === 'true') return true;
+    if (normalized === 'false') return false;
+  }
+  throw new Error(`${label} must be a boolean.`);
 }
 
 function validateTenantQuotas(label: string, quotas: ODataTenantQuotaConfig): void {

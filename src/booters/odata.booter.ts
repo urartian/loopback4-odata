@@ -64,6 +64,11 @@ import {
   RepositoryMediaHandlerAdapter,
 } from '../services/odata-media-handler';
 import { isModelCtor, modelsRepresentSameEntity } from '../util/model-helpers';
+import { resolveCompositionConfigForEntitySet } from '../util/composition-policy';
+import {
+  validateCompositionCascadeCycles,
+  validateCompositionResolvedConfig,
+} from '../util/composition-validation';
 
 @injectable({ tags: { booters: 'odata' } })
 export class ODataBooter implements Booter {
@@ -304,6 +309,20 @@ export class ODataBooter implements Booter {
         mediaHandlerBindingKey: mediaHandlerBindingKey ?? undefined,
       });
 
+      def.compositionResolved = validateCompositionResolvedConfig({
+        entitySetName: setName,
+        modelCtor,
+        modelDefinition,
+        resolved: resolveCompositionConfigForEntitySet({
+          entitySetName: setName,
+          modelMeta,
+          registryDef: def,
+          globalConfig: this.config,
+        }),
+        strict: this.config?.strict !== false,
+        logger: this.logger,
+      });
+
       await this.detectTransactionalCapability(def, repoBinding);
       await this.configureApplyPushdown(def, repoBinding, modelMeta, modelCtor);
       if (hasStream) {
@@ -315,6 +334,15 @@ export class ODataBooter implements Booter {
       this.app.controller(CrudController);
       this.registerOperations(def, ctor);
       this.registerNavigationRefRoutes(def, modelDefinition, CrudController);
+    }
+
+    const compositionEnforcement = this.config?.composition?.enforcement ?? 'database';
+    if (compositionEnforcement === 'application') {
+      validateCompositionCascadeCycles({
+        registry: this.registry,
+        strict: this.config?.strict !== false,
+        logger: this.logger,
+      });
     }
   }
 

@@ -1588,6 +1588,109 @@ Validation notes:
   }
   ```
 
+### Composition Deletes
+
+This project supports two enforcement modes for “composition-style” lifecycle ownership (parent → children).
+
+Configuration:
+
+- `composition.enforcement`: `'database'` (default) or `'application'`
+- In `enforcement: 'database'`, the framework does not run any composition delete logic; behavior is determined entirely by your DB foreign keys (`ON DELETE CASCADE` vs `RESTRICT/NO ACTION`). Other `composition.*` options are ignored.
+- The rest of `composition.*` options apply only when `enforcement: 'application'`.
+
+#### Recommended default: database-enforced
+
+By default, deletes are **database-enforced**: `DELETE /odata/<EntitySet>(<id>)` issues a single delete for the requested entity and relies on your database schema (FK constraints) to either cascade or reject. This is the recommended production mode for Postgres.
+
+Example (global config, explicit default):
+
+```ts
+this.bind(ODATA_BINDINGS.CONFIG).to({
+  ...current,
+  composition: {
+    enforcement: 'database', // default; OK to omit
+  },
+} as ODataConfig);
+```
+
+Example (Postgres DDL for `Orders -> OrderItems -> OrderItemNotes` cascade):
+
+```sql
+ALTER TABLE order_items
+  ADD CONSTRAINT fk_order_items_order
+  FOREIGN KEY (order_id) REFERENCES orders(id)
+  ON DELETE CASCADE;
+
+ALTER TABLE order_item_notes
+  ADD CONSTRAINT fk_order_item_notes_item
+  FOREIGN KEY (order_item_id) REFERENCES order_items(id)
+  ON DELETE CASCADE;
+```
+
+If you prefer “restrict” behavior, use `ON DELETE RESTRICT`/`NO ACTION` (the default in many setups).
+
+When to use database-enforced:
+
+- You use Postgres (or another RDBMS with real FK constraints) and you control migrations.
+- You want the strongest correctness guarantees with the simplest runtime behavior.
+- You want “hard delete” semantics (soft delete is a separate, explicit design choice).
+- When deletes are blocked by FK constraints (database “restrict”), the service returns `409 Conflict`.
+
+#### Optional: application-enforced deletes
+
+Application-enforced deletes are an opt-in “escape hatch”. When enabled, the framework applies composition policies itself (restrict/cascade) and can perform depth-first cascades with guardrails/telemetry.
+
+If you can’t rely on DB-enforced referential actions (or you want explicit depth-first deletes with guardrails/telemetry), enable application-enforced composition deletes:
+
+- Set `composition.enforcement: 'application'`
+- Configure per-navigation delete policies:
+  - `restrict` (default): reject parent deletes when composed children exist (`409 Conflict`)
+  - `cascade`: delete composed children depth-first (and nested composed children) before deleting the parent
+
+Configuration is layered and merged per entity set with the following precedence (highest wins): registry (`EntitySetDef.composition`) → decorator (`@odataModel({composition})`) → global per-set (`ODataConfig.composition.entitySets`) → global default (`ODataConfig.composition.defaultDeletePolicy`).
+
+Example (global config):
+
+```ts
+this.bind(ODATA_BINDINGS.CONFIG).to({
+  ...current,
+  composition: {
+    enforcement: 'application',
+    defaultDeletePolicy: 'restrict',
+    requireTransactionSupport: true,
+    maxDepth: 8,
+    maxEntities: 5000,
+    entitySets: {
+      Orders: { relations: { items: { delete: 'cascade' } } },
+      OrderItems: { relations: { notes: { delete: 'cascade' } } },
+    },
+  },
+} as ODataConfig);
+```
+
+Notes:
+
+- Cascade deletes reuse `$batch` changeset transactions when present; otherwise they start a new datasource transaction when supported (Postgres-first).
+- Set `composition.requireTransactionSupport: false` to allow best-effort cascade deletes on non-transactional datasources.
+- If an entity set defines `@odata.on('DELETE')`, composition delete semantics are not applied automatically; the handler fully owns delete behavior.
+
+Soft delete is an explicit design choice: implement it via an override handler:
+
+```ts
+import { odata, CrudOnContext } from '@loopback/odata';
+
+export class OrdersController {
+  constructor(/* inject your repository here */) {}
+
+  @odata.on('DELETE')
+  async softDelete(ctx: CrudOnContext) {
+    // Example: mark as deleted instead of hard-delete
+    await (ctx.repository as any).updateById(ctx.id, { deletedAt: new Date() }, ctx.options);
+    ctx.helpers.noContent();
+  }
+}
+```
+
 ### Navigation `$ref`
 
 Link existing entities without PATCHing full payloads. For a `hasMany` relation:
@@ -1781,6 +1884,14 @@ Use `ODATA_BINDINGS.LOGGER` to plug in your preferred logger (e.g., Pino, Winsto
 | `correlation.generateWhenMissing`              | Generates a UUID when the client omits the correlation header (default `true`).                                                                                       |
 | `correlation.propagateToRepositories`          | Reserved for future use; when enabled, repository options will contain the correlation ID for downstream logging.                                                     |
 
+#### Composition
+
+- `composition.enforcement`: `'database'` (default, recommended) or `'application'` (opt-in depth-first cascade/restrict in code).
+- `composition.defaultDeletePolicy`: `'restrict'` by default; used as the fallback policy for navigations in `composition.entitySets` (application mode only).
+- `composition.entitySets`: per entity set relation policies, e.g. `{ Orders: { relations: { items: { delete: 'cascade' } } } }` (application mode only).
+- `composition.requireTransactionSupport`: default `true`; when `true`, cascade deletes require datasource transactions for atomicity (application mode only).
+- `composition.maxDepth` / `composition.maxEntities`: guardrails for application-enforced cascade planning/execution (application mode only).
+
 ### Event schema
 
 Every telemetry record is emitted through the bound logger (`ODATA_BINDINGS.LOGGER`) and contains:
@@ -1803,7 +1914,7 @@ Telemetry respects LoopBack’s logging pipeline—you can forward the enriched 
 - [ ] Draft workflow for deep updates
 - [ ] Additional `$apply` pushdown adapters (MSSQL, Mongo aggregation)
 - [ ] Deep update / draft handling for composition hierarchies
-- [ ] Opt-in cascade delete for composition-style relations (hook/transaction-aware)
+- [x] Opt-in cascade delete for composition-style relations (hook/transaction-aware)
 - [ ] Rich lambda grammar with nested `any` / `all` and mixed logical operators
 - [ ] Virtual/calculated field exposure with CSDL annotations
 

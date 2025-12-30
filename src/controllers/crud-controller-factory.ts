@@ -34,7 +34,7 @@ import {
   Transaction,
   juggler,
 } from '@loopback/repository';
-import { EntitySetDef } from '../registry/entityset-registry';
+import { EntitySetDef, EntitySetRegistry } from '../registry/entityset-registry';
 import {
   parseODataQuery,
   AggregationSpec,
@@ -83,12 +83,23 @@ import {
   CrudScope,
 } from '../types/crud-hooks';
 import { ODATA_BINDINGS, ODataLogger, ODataTenantThrottler } from '../keys';
-import { ODataConfig, ODataApplyTelemetryEvent, ODataRequestState } from '../types';
+import {
+  ODataApplyTelemetryEvent,
+  ODataCompositionResolvedConfig,
+  ODataConfig,
+  ODataRequestState,
+} from '../types';
 import * as ipaddr from 'ipaddr.js';
 import { getODataSearchableProps } from '../decorators/search.decorators';
+import { getODataModelMeta } from '../decorators/model.decorator';
 import { ensureModelDefinitionWithRelations } from '../util/model-definition';
 import { isEntityCtor } from '../util/model-helpers';
 import { ensureNavigationTargetKey } from '../util/relation-metadata';
+import {
+  compositionConfigHasCascade,
+  resolveCompositionConfigForEntitySet,
+} from '../util/composition-policy';
+import { validateCompositionResolvedConfig } from '../util/composition-validation';
 import {
   ResolvedNavigationPath,
   resolveNavigationPath,
@@ -148,6 +159,27 @@ type CrudWhere = Where<CrudEntity>;
 type SearchComparisonStrategy = {
   positive: 'like' | 'ilike';
   negative: 'nlike' | 'nilike';
+};
+
+type CompositionCascadeRoot = {
+  entitySet: string;
+  id: unknown;
+};
+
+type CompositionCascadeNode = {
+  entitySet: EntitySetDef;
+  id: unknown;
+  path: string[];
+  children: CompositionCascadeNode[];
+};
+
+type CompositionCascadeState = {
+  root: CompositionCascadeRoot;
+  maxDepth: number;
+  maxEntities: number;
+  entitiesPlanned: number; // includes root
+  entitiesDeleted: number; // includes cascade children only
+  visiting: Set<string>;
 };
 
 const DB_METHODS: ReadonlySet<string> = new Set([
@@ -719,6 +751,8 @@ export function defineODataCrudController(def: EntitySetDef) {
     readonly entityCtor = modelCtor as typeof Entity;
     _throttleApplied = false;
     requestStateCache?: ODataRequestState | null;
+    compositionResolvedCache?: ODataCompositionResolvedConfig | null;
+    registryCache?: EntitySetRegistry | null;
     searchComparisonStrategy?: SearchComparisonStrategy;
     modelPropertyCache = new WeakMap<typeof Entity, Set<string>>();
     _trustedProxyRanges?: Array<[ipaddr.IPv4 | ipaddr.IPv6, number]>;
@@ -9449,9 +9483,17 @@ export function defineODataCrudController(def: EntitySetDef) {
       if (preferences.respondAsync) this.throwPreferenceNotSupported('respond-async');
 
       const entityId = this.coerceParentId(id);
-      return this.withWriteTransaction(async () => {
-        const op: CrudOperation = 'DELETE';
-        const scope: CrudScope | undefined = undefined;
+      const op: CrudOperation = 'DELETE';
+      const scope: CrudScope | undefined = undefined;
+      const hasOnDeleteOverride = Boolean(this.getHookMethods(op, scope).on);
+      const compositionResolved = hasOnDeleteOverride
+        ? undefined
+        : this.getCompositionResolvedConfig();
+      const compositionEnabled =
+        !hasOnDeleteOverride && compositionResolved?.enforcement === 'application';
+      const cascadeEnabled = compositionEnabled && compositionConfigHasCascade(compositionResolved);
+
+      const runDelete = async () => {
         const ctx = this.buildHookContext({
           operation: op,
           scope,
@@ -9477,33 +9519,159 @@ export function defineODataCrudController(def: EntitySetDef) {
             (error as any).code = 'PreconditionRequired';
             throw error;
           }
-          if (ifMatch && !ifMatch.any) {
-            const { values, invalidComposite } = decodeIfMatchValues(
-              ifMatch.values ?? [],
-              etagProperties,
-              etagPropertyDefs,
-            );
-            if (invalidComposite || !values.length) this.throwPreconditionFailed();
-            const where = this.buildConditionalWhere(entityId, values, false);
-            if (preference === 'representation') {
+
+          const allowComposition = compositionEnabled;
+          const composition = allowComposition ? compositionResolved : undefined;
+          const cascadeState: CompositionCascadeState | undefined =
+            composition && cascadeEnabled
+              ? {
+                  root: { entitySet: setName, id: entityId },
+                  maxDepth: composition.maxDepth,
+                  maxEntities: composition.maxEntities,
+                  entitiesPlanned: 0,
+                  entitiesDeleted: 0,
+                  visiting: new Set<string>(),
+                }
+              : undefined;
+
+          if (composition && allowComposition) {
+            if (ifMatch && !ifMatch.any) {
+              const { values, invalidComposite } = decodeIfMatchValues(
+                ifMatch.values ?? [],
+                etagProperties,
+                etagPropertyDefs,
+              );
+              if (invalidComposite || !values.length) this.throwPreconditionFailed();
+              const where = this.buildConditionalWhere(entityId, values, false);
               entityForResponse = await this.findEntityForDeleteRepresentation(
                 entityId,
                 where,
                 options,
               );
+              if (!entityForResponse) this.throwPreconditionFailed();
+            } else {
+              if (preference === 'representation') {
+                entityForResponse = await this.findEntityForDeleteRepresentation(
+                  entityId,
+                  undefined,
+                  options,
+                );
+              } else {
+                await this.repository.findById(entityId as any, undefined, options);
+              }
             }
-            const { count } = await this.repository.deleteAll(where, options);
-            if (!count) this.throwPreconditionFailed();
-          } else {
-            if (preference === 'representation') {
-              entityForResponse = await this.findEntityForDeleteRepresentation(
-                entityId,
-                undefined,
-                options,
-              );
+
+            if (cascadeEnabled && cascadeState) {
+              this.emitCompositionTelemetry('composition.cascade.start', 'info', {
+                rootEntitySet: cascadeState.root.entitySet,
+                rootId: cascadeState.root.id,
+                maxDepth: cascadeState.maxDepth,
+                maxEntities: cascadeState.maxEntities,
+              });
+              try {
+                const rootNode = await this.planCascadeForEntity({
+                  entitySet: def,
+                  repository: this.repository as AnyObject,
+                  id: entityId,
+                  resolved: composition,
+                  depth: 0,
+                  path: [],
+                  state: cascadeState,
+                });
+                for (const child of rootNode.children) {
+                  await this.executeCascadeNode(child, cascadeState);
+                }
+              } catch (error) {
+                const statusCode =
+                  typeof (error as AnyObject)?.statusCode === 'number'
+                    ? ((error as AnyObject).statusCode as number)
+                    : 500;
+                this.emitCompositionTelemetry('composition.cascade.end', 'warn', {
+                  rootEntitySet: setName,
+                  rootId: entityId,
+                  entitiesDeleted: cascadeState.entitiesDeleted + 1,
+                  maxDepth: composition.maxDepth,
+                  status: statusCode,
+                });
+                throw error;
+              }
+            } else {
+              await this.ensureNoRestrictChildren({
+                entitySet: def,
+                repository: this.repository as AnyObject,
+                id: entityId,
+                resolved: composition,
+              });
             }
-            await this.repository.deleteById(entityId as any, options);
           }
+
+          try {
+            if (ifMatch && !ifMatch.any) {
+              const { values, invalidComposite } = decodeIfMatchValues(
+                ifMatch.values ?? [],
+                etagProperties,
+                etagPropertyDefs,
+              );
+              if (invalidComposite || !values.length) this.throwPreconditionFailed();
+              const where = this.buildConditionalWhere(entityId, values, false);
+              if (preference === 'representation' && !entityForResponse) {
+                entityForResponse = await this.findEntityForDeleteRepresentation(
+                  entityId,
+                  where,
+                  options,
+                );
+              }
+              if (cascadeEnabled) {
+                this.assertCompositionWriteDataSource(
+                  this.repository as AnyObject,
+                  'composition-delete:root',
+                );
+              }
+              const { count } = await this.repository.deleteAll(where, options);
+              if (!count) this.throwPreconditionFailed();
+            } else {
+              if (preference === 'representation' && !entityForResponse) {
+                entityForResponse = await this.findEntityForDeleteRepresentation(
+                  entityId,
+                  undefined,
+                  options,
+                );
+              }
+              if (cascadeEnabled) {
+                this.assertCompositionWriteDataSource(
+                  this.repository as AnyObject,
+                  'composition-delete:root',
+                );
+              }
+              await this.repository.deleteById(entityId as any, options);
+            }
+          } catch (error) {
+            if (cascadeEnabled && cascadeState) {
+              const statusCode =
+                typeof (error as AnyObject)?.statusCode === 'number'
+                  ? ((error as AnyObject).statusCode as number)
+                  : 500;
+              this.emitCompositionTelemetry('composition.cascade.end', 'warn', {
+                rootEntitySet: setName,
+                rootId: entityId,
+                entitiesDeleted: cascadeState.entitiesDeleted + 1,
+                maxDepth: compositionResolved?.maxDepth,
+                status: statusCode,
+              });
+            }
+            throw error;
+          }
+
+          if (cascadeEnabled && cascadeState) {
+            this.emitCompositionTelemetry('composition.cascade.end', 'info', {
+              rootEntitySet: setName,
+              rootId: entityId,
+              entitiesDeleted: cascadeState.entitiesDeleted + 1,
+              maxDepth: compositionResolved?.maxDepth,
+              status: preference === 'representation' ? 200 : 204,
+            });
+          }
+
           this.ensureODataHeaders();
           if (preference === 'representation') {
             if (!entityForResponse) {
@@ -9538,7 +9706,12 @@ export function defineODataCrudController(def: EntitySetDef) {
           await this.runAfter(op, scope, ctx);
         }
         return ctx.result as AnyObject | undefined;
-      });
+      };
+
+      if (cascadeEnabled && compositionResolved) {
+        return this.withCompositionWriteTransaction(compositionResolved, runDelete);
+      }
+      return this.withWriteTransaction(runDelete);
     }
 
     atomicityState(): AtomicityRequestState | undefined {
@@ -9554,8 +9727,15 @@ export function defineODataCrudController(def: EntitySetDef) {
     }
 
     repositoryOptions(): Options | undefined {
+      return this.repositoryOptionsForEntitySet(setName);
+    }
+
+    repositoryOptionsForEntitySet(entitySetName: string): Options | undefined {
       const state = this.atomicityState();
-      const transaction = state?.getTransaction(setName) ?? this.writeTxState()?.transaction;
+      const transaction =
+        state?.getTransaction(entitySetName) ??
+        state?.getTransaction(setName) ??
+        this.writeTxState()?.transaction;
       return transaction ? { transaction } : undefined;
     }
 
@@ -9722,6 +9902,678 @@ export function defineODataCrudController(def: EntitySetDef) {
       } finally {
         this.clearWriteTxState();
       }
+    }
+
+    getEntitySetRegistry(): EntitySetRegistry | undefined {
+      if (this.registryCache !== undefined) {
+        return this.registryCache ?? undefined;
+      }
+      try {
+        const registry = this.httpCtx.getSync(ODATA_BINDINGS.ENTITY_SET_REGISTRY, {
+          optional: true,
+        }) as EntitySetRegistry | undefined;
+        this.registryCache = registry ?? null;
+      } catch {
+        this.registryCache = null;
+      }
+      return this.registryCache ?? undefined;
+    }
+
+    getCompositionResolvedConfig(): ODataCompositionResolvedConfig | undefined {
+      if (this.compositionResolvedCache !== undefined) {
+        return this.compositionResolvedCache ?? undefined;
+      }
+      if (def.compositionResolved) {
+        this.compositionResolvedCache = def.compositionResolved;
+        return def.compositionResolved;
+      }
+      const modelMeta = getODataModelMeta(modelCtor);
+      const resolved = resolveCompositionConfigForEntitySet({
+        entitySetName: setName,
+        modelMeta,
+        registryDef: def,
+        globalConfig: this.cfg,
+      });
+      const validated = validateCompositionResolvedConfig({
+        entitySetName: setName,
+        modelCtor,
+        modelDefinition: modelDefinition as ModelDefinition | undefined,
+        resolved,
+        strict: this.cfg?.strict !== false,
+        logger: this.logger,
+      });
+      def.compositionResolved = validated;
+      this.compositionResolvedCache = validated ?? null;
+      return validated ?? undefined;
+    }
+
+    formatEntityInstance(entitySetName: string, id: unknown): string {
+      if (id == null) return `${entitySetName}(?)`;
+      if (typeof id === 'object') return `${entitySetName}(${stableStringify(id as AnyObject)})`;
+      return `${entitySetName}(${String(id)})`;
+    }
+
+    async withCompositionWriteTransaction<T>(
+      resolved: ODataCompositionResolvedConfig,
+      fn: () => Promise<T>,
+    ): Promise<T> {
+      ensureConfigValidated(this.cfg);
+      if (this.writeTxState()) return fn();
+
+      const repositoryDs = (this.repository as AnyObject | undefined)?.dataSource as
+        | juggler.DataSource
+        | undefined;
+      if (!repositoryDs) {
+        return fn();
+      }
+
+      if (this.atomicityState()) {
+        (this.request as any)[ODATA_WRITE_TX_STATE] = {
+          dataSource: repositoryDs,
+        } satisfies WriteTxState;
+        try {
+          return await fn();
+        } finally {
+          this.clearWriteTxState();
+        }
+      }
+
+      const requireSupport = resolved.requireTransactionSupport;
+      if (!dataSourceSupportsTransactions(repositoryDs)) {
+        if (requireSupport) {
+          this.emitTelemetry({
+            category: 'requests',
+            event: 'composition.tx.unavailable',
+            level: 'warn',
+            requireSample: false,
+            context: {
+              entitySet: setName,
+              reason: 'unsupported',
+            },
+          });
+          const err = new HttpErrors.NotImplemented(
+            'Cascade delete requires transaction support for atomicity.',
+          );
+          (err as any).code = 'NotImplemented';
+          throw err;
+        }
+        (this.request as any)[ODATA_WRITE_TX_STATE] = {
+          dataSource: repositoryDs,
+        } satisfies WriteTxState;
+        try {
+          return await fn();
+        } finally {
+          this.clearWriteTxState();
+        }
+      }
+
+      const isolation = this.resolveWriteTxIsolationLevel();
+      let transaction: Transaction;
+      try {
+        transaction = (await repositoryDs.beginTransaction(isolation)) as Transaction;
+      } catch (error) {
+        if (requireSupport) {
+          this.emitTelemetry({
+            category: 'requests',
+            event: 'composition.tx.unavailable',
+            level: 'warn',
+            requireSample: false,
+            context: {
+              entitySet: setName,
+              reason: 'beginTransaction-failed',
+            },
+            error: error as Error,
+          });
+          const err = new HttpErrors.NotImplemented(
+            'Cascade delete requires transaction support for atomicity.',
+          );
+          (err as any).code = 'NotImplemented';
+          throw err;
+        }
+        (this.request as any)[ODATA_WRITE_TX_STATE] = {
+          dataSource: repositoryDs,
+        } satisfies WriteTxState;
+        try {
+          return await fn();
+        } finally {
+          this.clearWriteTxState();
+        }
+      }
+
+      (this.request as any)[ODATA_WRITE_TX_STATE] = {
+        transaction,
+        dataSource: repositoryDs,
+      } satisfies WriteTxState;
+
+      let rolledBack = false;
+      try {
+        const result = await fn();
+        try {
+          await transaction.commit();
+        } catch (commitError) {
+          try {
+            await transaction.rollback();
+            rolledBack = true;
+          } catch {
+            /* ignore rollback errors to surface commit failure */
+          }
+          this.emitTelemetry({
+            category: 'requests',
+            event: 'tx.commit-failed',
+            level: 'error',
+            requireSample: false,
+            context: {
+              entitySet: setName,
+            },
+            error: commitError as Error,
+          });
+          const err = new HttpErrors.InternalServerError(
+            'Failed to commit datasource transaction.',
+          );
+          (err as any).code = 'TransactionCommitFailed';
+          throw err;
+        }
+        return result;
+      } catch (error) {
+        if (!rolledBack) {
+          try {
+            await transaction.rollback();
+          } catch {
+            /* ignore rollback errors */
+          }
+        }
+        throw error;
+      } finally {
+        this.clearWriteTxState();
+      }
+    }
+
+    assertCompositionWriteDataSource(repo: AnyObject | undefined, hint: string): void {
+      const state = this.writeTxState();
+      if (!state) return;
+      const repoDs = (repo as AnyObject | undefined)?.dataSource as juggler.DataSource | undefined;
+      if (!repoDs || repoDs === state.dataSource) return;
+      const err = new HttpErrors.NotImplemented(
+        `Cascade delete across multiple datasources is not supported (${hint}).`,
+      );
+      (err as any).code = 'NotImplemented';
+      throw err;
+    }
+
+    async resolveRepositoryForEntitySet(target: EntitySetDef): Promise<AnyObject> {
+      if (target.modelCtor === modelCtor) return this.repository as AnyObject;
+      if (!target.repositoryBindingKey) {
+        throw new HttpErrors.InternalServerError(
+          `Entity set ${target.name} does not have an associated repository binding.`,
+        );
+      }
+      return (await this.httpCtx.get(target.repositoryBindingKey as any)) as AnyObject;
+    }
+
+    hookMatchesForBundle(
+      op: CrudOperation,
+      scope: CrudScope | undefined,
+      meta: { op: CrudOperation; scope?: CrudScope },
+    ): boolean {
+      if (meta.op !== op) return false;
+      if (op !== 'READ') return true;
+      if (!meta.scope) return true;
+      return meta.scope === scope;
+    }
+
+    getHookMethodsForEntitySet(
+      entitySet: EntitySetDef,
+      op: CrudOperation,
+      scope?: CrudScope,
+    ): { before: string[]; after: string[]; on?: string } {
+      const bundle = entitySet.hooks;
+      if (!bundle) return { before: [], after: [] };
+      const before = (bundle.before ?? [])
+        .filter((h) => this.hookMatchesForBundle(op, scope, h))
+        .map((h) => h.methodName);
+      const after = (bundle.after ?? [])
+        .filter((h) => this.hookMatchesForBundle(op, scope, h))
+        .map((h) => h.methodName);
+      const on = (bundle.on ?? []).find((h) => this.hookMatchesForBundle(op, scope, h))?.methodName;
+      return { before, after, on };
+    }
+
+    async resolveSourceControllerForEntitySet(
+      entitySet: EntitySetDef,
+    ): Promise<AnyObject | undefined> {
+      const key = entitySet.sourceControllerBindingKey;
+      if (!key) return undefined;
+      try {
+        return await this.httpCtx.get(key as any);
+      } catch {
+        return undefined;
+      }
+    }
+
+    emitHookTelemetryForEntitySet(
+      phase: 'before' | 'after' | 'on',
+      entitySetName: string,
+      op: CrudOperation,
+      scope: CrudScope | undefined,
+      hookName: string,
+      startedAt: bigint,
+      error?: Error,
+    ): void {
+      const durationNs = process.hrtime.bigint() - startedAt;
+      const durationMs = Number(durationNs) / 1e6;
+      this.emitTelemetry({
+        category: 'hooks',
+        event: `hook.${phase}`,
+        level: error ? 'warn' : 'debug',
+        context: {
+          entitySet: entitySetName,
+          operation: op,
+          scope,
+          hookName,
+          status: error ? 'error' : 'completed',
+          durationMs,
+        },
+        error,
+      });
+    }
+
+    buildHookContextForEntitySet(base: {
+      entitySet: EntitySetDef;
+      repository: AnyObject;
+      operation: CrudOperation;
+      scope?: CrudScope;
+      id?: unknown;
+      options?: Options;
+    }): CrudHookContext {
+      return {
+        operation: base.operation,
+        scope: base.scope,
+        entitySet: base.entitySet as unknown as any,
+        repository: base.repository,
+        options: base.options,
+        request: this.request,
+        response: this.response,
+        state: {},
+        id: base.id as any,
+        payload: undefined,
+        filter: undefined,
+        result: undefined,
+      } as CrudHookContext;
+    }
+
+    async runBeforeForEntitySet(entitySet: EntitySetDef, op: CrudOperation, ctx: CrudHookContext) {
+      const source = await this.resolveSourceControllerForEntitySet(entitySet);
+      if (!source) return;
+      const names = this.getHookMethodsForEntitySet(entitySet, op).before;
+      for (const name of names) {
+        if (typeof source[name] !== 'function') continue;
+        const startedAt = process.hrtime.bigint();
+        try {
+          await source[name](ctx);
+          this.emitHookTelemetryForEntitySet(
+            'before',
+            entitySet.name,
+            op,
+            undefined,
+            name,
+            startedAt,
+          );
+        } catch (error) {
+          this.emitHookTelemetryForEntitySet(
+            'before',
+            entitySet.name,
+            op,
+            undefined,
+            name,
+            startedAt,
+            error as Error,
+          );
+          throw error;
+        }
+      }
+    }
+
+    async runAfterForEntitySet(entitySet: EntitySetDef, op: CrudOperation, ctx: CrudHookContext) {
+      if (this.response.headersSent) return;
+      const source = await this.resolveSourceControllerForEntitySet(entitySet);
+      if (!source) return;
+      const names = this.getHookMethodsForEntitySet(entitySet, op).after;
+      for (const name of names) {
+        if (typeof source[name] !== 'function') continue;
+        const startedAt = process.hrtime.bigint();
+        let maybe: unknown;
+        try {
+          maybe = await source[name](ctx);
+          this.emitHookTelemetryForEntitySet(
+            'after',
+            entitySet.name,
+            op,
+            undefined,
+            name,
+            startedAt,
+          );
+        } catch (error) {
+          this.emitHookTelemetryForEntitySet(
+            'after',
+            entitySet.name,
+            op,
+            undefined,
+            name,
+            startedAt,
+            error as Error,
+          );
+          throw error;
+        }
+        if (maybe !== undefined) {
+          ctx.result = maybe;
+        }
+      }
+    }
+
+    emitCompositionTelemetry(
+      event: string,
+      level: TelemetryEventOptions['level'],
+      context: AnyObject,
+      error?: Error,
+    ): void {
+      this.emitTelemetry({
+        category: 'requests',
+        event,
+        level,
+        requireSample: false,
+        context,
+        error,
+      });
+    }
+
+    throwCompositionGuardrail(
+      reason: 'depth' | 'maxEntities',
+      value: number,
+      limit: number,
+    ): never {
+      this.emitCompositionTelemetry('composition.guardrail', 'warn', {
+        reason,
+        value,
+        limit,
+        entitySet: setName,
+      });
+      if (reason === 'depth') {
+        throw new HttpErrors.BadRequest(
+          `Composition delete exceeds maximum supported depth of ${limit}.`,
+        );
+      }
+      throw new HttpErrors.BadRequest(
+        `Composition delete exceeds maximum supported entity delete limit of ${limit}.`,
+      );
+    }
+
+    async ensureNoRestrictChildren(params: {
+      entitySet: EntitySetDef;
+      repository: AnyObject;
+      id: unknown;
+      resolved?: ODataCompositionResolvedConfig;
+      cascadeState?: CompositionCascadeState;
+    }): Promise<void> {
+      const { entitySet, repository, id, resolved, cascadeState } = params;
+      if (!resolved) return;
+      const restrictRelations = Object.entries(resolved.relations).filter(
+        ([, cfg]) => cfg.delete === 'restrict',
+      );
+      if (!restrictRelations.length) return;
+
+      const definition =
+        ensureModelDefinitionWithRelations(entitySet.modelCtor) ??
+        ((entitySet.modelCtor as unknown as { definition?: ModelDefinition }).definition as
+          | ModelDefinition
+          | undefined);
+      const relationDefs = (definition?.relations ?? {}) as Record<string, AnyObject>;
+
+      const blocked: string[] = [];
+      for (const [relationName] of restrictRelations) {
+        const relationMeta = relationDefs[relationName] as AnyObject | undefined;
+        if (!relationMeta) continue;
+        const relationType = relationMeta.type ?? relationMeta.relationType;
+        const factory = (repository as AnyObject)[relationName];
+        if (typeof factory !== 'function') {
+          throw new HttpErrors.InternalServerError(
+            `Repository for ${entitySet.name} does not expose a relation factory for ${relationName}.`,
+          );
+        }
+        const relationRepo = factory(id, this.repositoryOptionsForEntitySet(entitySet.name));
+        if (relationType === 'hasMany') {
+          const rows = (await relationRepo.find(
+            { limit: 1 },
+            this.repositoryOptionsForEntitySet(entitySet.name),
+          )) as unknown[];
+          if (rows?.length) blocked.push(relationName);
+        } else if (relationType === 'hasOne') {
+          try {
+            await relationRepo.get(undefined, this.repositoryOptionsForEntitySet(entitySet.name));
+            blocked.push(relationName);
+          } catch (err) {
+            const statusCode = (err as AnyObject | undefined)?.statusCode;
+            if (err instanceof EntityNotFoundError || statusCode === 404) {
+              /* ignore */
+            } else {
+              throw err;
+            }
+          }
+        }
+      }
+
+      if (!blocked.length) return;
+      const root = cascadeState?.root;
+      this.emitCompositionTelemetry('composition.restrict', 'info', {
+        entitySet: entitySet.name,
+        id,
+        blockedRelations: blocked,
+        ...(root ? { rootEntitySet: root.entitySet, rootId: root.id } : {}),
+      });
+      const err = new HttpErrors.Conflict(
+        `Cannot delete ${this.formatEntityInstance(entitySet.name, id)} because composed children exist: ${blocked.join(
+          ', ',
+        )}. Delete children first or enable cascade.`,
+      );
+      (err as any).code = 'Conflict';
+      throw err;
+    }
+
+    async planCascadeForEntity(params: {
+      entitySet: EntitySetDef;
+      repository: AnyObject;
+      id: unknown;
+      resolved?: ODataCompositionResolvedConfig;
+      depth: number;
+      path: string[];
+      state: CompositionCascadeState;
+    }): Promise<CompositionCascadeNode> {
+      const { entitySet, repository, id, resolved, depth, path, state } = params;
+      if (depth > state.maxDepth) {
+        this.throwCompositionGuardrail('depth', depth, state.maxDepth);
+      }
+      state.entitiesPlanned += 1;
+      if (state.entitiesPlanned > state.maxEntities) {
+        this.throwCompositionGuardrail('maxEntities', state.entitiesPlanned, state.maxEntities);
+      }
+
+      const visitingKey = `${entitySet.name}:${stableStringify({ id })}`;
+      if (state.visiting.has(visitingKey)) {
+        throw new HttpErrors.BadRequest(
+          'Composition cascade detected a cycle in configured relations.',
+        );
+      }
+      state.visiting.add(visitingKey);
+
+      try {
+        await this.ensureNoRestrictChildren({
+          entitySet,
+          repository,
+          id,
+          resolved,
+          cascadeState: state,
+        });
+
+        const definition =
+          ensureModelDefinitionWithRelations(entitySet.modelCtor) ??
+          ((entitySet.modelCtor as unknown as { definition?: ModelDefinition }).definition as
+            | ModelDefinition
+            | undefined);
+        const relationDefs = (definition?.relations ?? {}) as Record<string, AnyObject>;
+
+        const children: CompositionCascadeNode[] = [];
+        if (resolved) {
+          const registry = this.getEntitySetRegistry();
+          for (const [relationName, relCfg] of Object.entries(resolved.relations)) {
+            if (relCfg.delete !== 'cascade') continue;
+            const relationMeta = relationDefs[relationName] as AnyObject | undefined;
+            if (!relationMeta) continue;
+            const relationType = relationMeta.type ?? relationMeta.relationType;
+            const factory = (repository as AnyObject)[relationName];
+            if (typeof factory !== 'function') {
+              throw new HttpErrors.InternalServerError(
+                `Repository for ${entitySet.name} does not expose a relation factory for ${relationName}.`,
+              );
+            }
+            const targetGetter = relationMeta.target as (() => typeof Entity) | undefined;
+            const targetCtor =
+              typeof targetGetter === 'function' ? (targetGetter() as typeof Entity) : undefined;
+            const targetDef = targetCtor ? registry?.get(targetCtor) : undefined;
+            if (!targetDef) {
+              const err = new HttpErrors.NotImplemented(
+                `Cascade delete is not supported for relation ${relationName} because its target entity set is not registered.`,
+              );
+              (err as any).code = 'NotImplemented';
+              throw err;
+            }
+            const options = this.repositoryOptionsForEntitySet(targetDef.name);
+            const relationRepo = factory(id, options);
+            const childRepo = await this.resolveRepositoryForEntitySet(targetDef);
+            const nextPath = [...path, `${entitySet.name}.${relationName}`];
+            const nextResolved = targetDef.compositionResolved;
+            if (relationType === 'hasOne') {
+              let child: AnyObject | undefined;
+              try {
+                child = (await relationRepo.get(
+                  undefined,
+                  this.repositoryOptionsForEntitySet(entitySet.name),
+                )) as AnyObject;
+              } catch (err) {
+                const statusCode = (err as AnyObject | undefined)?.statusCode;
+                if (err instanceof EntityNotFoundError || statusCode === 404) {
+                  child = undefined;
+                } else {
+                  throw err;
+                }
+              }
+              if (!child) continue;
+              const childPlain = this.toPlainEntity(child as any) ?? (child as AnyObject);
+              const childIdProps = getIdProperties(
+                ensureModelDefinitionWithRelations(targetDef.modelCtor) ??
+                  ((targetDef.modelCtor as unknown as { definition?: ModelDefinition })
+                    .definition as ModelDefinition | undefined),
+              );
+              const childId = this.buildFactoryIdArgument(childPlain, childIdProps);
+              if (childId == null) continue;
+              children.push(
+                await this.planCascadeForEntity({
+                  entitySet: targetDef,
+                  repository: childRepo,
+                  id: childId,
+                  resolved: nextResolved,
+                  depth: depth + 1,
+                  path: nextPath,
+                  state,
+                }),
+              );
+              continue;
+            }
+            if (relationType === 'hasMany') {
+              const keyTo = ensureNavigationTargetKey(relationMeta);
+              if (!keyTo) {
+                const err = new HttpErrors.NotImplemented(
+                  `Cascade delete is not supported for relation ${relationName} because its foreign key (keyTo) could not be resolved.`,
+                );
+                (err as any).code = 'NotImplemented';
+                throw err;
+              }
+              const childModelDef =
+                ensureModelDefinitionWithRelations(targetDef.modelCtor) ??
+                ((targetDef.modelCtor as unknown as { definition?: ModelDefinition }).definition as
+                  | ModelDefinition
+                  | undefined);
+              const childIdProps = getIdProperties(childModelDef);
+              const limit = 1000;
+              const fields = childIdProps.reduce<Record<string, boolean>>((acc, prop) => {
+                acc[prop] = true;
+                return acc;
+              }, {});
+              let offset = 0;
+              while (true) {
+                if (state.entitiesPlanned >= state.maxEntities) {
+                  this.throwCompositionGuardrail(
+                    'maxEntities',
+                    state.entitiesPlanned,
+                    state.maxEntities,
+                  );
+                }
+                const rows = (await relationRepo.find(
+                  { fields, limit, skip: offset },
+                  options,
+                )) as AnyObject[];
+                if (!rows?.length) break;
+                for (const row of rows) {
+                  const childPlain = this.toPlainEntity(row as any) ?? (row as AnyObject);
+                  const childId = this.buildFactoryIdArgument(childPlain, childIdProps);
+                  if (childId == null) continue;
+                  children.push(
+                    await this.planCascadeForEntity({
+                      entitySet: targetDef,
+                      repository: childRepo,
+                      id: childId,
+                      resolved: nextResolved,
+                      depth: depth + 1,
+                      path: nextPath,
+                      state,
+                    }),
+                  );
+                }
+                if (rows.length < limit) break;
+                offset += rows.length;
+              }
+            }
+          }
+        }
+
+        return { entitySet, id, path, children };
+      } finally {
+        state.visiting.delete(visitingKey);
+      }
+    }
+
+    async executeCascadeNode(
+      node: CompositionCascadeNode,
+      state: CompositionCascadeState,
+    ): Promise<void> {
+      for (const child of node.children) {
+        await this.executeCascadeNode(child, state);
+      }
+      const repo = await this.resolveRepositoryForEntitySet(node.entitySet);
+      this.assertCompositionWriteDataSource(repo, `composition-cascade:${node.entitySet.name}`);
+      const options = this.repositoryOptionsForEntitySet(node.entitySet.name);
+      const ctx = this.buildHookContextForEntitySet({
+        entitySet: node.entitySet,
+        repository: repo,
+        operation: 'DELETE',
+        id: node.id,
+        options,
+      });
+      ctx.state.cascade = true;
+      ctx.state.cascadeRoot = state.root;
+      ctx.state.cascadePath = node.path;
+      await this.runBeforeForEntitySet(node.entitySet, 'DELETE', ctx);
+      await repo.deleteById(node.id as any, options);
+      await this.runAfterForEntitySet(node.entitySet, 'DELETE', ctx);
+      state.entitiesDeleted += 1;
     }
 
     parsePreferenceHeader(): {

@@ -63,6 +63,7 @@ export interface ODataConfig {
   correlation?: ODataCorrelationConfig;
   appendKeysForClientPaging?: boolean; // default true - stabilize manual $skip order
   writeTransactions?: ODataWriteTransactionsConfig;
+  composition?: ODataCompositionConfig;
 }
 
 export interface ODataWriteTransactionsConfig {
@@ -70,6 +71,36 @@ export interface ODataWriteTransactionsConfig {
   isolationLevel?: 'READ_COMMITTED' | 'REPEATABLE_READ' | 'SERIALIZABLE'; // default READ_COMMITTED
   requireTransactionSupport?: boolean; // default: true when strict=true, else false
   rejectMultiDataSource?: boolean; // default true
+}
+
+export type ODataCompositionEnforcement = 'database' | 'application';
+
+export type ODataCompositionDeletePolicy = 'restrict' | 'cascade';
+
+export interface ODataCompositionRelationConfig {
+  delete?: ODataCompositionDeletePolicy;
+}
+
+export interface ODataCompositionEntitySetConfig {
+  relations?: Record<string, ODataCompositionRelationConfig>;
+}
+
+export interface ODataCompositionConfig {
+  enforcement?: ODataCompositionEnforcement; // default: 'database'
+  defaultDeletePolicy?: ODataCompositionDeletePolicy; // default: 'restrict'
+  requireTransactionSupport?: boolean; // default: true
+  maxDepth?: number; // default: 8
+  maxEntities?: number; // default: 5000
+  entitySets?: Record<string, ODataCompositionEntitySetConfig>;
+}
+
+export interface ODataCompositionResolvedConfig {
+  enforcement: ODataCompositionEnforcement;
+  defaultDeletePolicy: ODataCompositionDeletePolicy;
+  requireTransactionSupport: boolean;
+  maxDepth: number;
+  maxEntities: number;
+  relations: Record<string, { delete: ODataCompositionDeletePolicy }>;
 }
 
 export interface ODataNavigationRestriction {

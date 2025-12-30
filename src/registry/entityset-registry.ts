@@ -4,7 +4,11 @@ import { DeltaTokenPayload } from '../util/delta-token';
 import { OperationMeta } from '../decorators/action.function.decorators';
 import type { CrudHookBundle } from '../types/crud-hooks';
 import { ControllerSecurityMetadata, MethodAliasMap } from '../util/security-metadata';
-import { ODataCapabilitiesConfig } from '../types';
+import {
+  ODataCapabilitiesConfig,
+  ODataCompositionEntitySetConfig,
+  ODataCompositionResolvedConfig,
+} from '../types';
 import { validatePaginationLimits } from '../util/config-validation';
 
 export interface EntitySqlMetadata {
@@ -36,6 +40,8 @@ export interface EntitySetDef<T extends Entity = Entity> {
   mediaHandlerBindingKey?: string;
   mediaMaxPayloadBytes?: number;
   capabilities?: ODataCapabilitiesConfig;
+  composition?: ODataCompositionEntitySetConfig;
+  compositionResolved?: ODataCompositionResolvedConfig;
   deepInsert?: boolean;
   deepUpdate?: boolean;
   applyPushdown?: boolean;
@@ -72,6 +78,12 @@ export class EntitySetRegistry {
     const next: EntitySetDef = { ...(existing ?? {}), ...def };
     if (!def.securityMetadata && existing?.securityMetadata) {
       next.securityMetadata = existing.securityMetadata;
+    }
+    if (def.composition === undefined && existing?.composition !== undefined) {
+      next.composition = existing.composition;
+    }
+    if (def.compositionResolved === undefined && existing?.compositionResolved !== undefined) {
+      next.compositionResolved = existing.compositionResolved;
     }
     if (def.deepInsert === undefined && existing?.deepInsert !== undefined) {
       next.deepInsert = existing.deepInsert;

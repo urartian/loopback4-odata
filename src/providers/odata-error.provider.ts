@@ -1,11 +1,13 @@
 import { BindingScope, Provider, inject, injectable } from '@loopback/core';
-import { RestBindings, Reject } from '@loopback/rest';
+import { HttpErrors, RestBindings, Reject } from '@loopback/rest';
 import { HttpError } from 'http-errors';
 import { ErrorWriterOptions, writeErrorToResponse } from 'strong-error-handler';
 import { ODATA_VERSION } from '../constants';
 import { ODATA_BINDINGS } from '../keys';
 import { ODataConfig } from '../types';
 import { gatherRequestUrls, normalizeBasePath, pathMatches } from '../util/base-path';
+
+type AnyObject = Record<string, unknown>;
 
 type ExtendedHttpError = HttpError & {
   statusCode?: number;
@@ -38,7 +40,8 @@ export class ODataErrorProvider implements Provider<Reject> {
         return;
       }
 
-      const httpError = err as ExtendedHttpError;
+      const normalizedError = this.normalizeODataError(request, err) as ExtendedHttpError;
+      const httpError = normalizedError as ExtendedHttpError;
       const statusCode =
         httpError.statusCode ??
         httpError.status ??
@@ -66,6 +69,31 @@ export class ODataErrorProvider implements Provider<Reject> {
         },
       });
     };
+  }
+
+  private normalizeODataError(request: { method?: string }, err: Error): Error {
+    const anyErr = err as unknown as AnyObject;
+    if ((anyErr as ExtendedHttpError)?.statusCode || (anyErr as ExtendedHttpError)?.status) {
+      return err;
+    }
+
+    // Postgres foreign_key_violation (e.g. delete parent row blocked by FK RESTRICT/NO ACTION)
+    // In database-enforced composition mode, this is the expected "restrict" behavior and should
+    // surface as 409 Conflict rather than 500.
+    if (String(request?.method ?? '').toUpperCase() === 'DELETE' && anyErr?.code === '23503') {
+      const conflict = new HttpErrors.Conflict(
+        'Delete restricted by referential integrity constraints.',
+      );
+      (conflict as AnyObject).innerError = {
+        ...(anyErr?.constraint ? { constraint: anyErr.constraint } : {}),
+        ...(anyErr?.table ? { table: anyErr.table } : {}),
+        ...(anyErr?.detail ? { detail: anyErr.detail } : {}),
+        dbCode: anyErr.code,
+      };
+      return conflict;
+    }
+
+    return err;
   }
 
   private mapStatusToCode(status: number): string {
