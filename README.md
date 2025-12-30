@@ -1598,6 +1598,85 @@ Configuration:
 - In `enforcement: 'database'`, the framework does not run any composition delete logic; behavior is determined entirely by your DB foreign keys (`ON DELETE CASCADE` vs `RESTRICT/NO ACTION`). Other `composition.*` options are ignored.
 - The rest of `composition.*` options apply only when `enforcement: 'application'`.
 
+> **Composition TL;DR**
+>
+> - Composition is **explicitly configured** (not inferred from required FKs): a relation is “composition” when it appears under `composition.*.relations` (global config, `@odataModel` decorator, or `EntitySetDef.composition`) after config resolution.
+> - It affects **delete semantics** (database-enforced via `ON DELETE ...` FKs, or application-enforced via configured delete policies).
+> - It also affects **write semantics** (regardless of enforcement mode): `$ref` link/unlink is rejected, and changing the child’s parent FK is rejected (direct `PATCH` and parent `PATCH` deep updates).
+>
+> **Golden path example: `Orders -> items (OrderItems)`**
+>
+> 1. Mark the navigation as composition:
+>
+> ```ts
+> // ODataConfig
+> composition: {
+>   enforcement: 'database', // or 'application'
+>   entitySets: {
+>     Orders: { relations: { items: { delete: 'cascade' } } },
+>   },
+> }
+> ```
+>
+> Or keep the rules next to the model via `@odataModel`:
+>
+> ```ts
+> import { Entity, model, property, hasMany, belongsTo } from '@loopback/repository';
+> import { odataModel } from '@loopback/odata';
+>
+> @odataModel({
+>   // marks Orders.items as a composition relation (explicit config)
+>   composition: { relations: { items: { delete: 'cascade' } } },
+> })
+> @model()
+> export class Order extends Entity {
+>   @property({ id: true }) id!: number;
+>   @hasMany(() => OrderItem, { keyTo: 'orderId' }) items?: OrderItem[];
+> }
+>
+> @model()
+> export class OrderItem extends Entity {
+>   @property({ id: true }) id!: number;
+>   @belongsTo(() => Order) orderId!: number;
+> }
+> ```
+>
+> Delete enforcement (database vs application) is still chosen globally via `ODataConfig.composition.enforcement`.
+>
+> 2. Add the DB FK for delete behavior (Postgres example):
+>
+> ```sql
+> ALTER TABLE order_items
+>   ADD CONSTRAINT fk_order_items_order
+>   FOREIGN KEY (order_id) REFERENCES orders(id)
+>   ON DELETE CASCADE;
+> ```
+>
+> 3. Allowed vs rejected writes:
+>
+> ```http
+> # allowed: create child owned by parent
+> POST /odata/OrderItems
+> {"orderId":1,"productId":5,"quantity":1}
+>
+> # allowed: update child fields (but not orderId)
+> PATCH /odata/OrderItems(10)
+> {"quantity":2}
+>
+> # rejected (409): link/unlink bypasses ownership
+> POST /odata/Orders(1)/items/$ref
+> {"@odata.id":"/odata/OrderItems(10)"}
+>
+> DELETE /odata/Orders(1)/items(10)/$ref
+>
+> # rejected (409): re-parenting, including via deep update payloads
+> PATCH /odata/OrderItems(10)
+> {"orderId":2}
+>
+> PATCH /odata/Orders(1)
+> {"items":[{"id":10,"orderId":2}]}
+> ```
+
 #### Recommended default: database-enforced
 
 By default, deletes are **database-enforced**: `DELETE /odata/<EntitySet>(<id>)` issues a single delete for the requested entity and relies on your database schema (FK constraints) to either cascade or reject. This is the recommended production mode for Postgres.
@@ -1719,13 +1798,19 @@ To delete a related row (instead of using in-payload markers), either:
 DELETE /odata/OrderItems(20002)
 ```
 
-or unlink it from the parent collection:
+or (for non-composition associations) unlink it from the parent collection:
 
 ```http
 DELETE /odata/Orders(9802)/items(20002)/$ref
 ```
 
 For `hasOne`, use `PUT /EntitySet(key)/Relation/$ref` to link and `DELETE /EntitySet(key)/Relation/$ref` to clear the link. Relations defined with `hasManyThrough` are skipped.
+
+Composition relations:
+
+- A relation is treated as composition when configured under `composition.*.relations` (global config, `@odataModel` decorator, or `EntitySetDef.composition`), i.e. when it appears in the resolved composition config.
+- `$ref` link/unlink is rejected with `409 Conflict`; create the child under the parent (or set the parent FK on `POST /ChildSet`) and delete children via `DELETE /ChildSet(key)`.
+- Re-parenting by `PATCH`ing the child’s parent FK is rejected with `409 Conflict`.
 
 For atomic multi-step graph changes (e.g., unlink + patch + insert), wrap the operations in a `$batch` atomic changeset.
 

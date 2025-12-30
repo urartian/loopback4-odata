@@ -752,6 +752,7 @@ export function defineODataCrudController(def: EntitySetDef) {
     _throttleApplied = false;
     requestStateCache?: ODataRequestState | null;
     compositionResolvedCache?: ODataCompositionResolvedConfig | null;
+    compositionParentForeignKeysCache?: { version: number; keys: string[] } | null;
     registryCache?: EntitySetRegistry | null;
     searchComparisonStrategy?: SearchComparisonStrategy;
     modelPropertyCache = new WeakMap<typeof Entity, Set<string>>();
@@ -2176,6 +2177,8 @@ export function defineODataCrudController(def: EntitySetDef) {
         }
         const relationRepo = factory(parentId, options);
         await this.persistDeepUpdateGraph(
+          parentId,
+          parentCtor,
           relationName,
           relationMeta,
           relationRepo,
@@ -2187,6 +2190,8 @@ export function defineODataCrudController(def: EntitySetDef) {
     }
 
     async persistDeepUpdateGraph(
+      parentId: unknown,
+      parentCtor: typeof Entity,
       relationName: string,
       relationMeta: AnyObject,
       relationRepository: AnyObject,
@@ -2204,6 +2209,8 @@ export function defineODataCrudController(def: EntitySetDef) {
       const relationType = relationMeta?.type ?? relationMeta?.relationType;
       if (relationType === 'hasMany') {
         await this.persistHasManyDeepUpdate(
+          parentId,
+          parentCtor,
           relationName,
           relationMeta,
           relationRepository,
@@ -2215,6 +2222,8 @@ export function defineODataCrudController(def: EntitySetDef) {
       }
       if (relationType === 'hasOne') {
         await this.persistHasOneDeepUpdate(
+          parentId,
+          parentCtor,
           relationName,
           relationMeta,
           relationRepository,
@@ -2230,6 +2239,8 @@ export function defineODataCrudController(def: EntitySetDef) {
     }
 
     async persistHasManyDeepUpdate(
+      parentId: unknown,
+      parentCtor: typeof Entity,
       relationName: string,
       relationMeta: AnyObject,
       relationRepository: AnyObject,
@@ -2256,6 +2267,16 @@ export function defineODataCrudController(def: EntitySetDef) {
         );
       }
 
+      const compositionRelation = this.isCompositionRelationForEntityCtor(parentCtor, relationName);
+      const keyTo = compositionRelation ? ensureNavigationTargetKey(relationMeta) : undefined;
+      const keyToPropDef = keyTo
+        ? ((targetDefinition?.properties ?? {})[keyTo] as PropertyDefinition | undefined)
+        : undefined;
+      const expectedKeyToValue =
+        keyTo && typeof parentId === 'string'
+          ? this.coerceIdentifierLiteral(parentId, keyToPropDef, keyTo)
+          : parentId;
+
       const targetRepository = await this.resolveTargetRepository(relationRepository, relationMeta);
       const existingEntities = await relationRepository.find(undefined, options);
       const existingMap = new Map<string, AnyObject>();
@@ -2274,6 +2295,20 @@ export function defineODataCrudController(def: EntitySetDef) {
         const entry = this.coercePayloadToObject(rawEntry);
         const normalized = this.normalizeDeepInsertPayload(entry, targetCtor);
         const childRoot = { ...normalized.root };
+
+        if (
+          compositionRelation &&
+          keyTo &&
+          Object.prototype.hasOwnProperty.call(childRoot, keyTo)
+        ) {
+          this.assertCompositionForeignKeyMatchesParent({
+            fkField: keyTo,
+            parentValue: this.coerceValueForProperty(expectedKeyToValue, keyToPropDef, keyTo),
+            rawFkValue: childRoot[keyTo],
+            propDef: keyToPropDef,
+          });
+        }
+
         const idValues = this.extractIdValues(childRoot, idProps);
         const idKey = this.buildEntityIdKey(idValues, idProps);
 
@@ -2339,6 +2374,8 @@ export function defineODataCrudController(def: EntitySetDef) {
     }
 
     async persistHasOneDeepUpdate(
+      parentId: unknown,
+      parentCtor: typeof Entity,
       relationName: string,
       relationMeta: AnyObject,
       relationRepository: AnyObject,
@@ -2366,6 +2403,20 @@ export function defineODataCrudController(def: EntitySetDef) {
 
       const normalized = this.normalizeDeepInsertPayload(entry, targetCtor);
       const childRoot = { ...normalized.root };
+
+      const compositionRelation = this.isCompositionRelationForEntityCtor(parentCtor, relationName);
+      const keyTo = compositionRelation ? ensureNavigationTargetKey(relationMeta) : undefined;
+      if (compositionRelation && keyTo && Object.prototype.hasOwnProperty.call(childRoot, keyTo)) {
+        const keyToPropDef = (targetDefinition?.properties ?? {})[keyTo] as
+          | PropertyDefinition
+          | undefined;
+        this.assertCompositionForeignKeyMatchesParent({
+          fkField: keyTo,
+          parentValue: this.coerceValueForProperty(parentId, keyToPropDef, keyTo),
+          rawFkValue: childRoot[keyTo],
+          propDef: keyToPropDef,
+        });
+      }
 
       const targetRepository = await this.resolveTargetRepository(relationRepository, relationMeta);
 
@@ -2454,6 +2505,28 @@ export function defineODataCrudController(def: EntitySetDef) {
       return relationMeta;
     }
 
+    isCompositionRelation(relationName: string): boolean {
+      const resolved = this.getCompositionResolvedConfig();
+      if (!resolved?.relations) return false;
+      return Object.prototype.hasOwnProperty.call(resolved.relations, relationName);
+    }
+
+    isCompositionRelationForEntityCtor(entityCtor: typeof Entity, relationName: string): boolean {
+      const registry = this.getEntitySetRegistry();
+      if (registry) {
+        const entitySetDef = registry.get(entityCtor);
+        if (entitySetDef) {
+          const resolved = this.getCompositionResolvedConfigForEntitySetDef(entitySetDef);
+          if (!resolved?.relations) return false;
+          return Object.prototype.hasOwnProperty.call(resolved.relations, relationName);
+        }
+      }
+      if (entityCtor === modelCtor) {
+        return this.isCompositionRelation(relationName);
+      }
+      return false;
+    }
+
     async linkNavigationRef(
       relationName: string,
       parentIdRaw: unknown,
@@ -2464,6 +2537,11 @@ export function defineODataCrudController(def: EntitySetDef) {
         throw new HttpErrors.BadRequest('Missing @odata.id in request body.');
       }
       const relationMeta = this.resolveNavigationRelationMetadata(relationName);
+      if (this.isCompositionRelation(relationName)) {
+        throw new HttpErrors.Conflict(
+          `Cannot link existing entities via $ref for composition relation "${setName}.${relationName}". Create the child entity under the parent instead.`,
+        );
+      }
       const keyTo = relationMeta.keyTo as string;
 
       const { keyExpression } = this.parseODataIdReference(targetUri);
@@ -2572,6 +2650,12 @@ export function defineODataCrudController(def: EntitySetDef) {
           const targetId = this.coerceTargetId(targetRepo, keyLiteral);
           ctx.navigationTargetKey = keyLiteral;
           ctx.navigationTargetId = targetId;
+        }
+
+        if (this.isCompositionRelation(relationName)) {
+          throw new HttpErrors.Conflict(
+            `Cannot unlink entities via $ref for composition relation "${setName}.${relationName}". Delete the child entity instead.`,
+          );
         }
 
         await this.enforceTenantLimit(op);
@@ -4786,6 +4870,49 @@ export function defineODataCrudController(def: EntitySetDef) {
       if (aStr < bStr) return -1;
       if (aStr > bStr) return 1;
       return 0;
+    }
+
+    coerceValueForProperty(
+      raw: unknown,
+      propDef: PropertyDefinition | undefined,
+      descriptor: string,
+    ): unknown {
+      if (typeof raw === 'string') {
+        return this.coerceIdentifierLiteral(raw, propDef, descriptor);
+      }
+      return raw;
+    }
+
+    throwCompositionReparentingConflict(fkField: string): never {
+      throw new HttpErrors.Conflict(
+        `Re-parenting is not allowed for composition children (attempted to modify "${fkField}").`,
+      );
+    }
+
+    assertCompositionForeignKeyUnchanged(params: {
+      fkField: string;
+      oldValue: unknown;
+      rawNewValue: unknown;
+      propDef: PropertyDefinition | undefined;
+    }): void {
+      const { fkField, oldValue, rawNewValue, propDef } = params;
+      const newValue = this.coerceValueForProperty(rawNewValue, propDef, fkField);
+      if (this.compareValues(oldValue, newValue) !== 0) {
+        this.throwCompositionReparentingConflict(fkField);
+      }
+    }
+
+    assertCompositionForeignKeyMatchesParent(params: {
+      fkField: string;
+      parentValue: unknown;
+      rawFkValue: unknown;
+      propDef: PropertyDefinition | undefined;
+    }): void {
+      const { fkField, parentValue, rawFkValue, propDef } = params;
+      const fkValue = this.coerceValueForProperty(rawFkValue, propDef, fkField);
+      if (this.compareValues(parentValue, fkValue) !== 0) {
+        this.throwCompositionReparentingConflict(fkField);
+      }
     }
 
     resolvePredicateValue(
@@ -9392,6 +9519,8 @@ export function defineODataCrudController(def: EntitySetDef) {
             (error as any).code = 'PreconditionRequired';
             throw error;
           }
+
+          let conditionalWhere: CrudWhere | undefined;
           if (ifMatch && !ifMatch.any) {
             const { values, invalidComposite } = decodeIfMatchValues(
               ifMatch.values ?? [],
@@ -9399,10 +9528,45 @@ export function defineODataCrudController(def: EntitySetDef) {
               etagPropertyDefs,
             );
             if (invalidComposite || !values.length) this.throwPreconditionFailed();
-            const where = this.buildConditionalWhere(parentIdValue, values, false);
+            conditionalWhere = this.buildConditionalWhere(parentIdValue, values, false);
+          }
+
+          const compositionParentForeignKeys = this.getCompositionParentForeignKeys();
+          const forbiddenFksInPayload = compositionParentForeignKeys.filter((field) =>
+            Object.prototype.hasOwnProperty.call(workingPayload, field),
+          );
+          if (forbiddenFksInPayload.length) {
+            let existing: CrudEntity | AnyObject | null | undefined;
+            if (conditionalWhere) {
+              existing = await this.repository.findOne(
+                { where: conditionalWhere } as Filter<CrudEntity>,
+                options,
+              );
+              if (!existing) this.throwPreconditionFailed();
+            } else {
+              existing = await this.repository.findById(parentIdValue as any, undefined, options);
+            }
+
+            const plainExisting = this.toPlainEntity(existing ?? undefined) ?? {};
+            for (const fkField of forbiddenFksInPayload) {
+              const oldValue = plainExisting[fkField];
+              const rawNewValue = (workingPayload as AnyObject)[fkField];
+              const propDef = (modelDefinition?.properties ?? {})[fkField] as
+                | PropertyDefinition
+                | undefined;
+              this.assertCompositionForeignKeyUnchanged({
+                fkField,
+                oldValue,
+                rawNewValue,
+                propDef,
+              });
+            }
+          }
+
+          if (conditionalWhere) {
             const { count } = await this.repository.updateAll(
               workingPayload as AnyObject,
-              where,
+              conditionalWhere,
               options,
             );
             if (!count) this.throwPreconditionFailed();
@@ -9945,6 +10109,92 @@ export function defineODataCrudController(def: EntitySetDef) {
       def.compositionResolved = validated;
       this.compositionResolvedCache = validated ?? null;
       return validated ?? undefined;
+    }
+
+    getCompositionResolvedConfigForEntitySetDef(
+      entitySetDef: EntitySetDef,
+    ): ODataCompositionResolvedConfig | undefined {
+      if (entitySetDef.compositionResolved) return entitySetDef.compositionResolved;
+      const entitySetName = entitySetDef.name;
+      const modelCtorForSet = entitySetDef.modelCtor;
+      const modelDefinitionForSet =
+        ensureModelDefinitionWithRelations(modelCtorForSet) ??
+        ((modelCtorForSet as unknown as { definition?: ModelDefinition }).definition as
+          | ModelDefinition
+          | undefined);
+      const modelMetaForSet = getODataModelMeta(modelCtorForSet);
+      const resolved = resolveCompositionConfigForEntitySet({
+        entitySetName,
+        modelMeta: modelMetaForSet,
+        registryDef: entitySetDef,
+        globalConfig: this.cfg,
+      });
+      const validated = validateCompositionResolvedConfig({
+        entitySetName,
+        modelCtor: modelCtorForSet,
+        modelDefinition: modelDefinitionForSet,
+        resolved,
+        strict: this.cfg?.strict !== false,
+        logger: this.logger,
+      });
+      entitySetDef.compositionResolved = validated;
+      return validated ?? undefined;
+    }
+
+    getCompositionParentForeignKeys(): string[] {
+      const registry = this.getEntitySetRegistry();
+      if (!registry) return [];
+      const version = registry.getVersion();
+      if (
+        this.compositionParentForeignKeysCache &&
+        this.compositionParentForeignKeysCache.version === version
+      ) {
+        return this.compositionParentForeignKeysCache.keys;
+      }
+
+      const foreignKeys = new Set<string>();
+      for (const entitySetDef of registry.list()) {
+        const resolved = this.getCompositionResolvedConfigForEntitySetDef(entitySetDef);
+        if (!resolved?.relations) continue;
+
+        const entitySetModelCtor = entitySetDef.modelCtor;
+        const entitySetModelDefinition =
+          ensureModelDefinitionWithRelations(entitySetModelCtor) ??
+          ((entitySetModelCtor as unknown as { definition?: ModelDefinition }).definition as
+            | ModelDefinition
+            | undefined);
+        const relationDefs = (entitySetModelDefinition?.relations ?? {}) as Record<
+          string,
+          AnyObject
+        >;
+
+        for (const relationName of Object.keys(resolved.relations)) {
+          const meta = relationDefs[relationName] as AnyObject | undefined;
+          if (!meta) continue;
+
+          const targetResolver = meta.target as (() => typeof Entity) | typeof Entity | undefined;
+          let targetCtor: typeof Entity | undefined;
+          if (isEntityCtor(targetResolver as unknown as typeof Entity)) {
+            targetCtor = targetResolver as unknown as typeof Entity;
+          } else if (typeof targetResolver === 'function') {
+            try {
+              targetCtor = (targetResolver as () => typeof Entity)();
+            } catch {
+              targetCtor = undefined;
+            }
+          }
+          if (!targetCtor) continue;
+          if (targetCtor !== modelCtor) continue;
+
+          const keyTo = ensureNavigationTargetKey(meta);
+          if (!keyTo) continue;
+          foreignKeys.add(keyTo);
+        }
+      }
+
+      const keys = Array.from(foreignKeys);
+      this.compositionParentForeignKeysCache = { version, keys };
+      return keys;
     }
 
     formatEntityInstance(entitySetName: string, id: unknown): string {
