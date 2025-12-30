@@ -25,6 +25,30 @@ describe('@odataModel decorator', () => {
     expect(getODataModelMeta(Order)).to.containEql({ lbModel: { settings: { strict: true } } });
   });
 
+  it('accepts full LoopBack @model() definition via lbModel and does not mutate user options', () => {
+    const decoratorOptions = {
+      lbModel: {
+        name: 'CustomName',
+        settings: {
+          strict: true,
+          postgresql: { table: 'my_table' },
+          indexes: {
+            idx_sku: { keys: { sku: 1 }, options: { unique: true } },
+          },
+        },
+      },
+      etag: 'updatedAt',
+    } as const;
+
+    @odataModel(decoratorOptions)
+    class CatalogItem extends Entity {}
+
+    const loopbackMeta = MetadataInspector.getClassMetadata(MODEL_KEY, CatalogItem);
+    expect(loopbackMeta).to.containEql(decoratorOptions.lbModel);
+
+    expect(getODataModelMeta(CatalogItem)).to.eql(decoratorOptions);
+  });
+
   it('throws when lbModel is provided and @model() metadata already exists', () => {
     const expectedMessage =
       '@odataModel({ lbModel: ... }) cannot be used on a class that already has @model() metadata. Remove @model() and configure model options via @odataModel({ lbModel: ... }).';

@@ -82,7 +82,7 @@ export class Product extends Entity {
 }
 ```
 
-Note: `@odataModel()` replaces LoopBack’s `@model()` for OData entity sets, but you still use standard LoopBack `@property`/relation decorators to define schema and relations. The `lbModel` block is passed through to LoopBack’s `@model(...)` decorator (the same options you’d otherwise pass to `@model({ ... })`). See LoopBack model definition settings: https://loopback.io/doc/en/lb4/Model.html#supported-entries-of-model-definition
+Note: `@odataModel()` replaces LoopBack’s `@model()` for OData entity sets, but you still use standard LoopBack `@property`/relation decorators to define schema and relations. The `lbModel` block is passed through 1:1 to LoopBack’s `@model(definition)` decorator (the same object you’d otherwise pass to `@model({ ... })`). See LoopBack model definition settings: https://loopback.io/doc/en/lb4/Model.html#supported-entries-of-model-definition
 
 Common `lbModel.settings` examples:
 

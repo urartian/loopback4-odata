@@ -1,23 +1,14 @@
 import 'reflect-metadata';
 import { MetadataInspector } from '@loopback/core';
 import { model as applyModel, Model, MODEL_KEY } from '@loopback/repository';
-import type { ModelSettings } from '@loopback/repository';
 import { ODataCompositionEntitySetConfig } from '../types';
 const ODATA_MODEL_KEY = 'odata:model';
 
 export interface ODataModelOptions {
-  lbModel?: {
-    /**
-     * Passed to LoopBack's `@model()` decorator.
-     * Mirrors `@loopback/repository` model definition settings.
-     */
-    settings?: ModelSettings;
-
-    /**
-     * Optional model name override.
-     */
-    name?: string;
-  };
+  /**
+   * Passed through to LoopBack's `@model(definition)` decorator.
+   */
+  lbModel?: NonNullable<Parameters<typeof applyModel>[0]>;
   entitySetName?: string;
   etag?: string | string[];
   deepInsert?: boolean;
@@ -49,13 +40,10 @@ export function odataModel(opts: ODataModelOptions = {}) {
         );
       }
     } else {
-      if (opts.lbModel) {
-        // LoopBack's @model() mutates the passed definition object (e.g., defaulting `name`).
-        // Clone to avoid mutating user-supplied decorator options, which are stored as OData metadata.
-        applyModel({ ...opts.lbModel })(target as typeof Model);
-      } else {
-        applyModel()(target as typeof Model);
-      }
+      // LoopBack's @model() mutates the passed definition object (e.g., defaulting `name`).
+      // Shallow-clone to avoid mutating user-supplied decorator options, which are stored as OData metadata.
+      const definition = opts.lbModel ? { ...opts.lbModel } : undefined;
+      applyModel(definition ?? {})(target as typeof Model);
     }
     Reflect.defineMetadata(ODATA_MODEL_KEY, opts, target);
   };
