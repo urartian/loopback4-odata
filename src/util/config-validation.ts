@@ -112,6 +112,14 @@ export function validateLambdaConfig(label: string, lambda?: ODataLambdaConfig):
   if (!lambda) return;
   const target = lambda as AnyObject;
   assignPositive(target, 'maxLambdaScanRows', label);
+  if ('pushdown' in target) {
+    const value = target.pushdown;
+    if (value !== undefined && value !== null) {
+      if (value !== 'disabled' && value !== 'postgres') {
+        throw new Error(`${label}.pushdown must be "disabled" or "postgres".`);
+      }
+    }
+  }
 }
 
 function assignPositive(target: AnyObject, key: string, parentLabel = 'ODataConfig'): void {

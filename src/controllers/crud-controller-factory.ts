@@ -137,6 +137,7 @@ import {
   StatisticsUpdate,
   TelemetryEventOptions,
 } from '../util/telemetry';
+import { buildPostgresLambdaIdQuery } from '../util/postgres-lambda-pushdown';
 import { acceptsAnyMediaType } from '../util/accept';
 import { normalizeBasePath } from '../util/base-path';
 import { escapeLikeLiteral } from '../util/like-escaping';
@@ -4134,6 +4135,42 @@ export function defineODataCrudController(def: EntitySetDef) {
         level: 'warn',
         context: {
           entitySet: setName,
+          ...detail,
+        },
+      });
+      this.emitTelemetry({
+        category: 'rewrite',
+        event: 'lambda-mode',
+        level: 'warn',
+        context: {
+          entitySet: setName,
+          mode: 'fallback',
+          ...detail,
+        },
+      });
+    }
+
+    logLambdaPushdown(detail: {
+      lambdasCount: number;
+      paths: string[];
+      rowsFetched: number;
+    }): void {
+      this.emitTelemetry({
+        category: 'rewrite',
+        event: 'lambda-pushdown',
+        level: 'info',
+        context: {
+          entitySet: setName,
+          ...detail,
+        },
+      });
+      this.emitTelemetry({
+        category: 'rewrite',
+        event: 'lambda-mode',
+        level: 'info',
+        context: {
+          entitySet: setName,
+          mode: 'pushdown',
           ...detail,
         },
       });
@@ -8449,6 +8486,123 @@ export function defineODataCrudController(def: EntitySetDef) {
         }
 
         if (lambdaExpressions.length) {
+          const pushdownMode = this.cfg?.lambda?.pushdown ?? 'disabled';
+          const pushdownStrict = this.cfg?.lambda?.pushdownStrict === true;
+          const dataSource = (this.repository as { dataSource?: juggler.DataSource }).dataSource;
+
+          if (pushdownMode === 'postgres' && dataSource && !requiresPostFilter) {
+            const limit =
+              typeof requestedLimit === 'number' && requestedLimit > 0
+                ? requestedLimit
+                : this.resolveMaxLambdaScanRows() + 1;
+            const offset = requestedOffset;
+
+            const built = buildPostgresLambdaIdQuery({
+              dataSource,
+              modelCtor,
+              lambdas: lambdaExpressions,
+              where: baseFilter.where as Where<AnyObject> | undefined,
+              order: baseFilter.order as Filter<CrudEntity>['order'],
+              limit,
+              offset,
+            });
+
+            if ('sql' in built) {
+              const idRows = await dataSource.execute(built.sql, built.params, options);
+              const rows = Array.isArray(idRows) ? (idRows as AnyObject[]) : [];
+              const ids = rows
+                .map((row) => row?.[built.idProperty] ?? row?.[built.idProperty.toLowerCase()])
+                .filter((id) => id !== undefined && id !== null);
+
+              if (typeof requestedLimit !== 'number') {
+                const maxRows = this.resolveMaxLambdaScanRows();
+                if (ids.length > maxRows) {
+                  throw new HttpErrors.BadRequest(
+                    `Lambda filter scan exceeds the server limit of ${maxRows} rows. Add $top or refine $filter.`,
+                  );
+                }
+              }
+
+              this.logLambdaPushdown({
+                lambdasCount: lambdaExpressions.length,
+                paths: lambdaExpressions.map((lambda) => lambda.path.join('/')),
+                rowsFetched: ids.length,
+              });
+
+              const fetchFilter: Filter<CrudEntity> = { ...baseFilter };
+              delete fetchFilter.order;
+              delete fetchFilter.limit;
+              delete fetchFilter.offset;
+              const idWhere = { [built.idProperty]: { inq: ids } } as CrudWhere;
+              const combined = this.combineWithAnd([
+                fetchFilter.where as CrudWhere | undefined,
+                idWhere,
+              ]);
+              fetchFilter.where = combined ?? idWhere;
+
+              const entities = ids.length ? await this.repository.find(fetchFilter, options) : [];
+              const plainEntities = entities.map((entity) => this.toPlainEntity(entity) ?? {});
+              this.normalizeLambdaCollectionsForResponse(plainEntities, lambdaExpressions);
+              const ordered = ids.length
+                ? (() => {
+                    const byId = new Map<string, AnyObject>();
+                    for (const entity of plainEntities) {
+                      const value = (entity as AnyObject)[built.idProperty];
+                      if (value === undefined || value === null) continue;
+                      byId.set(String(value), entity);
+                    }
+                    return ids
+                      .map((id) => byId.get(String(id)))
+                      .filter((entity): entity is AnyObject => Boolean(entity));
+                  })()
+                : [];
+
+              this.applyComputeExpressions(ordered, computeExpressions);
+
+              this.ensureODataHeaders();
+              const result = {
+                '@odata.context': contextBase,
+                value: this.decoratePlainEntities(ordered),
+              } as AnyObject;
+              this.recordTelemetryStats({ rows: ordered.length });
+              ctx.result = result;
+              return result;
+            } else if (pushdownStrict) {
+              this.emitTelemetry({
+                category: 'rewrite',
+                event: 'lambda-mode',
+                level: 'warn',
+                context: {
+                  entitySet: setName,
+                  mode: 'rejected',
+                  reason: built.declineReason,
+                  lambdasCount: lambdaExpressions.length,
+                  paths: lambdaExpressions.map((lambda) => lambda.path.join('/')),
+                },
+              });
+              throw new HttpErrors.BadRequest(
+                `Lambda pushdown is required but the query is not eligible (${built.declineReason}).`,
+              );
+            }
+          } else if (pushdownStrict && pushdownMode !== 'disabled') {
+            const reason = requiresPostFilter ? 'requires-postfilter' : 'unsupported-datasource';
+            this.emitTelemetry({
+              category: 'rewrite',
+              event: 'lambda-mode',
+              level: 'warn',
+              context: {
+                entitySet: setName,
+                mode: 'rejected',
+                reason,
+                lambdasCount: lambdaExpressions.length,
+                paths: lambdaExpressions.map((lambda) => lambda.path.join('/')),
+              },
+            });
+            throw new HttpErrors.BadRequest(
+              `Lambda pushdown is required but the query is not eligible (${reason}).`,
+            );
+          }
+
           const fetchFilter: Filter<CrudEntity> = { ...baseFilter };
           delete fetchFilter.order;
           delete fetchFilter.limit;

@@ -1179,6 +1179,8 @@ Any custom store only needs to implement the `TenantThrottleStore` interface (al
 - `lambda.maxLambdaScanRows`: Maximum number of root entities fetched for in-memory lambda evaluation (default: `maxApplyResultSize` if set, else `2000`). Requests exceeding the limit return `400 Bad Request`.
 - `lambda.requireTopWhenLambda`: When `true`, requires the client to include `$top` unless server-driven paging is active; otherwise returns `400 Bad Request` (default: `false`).
 - `lambda.warnOnLambdaFallback`: When `true`, logs/emits telemetry when lambda evaluation falls back to in-memory processing (default: `true`).
+- `lambda.pushdown`: Enables database pushdown for supported lambda filters (`'disabled' | 'postgres'`, default: `'disabled'`). When enabled and eligible, `any` translates to `EXISTS (...)` and `all` translates to `NOT EXISTS (... WHERE (predicate) IS NOT TRUE)` to preserve OData null semantics.
+- `lambda.pushdownStrict`: When `true`, rejects lambda queries that are not eligible for pushdown with `400 Bad Request` (default: `false`). When `false`, ineligible queries fall back to in-memory evaluation with guardrails.
 - `strict` (default: true): Enables stricter validations and policies:
   - Requires `If-Match` on `PATCH`/`DELETE` when ETags are enabled (428 if missing).
   - If `maxTop` is set, `$top` above the cap returns `400 Bad Request` instead of being clamped.
@@ -1207,6 +1209,8 @@ app.bind(ODATA_BINDINGS.CONFIG).to({
     maxLambdaScanRows: 2000,
     requireTopWhenLambda: true,
     warnOnLambdaFallback: true,
+    pushdown: 'postgres',
+    pushdownStrict: false,
   },
 });
 ```

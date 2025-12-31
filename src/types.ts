@@ -260,6 +260,8 @@ export interface ODataLambdaConfig {
   maxLambdaScanRows?: number;
   requireTopWhenLambda?: boolean;
   warnOnLambdaFallback?: boolean;
+  pushdown?: 'disabled' | 'postgres';
+  pushdownStrict?: boolean;
 }
 
 export type ODataTelemetryCategory =
