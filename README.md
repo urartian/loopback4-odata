@@ -56,17 +56,17 @@ export class MyAppApplication extends BootMixin(RepositoryMixin(RestApplication)
 2. Define a model
 
 ```ts
-import { Entity, model, property } from '@loopback/repository';
-import { odataModel, odataController } from '@loopback/odata';
+import { Entity, property } from '@loopback/repository';
+import { odataModel } from '@loopback/odata';
 
 @odataModel({
+  lbModel: { settings: { strict: true } },
   etag: 'updatedAt',
   delta: {
     enabled: true,
     field: 'updatedAt',
   },
 })
-@model()
 export class Product extends Entity {
   @property({ id: true })
   id!: number;
@@ -80,6 +80,16 @@ export class Product extends Entity {
   @property({ type: 'date', defaultFn: 'now' })
   updatedAt!: Date;
 }
+```
+
+Note: `@odataModel()` replaces LoopBack’s `@model()` for OData entity sets, but you still use standard LoopBack `@property`/relation decorators to define schema and relations. The `lbModel` block is passed through 1:1 to LoopBack’s `@model(definition)` decorator (the same object you’d otherwise pass to `@model({ ... })`). See LoopBack model definition settings: https://loopback.io/doc/en/lb4/Model.html#supported-entries-of-model-definition
+
+Common `lbModel.settings` examples:
+
+```ts
+@odataModel({ lbModel: { settings: { strict: true } } })
+@odataModel({ lbModel: { settings: { postgresql: { table: 'products' } } } })
+@odataModel({ lbModel: { settings: { indexes: { idx_sku: { keys: { sku: 1 }, options: { unique: true } } } } } })
 ```
 
 3. Create a repository
@@ -512,7 +522,6 @@ Example:
 
 ```ts
 @odataModel()
-@model()
 export class Product extends Entity {
   @property({ id: true }) id!: number;
   @odataSearchable() @property() name!: string;
@@ -782,11 +791,10 @@ LoopBack models can advertise computed fields by marking them as non-persistent.
 
 ```ts
 // order.model.ts
-import { Entity, model, property } from '@loopback/repository';
+import { Entity, property } from '@loopback/repository';
 import { odataModel } from '@loopback/odata';
 
 @odataModel({ entitySetName: 'Orders' })
-@model()
 export class Order extends Entity {
   @property({ id: true })
   id: string;
@@ -885,7 +893,6 @@ Add an ETag column to your LoopBack model and opt in by passing it to `@odataMod
 
 ```ts
 @odataModel({ etag: 'updatedAt' })
-@model()
 export class Product extends Entity {
   @property({ id: true })
   id!: number;
@@ -1081,7 +1088,7 @@ const ProductsSet: EntitySetDef<Product> = {
 - `tenantResolver(request)`: Function that extracts a tenant/customer identifier from an incoming request (for example `req.user?.tenantId` or `req.get('x-tenant-id')`). When combined with `tenantQuotas`, the server enforces per-tenant throttling. If the resolver throws, the request now fails fast with `400 TenantResolutionFailed` so malformed or malicious headers cannot fall back to the unrestricted default bucket.
 - `tenantQuotas`: `{ maxRequestsPerMinute?: number; maxConcurrentRequests?: number; maxLeaseRefreshers?: number; overrides?: Record<string, { maxRequestsPerMinute?: number; maxConcurrentRequests?: number }> }`. Leave undefined to disable throttling or specify per-tenant overrides to grant premium customers higher limits. `maxLeaseRefreshers` caps how many concurrent lease refresh timers the server maintains globally (default 1000) so a burst of unique tenants cannot exhaust the process.
 - `onLog(entry)`: Optional hook invoked for every log entry emitted by the OData component (`entry` includes `level`, `message`, `context`, and optional `error`). Use it to forward structured telemetry into your existing logging/monitoring pipeline. If you bind your own logger to `ODATA_BINDINGS.LOGGER` the hook still fires after the logger handles the entry.
-- `documentInOpenApiDefault`: Controls whether generated OData routes appear in the published OpenAPI spec. The default `'auto'` policy documents entity sets that are also decorated with LoopBack's `@model()` and hides OData-only models. Set to `true` to publish every generated controller or `false` to hide everything unless a model opts in via `@odataModel({documentInOpenApi: true})`.
+- `documentInOpenApiDefault`: Controls whether generated OData routes appear in the published OpenAPI spec. The default `'auto'` policy documents entity sets whose model has LoopBack model metadata (typically via `@odataModel()` which applies `@model()` automatically). Set to `true` to publish every generated controller or `false` to hide everything unless a model opts in via `@odataModel({documentInOpenApi: true})`.
 - `removeUndocumentedFromSpec`: When `true` (default), routes tagged with `x-visibility: 'undocumented'` are removed before `/openapi.json` is served. Set to `false` to keep them in the document; the spec enhancer retags them as `x-visibility: 'internal'` so tooling can filter them out.
 
 #### Tenant throttling example
@@ -1200,7 +1207,7 @@ Both the global `capabilities` defaults and per-set overrides support the new `i
 
 Generated OData routes now annotate each operation with `x-odata-generated` and a `x-visibility` hint so you can decide which controllers appear in `/openapi.json`.
 
-- With the default `documentInOpenApiDefault: 'auto'`, models that also use LoopBack's `@model()` decorator remain visible while controllers decorated only with `@odataModel()` are hidden.
+- With the default `documentInOpenApiDefault: 'auto'`, generated routes are documented when the model has LoopBack `@model()` metadata (which `@odataModel()` applies automatically when needed).
 - Opt in explicitly with `@odataModel({documentInOpenApi: true})`, or suppress documentation with `@odataModel({documentInOpenApi: false})` even when `@model()` is present.
 - Override the global policy by binding `documentInOpenApiDefault` to `true` (publish every generated controller) or `false` (hide everything until a model opts in).
 
@@ -1213,7 +1220,6 @@ class CustomerDraft extends Entity {
 }
 
 @odataModel({ documentInOpenApi: false })
-@model()
 class AuditLog extends Entity {
   /* ... */
 }
@@ -1269,7 +1275,6 @@ Example: property-backed storage that tracks MIME type/length/ETag on the entity
   mediaEtagField: 'mediaVersion',
   mediaLengthField: 'size',
 })
-@model()
 class MediaAsset extends Entity {
   @property({ id: true }) id?: number;
   @property({ type: 'string' }) contentType?: string;
@@ -1479,7 +1484,6 @@ You can still control the behaviour explicitly:
 
   ```ts
   @odataModel({ deepInsert: false })
-  @model()
   export class Order extends Entity {
     @hasMany(() => OrderItem)
     items?: OrderItem[];
@@ -1490,7 +1494,6 @@ You can still control the behaviour explicitly:
 
   ```ts
   @odataModel({ deepInsert: true })
-  @model()
   export class DraftOrder extends Entity {
     @hasMany(() => OrderItem)
     items?: OrderItem[];
@@ -1628,13 +1631,12 @@ Configuration:
 >   // marks Orders.items as a composition relation (explicit config)
 >   composition: { relations: { items: { delete: 'cascade' } } },
 > })
-> @model()
 > export class Order extends Entity {
 >   @property({ id: true }) id!: number;
 >   @hasMany(() => OrderItem, { keyTo: 'orderId' }) items?: OrderItem[];
 > }
 >
-> @model()
+> @odataModel()
 > export class OrderItem extends Entity {
 >   @property({ id: true }) id!: number;
 >   @belongsTo(() => Order) orderId!: number;
