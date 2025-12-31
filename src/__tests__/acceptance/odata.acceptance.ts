@@ -1779,6 +1779,50 @@ describe('OData component acceptance', () => {
     }
   });
 
+  it('supports multiple lambda filters combined with AND', async () => {
+    const res = await client
+      .get('/odata/Products')
+      .query({
+        $filter: 'orderItems/any(i: i/unitPrice gt 800) and orderItems/any(i: i/unitPrice gt 700)',
+      })
+      .expect(200);
+
+    expect(res.body.value).to.be.Array();
+    expect(res.body.value.length).to.be.greaterThan(0);
+    for (const item of res.body.value) {
+      expect(item.orderItems.some((oi: any) => oi.unitPrice > 800)).to.be.true();
+      expect(item.orderItems.some((oi: any) => oi.unitPrice > 700)).to.be.true();
+    }
+  });
+
+  it('supports negated lambda any filters', async () => {
+    const res = await client
+      .get('/odata/Products')
+      .query({ $filter: 'not orderItems/any(i: i/unitPrice gt 800)' })
+      .expect(200);
+
+    expect(res.body.value).to.be.Array();
+    expect(res.body.value.length).to.be.greaterThan(0);
+    for (const item of res.body.value) {
+      expect(item.orderItems.some((oi: any) => oi.unitPrice > 800)).to.be.false();
+    }
+  });
+
+  it('supports negated lambda all filters', async () => {
+    const res = await client
+      .get('/odata/Products')
+      .query({ $filter: 'not orderItems/all(i: i/unitPrice gt 999999)' })
+      .expect(200);
+
+    expect(res.body.value).to.be.Array();
+    expect(res.body.value.length).to.be.greaterThan(0);
+    for (const item of res.body.value) {
+      expect(item.orderItems).to.be.Array();
+      expect(item.orderItems.length).to.be.greaterThan(0);
+      expect(item.orderItems.some((oi: any) => oi.unitPrice <= 999999)).to.be.true();
+    }
+  });
+
   it('supports lambda filters combined with additional predicates', async () => {
     const res = await client
       .get('/odata/Products')

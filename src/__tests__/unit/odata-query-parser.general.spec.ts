@@ -77,15 +77,16 @@ describe('parseODataQuery basics', () => {
       $filter: 'orderItems/any(i: i/unitPrice gt 800) and price gt 1000',
     });
 
-    assert(parsed.lambda);
-    assert.deepStrictEqual(parsed.lambda?.path, ['orderItems']);
+    assert(parsed.lambdas);
+    assert.equal(parsed.lambdas?.length, 1);
+    assert.deepStrictEqual(parsed.lambdas?.[0]?.path, ['orderItems']);
     assert.deepStrictEqual(parsed.where, { price: { gt: 1000 } });
   });
 
   it('rejects lambda expressions combined with OR predicates', () => {
     assert.throws(
       () => parseODataQuery({ $filter: 'orderItems/any(i: i/unitPrice gt 800) or price gt 1000' }),
-      /Lambda expressions combined with OR are not supported yet/i,
+      /Lambda expressions combined with OR are not supported/i,
     );
   });
 
@@ -126,8 +127,67 @@ describe('parseODataQuery basics', () => {
       $filter: 'orderItems/any(i:i/unitPrice gt 800)',
     });
 
-    assert(parsed.lambda);
-    assert.equal(parsed.lambda?.alias, 'i');
+    assert(parsed.lambdas);
+    assert.equal(parsed.lambdas?.[0]?.alias, 'i');
+  });
+
+  it('supports multiple lambda expressions combined with AND', () => {
+    const parsed = parseODataQuery({
+      $filter: 'orderItems/any(i: i/unitPrice gt 800) and orderItems/any(i: i/unitPrice lt 900)',
+    });
+
+    assert(parsed.lambdas);
+    assert.equal(parsed.lambdas?.length, 2);
+    assert.equal(parsed.where, undefined);
+  });
+
+  it('supports multiple lambdas with non-lambda predicates', () => {
+    const parsed = parseODataQuery({
+      $filter:
+        "orderItems/any(i: i/unitPrice gt 800) and notes/any(n: contains(n/text,'urgent')) and price gt 1000",
+    });
+
+    assert(parsed.lambdas);
+    assert.equal(parsed.lambdas?.length, 2);
+    assert.deepStrictEqual(parsed.where, { price: { gt: 1000 } });
+  });
+
+  it('rewrites negated any(...) to all(not ...)', () => {
+    const parsed = parseODataQuery({
+      $filter: 'not orderItems/any(i: i/unitPrice gt 800)',
+    });
+
+    assert(parsed.lambdas);
+    assert.equal(parsed.lambdas?.length, 1);
+    const lambda = parsed.lambdas?.[0];
+    assert(lambda);
+    assert.equal(lambda.type, 'all');
+    assert.equal(lambda.alias, 'i');
+    assert.equal(lambda.predicate.operator, 'not');
+  });
+
+  it('rewrites negated all(...) to any(not ...)', () => {
+    const parsed = parseODataQuery({
+      $filter: 'not orderItems/all(i: i/unitPrice gt 800)',
+    });
+
+    assert(parsed.lambdas);
+    assert.equal(parsed.lambdas?.length, 1);
+    const lambda = parsed.lambdas?.[0];
+    assert(lambda);
+    assert.equal(lambda.type, 'any');
+    assert.equal(lambda.alias, 'i');
+    assert.equal(lambda.predicate.operator, 'not');
+  });
+
+  it('rejects nested lambdas', () => {
+    assert.throws(
+      () =>
+        parseODataQuery({
+          $filter: 'orderItems/any(i: i/subItems/any(s: s/id eq 1))',
+        }),
+      /Nested lambda expressions are not supported/i,
+    );
   });
 
   it('attaches simple $apply pipelines to the parsed query', () => {

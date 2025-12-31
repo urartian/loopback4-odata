@@ -5,6 +5,7 @@ import {
   ODataCompositionEnforcement,
   ODataCompositionDeletePolicy,
   ODataCorrelationConfig,
+  ODataLambdaConfig,
   ODataPaginationConfig,
   ODataTelemetryCategory,
   ODataTelemetryConfig,
@@ -51,6 +52,9 @@ export function validateODataConfig(config: ODataConfig): void {
   config.tokenSecret = config.tokenSecret.trim();
   if (config.pagination) {
     validatePaginationLimits('ODataConfig.pagination', config.pagination);
+  }
+  if (config.lambda) {
+    validateLambdaConfig('ODataConfig.lambda', config.lambda);
   }
   assignPositive(config as AnyObject, 'pageSize');
   assignPositive(config as AnyObject, 'maxTop');
@@ -102,6 +106,12 @@ export function validatePaginationLimits(label: string, pagination?: ODataPagina
   assignPositive(target, 'maxSkip', label);
   assignPositive(target, 'maxPageSize', label);
   assignPositive(target, 'maxApplyPageSize', label);
+}
+
+export function validateLambdaConfig(label: string, lambda?: ODataLambdaConfig): void {
+  if (!lambda) return;
+  const target = lambda as AnyObject;
+  assignPositive(target, 'maxLambdaScanRows', label);
 }
 
 function assignPositive(target: AnyObject, key: string, parentLabel = 'ODataConfig'): void {

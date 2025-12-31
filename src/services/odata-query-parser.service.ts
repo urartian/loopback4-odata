@@ -940,35 +940,98 @@ function containsLambda(expr: ParsedExpression): boolean {
   return false;
 }
 
-function splitLambdaExpression(expr: ParsedExpression): {
-  lambda?: LambdaExpressionNode;
+function assertNoNestedLambda(lambda: LambdaExpressionNode): void {
+  if (containsLambda(lambda.predicate)) {
+    throw new Error('Nested lambda expressions are not supported.');
+  }
+}
+
+function rewriteNegatedLambdas(expr: ParsedExpression): ParsedExpression {
+  if (expr.operator === 'lambda') return expr;
+
+  if (expr.operator === 'logical') {
+    return {
+      ...expr,
+      expressions: expr.expressions.map((child) => rewriteNegatedLambdas(child)),
+    };
+  }
+
+  if (expr.operator === 'not') {
+    const inner = rewriteNegatedLambdas(expr.expr);
+    if (inner.operator === 'not') {
+      return rewriteNegatedLambdas(inner.expr);
+    }
+    if (inner.operator === 'lambda') {
+      const lambdaType = inner.lambdaType === 'any' ? 'all' : 'any';
+      return {
+        ...inner,
+        lambdaType,
+        predicate: { operator: 'not', expr: inner.predicate },
+      };
+    }
+    return { operator: 'not', expr: inner };
+  }
+
+  return expr;
+}
+
+function collectAndTerms(expr: ParsedExpression, output: ParsedExpression[]): void {
+  if (expr.operator === 'logical' && expr.type === 'and') {
+    for (const child of expr.expressions) {
+      collectAndTerms(child, output);
+    }
+    return;
+  }
+  output.push(expr);
+}
+
+function splitLambdaExpressions(expr: ParsedExpression): {
+  lambdas?: LambdaExpressionNode[];
   predicate?: ParsedExpression;
 } {
   if (expr.operator === 'lambda') {
-    return { lambda: expr };
+    assertNoNestedLambda(expr);
+    return { lambdas: [expr] };
   }
 
-  if (expr.operator === 'logical') {
-    if (expr.type !== 'and') {
-      if (containsLambda(expr)) {
-        throw new Error('Lambda expressions combined with OR are not supported yet.');
-      }
-      return { predicate: expr };
+  if (expr.operator === 'logical' && expr.type === 'or') {
+    if (containsLambda(expr)) {
+      throw new Error('Lambda expressions combined with OR are not supported.');
     }
-    let lambda: LambdaExpressionNode | undefined;
+    return { predicate: expr };
+  }
+
+  if (expr.operator === 'logical' && expr.type === 'and') {
+    const terms: ParsedExpression[] = [];
+    collectAndTerms(expr, terms);
+
+    const lambdas: LambdaExpressionNode[] = [];
     const others: ParsedExpression[] = [];
-    for (const child of expr.expressions) {
-      const result = splitLambdaExpression(child);
-      if (result.lambda) {
-        if (lambda) {
-          throw new Error('Multiple lambda expressions are not supported yet.');
-        }
-        lambda = result.lambda;
+
+    for (const term of terms) {
+      if (term.operator === 'lambda') {
+        assertNoNestedLambda(term);
+        lambdas.push(term);
+        continue;
       }
-      if (result.predicate) {
-        others.push(result.predicate);
+
+      if (term.operator === 'logical' && term.type === 'or' && containsLambda(term)) {
+        throw new Error('Lambda expressions combined with OR are not supported.');
       }
+
+      if (term.operator === 'not' && containsLambda(term)) {
+        throw new Error(
+          'Negated lambda expressions are only supported as "not <collection>/any(...)" or "not <collection>/all(...)".',
+        );
+      }
+
+      if (containsLambda(term)) {
+        throw new Error('Lambda expressions must be combined using top-level AND only.');
+      }
+
+      others.push(term);
     }
+
     let predicate: ParsedExpression | undefined;
     if (others.length === 1) {
       predicate = others[0];
@@ -979,11 +1042,14 @@ function splitLambdaExpression(expr: ParsedExpression): {
         expressions: others,
       };
     }
-    return { lambda, predicate };
+
+    return { lambdas: lambdas.length ? lambdas : undefined, predicate };
   }
 
   if (expr.operator === 'not' && containsLambda(expr)) {
-    throw new Error('Negated lambda expressions are not supported yet.');
+    throw new Error(
+      'Negated lambda expressions are only supported as "not <collection>/any(...)" or "not <collection>/all(...)".',
+    );
   }
 
   return { predicate: expr };
@@ -2431,7 +2497,7 @@ export interface ParsedODataQuery extends Filter<AnyObject> {
   search?: string;
   applyPipeline?: ApplyPipeline;
   apply?: AggregationSpec;
-  lambda?: LambdaExpression;
+  lambdas?: LambdaExpression[];
   postFilter?: ParsedExpression;
   whereExpression?: ParsedExpression;
   unsupportedFunctions?: string[];
@@ -2473,14 +2539,15 @@ export function parseODataQuery(query: QueryObject, options: ParseOptions = {}):
     const tokens = tokenize(filterExpr);
     if (tokens.length) {
       const [expr] = parseFilter(tokens);
-      const { lambda, predicate } = splitLambdaExpression(expr);
-      if (lambda) {
-        filter.lambda = {
+      const rewritten = rewriteNegatedLambdas(expr);
+      const { lambdas, predicate } = splitLambdaExpressions(rewritten);
+      if (lambdas?.length) {
+        filter.lambdas = lambdas.map((lambda) => ({
           type: lambda.lambdaType,
           path: lambda.path,
           alias: lambda.alias,
           predicate: lambda.predicate,
-        };
+        }));
       }
       if (predicate) {
         filter.whereExpression = predicate;

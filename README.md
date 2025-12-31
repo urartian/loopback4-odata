@@ -931,7 +931,7 @@ Run `npm test` to compile the TypeScript specs and execute the unit suite. Accep
 - [x] $metadata endpoint with generated CSDL (including navigation properties for relations)
 - [x] Basic query options → LoopBack filters (`$filter`, `$orderby`, `$top`, `$skip`, `$select`)
 - [x] Extended filter support: `not`, numeric functions (`round`, `floor`, `ceiling`), date extraction (`year`), string helpers (`trim`, `concat`), date parts (`month`, `day`, `hour`, `minute`, `second`) with strict-mode guards when unsupported, and `$search` across string fields
-- [x] any/all (lambdas): translate `<nav>/(any|all)(x: <expr>)` through relation repositories, support multi-segment paths, and allow additional predicates via `and` (nesting/multiple lambdas still pending)
+- [x] any/all (lambdas): support `<nav>/(any|all)(x: <expr>)` (including multi-segment paths); multiple lambdas are supported when combined by top-level `and`; `not <lambda>` is supported via `any/all` rewrite (nested lambdas and `or` with lambdas remain unsupported)
 - [x] Relational expansion via `$expand`
 - [x] Inline and standalone `$count`
 - [x] `$batch` endpoint (JSON and multipart/mixed)
@@ -1175,7 +1175,10 @@ Any custom store only needs to implement the `TenantThrottleStore` interface (al
 - `maxDeepUpdateDepth`: Maximum recursion depth for deep update traversal (defaults to `maxDeepInsertDepth` when not set).
 - `enableNavigationRefEndpoints`: Set to `false` to skip registration of navigation `$ref` routes if you prefer to manage linking manually (default: `true`).
 - `$apply` pipelines support chained `filter`, `groupby`, `aggregate`, `orderby`, `skip`, and `top` stages, including navigation-path aggregates. By default the runtime executes these pipelines in memory; this carries CPU and memory overhead and should be reserved for small result sets. Opt into pushdown to keep heavy analytics inside the database.
-- Lambda filters (`any` / `all`) support navigation collections (including multi-segment paths) and can be combined with additional predicates using `and`. Nesting lambdas, mixing multiple lambdas, or combining them with `or` remains unsupported.
+- Lambda filters (`any` / `all`) support navigation collections (including multi-segment paths) and can be combined with additional predicates using `and`. Multiple lambdas are supported when combined by top-level `and`, and `not <collection>/(any|all)(...)` is supported via rewrite. Nested lambdas and combining lambdas with `or` remain unsupported.
+- `lambda.maxLambdaScanRows`: Maximum number of root entities fetched for in-memory lambda evaluation (default: `maxApplyResultSize` if set, else `2000`). Requests exceeding the limit return `400 Bad Request`.
+- `lambda.requireTopWhenLambda`: When `true`, requires the client to include `$top` unless server-driven paging is active; otherwise returns `400 Bad Request` (default: `false`).
+- `lambda.warnOnLambdaFallback`: When `true`, logs/emits telemetry when lambda evaluation falls back to in-memory processing (default: `true`).
 - `strict` (default: true): Enables stricter validations and policies:
   - Requires `If-Match` on `PATCH`/`DELETE` when ETags are enabled (428 if missing).
   - If `maxTop` is set, `$top` above the cap returns `400 Bad Request` instead of being clamped.
@@ -1194,6 +1197,19 @@ Example: With `{basePath: '/api/odata', maxTop: 100, enableCount: false}`
 - `GET /api/odata/Products?$top=1000` returns at most 100 records.
 - `GET /api/odata/Products?$count=true` → `400 Bad Request` (unsupported option).
 - `GET /api/odata/Products/$count` → `501 Not Implemented`.
+
+Example: Lambda guardrails
+
+```ts
+app.bind(ODATA_BINDINGS.CONFIG).to({
+  tokenSecret: 'change-me',
+  lambda: {
+    maxLambdaScanRows: 2000,
+    requireTopWhenLambda: true,
+    warnOnLambdaFallback: true,
+  },
+});
+```
 
 Entity-set specific overrides are available via `EntitySetRegistry.register`:
 
