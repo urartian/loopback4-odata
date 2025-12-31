@@ -9904,6 +9904,37 @@ export function defineODataCrudController(def: EntitySetDef) {
     }
 
     assertWriteDataSource(repo: AnyObject | undefined, hint: string): void {
+      const atomicity = this.atomicityState() as
+        | (AtomicityRequestState & { dataSource?: juggler.DataSource; dataSourceKey?: string })
+        | undefined;
+      if (atomicity?.dataSource || atomicity?.dataSourceKey) {
+        const repoDs = (repo as AnyObject | undefined)?.dataSource as
+          | juggler.DataSource
+          | undefined;
+        if (repoDs && atomicity.dataSource && repoDs !== atomicity.dataSource) {
+          const err = new HttpErrors.NotImplemented(
+            `Atomicity group ${atomicity.groupId} would write across multiple datasources (${hint}).`,
+          );
+          (err as any).code = 'MultiDataSourceChangesetNotSupported';
+          throw err;
+        }
+        const expectedKey = atomicity.dataSourceKey;
+        const actualKey = repoDs?.name;
+        if (
+          repoDs &&
+          !atomicity.dataSource &&
+          expectedKey &&
+          actualKey &&
+          expectedKey !== actualKey
+        ) {
+          const err = new HttpErrors.NotImplemented(
+            `Atomicity group ${atomicity.groupId} would write across multiple datasources (${hint}).`,
+          );
+          (err as any).code = 'MultiDataSourceChangesetNotSupported';
+          throw err;
+        }
+      }
+
       const state = this.writeTxState();
       if (!state) return;
       const cfg = this.cfg?.writeTransactions;

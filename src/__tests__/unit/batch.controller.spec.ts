@@ -1,5 +1,6 @@
 /// <reference path="../../types/testing.globals.d.ts" />
 
+import 'reflect-metadata';
 import { strict as assert } from 'assert';
 import { ODataBatchController, BatchResponsePayload } from '../../controllers/batch.controller';
 import { ODataConfig } from '../../types';
@@ -9,6 +10,7 @@ import { ODataLogger } from '../../keys';
 import { EntitySetRegistry } from '../../registry/entityset-registry';
 import { Order, OrderItem } from '../fixtures/odata-app.fixture';
 import { ODATA_ATOMICITY_STATE } from '../../constants';
+import { Entity, hasMany, model, property } from '@loopback/repository';
 
 type StubResponseMap = Record<
   string,
@@ -186,6 +188,255 @@ describe('$batch controller', () => {
     assert.equal(second.status, 409);
     assert.deepStrictEqual(second.body, { error: { code: 'Conflict' } });
     assert.equal(rollbackCalled, true);
+  });
+
+  it('rejects changesets that would write to multiple datasources', async () => {
+    let beginCount = 0;
+    const dsA = {
+      name: 'dsA',
+      async beginTransaction() {
+        beginCount += 1;
+        return { commit: async () => undefined, rollback: async () => undefined };
+      },
+    };
+    const dsB = {
+      name: 'dsB',
+      async beginTransaction() {
+        beginCount += 1;
+        return { commit: async () => undefined, rollback: async () => undefined };
+      },
+    };
+    const defs = {
+      Orders: {
+        name: 'Orders',
+        modelCtor: class {},
+        repositoryBindingKey: 'repositories.Orders',
+      },
+      Customers: {
+        name: 'Customers',
+        modelCtor: class {},
+        repositoryBindingKey: 'repositories.Customers',
+      },
+    };
+    const registry = {
+      findByName: (name: string) => (defs as any)[name],
+    } as any;
+    const controller = new ODataBatchController(
+      { handleRequest: async () => undefined } as any,
+      'http://localhost',
+      createRequestContextStub(),
+      {
+        get: async (binding: string) => {
+          if (binding === 'repositories.Orders') return { dataSource: dsA };
+          if (binding === 'repositories.Customers') return { dataSource: dsB };
+          return undefined;
+        },
+      } as any,
+      registry,
+      noopLogger,
+      defaultConfig,
+    );
+    let executed = 0;
+    (controller as any).executeSingle = async (request: { id?: string }) => {
+      executed += 1;
+      return { id: request.id, status: 204 };
+    };
+
+    const batchResult = (await controller.handleBatch(
+      {
+        requests: [
+          { id: 'o1', method: 'POST', url: '/odata/Orders', atomicityGroup: 'g1' },
+          { id: 'c1', method: 'POST', url: '/odata/Customers', atomicityGroup: 'g1' },
+        ],
+      },
+      responseStub,
+      requestStub('application/json'),
+    )) as BatchResponsePayload;
+
+    assert.equal(executed, 0);
+    assert.equal(beginCount, 0);
+    const changeset = batchResult.responses.filter((entry: any) => entry.atomicityGroup === 'g1');
+    assert.equal(changeset.length, 2);
+    for (const entry of changeset) {
+      assert.equal(entry.status, 501);
+      assert.equal((entry.body as any)?.error?.code, 'MultiDataSourceChangesetNotSupported');
+    }
+  });
+
+  it('resolves Content-ID URLs within a changeset and uses a single transaction', async () => {
+    @model()
+    class OrderModel extends Entity {
+      @property({ id: true })
+      id!: number;
+
+      @hasMany(() => OrderItemModel)
+      items?: OrderItemModel[];
+    }
+
+    @model()
+    class OrderItemModel extends Entity {
+      @property({ id: true })
+      id!: number;
+    }
+
+    let beginCount = 0;
+    let commitCount = 0;
+    let rollbackCount = 0;
+    const tx = {
+      async commit() {
+        commitCount += 1;
+      },
+      async rollback() {
+        rollbackCount += 1;
+      },
+    };
+    const ds = {
+      name: 'db',
+      async beginTransaction() {
+        beginCount += 1;
+        return tx;
+      },
+    };
+    const defs = {
+      Orders: {
+        name: 'Orders',
+        modelCtor: OrderModel,
+        repositoryBindingKey: 'repositories.Orders',
+      },
+      OrderItems: {
+        name: 'OrderItems',
+        modelCtor: OrderItemModel,
+        repositoryBindingKey: 'repositories.OrderItems',
+      },
+    };
+    const registry = {
+      findByName: (name: string) => (defs as any)[name],
+      get: (modelCtor: unknown) =>
+        modelCtor === OrderModel
+          ? (defs as any).Orders
+          : modelCtor === OrderItemModel
+            ? (defs as any).OrderItems
+            : undefined,
+    } as any;
+    const controller = new ODataBatchController(
+      { handleRequest: async () => undefined } as any,
+      'http://localhost',
+      createRequestContextStub(),
+      {
+        get: async () => ({ dataSource: ds }),
+      } as any,
+      registry,
+      noopLogger,
+      defaultConfig,
+    );
+    let executed = 0;
+    (controller as any).executeSingle = async (request: { id?: string }) => {
+      executed += 1;
+      return { id: request.id, status: 204 };
+    };
+
+    const batchResult = (await controller.handleBatch(
+      {
+        requests: [
+          { id: '1', method: 'POST', url: '/odata/Orders', atomicityGroup: 'g1' },
+          { id: '2', method: 'POST', url: '$1/Items', atomicityGroup: 'g1' },
+        ],
+      },
+      responseStub,
+      requestStub('application/json'),
+    )) as BatchResponsePayload;
+
+    assert.equal(executed, 2);
+    assert.equal(beginCount, 1);
+    assert.equal(commitCount, 1);
+    assert.equal(rollbackCount, 0);
+    const changeset = batchResult.responses.filter((entry: any) => entry.atomicityGroup === 'g1');
+    assert.equal(changeset.length, 2);
+    for (const entry of changeset) {
+      assert.equal(entry.status, 204);
+    }
+  });
+
+  it('rejects Content-ID forward references inside a changeset', async () => {
+    @model()
+    class OrderModel extends Entity {
+      @property({ id: true })
+      id!: number;
+
+      @hasMany(() => OrderItemModel)
+      items?: OrderItemModel[];
+    }
+
+    @model()
+    class OrderItemModel extends Entity {
+      @property({ id: true })
+      id!: number;
+    }
+
+    let beginCount = 0;
+    const ds = {
+      name: 'db',
+      async beginTransaction() {
+        beginCount += 1;
+        return { commit: async () => undefined, rollback: async () => undefined };
+      },
+    };
+    const defs = {
+      Orders: {
+        name: 'Orders',
+        modelCtor: OrderModel,
+        repositoryBindingKey: 'repositories.Orders',
+      },
+      OrderItems: {
+        name: 'OrderItems',
+        modelCtor: OrderItemModel,
+        repositoryBindingKey: 'repositories.OrderItems',
+      },
+    };
+    const registry = {
+      findByName: (name: string) => (defs as any)[name],
+      get: (modelCtor: unknown) =>
+        modelCtor === OrderModel
+          ? (defs as any).Orders
+          : modelCtor === OrderItemModel
+            ? (defs as any).OrderItems
+            : undefined,
+    } as any;
+    const controller = new ODataBatchController(
+      { handleRequest: async () => undefined } as any,
+      'http://localhost',
+      createRequestContextStub(),
+      {
+        get: async () => ({ dataSource: ds }),
+      } as any,
+      registry,
+      noopLogger,
+      defaultConfig,
+    );
+    let executed = 0;
+    (controller as any).executeSingle = async (request: { id?: string }) => {
+      executed += 1;
+      return { id: request.id, status: 204 };
+    };
+
+    await assert.rejects(
+      () =>
+        controller.handleBatch(
+          {
+            requests: [
+              { id: '1', method: 'POST', url: '$2/Items', atomicityGroup: 'g1' },
+              { id: '2', method: 'POST', url: '/odata/Orders', atomicityGroup: 'g1' },
+            ],
+          },
+          responseStub,
+          requestStub('application/json'),
+        ),
+      (err: unknown) =>
+        err instanceof HttpErrors.BadRequest && /Content-ID/i.test((err as Error).message ?? ''),
+    );
+
+    assert.equal(executed, 0);
+    assert.equal(beginCount, 0);
   });
 
   it('continues executing independent JSON requests after a failure', async () => {
@@ -953,19 +1204,53 @@ describe('$batch controller', () => {
   });
 
   it('rejects JSON changesets whose aggregate response size exceeds the configured payload limit', async () => {
-    const controller = createController(
+    const config: ODataConfig = {
+      ...defaultConfig,
+      batch: { ...defaultConfig.batch, maxResponsePayloadBytes: 3000 },
+    };
+    const def = {
+      name: 'Products',
+      modelCtor: class {},
+      repositoryBindingKey: 'repositories.Products',
+    };
+    const registry = {
+      findByName: (name: string) => (name === 'Products' ? def : undefined),
+    } as any;
+    const controller = new ODataBatchController(
+      { handleRequest: async () => undefined } as any,
+      'http://localhost',
+      createRequestContextStub(),
       {
-        c1: { status: 200, body: Buffer.alloc(2048) },
-        c2: { status: 200, body: Buffer.alloc(2048) },
-      },
-      {
-        ...defaultConfig,
-        batch: {
-          ...defaultConfig.batch,
-          maxResponsePayloadBytes: 3000,
-        },
-      },
+        get: async () => ({
+          dataSource: {
+            name: 'db',
+            beginTransaction: async () => ({
+              commit: async () => undefined,
+              rollback: async () => undefined,
+            }),
+          },
+        }),
+      } as any,
+      registry,
+      noopLogger,
+      config,
     );
+    const stubs: StubResponseMap = {
+      c1: { status: 200, body: Buffer.alloc(2048) },
+      c2: { status: 200, body: Buffer.alloc(2048) },
+    };
+    (controller as any).executeSingle = async (request: { id: string }) => {
+      const stub = stubs[request.id];
+      if (!stub) {
+        throw new Error(`Missing stub for request ${request.id}`);
+      }
+      return {
+        id: request.id,
+        status: stub.status,
+        headers: stub.headers,
+        body: stub.body,
+      };
+    };
 
     await assert.rejects(
       controller.handleBatch(
@@ -983,19 +1268,53 @@ describe('$batch controller', () => {
   });
 
   it('rejects multipart changesets whose aggregate response size exceeds the configured payload limit', async () => {
-    const controller = createController(
+    const config: ODataConfig = {
+      ...defaultConfig,
+      batch: { ...defaultConfig.batch, maxResponsePayloadBytes: 4000 },
+    };
+    const def = {
+      name: 'Products',
+      modelCtor: class {},
+      repositoryBindingKey: 'repositories.Products',
+    };
+    const registry = {
+      findByName: (name: string) => (name === 'Products' ? def : undefined),
+    } as any;
+    const controller = new ODataBatchController(
+      { handleRequest: async () => undefined } as any,
+      'http://localhost',
+      createRequestContextStub(),
       {
-        '1': { status: 200, body: Buffer.alloc(2048) },
-        '2': { status: 200, body: Buffer.alloc(2048) },
-      },
-      {
-        ...defaultConfig,
-        batch: {
-          ...defaultConfig.batch,
-          maxResponsePayloadBytes: 4000,
-        },
-      },
+        get: async () => ({
+          dataSource: {
+            name: 'db',
+            beginTransaction: async () => ({
+              commit: async () => undefined,
+              rollback: async () => undefined,
+            }),
+          },
+        }),
+      } as any,
+      registry,
+      noopLogger,
+      config,
     );
+    const stubs: StubResponseMap = {
+      '1': { status: 200, body: Buffer.alloc(2048) },
+      '2': { status: 200, body: Buffer.alloc(2048) },
+    };
+    (controller as any).executeSingle = async (request: { id: string }) => {
+      const stub = stubs[request.id];
+      if (!stub) {
+        throw new Error(`Missing stub for request ${request.id}`);
+      }
+      return {
+        id: request.id,
+        status: stub.status,
+        headers: stub.headers,
+        body: stub.body,
+      };
+    };
 
     const boundary = 'batch_cs_limit';
     const changesetBoundary = 'changeset_cs_limit';
@@ -1565,6 +1884,26 @@ describe('$batch controller', () => {
           contentIds,
         ),
       (err: unknown) => err instanceof HttpErrors.BadRequest,
+    );
+  });
+
+  it('throws 400 when a changeset contains an unknown Content-ID reference', async () => {
+    const controller = createController({});
+
+    await assert.rejects(
+      () =>
+        controller.handleBatch(
+          {
+            requests: [
+              { id: 'a1', method: 'POST', url: '$missing-token', atomicityGroup: 'g1' },
+              { id: 'a2', method: 'POST', url: '/odata/Products', atomicityGroup: 'g1' },
+            ],
+          },
+          responseStub,
+          requestStub('application/json'),
+        ),
+      (err: unknown) =>
+        err instanceof HttpErrors.BadRequest && /Content-ID/i.test((err as Error).message ?? ''),
     );
   });
 
