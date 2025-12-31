@@ -179,12 +179,16 @@ class AtomicityGroupContext {
   constructor(
     public readonly id: string,
     private readonly transactionsBySet: Map<string, Transaction>,
+    dataSource?: juggler.DataSource,
+    dataSourceKey?: string,
   ) {
     const unique = new Set<Transaction>();
     for (const tx of transactionsBySet.values()) unique.add(tx);
     this.transactions = Array.from(unique.values());
     this.requestState = {
       groupId: id,
+      dataSource,
+      dataSourceKey,
       getTransaction: (entitySetName: string) => this.transactionsBySet.get(entitySetName),
     };
   }
@@ -625,10 +629,14 @@ export class ODataBatchController {
     return Number(elapsed) / 1e6;
   }
 
-  private async ensureTransactionalSupport(def: EntitySetDef, groupId: string): Promise<boolean> {
+  private async ensureTransactionalSupport(
+    def: EntitySetDef,
+    groupId: string,
+    resolvedDataSource?: juggler.DataSource,
+  ): Promise<boolean> {
     if (def.supportsTransactions === true) return true;
     if (def.transactionCapabilityLocked === false) {
-      const refreshed = await this.tryRefreshTransactionalSupport(def);
+      const refreshed = await this.tryRefreshTransactionalSupport(def, resolvedDataSource);
       if (refreshed) return true;
     }
     if (def.supportsTransactions === false) {
@@ -643,11 +651,16 @@ export class ODataBatchController {
     return true;
   }
 
-  private async tryRefreshTransactionalSupport(def: EntitySetDef): Promise<boolean> {
+  private async tryRefreshTransactionalSupport(
+    def: EntitySetDef,
+    resolvedDataSource?: juggler.DataSource,
+  ): Promise<boolean> {
     if (!def.repositoryBindingKey) return false;
     try {
-      const repository = await this.app.get(def.repositoryBindingKey);
-      const dataSource = (repository as { dataSource?: juggler.DataSource }).dataSource;
+      const dataSource =
+        resolvedDataSource ??
+        ((await this.app.get(def.repositoryBindingKey)) as { dataSource?: juggler.DataSource })
+          .dataSource;
       if (!dataSource) {
         this.markEntitySetNonTransactional(def, def.repositoryBindingKey);
         return false;
@@ -1380,7 +1393,43 @@ export class ODataBatchController {
     sharedContentIdEtags: Map<string, string>,
   ): Promise<BatchResponseEntry[]> {
     this.ensureAtomicityGroupContainsOnlyWrites(groupId, requests);
-    const context = await this.createAtomicGroupContext(groupId, requests);
+    let context: AtomicityGroupContext | undefined;
+    try {
+      context = await this.createAtomicGroupContext(groupId, requests, requestOrder);
+    } catch (error) {
+      const rejection = this.describeAtomicityGroupRejection(error);
+      if (rejection) {
+        this.logger.warn(rejection.logMessage, {
+          scope: 'batch',
+          atomicityGroup: groupId,
+          reason: rejection.reason,
+          dataSources: rejection.dataSources,
+          entitySets: rejection.entitySets,
+        });
+        this.emitBatchTelemetry(
+          'batch.changeset.rejected',
+          {
+            atomicityGroup: groupId,
+            reason: rejection.reason,
+            dataSources: rejection.dataSources,
+            entitySets: rejection.entitySets,
+          },
+          'warn',
+        );
+        const entries = requests.map((req) => {
+          const entry: BatchResponseEntry = {
+            id: req.id,
+            status: 501,
+            body: this.odataError(rejection.code, rejection.message),
+          };
+          this.trackResponseSize(tracker, entry);
+          if (req.id) dependencyResults.set(req.id, entry);
+          return entry;
+        });
+        return entries;
+      }
+      throw error;
+    }
     const contentIdMap = new Map<string, string>(sharedContentIds);
     const contentIdEtags = new Map<string, string>(sharedContentIdEtags);
     try {
@@ -1482,80 +1531,80 @@ export class ODataBatchController {
   private async createAtomicGroupContext(
     groupId: string,
     requests: BatchRequest[],
+    requestOrder?: Map<BatchRequest, number>,
   ): Promise<AtomicityGroupContext | undefined> {
+    const order = requestOrder ?? this.buildRequestOrderIndex(requests);
     const setNames = new Set<string>();
+    const setDefs = new Map<string, EntitySetDef>();
+    const dataSourcesBySet = new Map<string, juggler.DataSource>();
+    const dataSourceInstances = new Set<juggler.DataSource>();
+    const dataSourceNameCounts = new Map<string, number>();
+    const dataSourceResolution = new Map<
+      juggler.DataSource,
+      { name?: string; bindingKey: string }
+    >();
+    const nonTransactionalSets = new Set<string>();
+
+    const entitySetCache = new Map<BatchRequest, string | undefined>();
     for (const request of requests) {
       const method = (request.method ?? 'GET').toUpperCase();
       // Only open transactions for write operations. GET/HEAD must not require a transaction.
       if (method === 'GET' || method === 'HEAD') continue;
-      const setName = this.resolveEntitySetName(request.url);
-      if (setName) setNames.add(setName);
-    }
-
-    const transactionsBySet = new Map<string, Transaction>();
-    const transactionsByDataSource = new Map<string, Transaction>();
-    const startedTransactions: Transaction[] = [];
-    const nonTransactionalSets = new Set<string>();
-
-    try {
-      for (const setName of setNames) {
-        const def = this.registry.findByName(setName);
-        if (!def) continue;
-        const transactional = await this.ensureTransactionalSupport(def, groupId);
-        if (!transactional) {
-          nonTransactionalSets.add(def.name);
-          continue;
-        }
-        if (!def.repositoryBindingKey) {
-          throw new HttpErrors.InternalServerError(
-            `Entity set ${def.name} is missing a repository binding and cannot participate in transactions.`,
-          );
-        }
-
-        const repository = await this.app.get(def.repositoryBindingKey);
-        const dataSource = (repository as { dataSource?: juggler.DataSource }).dataSource;
-        if (!dataSource || !dataSourceSupportsTransactions(dataSource)) {
-          this.markEntitySetNonTransactional(def, dataSource?.name ?? def.repositoryBindingKey);
-          nonTransactionalSets.add(def.name);
-          continue;
-        }
-
-        const dsKey = dataSource.name ?? def.repositoryBindingKey;
-        let tx = transactionsByDataSource.get(dsKey);
-        if (!tx) {
-          try {
-            tx = await this.beginTransactionForDataSource(dataSource);
-          } catch (error) {
-            if (error instanceof HttpErrors.HttpError && error.statusCode === 501) {
-              this.markEntitySetNonTransactional(def, dataSource.name ?? def.repositoryBindingKey);
-              nonTransactionalSets.add(def.name);
-              continue;
-            }
-            throw error;
-          }
-          transactionsByDataSource.set(dsKey, tx);
-          startedTransactions.push(tx);
-        }
-        def.supportsTransactions = true;
-        def.transactionCapabilityLocked = true;
-        transactionsBySet.set(def.name, tx!);
-      }
-    } catch (error) {
-      await this.rollbackGroupTransactions(startedTransactions);
-      throw error;
-    }
-
-    if (!transactionsBySet.size) {
-      if (setNames.size) {
-        const affected = Array.from(nonTransactionalSets.size ? nonTransactionalSets : setNames);
-        this.warn('Atomicity group cannot start datasource transactions.', {
-          atomicityGroup: groupId,
-          entitySets: affected,
+      const resolved = this.resolveAtomicityGroupEntitySetName(
+        request,
+        groupId,
+        requests,
+        order,
+        entitySetCache,
+        new Set(),
+      );
+      if (!resolved) {
+        throw this.atomicityGroupUnsupported(groupId, {
+          reason: 'unresolvable',
+          entitySets: Array.from(setNames),
         });
-        await this.rollbackGroupTransactions(startedTransactions);
-        throw this.atomicityTransactionsUnsupported(groupId, affected);
       }
-      return undefined;
+      setNames.add(resolved);
+    }
+
+    if (!setNames.size) return undefined;
+
+    // Map entity sets to datasources (no transactions opened during this pass).
+    for (const setName of setNames) {
+      const def = this.registry.findByName(setName);
+      if (!def) {
+        throw this.atomicityGroupUnsupported(groupId, {
+          reason: 'unresolvable',
+          entitySets: Array.from(setNames),
+        });
+      }
+      setDefs.set(setName, def);
+      if (def.supportsTransactions === false && def.transactionCapabilityLocked === true) {
+        nonTransactionalSets.add(def.name);
+        continue;
+      }
+      if (!def.repositoryBindingKey) {
+        throw new HttpErrors.InternalServerError(
+          `Entity set ${def.name} is missing a repository binding and cannot participate in transactions.`,
+        );
+      }
+      const repository = await this.app.get(def.repositoryBindingKey);
+      const dataSource = (repository as { dataSource?: juggler.DataSource }).dataSource;
+      if (!dataSource) {
+        this.markEntitySetNonTransactional(def, def.repositoryBindingKey);
+        nonTransactionalSets.add(def.name);
+        continue;
+      }
+      dataSourcesBySet.set(setName, dataSource);
+      dataSourceInstances.add(dataSource);
+      const name = dataSource.name;
+      if (name) {
+        dataSourceNameCounts.set(name, (dataSourceNameCounts.get(name) ?? 0) + 1);
+      }
+      dataSourceResolution.set(dataSource, {
+        name: dataSource.name,
+        bindingKey: def.repositoryBindingKey,
+      });
     }
 
     if (nonTransactionalSets.size) {
@@ -1564,11 +1613,266 @@ export class ODataBatchController {
         atomicityGroup: groupId,
         entitySets: affected,
       });
-      await this.rollbackGroupTransactions(startedTransactions);
       throw this.atomicityTransactionsUnsupported(groupId, affected);
     }
 
-    return new AtomicityGroupContext(groupId, transactionsBySet);
+    if (dataSourceInstances.size > 1) {
+      const dataSources: string[] = [];
+      for (const info of dataSourceResolution.values()) {
+        if (info.name) {
+          const count = dataSourceNameCounts.get(info.name) ?? 0;
+          dataSources.push(count > 1 ? `${info.name} (${info.bindingKey})` : info.name);
+        } else {
+          dataSources.push(info.bindingKey);
+        }
+      }
+      throw this.atomicityMultiDataSourceUnsupported(groupId, {
+        dataSources: Array.from(new Set(dataSources)),
+        entitySets: Array.from(setNames),
+      });
+    }
+
+    const chosenSet = Array.from(setNames)[0];
+    const chosenDef = setDefs.get(chosenSet);
+    const chosenDataSource = chosenSet ? dataSourcesBySet.get(chosenSet) : undefined;
+    const chosenKey =
+      chosenDataSource && chosenDef
+        ? (chosenDataSource.name ?? chosenDef.repositoryBindingKey)
+        : undefined;
+
+    // Validate transaction capability for all entity sets before starting a transaction.
+    for (const setName of setNames) {
+      const def = setDefs.get(setName);
+      const dataSource = dataSourcesBySet.get(setName);
+      if (!def || !dataSource) continue;
+      const transactional = await this.ensureTransactionalSupport(def, groupId, dataSource);
+      if (!transactional) {
+        nonTransactionalSets.add(def.name);
+        continue;
+      }
+      if (!dataSourceSupportsTransactions(dataSource)) {
+        this.markEntitySetNonTransactional(def, dataSource.name ?? def.repositoryBindingKey);
+        nonTransactionalSets.add(def.name);
+      }
+    }
+
+    if (nonTransactionalSets.size) {
+      const affected = Array.from(nonTransactionalSets);
+      this.warn('Atomicity group contains non-transactional entity sets.', {
+        atomicityGroup: groupId,
+        entitySets: affected,
+      });
+      throw this.atomicityTransactionsUnsupported(groupId, affected);
+    }
+
+    if (!chosenDataSource || !chosenKey) {
+      const affected = Array.from(setNames);
+      this.warn('Atomicity group cannot start datasource transactions.', {
+        atomicityGroup: groupId,
+        entitySets: affected,
+      });
+      throw this.atomicityTransactionsUnsupported(groupId, affected);
+    }
+
+    const transactionsBySet = new Map<string, Transaction>();
+    let tx: Transaction;
+    try {
+      tx = await this.beginTransactionForDataSource(chosenDataSource);
+    } catch (error) {
+      if (error instanceof HttpErrors.HttpError && error.statusCode === 501) {
+        for (const def of setDefs.values()) {
+          this.markEntitySetNonTransactional(def, chosenKey);
+        }
+        throw this.atomicityTransactionsUnsupported(groupId, Array.from(setNames));
+      }
+      throw error;
+    }
+
+    for (const setName of setNames) {
+      const def = setDefs.get(setName);
+      if (!def) continue;
+      def.supportsTransactions = true;
+      def.transactionCapabilityLocked = true;
+      transactionsBySet.set(def.name, tx);
+    }
+
+    return new AtomicityGroupContext(groupId, transactionsBySet, chosenDataSource, chosenKey);
+  }
+
+  private resolveAtomicityGroupEntitySetName(
+    request: BatchRequest,
+    groupId: string,
+    groupRequests: BatchRequest[],
+    requestOrder: Map<BatchRequest, number>,
+    cache: Map<BatchRequest, string | undefined>,
+    visiting: Set<BatchRequest>,
+  ): string | undefined {
+    if (cache.has(request)) return cache.get(request);
+    if (visiting.has(request)) return undefined;
+    visiting.add(request);
+    try {
+      const direct = this.resolveEntitySetName(request.url);
+      if (direct) {
+        cache.set(request, direct);
+        return direct;
+      }
+      const stripped = this.stripServiceRootFromUrl(request.url);
+      if (!stripped?.length) {
+        cache.set(request, undefined);
+        return undefined;
+      }
+      const firstRaw = this.decodePathSegment(stripped[0]);
+      if (!firstRaw || !firstRaw.startsWith('$')) {
+        cache.set(request, undefined);
+        return undefined;
+      }
+      const tokenMatch = this.extractContentIdToken(firstRaw);
+      if (!tokenMatch) {
+        cache.set(request, undefined);
+        return undefined;
+      }
+      const referenced = this.resolveAtomicityGroupContentIdReference(
+        tokenMatch.token,
+        request,
+        groupId,
+        groupRequests,
+        requestOrder,
+      );
+      if (!referenced) {
+        throw new HttpErrors.BadRequest(
+          `Invalid Content-ID reference ${firstRaw}: must reference an earlier request in the same changeset.`,
+        );
+      }
+      const baseSet = this.resolveAtomicityGroupEntitySetName(
+        referenced,
+        groupId,
+        groupRequests,
+        requestOrder,
+        cache,
+        visiting,
+      );
+      if (!baseSet) {
+        cache.set(request, undefined);
+        return undefined;
+      }
+      const resolved = this.resolveEntitySetFromBase(baseSet, stripped.slice(1));
+      cache.set(request, resolved);
+      return resolved;
+    } finally {
+      visiting.delete(request);
+    }
+  }
+
+  private resolveAtomicityGroupContentIdReference(
+    token: string,
+    request: BatchRequest,
+    groupId: string,
+    groupRequests: BatchRequest[],
+    requestOrder: Map<BatchRequest, number>,
+  ): BatchRequest | undefined {
+    const groupById = new Map<string, BatchRequest>();
+    for (const candidate of groupRequests) {
+      if (candidate.id) groupById.set(candidate.id, candidate);
+    }
+    let referenced: BatchRequest | undefined;
+    if (token.startsWith('requests(') && token.endsWith(')')) {
+      const inner = token.slice('requests('.length, -1).trim();
+      if (/^\d+$/.test(inner)) {
+        const ordinal = Number(inner);
+        if (!Number.isFinite(ordinal) || ordinal <= 0) return undefined;
+        for (const [req, idx] of requestOrder) {
+          if (idx + 1 === ordinal) {
+            referenced = req;
+            break;
+          }
+        }
+      } else {
+        const stripped =
+          (inner.startsWith("'") && inner.endsWith("'")) ||
+          (inner.startsWith('"') && inner.endsWith('"'))
+            ? inner.slice(1, -1)
+            : inner;
+        referenced = groupById.get(stripped);
+      }
+    } else {
+      referenced = groupById.get(token);
+    }
+    if (!referenced) return undefined;
+    if (referenced.atomicityGroup?.trim() !== groupId) return undefined;
+    const currentIndex = requestOrder.get(request);
+    const referencedIndex = requestOrder.get(referenced);
+    if (currentIndex === undefined || referencedIndex === undefined) return undefined;
+    if (referencedIndex >= currentIndex) return undefined;
+    return referenced;
+  }
+
+  private resolveEntitySetFromBase(
+    baseSetName: string,
+    trailingSegments: string[],
+  ): string | undefined {
+    let current = this.registry.findByName(baseSetName);
+    if (!current) return undefined;
+    for (const segmentRaw of trailingSegments) {
+      const segment = this.normalizePathSegment(segmentRaw);
+      if (!segment || segment.startsWith('$')) break;
+      const next = this.resolveNavigationTargetEntitySet(current, segment);
+      if (!next) break;
+      current = next;
+    }
+    return current?.name;
+  }
+
+  private stripServiceRootFromUrl(rawUrl: string): string[] | undefined {
+    const sanitized = this.sanitizeUrl(rawUrl, true);
+    if (!sanitized) return undefined;
+    const [path] = sanitized.split('?');
+    const segments = path.split('/').filter(Boolean);
+    return this.stripServiceRootSegments(segments);
+  }
+
+  private decodePathSegment(segment: string): string {
+    if (!segment) return segment;
+    try {
+      return decodeURIComponent(segment);
+    } catch {
+      return segment;
+    }
+  }
+
+  private describeAtomicityGroupRejection(error: unknown):
+    | {
+        code: string;
+        message: string;
+        reason: 'multi-datasource' | 'unresolvable';
+        dataSources: string[];
+        entitySets: string[];
+        logMessage: string;
+      }
+    | undefined {
+    if (!(error instanceof HttpErrors.HttpError)) return undefined;
+    if (error.statusCode !== 501) return undefined;
+    const code = (error as AnyObject).code;
+    if (code !== 'MultiDataSourceChangesetNotSupported' && code !== 'AtomicityGroupNotSupported') {
+      return undefined;
+    }
+    const details = (error as AnyObject).details as AnyObject | undefined;
+    const reason =
+      (details?.reason as 'multi-datasource' | 'unresolvable' | undefined) ?? 'unresolvable';
+    const dataSources = Array.isArray(details?.dataSources)
+      ? (details?.dataSources as string[])
+      : [];
+    const entitySets = Array.isArray(details?.entitySets) ? (details?.entitySets as string[]) : [];
+    return {
+      code,
+      message: error.message ?? 'Atomicity group rejected.',
+      reason,
+      dataSources,
+      entitySets,
+      logMessage:
+        code === 'MultiDataSourceChangesetNotSupported'
+          ? 'Atomicity group rejected: multi-datasource changeset.'
+          : 'Atomicity group rejected: unresolvable datasource.',
+    };
   }
   private async rollbackGroupTransactions(transactions: Transaction[]): Promise<void> {
     for (const tx of transactions) {
@@ -1595,6 +1899,31 @@ export class ODataBatchController {
     return err;
   }
 
+  private atomicityMultiDataSourceUnsupported(
+    groupId: string,
+    details: { dataSources: string[]; entitySets: string[] },
+  ): HttpErrors.HttpError {
+    const list = details.dataSources?.length ? details.dataSources.join(', ') : 'unknown';
+    const err = new HttpErrors.NotImplemented(
+      `Atomicity group ${groupId} would write to multiple datasources (${list}). Split into separate changesets or use a single datasource.`,
+    );
+    (err as AnyObject).code = 'MultiDataSourceChangesetNotSupported';
+    (err as AnyObject).details = { ...details, reason: 'multi-datasource' };
+    return err;
+  }
+
+  private atomicityGroupUnsupported(
+    groupId: string,
+    details: { reason: 'unresolvable'; entitySets?: string[]; dataSources?: string[] },
+  ): HttpErrors.HttpError {
+    const err = new HttpErrors.NotImplemented(
+      `Atomicity group ${groupId} contains a write request that cannot be mapped to a registered entity set; changeset atomicity cannot be guaranteed.`,
+    );
+    (err as AnyObject).code = 'AtomicityGroupNotSupported';
+    (err as AnyObject).details = { ...details, reason: 'unresolvable' };
+    return err;
+  }
+
   private resolveEntitySetName(rawUrl: string): string | undefined {
     const sanitized = this.sanitizeUrl(rawUrl, true);
     if (!sanitized) return undefined;
@@ -1611,7 +1940,8 @@ export class ODataBatchController {
     const [first, ...rest] = normalizedSegments;
     if (!first || first.startsWith('$')) return undefined;
 
-    let current = this.registry.findByName(first);
+    const strippedFirst = this.stripNamespacePrefix(first);
+    let current = this.registry.findByName(first) ?? this.registry.findByName(strippedFirst);
     if (!current) return undefined;
 
     for (const segment of rest) {
@@ -1622,6 +1952,18 @@ export class ODataBatchController {
     }
 
     return current?.name;
+  }
+
+  private stripNamespacePrefix(entitySet: string): string {
+    const prefixes = [this.cfg?.namespace, this.cfg?.namespaceAlias]
+      .filter((value): value is string => Boolean(value))
+      .map((value) => `${value}.`);
+    for (const prefix of prefixes) {
+      if (entitySet.startsWith(prefix)) {
+        return entitySet.slice(prefix.length);
+      }
+    }
+    return entitySet;
   }
 
   private normalizePathSegment(segment: string): string | undefined {

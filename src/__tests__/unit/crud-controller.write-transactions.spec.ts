@@ -301,6 +301,54 @@ describe('CRUD controller writeTransactions', () => {
     expect(rollbackCount).to.equal(1);
   });
 
+  it('rejects deep insert writes that target a different datasource inside a $batch atomicity group', async () => {
+    const tx = { commit: async () => undefined, rollback: async () => undefined };
+    const ds1 = { name: 'db1' };
+    const repo = {
+      dataSource: ds1,
+    };
+
+    const controller = createController({
+      repo,
+      cfg: {},
+      requestOverrides: {
+        [ODATA_ATOMICITY_STATE]: {
+          groupId: 'g1',
+          dataSource: ds1,
+          dataSourceKey: 'db1',
+          getTransaction() {
+            return tx as any;
+          },
+        },
+      },
+    });
+
+    const ds2 = { name: 'db2' };
+    const relationRepo = {
+      dataSource: ds2,
+      async create() {
+        return { id: 1 };
+      },
+    };
+    const relationMeta = {
+      type: 'hasMany',
+      targetsMany: true,
+      target: () => WidgetChild,
+    };
+
+    await expect(
+      (controller as any).persistDeepInsertGraph(
+        'children',
+        relationMeta,
+        relationRepo,
+        { id: 1 },
+        { transaction: tx },
+        new Set(),
+        1,
+      ),
+    ).to.be.rejectedWith(HttpErrors.NotImplemented);
+  });
+
   it('rolls back when deep update fails', async () => {
     @model()
     class Parent extends Entity {

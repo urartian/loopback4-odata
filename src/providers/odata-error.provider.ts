@@ -130,6 +130,8 @@ export class ODataErrorProvider implements Provider<Reject> {
       case 'PreferenceNotSupported':
       case 'TenantResolutionFailed':
       case 'TransactionCommitFailed':
+      case 'MultiDataSourceChangesetNotSupported':
+      case 'AtomicityGroupNotSupported':
         return code;
       default:
         return undefined;
@@ -144,6 +146,8 @@ export class ODataErrorProvider implements Provider<Reject> {
       case 'REQUEST_VALIDATION_FAILED':
         return 400;
       case 'PreferenceNotSupported':
+      case 'MultiDataSourceChangesetNotSupported':
+      case 'AtomicityGroupNotSupported':
         return 501;
       case 'TenantResolutionFailed':
         return 400;
