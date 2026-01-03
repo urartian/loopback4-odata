@@ -132,6 +132,11 @@ export class ODataErrorProvider implements Provider<Reject> {
       case 'TransactionCommitFailed':
       case 'MultiDataSourceChangesetNotSupported':
       case 'AtomicityGroupNotSupported':
+      case 'nested-lambda-depth-exceeded':
+      case 'lambda-alias-prefix-required':
+      case 'lambda-or-unsupported':
+      case 'through-relation-unsupported':
+      case 'pushdown-join-count-exceeded':
         return code;
       default:
         return undefined;

@@ -1779,6 +1779,50 @@ describe('OData component acceptance', () => {
     }
   });
 
+  it('supports multiple lambda filters combined with AND', async () => {
+    const res = await client
+      .get('/odata/Products')
+      .query({
+        $filter: 'orderItems/any(i: i/unitPrice gt 800) and orderItems/any(i: i/unitPrice gt 700)',
+      })
+      .expect(200);
+
+    expect(res.body.value).to.be.Array();
+    expect(res.body.value.length).to.be.greaterThan(0);
+    for (const item of res.body.value) {
+      expect(item.orderItems.some((oi: any) => oi.unitPrice > 800)).to.be.true();
+      expect(item.orderItems.some((oi: any) => oi.unitPrice > 700)).to.be.true();
+    }
+  });
+
+  it('supports negated lambda any filters', async () => {
+    const res = await client
+      .get('/odata/Products')
+      .query({ $filter: 'not orderItems/any(i: i/unitPrice gt 800)' })
+      .expect(200);
+
+    expect(res.body.value).to.be.Array();
+    expect(res.body.value.length).to.be.greaterThan(0);
+    for (const item of res.body.value) {
+      expect(item.orderItems.some((oi: any) => oi.unitPrice > 800)).to.be.false();
+    }
+  });
+
+  it('supports negated lambda all filters', async () => {
+    const res = await client
+      .get('/odata/Products')
+      .query({ $filter: 'not orderItems/all(i: i/unitPrice gt 999999)' })
+      .expect(200);
+
+    expect(res.body.value).to.be.Array();
+    expect(res.body.value.length).to.be.greaterThan(0);
+    for (const item of res.body.value) {
+      expect(item.orderItems).to.be.Array();
+      expect(item.orderItems.length).to.be.greaterThan(0);
+      expect(item.orderItems.some((oi: any) => oi.unitPrice <= 999999)).to.be.true();
+    }
+  });
+
   it('supports lambda filters combined with additional predicates', async () => {
     const res = await client
       .get('/odata/Products')
@@ -1790,6 +1834,86 @@ describe('OData component acceptance', () => {
     const [first] = res.body.value;
     expect(first.price).to.be.greaterThan(1000);
     expect(first.orderItems.some((oi: any) => oi.unitPrice > 800)).to.be.true();
+  });
+
+  it('supports lambda filters combined with OR predicates', async () => {
+    const res = await client
+      .get('/odata/Products')
+      .query({ $filter: 'orderItems/any(i: i/unitPrice gt 800) or price gt 1000' })
+      .expect(200);
+
+    expect(res.body.value).to.be.Array();
+    expect(res.body.value.length).to.be.greaterThan(0);
+    for (const item of res.body.value) {
+      const matchesLambda = (item.orderItems ?? []).some((oi: any) => oi.unitPrice > 800);
+      const matchesPrice = typeof item.price === 'number' && item.price > 1000;
+      expect(matchesLambda || matchesPrice).to.be.true();
+    }
+  });
+
+  it('includes @odata.count for lambda any filters', async () => {
+    const countRes = await client
+      .get('/odata/Products/$count')
+      .query({ $filter: 'orderItems/any(i: i/unitPrice gt 800)' })
+      .expect(200);
+    const expected = Number(countRes.text);
+    expect(Number.isFinite(expected)).to.be.true();
+
+    const res = await client
+      .get('/odata/Products')
+      .query({
+        $count: 'true',
+        $top: '1',
+        $filter: 'orderItems/any(i: i/unitPrice gt 800)',
+      })
+      .expect(200);
+
+    expect(res.body['@odata.count']).to.equal(expected);
+    expect(res.body.value).to.be.Array();
+    if (expected > 0) {
+      expect(res.body.value.length).to.equal(1);
+    }
+  });
+
+  it('includes @odata.count for lambda OR filters', async () => {
+    const filter = 'orderItems/any(i: i/unitPrice gt 800) or price gt 1000';
+    const countRes = await client
+      .get('/odata/Products/$count')
+      .query({ $filter: filter })
+      .expect(200);
+    const expected = Number(countRes.text);
+    expect(Number.isFinite(expected)).to.be.true();
+
+    const res = await client
+      .get('/odata/Products')
+      .query({ $count: 'true', $top: '1', $filter: filter })
+      .expect(200);
+
+    expect(res.body['@odata.count']).to.equal(expected);
+    expect(res.body.value).to.be.Array();
+    if (expected > 0) {
+      expect(res.body.value.length).to.equal(1);
+    }
+  });
+
+  it('rejects nested lambdas above the depth cap with a stable OData error code', async () => {
+    const res = await client
+      .get('/odata/Products')
+      .query({
+        $filter: 'orderItems/any(i: i/subItems/any(s: s/nested/any(t: t/id eq 1)))',
+      })
+      .expect(400);
+
+    expect(res.body.error.code).to.equal('nested-lambda-depth-exceeded');
+  });
+
+  it('rejects unprefixed fields in lambda predicates with a stable OData error code', async () => {
+    const res = await client
+      .get('/odata/Products')
+      .query({ $filter: 'orderItems/any(i: unitPrice gt 800)' })
+      .expect(400);
+
+    expect(res.body.error.code).to.equal('lambda-alias-prefix-required');
   });
 
   it('keeps expanded navigation when root $select omits relation property', async () => {

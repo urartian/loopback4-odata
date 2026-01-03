@@ -32,16 +32,19 @@ export interface ResolvedNavigationPath {
 }
 
 export class NavigationPathError extends Error {
-  constructor(message: string) {
+  code?: string;
+
+  constructor(message: string, code?: string) {
     super(message);
     this.name = 'NavigationPathError';
+    this.code = code;
   }
 }
 
 export function resolveNavigationPath(
   modelCtor: typeof Entity,
   path: string,
-  options: { maxDepth?: number } = {},
+  options: { maxDepth?: number; allowThrough?: boolean } = {},
 ): ResolvedNavigationPath {
   const segments = (path ?? '').split('/').filter(Boolean);
   if (!segments.length) {
@@ -50,6 +53,8 @@ export function resolveNavigationPath(
 
   const joins: NavigationJoinSegment[] = [];
   const maxDepth = options.maxDepth ?? 5;
+  const allowThrough = options.allowThrough === true;
+  let usedThrough = false;
 
   let currentModel = modelCtor;
   let propertyStart = segments.length;
@@ -67,9 +72,62 @@ export function resolveNavigationPath(
       break;
     }
     if (relationMeta.through) {
-      throw new NavigationPathError(
-        `Navigation path "${path}" references relation "${segment}" using hasManyThrough, which is not supported for $apply pushdown.`,
-      );
+      if (!allowThrough) {
+        throw new NavigationPathError(
+          `Navigation path "${path}" references relation "${segment}" using hasManyThrough, which is not supported for pushdown.`,
+        );
+      }
+      if (usedThrough) {
+        throw new NavigationPathError(
+          `Navigation path "${path}" references multiple hasManyThrough segments, which is not supported.`,
+          'through-relation-unsupported',
+        );
+      }
+      const targetModel = resolveRelationTarget(relationMeta);
+      const through = resolveThroughMeta(relationMeta.through, targetModel);
+      if (!through) {
+        throw new NavigationPathError(
+          `Navigation path "${path}" cannot resolve hasManyThrough metadata for relation "${segment}".`,
+          'through-relation-unsupported',
+        );
+      }
+      const sourceDefinition = getModelDefinition(currentModel);
+      if (!sourceDefinition) {
+        throw new NavigationPathError(
+          'Missing model definition while resolving navigation path.',
+          'through-relation-unsupported',
+        );
+      }
+      const sourceId = getPrimaryKey(sourceDefinition);
+      // source -> through uses hasMany semantics
+      joins.push({
+        relationName: relationMeta.name ?? segment,
+        relationType: 'hasMany',
+        sourceModel: currentModel,
+        targetModel: through.throughModel,
+        sourceKey: sourceId,
+        targetKey: through.sourceFk,
+      });
+      // through -> target uses belongsTo semantics (through has FK to target)
+      const targetDefinition = getModelDefinition(through.targetModel);
+      if (!targetDefinition) {
+        throw new NavigationPathError(
+          'Missing model definition while resolving navigation path.',
+          'through-relation-unsupported',
+        );
+      }
+      const targetId = getPrimaryKey(targetDefinition);
+      joins.push({
+        relationName: relationMeta.name ?? segment,
+        relationType: 'belongsTo',
+        sourceModel: through.throughModel,
+        targetModel: through.targetModel,
+        sourceKey: through.targetFk,
+        targetKey: targetId,
+      });
+      currentModel = through.targetModel;
+      usedThrough = true;
+      continue;
     }
     const relationType = normalizeRelationType(relationMeta);
     if (!relationType) {
@@ -106,6 +164,36 @@ export function resolveNavigationPath(
     propertyPath: propertySegments.length ? propertySegments.join('/') : undefined,
     targetModel: currentModel,
   };
+}
+
+function resolveThroughMeta(
+  through: AnyObject,
+  targetModel: typeof Entity | undefined,
+):
+  | { throughModel: typeof Entity; targetModel: typeof Entity; sourceFk: string; targetFk: string }
+  | undefined {
+  if (!targetModel) return undefined;
+  const modelResolver = through?.model as unknown;
+  const keyFrom = through?.keyFrom;
+  const keyTo = through?.keyTo;
+  if (!keyFrom || !keyTo) return undefined;
+  let throughModel: typeof Entity | undefined;
+  if (typeof modelResolver === 'function' && isEntityConstructor(modelResolver as AnyObject)) {
+    throughModel = modelResolver as typeof Entity;
+  } else if (typeof modelResolver === 'function') {
+    try {
+      const resolved = (modelResolver as () => typeof Entity)();
+      if (isEntityConstructor(resolved as AnyObject)) {
+        throughModel = resolved as typeof Entity;
+      } else if (typeof resolved === 'function') {
+        throughModel = resolved as typeof Entity;
+      }
+    } catch {
+      throughModel = undefined;
+    }
+  }
+  if (!throughModel) return undefined;
+  return { throughModel, targetModel, sourceFk: String(keyFrom), targetFk: String(keyTo) };
 }
 
 function getRelationMeta(modelCtor: typeof Entity, name: string): RelationMeta | undefined {

@@ -40,6 +40,7 @@ import {
   AggregationSpec,
   AggregationOperator,
   AggregationExpression,
+  LambdaQueryRejectedError,
   LambdaExpression,
   ParsedExpression,
   FunctionArg,
@@ -137,6 +138,10 @@ import {
   StatisticsUpdate,
   TelemetryEventOptions,
 } from '../util/telemetry';
+import {
+  buildPostgresLambdaCountQuery,
+  buildPostgresLambdaIdQuery,
+} from '../util/postgres-lambda-pushdown';
 import { acceptsAnyMediaType } from '../util/accept';
 import { normalizeBasePath } from '../util/base-path';
 import { escapeLikeLiteral } from '../util/like-escaping';
@@ -4104,6 +4109,77 @@ export function defineODataCrudController(def: EntitySetDef) {
       });
     }
 
+    resolveMaxLambdaScanRows(): number {
+      const configured = this.cfg?.lambda?.maxLambdaScanRows;
+      const fallback = this.cfg?.maxApplyResultSize ?? 2000;
+      const value = configured ?? fallback;
+      const normalized = Number.isFinite(value) && (value as number) > 0 ? Math.floor(value) : 2000;
+      return normalized > 0 ? normalized : 2000;
+    }
+
+    shouldWarnOnLambdaFallback(): boolean {
+      const configured = this.cfg?.lambda?.warnOnLambdaFallback;
+      if (configured === false) return false;
+      return true;
+    }
+
+    logLambdaFallback(detail: {
+      lambdasCount: number;
+      paths: string[];
+      rowsFetched: number;
+    }): void {
+      if (!this.shouldWarnOnLambdaFallback()) return;
+      this.logger.warn('Lambda filter evaluated in-memory.', {
+        entitySet: setName,
+        ...detail,
+      });
+      this.emitTelemetry({
+        category: 'rewrite',
+        event: 'lambda-fallback',
+        level: 'warn',
+        context: {
+          entitySet: setName,
+          ...detail,
+        },
+      });
+      this.emitTelemetry({
+        category: 'rewrite',
+        event: 'lambda-mode',
+        level: 'warn',
+        context: {
+          entitySet: setName,
+          mode: 'fallback',
+          ...detail,
+        },
+      });
+    }
+
+    logLambdaPushdown(detail: {
+      lambdasCount: number;
+      paths: string[];
+      rowsFetched: number;
+    }): void {
+      this.emitTelemetry({
+        category: 'rewrite',
+        event: 'lambda-pushdown',
+        level: 'info',
+        context: {
+          entitySet: setName,
+          ...detail,
+        },
+      });
+      this.emitTelemetry({
+        category: 'rewrite',
+        event: 'lambda-mode',
+        level: 'info',
+        context: {
+          entitySet: setName,
+          mode: 'pushdown',
+          ...detail,
+        },
+      });
+    }
+
     throwDeltaValidationError(
       result: Exclude<DeltaTokenValidationResult, { ok: true; payload?: DeltaTokenPayload }>,
     ): never {
@@ -4523,9 +4599,10 @@ export function defineODataCrudController(def: EntitySetDef) {
       current: AnyObject,
       alias: string,
       root: AnyObject,
+      bindings?: Record<string, AnyObject>,
     ): unknown {
       if (arg.kind === 'literal') return arg.value;
-      const raw = this.resolvePredicateValue(arg.name, current, alias, root);
+      const raw = this.resolvePredicateValue(arg.name, current, alias, root, bindings);
       if (raw == null) return raw;
       if (typeof raw === 'string') {
         if (arg.transform === 'tolower') return raw.toLowerCase();
@@ -4544,16 +4621,17 @@ export function defineODataCrudController(def: EntitySetDef) {
       current: AnyObject,
       alias: string,
       root: AnyObject,
+      bindings?: Record<string, AnyObject>,
     ): string | undefined {
       switch (expr.name) {
         case 'trim': {
-          const value = this.resolveFunctionArgValue(expr.args[0], current, alias, root);
+          const value = this.resolveFunctionArgValue(expr.args[0], current, alias, root, bindings);
           if (value == null) return undefined;
           return String(value).trim();
         }
         case 'concat': {
           const parts = expr.args.map((arg) => {
-            const value = this.resolveFunctionArgValue(arg, current, alias, root);
+            const value = this.resolveFunctionArgValue(arg, current, alias, root, bindings);
             return value == null ? '' : String(value);
           });
           return parts.join('');
@@ -4591,18 +4669,112 @@ export function defineODataCrudController(def: EntitySetDef) {
     }
 
     ensureLambdaInclusion(filter: Filter<CrudEntity>, lambda: LambdaExpression) {
-      if (!lambda.path.length) {
-        throw new HttpErrors.BadRequest('Lambda expressions must reference a navigation property.');
-      }
+      this.ensureLambdasInclusion(filter, [lambda]);
+    }
+
+    ensureLambdasInclusion(filter: Filter<CrudEntity>, lambdas: LambdaExpression[]) {
+      if (!lambdas.length) return;
       const includeList = this.normalizeIncludeList(filter.include);
-      this.ensureIncludePath(includeList, lambda.path);
+      for (const lambda of lambdas) {
+        if (!lambda.path.length) {
+          throw new HttpErrors.BadRequest(
+            'Lambda expressions must reference a navigation property.',
+          );
+        }
+        this.ensureIncludePath(includeList, lambda.path);
+        const nested = this.collectNestedLambdaIncludePaths(lambda);
+        for (const path of nested) {
+          this.ensureIncludePath(includeList, path);
+        }
+        this.ensureLambdaFieldProjection(filter, lambda.path[0]);
+      }
       filter.include = includeList;
       ensureIncludeProjection(
         filter as Filter<AnyObject>,
         filter.include as InclusionFilter[] | undefined,
         modelRelations,
       );
-      this.ensureLambdaFieldProjection(filter, lambda.path[0]);
+    }
+
+    collectNestedLambdaIncludePaths(lambda: LambdaExpression): string[][] {
+      const results: string[][] = [];
+      const dedupe = new Set<string>();
+      const add = (path: string[]) => {
+        const key = path.join('/');
+        if (!key) return;
+        if (dedupe.has(key)) return;
+        dedupe.add(key);
+        results.push(path);
+      };
+
+      const walk = (expr: ParsedExpression, aliasPaths: Map<string, string[]>) => {
+        if (expr.operator === 'lambda') {
+          const [sourceAlias, ...rest] = expr.path;
+          const base = sourceAlias ? aliasPaths.get(sourceAlias) : undefined;
+          if (base && rest.length) {
+            const includePath = [...base, ...rest];
+            add(includePath);
+            const next = new Map(aliasPaths);
+            next.set(expr.alias, includePath);
+            walk(expr.predicate, next);
+          }
+          return;
+        }
+        if (expr.operator === 'logical') {
+          for (const child of expr.expressions) {
+            walk(child, aliasPaths);
+          }
+          return;
+        }
+        if (expr.operator === 'not') {
+          walk(expr.expr, aliasPaths);
+        }
+      };
+
+      const aliasPaths = new Map<string, string[]>();
+      aliasPaths.set(lambda.alias, lambda.path);
+      walk(lambda.predicate, aliasPaths);
+      return results;
+    }
+
+    collectRootLambdasFromExpression(expr: ParsedExpression): LambdaExpression[] {
+      const lambdas: LambdaExpression[] = [];
+      const seen = new Set<string>();
+
+      const walk = (node: ParsedExpression, aliasesInScope: Set<string>) => {
+        if (node.operator === 'lambda') {
+          const [first] = node.path;
+          const isNested = Boolean(first && aliasesInScope.has(first) && node.path.length >= 2);
+          if (!isNested) {
+            const key = `${node.lambdaType}:${node.path.join('/')}:${node.alias}`;
+            if (!seen.has(key)) {
+              seen.add(key);
+              lambdas.push({
+                type: node.lambdaType,
+                path: node.path,
+                alias: node.alias,
+                predicate: node.predicate,
+              });
+            }
+          }
+          const next = new Set(aliasesInScope);
+          next.add(node.alias);
+          walk(node.predicate, next);
+          return;
+        }
+        if (node.operator === 'logical') {
+          for (const child of node.expressions) {
+            walk(child, aliasesInScope);
+          }
+          return;
+        }
+        if (node.operator === 'not') {
+          walk(node.expr, aliasesInScope);
+        }
+      };
+
+      walk(expr, new Set());
+      return lambdas;
     }
 
     cloneIncludeEntry(entry: string | InclusionFilter): NormalizedInclusion {
@@ -4684,22 +4856,64 @@ export function defineODataCrudController(def: EntitySetDef) {
       return current.filter((item) => item != null) as AnyObject[];
     }
 
+    normalizeLambdaCollectionsForResponse(
+      entities: AnyObject[],
+      lambdas: LambdaExpression[],
+    ): void {
+      if (!entities.length || !lambdas.length) return;
+      const relations = new Set<string>();
+      for (const lambda of lambdas) {
+        const rootRelation = lambda.path[0];
+        if (!rootRelation) continue;
+        const def = (modelRelations as AnyObject | undefined)?.[rootRelation] as
+          | { type?: string; targetsMany?: boolean }
+          | undefined;
+        const isToMany =
+          def?.targetsMany === true || def?.type === 'hasMany' || def?.type === 'hasManyThrough';
+        if (isToMany) {
+          relations.add(rootRelation);
+        }
+      }
+      if (!relations.size) return;
+      for (const entity of entities) {
+        for (const relation of relations) {
+          const current = (entity as AnyObject)[relation];
+          if (current == null) {
+            (entity as AnyObject)[relation] = [];
+          } else if (!Array.isArray(current)) {
+            (entity as AnyObject)[relation] = [current];
+          }
+        }
+      }
+    }
+
     filterEntitiesByLambda(entities: AnyObject[], lambda: LambdaExpression): AnyObject[] {
-      return entities.filter((entity) => this.evaluateLambda(entity, lambda));
+      return this.filterEntitiesByLambdas(entities, [lambda]);
+    }
+
+    filterEntitiesByLambdas(entities: AnyObject[], lambdas: LambdaExpression[]): AnyObject[] {
+      if (!lambdas.length) return entities;
+      return entities.filter((entity) =>
+        lambdas.every((lambda) => this.evaluateLambda(entity, lambda)),
+      );
     }
 
     evaluateLambda(entity: AnyObject, lambda: LambdaExpression): boolean {
       const items = this.resolveCollectionPath(entity, lambda.path);
-      if (lambda.type === 'any') {
-        return items.some((item) =>
-          this.evaluatePredicate(lambda.predicate, item, lambda.alias, entity),
+      const evalItem = (item: AnyObject) =>
+        this.evaluatePredicate(
+          lambda.predicate,
+          item,
+          lambda.alias,
+          entity,
+          lambda.alias ? { [lambda.alias]: item } : undefined,
         );
+      if (lambda.type === 'any') {
+        return items.some((item) => evalItem(item));
       }
       // all
       if (!items.length) return true;
-      return items.every((item) =>
-        this.evaluatePredicate(lambda.predicate, item, lambda.alias, entity),
-      );
+      return items.every((item) => evalItem(item));
     }
 
     evaluatePredicate(
@@ -4707,10 +4921,11 @@ export function defineODataCrudController(def: EntitySetDef) {
       current: AnyObject,
       alias: string,
       root: AnyObject,
+      bindings?: Record<string, AnyObject>,
     ): boolean {
       switch (expr.operator) {
         case 'comparison': {
-          const left = this.resolvePredicateValue(expr.field, current, alias, root);
+          const left = this.resolvePredicateValue(expr.field, current, alias, root, bindings);
           const right = expr.value;
           switch (expr.comparator) {
             case 'eq':
@@ -4730,7 +4945,7 @@ export function defineODataCrudController(def: EntitySetDef) {
           }
         }
         case 'function': {
-          const value = this.resolvePredicateValue(expr.field, current, alias, root);
+          const value = this.resolvePredicateValue(expr.field, current, alias, root, bindings);
           if (typeof value !== 'string') return false;
           const arg = typeof expr.args[0] === 'string' ? expr.args[0] : String(expr.args[0] ?? '');
           const source = expr.caseInsensitive ? value.toLowerCase() : value;
@@ -4741,13 +4956,13 @@ export function defineODataCrudController(def: EntitySetDef) {
           return false;
         }
         case 'stringfncmp': {
-          const result = this.evaluateStringFunction(expr, current, alias, root);
+          const result = this.evaluateStringFunction(expr, current, alias, root, bindings);
           if (result == null) return false;
           const compare = this.compareValues(result, expr.value);
           return expr.comparator === 'eq' ? compare === 0 : compare !== 0;
         }
         case 'datepart': {
-          const value = this.resolvePredicateValue(expr.field, current, alias, root);
+          const value = this.resolvePredicateValue(expr.field, current, alias, root, bindings);
           const partValue = this.extractDatePart(value, expr.part);
           if (partValue == null) return false;
           const compare = this.compareValues(partValue, expr.value);
@@ -4769,7 +4984,7 @@ export function defineODataCrudController(def: EntitySetDef) {
           }
         }
         case 'fncmp': {
-          const value = this.resolvePredicateValue(expr.field, current, alias, root);
+          const value = this.resolvePredicateValue(expr.field, current, alias, root, bindings);
           const numeric = value instanceof Date ? value : Number(value);
           if (expr.name === 'year') {
             if (!(value instanceof Date)) return false;
@@ -4788,7 +5003,7 @@ export function defineODataCrudController(def: EntitySetDef) {
           return false;
         }
         case 'indexofcmp': {
-          const value = this.resolvePredicateValue(expr.field, current, alias, root);
+          const value = this.resolvePredicateValue(expr.field, current, alias, root, bindings);
           if (typeof value !== 'string') return false;
           const index = value.toLowerCase().indexOf(expr.needle.toLowerCase());
           const compare = this.compareValues(index, expr.value);
@@ -4809,7 +5024,7 @@ export function defineODataCrudController(def: EntitySetDef) {
           return false;
         }
         case 'substrcmp': {
-          const value = this.resolvePredicateValue(expr.field, current, alias, root);
+          const value = this.resolvePredicateValue(expr.field, current, alias, root, bindings);
           if (typeof value !== 'string') return false;
           const start = Math.max(0, expr.start);
           const segment =
@@ -4817,7 +5032,7 @@ export function defineODataCrudController(def: EntitySetDef) {
           return expr.comparator === 'eq' ? segment === expr.literal : segment !== expr.literal;
         }
         case 'lengthcmp': {
-          const value = this.resolvePredicateValue(expr.field, current, alias, root);
+          const value = this.resolvePredicateValue(expr.field, current, alias, root, bindings);
           const len =
             typeof value === 'string' ? value.length : Array.isArray(value) ? value.length : 0;
           switch (expr.comparator) {
@@ -4840,17 +5055,43 @@ export function defineODataCrudController(def: EntitySetDef) {
         case 'logical': {
           if (expr.type === 'and') {
             return expr.expressions.every((child) =>
-              this.evaluatePredicate(child, current, alias, root),
+              this.evaluatePredicate(child, current, alias, root, bindings),
             );
           }
           return expr.expressions.some((child) =>
-            this.evaluatePredicate(child, current, alias, root),
+            this.evaluatePredicate(child, current, alias, root, bindings),
           );
         }
         case 'not':
-          return !this.evaluatePredicate(expr.expr, current, alias, root);
-        case 'lambda':
-          throw new Error('Nested lambda expressions are not supported yet.');
+          return !this.evaluatePredicate(expr.expr, current, alias, root, bindings);
+        case 'lambda': {
+          if (!expr.path.length) return false;
+
+          const [first, ...rest] = expr.path;
+          const hasBoundSource = Boolean(first && rest.length && bindings?.[first]);
+          const source = hasBoundSource ? bindings?.[first as string] : root;
+          const items = hasBoundSource
+            ? this.resolveCollectionPath(source as AnyObject, rest)
+            : this.resolveCollectionPath(source as AnyObject, expr.path);
+
+          const baseBindings = bindings ? { ...bindings } : {};
+
+          if (expr.lambdaType === 'any') {
+            return items.some((item) =>
+              this.evaluatePredicate(expr.predicate, item, expr.alias, root, {
+                ...baseBindings,
+                [expr.alias]: item,
+              }),
+            );
+          }
+          if (!items.length) return true;
+          return items.every((item) =>
+            this.evaluatePredicate(expr.predicate, item, expr.alias, root, {
+              ...baseBindings,
+              [expr.alias]: item,
+            }),
+          );
+        }
         default:
           return false;
       }
@@ -4920,8 +5161,13 @@ export function defineODataCrudController(def: EntitySetDef) {
       current: AnyObject,
       alias: string,
       root: AnyObject,
+      bindings?: Record<string, AnyObject>,
     ): unknown {
       const segments = path.split('/');
+      const bound = segments[0] ? bindings?.[segments[0]] : undefined;
+      if (bound) {
+        return this.resolvePath(bound, segments.slice(1));
+      }
       if (segments[0] === alias) {
         return this.resolvePath(current, segments.slice(1));
       }
@@ -7657,7 +7903,8 @@ export function defineODataCrudController(def: EntitySetDef) {
       let aggregationSpec: AggregationSpec | undefined;
       let applyPipeline: ApplyPipeline | undefined;
       let applyPlan: ApplyExecutionPlan | undefined;
-      let lambdaExpression: LambdaExpression | undefined;
+      let lambdaExpressions: LambdaExpression[] = [];
+      let lambdaExpressionTree: ParsedExpression | undefined;
       let postFilterExpr: ParsedExpression | undefined;
       let unsupportedFunctions: string[] = [];
       let deltaTokenValue: string | undefined;
@@ -7676,6 +7923,7 @@ export function defineODataCrudController(def: EntitySetDef) {
             maxSubstringStart: this.cfg?.maxSubstringStart,
             maxSubstringLength: this.cfg?.maxSubstringLength,
             maxFilterFieldNameLength: this.cfg?.maxFilterFieldNameLength,
+            maxLambdaExistsDepth: this.cfg?.lambda?.pushdownMaxExistsDepth,
           },
         );
         inlineCountRequested = parsed.inlineCount === true;
@@ -7714,7 +7962,8 @@ export function defineODataCrudController(def: EntitySetDef) {
         if (computeExpressions?.length && (aggregationSpec || applyPlan)) {
           throw new HttpErrors.BadRequest('Combining $compute with $apply is not supported.');
         }
-        lambdaExpression = parsed.lambda;
+        lambdaExpressions = parsed.lambdas ?? [];
+        lambdaExpressionTree = parsed.lambdaExpression;
         postFilterExpr = parsed.postFilter;
         unsupportedFunctions = parsed.unsupportedFunctions ?? [];
         skipTokenValue = parsed.skipToken;
@@ -7786,14 +8035,14 @@ export function defineODataCrudController(def: EntitySetDef) {
           inlineCount?: boolean;
           apply?: AggregationSpec;
           applyPipeline?: ApplyPipeline;
-          lambda?: LambdaExpression;
+          lambdas?: LambdaExpression[];
           skipToken?: string;
           deltaToken?: string;
         };
         delete (parsedFilter as { inlineCount?: boolean }).inlineCount;
         delete (parsedFilter as { apply?: AggregationSpec }).apply;
         delete (parsedFilter as { applyPipeline?: ApplyPipeline }).applyPipeline;
-        delete (parsedFilter as { lambda?: LambdaExpression }).lambda;
+        delete (parsedFilter as { lambdas?: LambdaExpression[] }).lambdas;
         delete (parsedFilter as { postFilter?: ParsedExpression }).postFilter;
         delete (parsedFilter as { unsupportedFunctions?: string[] }).unsupportedFunctions;
         delete (parsedFilter as { skipToken?: string }).skipToken;
@@ -7866,6 +8115,23 @@ export function defineODataCrudController(def: EntitySetDef) {
         if (error instanceof HttpErrors.HttpError) {
           throw error;
         }
+        if (error instanceof LambdaQueryRejectedError) {
+          this.emitTelemetry({
+            category: 'rewrite',
+            event: 'lambda-mode',
+            level: 'warn',
+            context: {
+              entitySet: setName,
+              mode: 'rejected',
+              reason: error.reason,
+              lambdasCount: error.lambdasCount,
+              paths: error.paths,
+            },
+          });
+          const err = new HttpErrors.BadRequest((error as Error).message);
+          (err as any).code = error.reason;
+          throw err;
+        }
         const message = (error as Error).message ?? 'Invalid OData query.';
         throw new HttpErrors.BadRequest(message);
       }
@@ -7918,13 +8184,24 @@ export function defineODataCrudController(def: EntitySetDef) {
         }
       }
 
-      if (lambdaExpression) {
+      if (lambdaExpressions.length) {
         if (aggregationSpec) {
           throw new HttpErrors.BadRequest(
             'Combining $apply with lambda expressions is not supported.',
           );
         }
-        this.ensureLambdaInclusion(baseFilter, lambdaExpression);
+        this.ensureLambdasInclusion(baseFilter, lambdaExpressions);
+      }
+      if (lambdaExpressionTree) {
+        if (aggregationSpec) {
+          throw new HttpErrors.BadRequest(
+            'Combining $apply with lambda expressions is not supported.',
+          );
+        }
+        const rootLambdas = this.collectRootLambdasFromExpression(lambdaExpressionTree);
+        if (rootLambdas.length) {
+          this.ensureLambdasInclusion(baseFilter, rootLambdas);
+        }
       }
 
       const paginationLimits = this.getPaginationLimits();
@@ -7997,6 +8274,14 @@ export function defineODataCrudController(def: EntitySetDef) {
 
       const originalTop = typeof baseFilter.limit === 'number' ? baseFilter.limit : undefined;
       const serverPagingEnabled = !aggregationSpec && !manualPagingRequested;
+      const hasLambdaFilters = lambdaExpressions.length > 0 || Boolean(lambdaExpressionTree);
+      if (hasLambdaFilters && this.cfg?.lambda?.requireTopWhenLambda === true) {
+        if (clientTopProvided === undefined && !serverPagingEnabled) {
+          throw new HttpErrors.BadRequest(
+            'The $top option is required when using lambda expressions.',
+          );
+        }
+      }
       let pageSize = serverPagingEnabled
         ? this.resolvePageSize(originalTop, {
             maxPageSize: paginationLimits.maxPageSize,
@@ -8359,15 +8644,246 @@ export function defineODataCrudController(def: EntitySetDef) {
           return result;
         }
 
-        if (lambdaExpression) {
+        if (lambdaExpressions.length || lambdaExpressionTree) {
+          const expressionTree = lambdaExpressionTree;
+          const rootLambdas = lambdaExpressions.length
+            ? lambdaExpressions
+            : expressionTree
+              ? this.collectRootLambdasFromExpression(expressionTree)
+              : [];
+          const pushdownMode = this.cfg?.lambda?.pushdown ?? 'disabled';
+          const pushdownStrict = this.cfg?.lambda?.pushdownStrict === true;
+          const dataSource = (this.repository as { dataSource?: juggler.DataSource }).dataSource;
+
+          if (pushdownMode === 'postgres' && dataSource && !requiresPostFilter) {
+            const limit =
+              typeof requestedLimit === 'number' && requestedLimit > 0
+                ? requestedLimit
+                : this.resolveMaxLambdaScanRows() + 1;
+            const offset = requestedOffset;
+
+            let totalCount: number | undefined;
+            let allowPushdown = true;
+            if (inlineCountRequested) {
+              const countBuilt = expressionTree
+                ? buildPostgresLambdaCountQuery({
+                    dataSource,
+                    modelCtor,
+                    expression: expressionTree,
+                    where: baseFilter.where as Where<AnyObject> | undefined,
+                    maxJoinCount: this.cfg?.lambda?.pushdownMaxJoinCount,
+                  })
+                : buildPostgresLambdaCountQuery({
+                    dataSource,
+                    modelCtor,
+                    lambdas: rootLambdas,
+                    where: baseFilter.where as Where<AnyObject> | undefined,
+                    maxJoinCount: this.cfg?.lambda?.pushdownMaxJoinCount,
+                  });
+
+              if ('sql' in countBuilt) {
+                const countRows = await dataSource.execute(
+                  countBuilt.sql,
+                  countBuilt.params,
+                  options,
+                );
+                const row = Array.isArray(countRows)
+                  ? (countRows[0] as AnyObject | undefined)
+                  : undefined;
+                const raw = row?.count ?? row?.COUNT ?? row?.Count;
+                const value =
+                  typeof raw === 'bigint'
+                    ? Number(raw)
+                    : typeof raw === 'number'
+                      ? raw
+                      : raw != null
+                        ? Number(raw)
+                        : undefined;
+                if (value !== undefined && Number.isFinite(value)) {
+                  totalCount = Math.trunc(value);
+                } else if (pushdownStrict) {
+                  throw new HttpErrors.InternalServerError(
+                    'Failed to resolve inline $count from the datasource response.',
+                  );
+                } else {
+                  allowPushdown = false;
+                }
+              } else if (pushdownStrict) {
+                this.emitTelemetry({
+                  category: 'rewrite',
+                  event: 'lambda-mode',
+                  level: 'warn',
+                  context: {
+                    entitySet: setName,
+                    mode: 'rejected',
+                    reason: countBuilt.declineReason,
+                    lambdasCount: rootLambdas.length,
+                    paths: rootLambdas.map((lambda) => lambda.path.join('/')),
+                  },
+                });
+                throw new HttpErrors.BadRequest(
+                  `Lambda pushdown is required but the query is not eligible (${countBuilt.declineReason}).`,
+                );
+              } else {
+                allowPushdown = false;
+              }
+            }
+
+            if (inlineCountRequested && allowPushdown && totalCount === undefined) {
+              if (pushdownStrict) {
+                throw new HttpErrors.InternalServerError(
+                  'Failed to resolve inline $count for this request.',
+                );
+              }
+              allowPushdown = false;
+            }
+
+            if (allowPushdown) {
+              const built = expressionTree
+                ? buildPostgresLambdaIdQuery({
+                    dataSource,
+                    modelCtor,
+                    expression: expressionTree,
+                    where: baseFilter.where as Where<AnyObject> | undefined,
+                    order: baseFilter.order as Filter<CrudEntity>['order'],
+                    limit,
+                    offset,
+                    maxJoinCount: this.cfg?.lambda?.pushdownMaxJoinCount,
+                  })
+                : buildPostgresLambdaIdQuery({
+                    dataSource,
+                    modelCtor,
+                    lambdas: rootLambdas,
+                    where: baseFilter.where as Where<AnyObject> | undefined,
+                    order: baseFilter.order as Filter<CrudEntity>['order'],
+                    limit,
+                    offset,
+                    maxJoinCount: this.cfg?.lambda?.pushdownMaxJoinCount,
+                  });
+
+              if ('sql' in built) {
+                const idRows = await dataSource.execute(built.sql, built.params, options);
+                const rows = Array.isArray(idRows) ? (idRows as AnyObject[]) : [];
+                const ids = rows
+                  .map((row) => row?.[built.idProperty] ?? row?.[built.idProperty.toLowerCase()])
+                  .filter((id) => id !== undefined && id !== null);
+
+                if (typeof requestedLimit !== 'number') {
+                  const maxRows = this.resolveMaxLambdaScanRows();
+                  if (ids.length > maxRows) {
+                    throw new HttpErrors.BadRequest(
+                      `Lambda filter scan exceeds the server limit of ${maxRows} rows. Add $top or refine $filter.`,
+                    );
+                  }
+                }
+
+                this.logLambdaPushdown({
+                  lambdasCount: rootLambdas.length,
+                  paths: rootLambdas.map((lambda) => lambda.path.join('/')),
+                  rowsFetched: ids.length,
+                });
+
+                const fetchFilter: Filter<CrudEntity> = { ...baseFilter };
+                delete fetchFilter.order;
+                delete fetchFilter.limit;
+                delete fetchFilter.offset;
+                const idWhere = { [built.idProperty]: { inq: ids } } as CrudWhere;
+                const combined = this.combineWithAnd([
+                  fetchFilter.where as CrudWhere | undefined,
+                  idWhere,
+                ]);
+                fetchFilter.where = combined ?? idWhere;
+
+                const entities = ids.length ? await this.repository.find(fetchFilter, options) : [];
+                const plainEntities = entities.map((entity) => this.toPlainEntity(entity) ?? {});
+                this.normalizeLambdaCollectionsForResponse(plainEntities, rootLambdas);
+                const ordered = ids.length
+                  ? (() => {
+                      const byId = new Map<string, AnyObject>();
+                      for (const entity of plainEntities) {
+                        const value = (entity as AnyObject)[built.idProperty];
+                        if (value === undefined || value === null) continue;
+                        byId.set(String(value), entity);
+                      }
+                      return ids
+                        .map((id) => byId.get(String(id)))
+                        .filter((entity): entity is AnyObject => Boolean(entity));
+                    })()
+                  : [];
+
+                this.applyComputeExpressions(ordered, computeExpressions);
+
+                this.ensureODataHeaders();
+                const result = {
+                  '@odata.context': contextBase,
+                  ...(inlineCountRequested ? { '@odata.count': totalCount! } : {}),
+                  value: this.decoratePlainEntities(ordered),
+                } as AnyObject;
+                this.recordTelemetryStats({ rows: ordered.length });
+                ctx.result = result;
+                return result;
+              } else if (pushdownStrict) {
+                this.emitTelemetry({
+                  category: 'rewrite',
+                  event: 'lambda-mode',
+                  level: 'warn',
+                  context: {
+                    entitySet: setName,
+                    mode: 'rejected',
+                    reason: built.declineReason,
+                    lambdasCount: rootLambdas.length,
+                    paths: rootLambdas.map((lambda) => lambda.path.join('/')),
+                  },
+                });
+                throw new HttpErrors.BadRequest(
+                  `Lambda pushdown is required but the query is not eligible (${built.declineReason}).`,
+                );
+              }
+            }
+          } else if (pushdownStrict && pushdownMode !== 'disabled') {
+            const reason = requiresPostFilter ? 'requires-postfilter' : 'unsupported-datasource';
+            this.emitTelemetry({
+              category: 'rewrite',
+              event: 'lambda-mode',
+              level: 'warn',
+              context: {
+                entitySet: setName,
+                mode: 'rejected',
+                reason,
+                lambdasCount: rootLambdas.length,
+                paths: rootLambdas.map((lambda) => lambda.path.join('/')),
+              },
+            });
+            throw new HttpErrors.BadRequest(
+              `Lambda pushdown is required but the query is not eligible (${reason}).`,
+            );
+          }
+
           const fetchFilter: Filter<CrudEntity> = { ...baseFilter };
           delete fetchFilter.order;
           delete fetchFilter.limit;
           delete fetchFilter.offset;
+          const maxLambdaScanRows = this.resolveMaxLambdaScanRows();
+          fetchFilter.limit = maxLambdaScanRows + 1;
 
           const entities = await this.repository.find(fetchFilter, options);
+          if (entities.length > maxLambdaScanRows) {
+            throw new HttpErrors.BadRequest(
+              `Lambda filter scan exceeds the server limit of ${maxLambdaScanRows} rows. Add $top or refine $filter.`,
+            );
+          }
+          this.logLambdaFallback({
+            lambdasCount: rootLambdas.length,
+            paths: rootLambdas.map((lambda) => lambda.path.join('/')),
+            rowsFetched: entities.length,
+          });
           const plainEntities = entities.map((entity) => this.toPlainEntity(entity) ?? {});
-          let filtered = this.filterEntitiesByLambda(plainEntities, lambdaExpression);
+          this.normalizeLambdaCollectionsForResponse(plainEntities, rootLambdas);
+          let filtered = expressionTree
+            ? plainEntities.filter((entity) =>
+                this.evaluatePredicate(expressionTree, entity, '', entity),
+              )
+            : this.filterEntitiesByLambdas(plainEntities, rootLambdas);
           if (requiresPostFilter) {
             filtered = this.applyPostFilter(filtered, postFilterExpr);
           }
@@ -8378,6 +8894,7 @@ export function defineODataCrudController(def: EntitySetDef) {
           this.ensureODataHeaders();
           const result = {
             '@odata.context': contextBase,
+            ...(inlineCountRequested ? { '@odata.count': filtered.length } : {}),
             value: this.decoratePlainEntities(paged),
           } as AnyObject;
           this.recordTelemetryStats({ rows: paged.length });
@@ -8530,6 +9047,8 @@ export function defineODataCrudController(def: EntitySetDef) {
       const applySupported = this.isApplyEnabled();
       let postFilterExpr: ParsedExpression | undefined;
       let unsupportedFunctions: string[] = [];
+      let lambdaExpressions: LambdaExpression[] = [];
+      let lambdaExpressionTree: ParsedExpression | undefined;
 
       try {
         const parsed = parseODataQuery(
@@ -8541,8 +9060,11 @@ export function defineODataCrudController(def: EntitySetDef) {
             maxSubstringStart: this.cfg?.maxSubstringStart,
             maxSubstringLength: this.cfg?.maxSubstringLength,
             maxFilterFieldNameLength: this.cfg?.maxFilterFieldNameLength,
+            maxLambdaExistsDepth: this.cfg?.lambda?.pushdownMaxExistsDepth,
           },
         );
+        lambdaExpressions = parsed.lambdas ?? [];
+        lambdaExpressionTree = parsed.lambdaExpression;
         this.enforceApplyCapability(applySupported, parsed);
         if (parsed.format) {
           const err = new HttpErrors.NotAcceptable(
@@ -8609,6 +9131,23 @@ export function defineODataCrudController(def: EntitySetDef) {
         if (error instanceof HttpErrors.HttpError) {
           throw error;
         }
+        if (error instanceof LambdaQueryRejectedError) {
+          this.emitTelemetry({
+            category: 'rewrite',
+            event: 'lambda-mode',
+            level: 'warn',
+            context: {
+              entitySet: setName,
+              mode: 'rejected',
+              reason: error.reason,
+              lambdasCount: error.lambdasCount,
+              paths: error.paths,
+            },
+          });
+          const err = new HttpErrors.BadRequest((error as Error).message);
+          (err as any).code = error.reason;
+          throw err;
+        }
         const message = (error as Error).message ?? 'Invalid OData query.';
         throw new HttpErrors.BadRequest(message);
       }
@@ -8616,6 +9155,15 @@ export function defineODataCrudController(def: EntitySetDef) {
       this.ensureAcceptsJson(['text/plain']);
       this.response.type('text/plain');
       this.validateFieldsStrict(baseFilter);
+
+      const rootLambdas = lambdaExpressions.length
+        ? lambdaExpressions
+        : lambdaExpressionTree
+          ? this.collectRootLambdasFromExpression(lambdaExpressionTree)
+          : [];
+      if (rootLambdas.length) {
+        this.ensureLambdasInclusion(baseFilter, rootLambdas);
+      }
 
       const op: CrudOperation = 'READ';
       const scope: CrudScope = 'count';
@@ -8630,6 +9178,36 @@ export function defineODataCrudController(def: EntitySetDef) {
 
       const execDefault = async () => {
         const options = this.repositoryOptions();
+        if (rootLambdas.length || lambdaExpressionTree) {
+          const fetchFilter: Filter<CrudEntity> = { ...baseFilter };
+          delete fetchFilter.order;
+          delete fetchFilter.limit;
+          delete fetchFilter.offset;
+          const maxLambdaScanRows = this.resolveMaxLambdaScanRows();
+          fetchFilter.limit = maxLambdaScanRows + 1;
+          const entities = await this.repository.find(fetchFilter, options);
+          if (entities.length > maxLambdaScanRows) {
+            throw new HttpErrors.BadRequest(
+              `Lambda filter scan exceeds the server limit of ${maxLambdaScanRows} rows. Add $top or refine $filter.`,
+            );
+          }
+          const plain = entities.map((entity) => this.toPlainEntity(entity) ?? {});
+          if (rootLambdas.length) {
+            this.normalizeLambdaCollectionsForResponse(plain, rootLambdas);
+          }
+          let filtered = lambdaExpressionTree
+            ? plain.filter((entity) =>
+                this.evaluatePredicate(lambdaExpressionTree!, entity, '', entity),
+              )
+            : this.filterEntitiesByLambdas(plain, rootLambdas);
+          if (postFilterExpr) {
+            filtered = this.applyPostFilter(filtered, postFilterExpr);
+          }
+          this.ensureODataHeaders();
+          const result = `${filtered.length}`;
+          ctx.result = result;
+          return result;
+        }
         if (postFilterExpr) {
           const entities = await this.repository.find(baseFilter, options);
           const plain = entities.map((entity) => this.toPlainEntity(entity) ?? {});
@@ -8696,6 +9274,7 @@ export function defineODataCrudController(def: EntitySetDef) {
             maxSubstringStart: this.cfg?.maxSubstringStart,
             maxSubstringLength: this.cfg?.maxSubstringLength,
             maxFilterFieldNameLength: this.cfg?.maxFilterFieldNameLength,
+            maxLambdaExistsDepth: this.cfg?.lambda?.pushdownMaxExistsDepth,
           },
         );
         this.enforceApplyCapability(applySupported, parsed);
@@ -8728,6 +9307,23 @@ export function defineODataCrudController(def: EntitySetDef) {
       } catch (error) {
         if (error instanceof HttpErrors.HttpError) {
           throw error;
+        }
+        if (error instanceof LambdaQueryRejectedError) {
+          this.emitTelemetry({
+            category: 'rewrite',
+            event: 'lambda-mode',
+            level: 'warn',
+            context: {
+              entitySet: setName,
+              mode: 'rejected',
+              reason: error.reason,
+              lambdasCount: error.lambdasCount,
+              paths: error.paths,
+            },
+          });
+          const err = new HttpErrors.BadRequest((error as Error).message);
+          (err as any).code = error.reason;
+          throw err;
         }
         const message = (error as Error).message ?? 'Invalid OData query.';
         throw new HttpErrors.BadRequest(message);

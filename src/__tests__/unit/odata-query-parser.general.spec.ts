@@ -77,16 +77,20 @@ describe('parseODataQuery basics', () => {
       $filter: 'orderItems/any(i: i/unitPrice gt 800) and price gt 1000',
     });
 
-    assert(parsed.lambda);
-    assert.deepStrictEqual(parsed.lambda?.path, ['orderItems']);
+    assert(parsed.lambdas);
+    assert.equal(parsed.lambdas?.length, 1);
+    assert.deepStrictEqual(parsed.lambdas?.[0]?.path, ['orderItems']);
     assert.deepStrictEqual(parsed.where, { price: { gt: 1000 } });
   });
 
-  it('rejects lambda expressions combined with OR predicates', () => {
-    assert.throws(
-      () => parseODataQuery({ $filter: 'orderItems/any(i: i/unitPrice gt 800) or price gt 1000' }),
-      /Lambda expressions combined with OR are not supported yet/i,
-    );
+  it('parses lambda expressions combined with OR predicates', () => {
+    const parsed = parseODataQuery({
+      $filter: 'orderItems/any(i: i/unitPrice gt 800) or price gt 1000',
+    });
+
+    assert(parsed.lambdaExpression);
+    assert.equal(parsed.lambdaExpression?.operator, 'logical');
+    assert.equal((parsed.lambdaExpression as any)?.type, 'or');
   });
 
   it('applies logical operator precedence (and > or)', () => {
@@ -126,8 +130,110 @@ describe('parseODataQuery basics', () => {
       $filter: 'orderItems/any(i:i/unitPrice gt 800)',
     });
 
-    assert(parsed.lambda);
-    assert.equal(parsed.lambda?.alias, 'i');
+    assert(parsed.lambdas);
+    assert.equal(parsed.lambdas?.[0]?.alias, 'i');
+  });
+
+  it('retains tolower/toupper wrappers inside lambda string functions', () => {
+    const parsed = parseODataQuery({
+      $filter: "notes/any(n: contains(tolower(n/text),'acme'))",
+    });
+
+    assert(parsed.lambdas);
+    assert.equal(parsed.lambdas?.length, 1);
+    const lambda = parsed.lambdas?.[0];
+    assert(lambda);
+    assert.equal(lambda.predicate.operator, 'function');
+    if (lambda.predicate.operator === 'function') {
+      assert.equal((lambda.predicate as any).transform, 'tolower');
+    }
+  });
+
+  it('supports multiple lambda expressions combined with AND', () => {
+    const parsed = parseODataQuery({
+      $filter: 'orderItems/any(i: i/unitPrice gt 800) and orderItems/any(i: i/unitPrice lt 900)',
+    });
+
+    assert(parsed.lambdas);
+    assert.equal(parsed.lambdas?.length, 2);
+    assert.equal(parsed.where, undefined);
+  });
+
+  it('supports multiple lambdas with non-lambda predicates', () => {
+    const parsed = parseODataQuery({
+      $filter:
+        "orderItems/any(i: i/unitPrice gt 800) and notes/any(n: contains(n/text,'urgent')) and price gt 1000",
+    });
+
+    assert(parsed.lambdas);
+    assert.equal(parsed.lambdas?.length, 2);
+    assert.deepStrictEqual(parsed.where, { price: { gt: 1000 } });
+  });
+
+  it('rewrites negated any(...) to all(not ...)', () => {
+    const parsed = parseODataQuery({
+      $filter: 'not orderItems/any(i: i/unitPrice gt 800)',
+    });
+
+    assert(parsed.lambdas);
+    assert.equal(parsed.lambdas?.length, 1);
+    const lambda = parsed.lambdas?.[0];
+    assert(lambda);
+    assert.equal(lambda.type, 'all');
+    assert.equal(lambda.alias, 'i');
+    assert.equal(lambda.predicate.operator, 'not');
+  });
+
+  it('rewrites negated all(...) to any(not ...)', () => {
+    const parsed = parseODataQuery({
+      $filter: 'not orderItems/all(i: i/unitPrice gt 800)',
+    });
+
+    assert(parsed.lambdas);
+    assert.equal(parsed.lambdas?.length, 1);
+    const lambda = parsed.lambdas?.[0];
+    assert(lambda);
+    assert.equal(lambda.type, 'any');
+    assert.equal(lambda.alias, 'i');
+    assert.equal(lambda.predicate.operator, 'not');
+  });
+
+  it('parses nested lambdas (depth 2)', () => {
+    const parsed = parseODataQuery({
+      $filter: 'orderItems/any(i: i/subItems/any(s: s/id eq 1))',
+    });
+
+    assert(parsed.lambdas);
+    assert.equal(parsed.lambdas?.length, 1);
+    const outer = parsed.lambdas?.[0];
+    assert(outer);
+    assert.equal(outer.type, 'any');
+    assert.equal(outer.predicate.operator, 'lambda');
+    if (outer.predicate.operator === 'lambda') {
+      assert.equal(outer.predicate.lambdaType, 'any');
+      assert.deepStrictEqual(outer.predicate.path, ['i', 'subItems']);
+      assert.equal(outer.predicate.alias, 's');
+    }
+  });
+
+  it('rejects nested lambdas above the configured depth cap', () => {
+    assert.throws(
+      () =>
+        parseODataQuery({
+          $filter: 'a/any(o: o/b/any(i: i/c/all(j: j/id eq 1)))',
+        }),
+      /nested-lambda-depth-exceeded/i,
+    );
+  });
+
+  it('rejects unprefixed fields inside lambda predicates', () => {
+    assert.throws(
+      () =>
+        parseODataQuery({
+          $filter: 'orderItems/any(i: unitPrice gt 800)',
+        }),
+      /lambda-alias-prefix-required/i,
+    );
   });
 
   it('attaches simple $apply pipelines to the parsed query', () => {

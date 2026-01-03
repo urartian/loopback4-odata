@@ -49,6 +49,7 @@ export interface ODataConfig {
   pageSize?: number; // default page size for server-driven paging
   enableDelta?: boolean; // opt-in for delta link emission
   pagination?: ODataPaginationConfig;
+  lambda?: ODataLambdaConfig;
   // OpenAPI visibility
   documentInOpenApiDefault?: boolean | 'auto'; // default 'auto'
   removeUndocumentedFromSpec?: boolean; // default true
@@ -253,6 +254,16 @@ export interface ODataPaginationConfig {
   maxSkip?: number; // maximum client-requested $skip
   maxPageSize?: number; // maximum server-driven page size for collections
   maxApplyPageSize?: number; // maximum server-driven page size for $apply pipelines
+}
+
+export interface ODataLambdaConfig {
+  maxLambdaScanRows?: number;
+  requireTopWhenLambda?: boolean;
+  warnOnLambdaFallback?: boolean;
+  pushdown?: 'disabled' | 'postgres';
+  pushdownStrict?: boolean;
+  pushdownMaxExistsDepth?: number;
+  pushdownMaxJoinCount?: number;
 }
 
 export type ODataTelemetryCategory =
