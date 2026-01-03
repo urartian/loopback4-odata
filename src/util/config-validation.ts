@@ -112,6 +112,8 @@ export function validateLambdaConfig(label: string, lambda?: ODataLambdaConfig):
   if (!lambda) return;
   const target = lambda as AnyObject;
   assignPositive(target, 'maxLambdaScanRows', label);
+  assignPositive(target, 'pushdownMaxExistsDepth', label);
+  assignPositive(target, 'pushdownMaxJoinCount', label);
   if ('pushdown' in target) {
     const value = target.pushdown;
     if (value !== undefined && value !== null) {

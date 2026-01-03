@@ -41,4 +41,43 @@ describe('ODataErrorProvider', () => {
     assert.equal(statusCode, 501);
     assert.equal(payload?.error?.code, 'MultiDataSourceChangesetNotSupported');
   });
+
+  it('preserves lambda rejection reason codes', () => {
+    const provider = new ODataErrorProvider({ debug: false }, {
+      tokenSecret: 'test-secret',
+      basePath: '/odata',
+    } as any);
+    const reject = provider.value();
+
+    let statusCode: number | undefined;
+    let payload: any;
+    const response = {
+      status(code: number) {
+        statusCode = code;
+        return this;
+      },
+      getHeader() {
+        return undefined;
+      },
+      set() {
+        return this;
+      },
+      contentType() {
+        return this;
+      },
+      send(body: unknown) {
+        payload = body;
+        return this;
+      },
+    } as any;
+
+    const request = { url: '/odata/Products', method: 'GET' } as any;
+    const err = new HttpErrors.BadRequest('bad lambda');
+    (err as any).code = 'nested-lambda-depth-exceeded';
+
+    reject({ request, response } as any, err);
+
+    assert.equal(statusCode, 400);
+    assert.equal(payload?.error?.code, 'nested-lambda-depth-exceeded');
+  });
 });

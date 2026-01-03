@@ -30,6 +30,7 @@ type FunctionExpression = {
   field: string;
   args: unknown[];
   caseInsensitive: boolean;
+  transform?: OperandTransform;
   negated?: boolean;
 };
 
@@ -210,6 +211,7 @@ interface ParseOptions {
   maxSubstringStart?: number;
   maxSubstringLength?: number;
   maxFilterFieldNameLength?: number;
+  maxLambdaExistsDepth?: number;
 }
 
 export class UnsupportedFilterError extends Error {
@@ -220,6 +222,20 @@ export class UnsupportedFilterError extends Error {
     super(`Unsupported filter functions: ${unique.join(', ')}`);
     this.name = 'UnsupportedFilterError';
     this.functions = unique;
+  }
+}
+
+export class LambdaQueryRejectedError extends Error {
+  reason: string;
+  lambdasCount: number;
+  paths: string[];
+
+  constructor(message: string, info: { reason: string; paths: string[] }) {
+    super(message);
+    this.name = 'LambdaQueryRejectedError';
+    this.reason = info.reason;
+    this.paths = [...info.paths];
+    this.lambdasCount = info.paths.length;
   }
 }
 
@@ -384,6 +400,7 @@ function parseFunction(tokens: string[], index: number): [FunctionExpression, nu
       field: fieldOperand.name,
       args: [value],
       caseInsensitive: true,
+      transform: fieldOperand.transform,
     },
     afterValue + 1,
   ];
@@ -940,10 +957,131 @@ function containsLambda(expr: ParsedExpression): boolean {
   return false;
 }
 
-function assertNoNestedLambda(lambda: LambdaExpressionNode): void {
-  if (containsLambda(lambda.predicate)) {
-    throw new Error('Nested lambda expressions are not supported.');
+const DEFAULT_MAX_LAMBDA_EXISTS_DEPTH = 2;
+
+function normalizeMaxLambdaDepth(options?: ParseOptions): number {
+  const configured = options?.maxLambdaExistsDepth;
+  if (configured === undefined || configured === null) return DEFAULT_MAX_LAMBDA_EXISTS_DEPTH;
+  const value = Number(configured);
+  if (!Number.isFinite(value) || value <= 0) return DEFAULT_MAX_LAMBDA_EXISTS_DEPTH;
+  return Math.floor(value);
+}
+
+function listLambdaPaths(expr: ParsedExpression): string[] {
+  const paths: string[] = [];
+  const visit = (node: ParsedExpression) => {
+    if (node.operator === 'lambda') {
+      paths.push(node.path.join('/'));
+      visit(node.predicate);
+      return;
+    }
+    if (node.operator === 'logical') {
+      node.expressions.forEach(visit);
+      return;
+    }
+    if (node.operator === 'not') {
+      visit(node.expr);
+      return;
+    }
+  };
+  visit(expr);
+  return paths;
+}
+
+function assertAliasedField(field: string, aliasesInScope: string[], lambdaPaths: string[]): void {
+  if (!aliasesInScope.length) return;
+  const [token, ...rest] = String(field).split('/');
+  if (!token || rest.length === 0 || !aliasesInScope.includes(token)) {
+    throw new LambdaQueryRejectedError(
+      'Fields inside lambda predicates must be prefixed with the lambda alias (lambda-alias-prefix-required).',
+      { reason: 'lambda-alias-prefix-required', paths: lambdaPaths },
+    );
   }
+}
+
+function validateLambdaExpressionTree(expr: ParsedExpression, options?: ParseOptions): void {
+  if (!containsLambda(expr)) return;
+  const maxDepth = normalizeMaxLambdaDepth(options);
+  const lambdaPaths = listLambdaPaths(expr);
+
+  const visit = (node: ParsedExpression, aliasesInScope: string[], depth: number) => {
+    switch (node.operator) {
+      case 'lambda': {
+        const nextDepth = depth + 1;
+        if (nextDepth > maxDepth) {
+          throw new LambdaQueryRejectedError(
+            `Nested lambda expressions exceed the maximum supported depth of ${maxDepth} (nested-lambda-depth-exceeded).`,
+            { reason: 'nested-lambda-depth-exceeded', paths: lambdaPaths },
+          );
+        }
+
+        if (aliasesInScope.length) {
+          const sourceAlias = node.path[0];
+          if (!sourceAlias || !aliasesInScope.includes(sourceAlias) || node.path.length < 2) {
+            throw new LambdaQueryRejectedError(
+              'Nested lambda paths inside lambda predicates must start with an in-scope lambda alias (lambda-alias-prefix-required).',
+              { reason: 'lambda-alias-prefix-required', paths: lambdaPaths },
+            );
+          }
+        }
+
+        visit(node.predicate, [...aliasesInScope, node.alias], nextDepth);
+        return;
+      }
+      case 'comparison':
+        assertAliasedField(node.field, aliasesInScope, lambdaPaths);
+        return;
+      case 'function':
+        assertAliasedField(node.field, aliasesInScope, lambdaPaths);
+        return;
+      case 'fncmp':
+        assertAliasedField(node.field, aliasesInScope, lambdaPaths);
+        return;
+      case 'stringfncmp': {
+        for (const arg of node.args) {
+          if (arg.kind === 'field') {
+            assertAliasedField(arg.name, aliasesInScope, lambdaPaths);
+          }
+        }
+        return;
+      }
+      case 'datepart':
+        assertAliasedField(node.field, aliasesInScope, lambdaPaths);
+        return;
+      case 'indexofcmp':
+        assertAliasedField(node.field, aliasesInScope, lambdaPaths);
+        return;
+      case 'substrcmp':
+        assertAliasedField(node.field, aliasesInScope, lambdaPaths);
+        return;
+      case 'lengthcmp':
+        assertAliasedField(node.field, aliasesInScope, lambdaPaths);
+        return;
+      case 'logical': {
+        if (
+          aliasesInScope.length &&
+          node.type === 'or' &&
+          node.expressions.some((child) => containsLambda(child))
+        ) {
+          throw new LambdaQueryRejectedError(
+            'Lambda expressions combined with OR inside lambda predicates are not supported (lambda-or-unsupported).',
+            { reason: 'lambda-or-unsupported', paths: lambdaPaths },
+          );
+        }
+        for (const child of node.expressions) {
+          visit(child, aliasesInScope, depth);
+        }
+        return;
+      }
+      case 'not':
+        visit(node.expr, aliasesInScope, depth);
+        return;
+      default:
+        return;
+    }
+  };
+
+  visit(expr, [], 0);
 }
 
 function rewriteNegatedLambdas(expr: ParsedExpression): ParsedExpression {
@@ -988,15 +1126,15 @@ function collectAndTerms(expr: ParsedExpression, output: ParsedExpression[]): vo
 function splitLambdaExpressions(expr: ParsedExpression): {
   lambdas?: LambdaExpressionNode[];
   predicate?: ParsedExpression;
+  lambdaExpression?: ParsedExpression;
 } {
   if (expr.operator === 'lambda') {
-    assertNoNestedLambda(expr);
     return { lambdas: [expr] };
   }
 
   if (expr.operator === 'logical' && expr.type === 'or') {
     if (containsLambda(expr)) {
-      throw new Error('Lambda expressions combined with OR are not supported.');
+      return { lambdaExpression: expr };
     }
     return { predicate: expr };
   }
@@ -1010,13 +1148,12 @@ function splitLambdaExpressions(expr: ParsedExpression): {
 
     for (const term of terms) {
       if (term.operator === 'lambda') {
-        assertNoNestedLambda(term);
         lambdas.push(term);
         continue;
       }
 
       if (term.operator === 'logical' && term.type === 'or' && containsLambda(term)) {
-        throw new Error('Lambda expressions combined with OR are not supported.');
+        return { lambdaExpression: expr };
       }
 
       if (term.operator === 'not' && containsLambda(term)) {
@@ -1026,7 +1163,7 @@ function splitLambdaExpressions(expr: ParsedExpression): {
       }
 
       if (containsLambda(term)) {
-        throw new Error('Lambda expressions must be combined using top-level AND only.');
+        return { lambdaExpression: expr };
       }
 
       others.push(term);
@@ -2498,6 +2635,7 @@ export interface ParsedODataQuery extends Filter<AnyObject> {
   applyPipeline?: ApplyPipeline;
   apply?: AggregationSpec;
   lambdas?: LambdaExpression[];
+  lambdaExpression?: ParsedExpression;
   postFilter?: ParsedExpression;
   whereExpression?: ParsedExpression;
   unsupportedFunctions?: string[];
@@ -2540,7 +2678,8 @@ export function parseODataQuery(query: QueryObject, options: ParseOptions = {}):
     if (tokens.length) {
       const [expr] = parseFilter(tokens);
       const rewritten = rewriteNegatedLambdas(expr);
-      const { lambdas, predicate } = splitLambdaExpressions(rewritten);
+      validateLambdaExpressionTree(rewritten, options);
+      const { lambdas, predicate, lambdaExpression } = splitLambdaExpressions(rewritten);
       if (lambdas?.length) {
         filter.lambdas = lambdas.map((lambda) => ({
           type: lambda.lambdaType,
@@ -2548,6 +2687,9 @@ export function parseODataQuery(query: QueryObject, options: ParseOptions = {}):
           alias: lambda.alias,
           predicate: lambda.predicate,
         }));
+      }
+      if (lambdaExpression) {
+        filter.lambdaExpression = lambdaExpression;
       }
       if (predicate) {
         filter.whereExpression = predicate;

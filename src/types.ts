@@ -262,6 +262,8 @@ export interface ODataLambdaConfig {
   warnOnLambdaFallback?: boolean;
   pushdown?: 'disabled' | 'postgres';
   pushdownStrict?: boolean;
+  pushdownMaxExistsDepth?: number;
+  pushdownMaxJoinCount?: number;
 }
 
 export type ODataTelemetryCategory =
