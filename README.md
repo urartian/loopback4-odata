@@ -507,7 +507,7 @@ All comparison operators (`eq`, `ne`, `gt`, `ge`, `lt`, `le`) are supported with
 GET /odata/Products?$filter=orderItems/any(i: i/unitPrice gt 800) and price gt 1000
 ```
 
-The parser keeps the lambda for post-processing while applying the remaining clauses (`price gt 1000`) to the database query. Lambdas currently support a single predicate per `$filter`, combined using `and`, and any/all across multi-segment navigation paths (for example, `orders/items/any(...)`).
+The parser keeps lambdas for post-processing or SQL pushdown while still applying any root predicates (like `price gt 1000`) to the database query. Lambdas support `any/all` across multi-segment navigation paths and can participate in full `$filter` boolean expression trees (for example `(<lambda>) or (<root predicate>)`). See [Configuration](#configuration) for the full lambda grammar, guardrails, and pushdown options.
 
 ### Searchable Fields
 
@@ -931,7 +931,7 @@ Run `npm test` to compile the TypeScript specs and execute the unit suite. Accep
 - [x] $metadata endpoint with generated CSDL (including navigation properties for relations)
 - [x] Basic query options → LoopBack filters (`$filter`, `$orderby`, `$top`, `$skip`, `$select`)
 - [x] Extended filter support: `not`, numeric functions (`round`, `floor`, `ceiling`), date extraction (`year`), string helpers (`trim`, `concat`), date parts (`month`, `day`, `hour`, `minute`, `second`) with strict-mode guards when unsupported, and `$search` across string fields
-- [x] any/all (lambdas): support `<nav>/(any|all)(x: <expr>)` (including multi-segment paths); multiple lambdas are supported when combined by top-level `and`; `not <lambda>` is supported via `any/all` rewrite (nested lambdas and `or` with lambdas remain unsupported)
+- [x] any/all (lambdas): support `<nav>/(any|all)(x: <expr>)` (including multi-segment paths), `not <lambda>` rewrite, nested lambdas (depth capped), and combining lambdas with other predicates using boolean trees (including top-level `or`)
 - [x] Relational expansion via `$expand`
 - [x] Inline and standalone `$count`
 - [x] `$batch` endpoint (JSON and multipart/mixed)
@@ -2037,7 +2037,7 @@ Telemetry respects LoopBack’s logging pipeline—you can forward the enriched 
 - [ ] Additional `$apply` pushdown adapters (MSSQL, Mongo aggregation)
 - [ ] Deep update / draft handling for composition hierarchies
 - [x] Opt-in cascade delete for composition-style relations (hook/transaction-aware)
-- [ ] Rich lambda grammar with nested `any` / `all` and mixed logical operators
+- [ ] Richer lambda grammar/pushdown coverage (deeper nesting, broader function support, and remaining boolean/operator edge cases)
 - [ ] Virtual/calculated field exposure with CSDL annotations
 
 ## Contributing
