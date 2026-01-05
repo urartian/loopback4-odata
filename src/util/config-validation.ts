@@ -5,6 +5,7 @@ import {
   ODataCompositionEnforcement,
   ODataCompositionDeletePolicy,
   ODataCorrelationConfig,
+  ODataFilterConfig,
   ODataLambdaConfig,
   ODataPaginationConfig,
   ODataTelemetryCategory,
@@ -55,6 +56,9 @@ export function validateODataConfig(config: ODataConfig): void {
   }
   if (config.lambda) {
     validateLambdaConfig('ODataConfig.lambda', config.lambda);
+  }
+  if (config.filter) {
+    validateFilterConfig('ODataConfig.filter', config.filter);
   }
   assignPositive(config as AnyObject, 'pageSize');
   assignPositive(config as AnyObject, 'maxTop');
@@ -122,6 +126,12 @@ export function validateLambdaConfig(label: string, lambda?: ODataLambdaConfig):
       }
     }
   }
+}
+
+export function validateFilterConfig(label: string, filter?: ODataFilterConfig): void {
+  if (!filter) return;
+  const target = filter as AnyObject;
+  assignPositive(target, 'maxInListItems', label);
 }
 
 function assignPositive(target: AnyObject, key: string, parentLabel = 'ODataConfig'): void {

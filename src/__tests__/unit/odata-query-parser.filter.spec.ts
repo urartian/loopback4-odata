@@ -206,6 +206,44 @@ describe('parseODataQuery extended filter grammar', () => {
   });
 });
 
+describe('parseODataQuery in operator', () => {
+  it('translates in() lists into inq', () => {
+    const parsed = parseODataQuery({ $filter: "status in ('Open','Closed')" });
+    assert.deepStrictEqual(parsed.where, { status: { inq: ['Open', 'Closed'] } });
+  });
+
+  it('translates numeric in() lists into inq', () => {
+    const parsed = parseODataQuery({ $filter: 'id in (1,2,3)' });
+    assert.deepStrictEqual(parsed.where, { id: { inq: [1, 2, 3] } });
+  });
+
+  it('splits null out of in() list', () => {
+    const parsed = parseODataQuery({ $filter: "field in (null,'X')" });
+    assert.deepStrictEqual(parsed.where, {
+      or: [{ field: null }, { field: { inq: ['X'] } }],
+    });
+  });
+
+  it('rejects oversized in() lists with stable code', () => {
+    assert.throws(
+      () => parseODataQuery({ $filter: 'id in (1,2,3)' }, { maxInListItems: 2 }),
+      (err) => {
+        const anyErr = err as any;
+        return (
+          /exceeds maximum/i.test(anyErr?.message ?? '') && anyErr?.code === 'in-list-too-large'
+        );
+      },
+    );
+  });
+
+  it('rejects non-literal in() list items in strict mode', () => {
+    assert.throws(
+      () => parseODataQuery({ $filter: 'status in (Open)' }, { strict: true }),
+      /requires literal/i,
+    );
+  });
+});
+
 describe('parseODataQuery filter safety limits', () => {
   it('rejects excessive length() patterns', () => {
     assert.throws(() => parseODataQuery({ $filter: 'length(code) eq 10001' }), /exceeds maximum/i);

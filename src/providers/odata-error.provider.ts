@@ -142,6 +142,7 @@ export class ODataErrorProvider implements Provider<Reject> {
       case 'invalid-guid-literal':
       case 'invalid-int64-literal':
       case 'invalid-decimal-literal':
+      case 'in-list-too-large':
         return code;
       default:
         return undefined;

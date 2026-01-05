@@ -4946,6 +4946,20 @@ export function defineODataCrudController(def: EntitySetDef) {
               return this.compareValues(left, right) < 0;
             case 'lte':
               return this.compareValues(left, right) <= 0;
+            case 'inq': {
+              if (!Array.isArray(right)) return false;
+              const hasNull = right.some((item) => item === null);
+              const nonNull = right.filter((item) => item !== null);
+              if (left == null) return hasNull;
+              return nonNull.some((item) => this.compareValues(left, item) === 0);
+            }
+            case 'nin': {
+              if (!Array.isArray(right)) return false;
+              const hasNull = right.some((item) => item === null);
+              const nonNull = right.filter((item) => item !== null);
+              if (left == null) return !hasNull;
+              return !nonNull.some((item) => this.compareValues(left, item) === 0);
+            }
             default:
               throw new Error(`Unsupported comparator: ${expr.comparator}`);
           }
@@ -5285,6 +5299,16 @@ export function defineODataCrudController(def: EntitySetDef) {
       if (!expr) return expr;
       switch (expr.operator) {
         case 'comparison': {
+          if (
+            (expr.comparator === 'inq' || expr.comparator === 'nin') &&
+            Array.isArray(expr.value)
+          ) {
+            const values = expr.value.map((entry) => {
+              if (entry === null) return null;
+              return this.coerceFilterLiteralForProperty(expr.field, entry);
+            });
+            return { ...expr, value: values };
+          }
           const coerced = this.coerceFilterLiteralForProperty(expr.field, expr.value);
           return coerced === expr.value ? expr : { ...expr, value: coerced };
         }
@@ -8143,6 +8167,7 @@ export function defineODataCrudController(def: EntitySetDef) {
             maxSubstringLength: this.cfg?.maxSubstringLength,
             maxFilterFieldNameLength: this.cfg?.maxFilterFieldNameLength,
             maxLambdaExistsDepth: this.cfg?.lambda?.pushdownMaxExistsDepth,
+            maxInListItems: this.cfg?.filter?.maxInListItems,
           },
         );
         inlineCountRequested = parsed.inlineCount === true;
@@ -8162,6 +8187,7 @@ export function defineODataCrudController(def: EntitySetDef) {
             maxSubstringStart: this.cfg?.maxSubstringStart,
             maxSubstringLength: this.cfg?.maxSubstringLength,
             maxFilterFieldNameLength: this.cfg?.maxFilterFieldNameLength,
+            maxInListItems: this.cfg?.filter?.maxInListItems,
           });
           const pipelineHasOrder = this.planHasInternalOrder(applyPlan);
           if (
@@ -8233,6 +8259,7 @@ export function defineODataCrudController(def: EntitySetDef) {
               maxSubstringStart: this.cfg?.maxSubstringStart,
               maxSubstringLength: this.cfg?.maxSubstringLength,
               maxFilterFieldNameLength: this.cfg?.maxFilterFieldNameLength,
+              maxInListItems: this.cfg?.filter?.maxInListItems,
             }) as CrudWhere;
           } catch (error) {
             if (error instanceof UnsupportedFilterError) {
@@ -9281,6 +9308,7 @@ export function defineODataCrudController(def: EntitySetDef) {
             maxSubstringLength: this.cfg?.maxSubstringLength,
             maxFilterFieldNameLength: this.cfg?.maxFilterFieldNameLength,
             maxLambdaExistsDepth: this.cfg?.lambda?.pushdownMaxExistsDepth,
+            maxInListItems: this.cfg?.filter?.maxInListItems,
           },
         );
         lambdaExpressions = parsed.lambdas ?? [];
@@ -9314,6 +9342,7 @@ export function defineODataCrudController(def: EntitySetDef) {
               maxSubstringStart: this.cfg?.maxSubstringStart,
               maxSubstringLength: this.cfg?.maxSubstringLength,
               maxFilterFieldNameLength: this.cfg?.maxFilterFieldNameLength,
+              maxInListItems: this.cfg?.filter?.maxInListItems,
             }) as CrudWhere;
           } catch (error) {
             if (error instanceof UnsupportedFilterError) {
@@ -9503,6 +9532,7 @@ export function defineODataCrudController(def: EntitySetDef) {
             maxSubstringLength: this.cfg?.maxSubstringLength,
             maxFilterFieldNameLength: this.cfg?.maxFilterFieldNameLength,
             maxLambdaExistsDepth: this.cfg?.lambda?.pushdownMaxExistsDepth,
+            maxInListItems: this.cfg?.filter?.maxInListItems,
           },
         );
         this.enforceApplyCapability(applySupported, parsed);
