@@ -8,12 +8,24 @@ import { ODataConfig } from '../../types';
 
 describe('CRUD controller navigation-property $filter + post-filter fallback', () => {
   @model()
+  class Address extends Entity {
+    @property({ id: true })
+    id!: number;
+
+    @property({ type: 'string' })
+    city!: string;
+  }
+
+  @model()
   class Customer extends Entity {
     @property({ id: true })
     id!: number;
 
     @property({ type: 'string' })
     name!: string;
+
+    @belongsTo(() => Address, { name: 'address' })
+    addressId!: number;
   }
 
   @model()
@@ -114,5 +126,41 @@ describe('CRUD controller navigation-property $filter + post-filter fallback', (
     expect(findCalls[0]?.include ?? []).to.containDeep([{ relation: 'customer' }]);
     expect(result.value).to.have.length(1);
     expect(result.value[0]?.id).to.equal(1);
+    expect(result.value[0]).to.not.have.property('customer');
+  });
+
+  it('keeps client-expanded relations but strips deeper injected includes', async () => {
+    const findCalls: any[] = [];
+    const controller = createController(
+      { $expand: 'customer', $filter: "customer/address/city eq 'X' and trim(status) eq 'Open'" },
+      { strict: false, filter: { maxPostFilterScanRows: 5 } },
+      {
+        find: async (filter: any) => {
+          findCalls.push(filter);
+          return [
+            {
+              id: 1,
+              status: ' Open ',
+              customer: { id: 10, name: 'Alice', address: { id: 50, city: 'X' } },
+            },
+            {
+              id: 2,
+              status: ' Open ',
+              customer: { id: 11, name: 'Bob', address: { id: 51, city: 'Y' } },
+            },
+          ];
+        },
+        count: async () => ({ count: 0 }),
+      },
+    );
+
+    const result = (await controller.list()) as any;
+
+    expect(findCalls.length).to.equal(1);
+    expect(findCalls[0]?.include ?? []).to.containDeep([{ relation: 'customer' }]);
+    expect(JSON.stringify(findCalls[0]?.include ?? [])).to.match(/address/);
+    expect(result.value).to.have.length(1);
+    expect(result.value[0]?.customer).to.have.property('name', 'Alice');
+    expect(result.value[0]?.customer).to.not.have.property('address');
   });
 });

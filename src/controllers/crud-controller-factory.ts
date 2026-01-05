@@ -4919,6 +4919,93 @@ export function defineODataCrudController(def: EntitySetDef) {
       return [this.cloneIncludeEntry(include)];
     }
 
+    extractIncludePaths(include: Filter<CrudEntity>['include']): string[][] {
+      const results: string[][] = [];
+      const visit = (entries: NormalizedInclusion[], prefix: string[]) => {
+        for (const entry of entries) {
+          const relation = entry.relation;
+          if (!relation) continue;
+          const next = [...prefix, relation];
+          results.push(next);
+          const nested = this.normalizeIncludeList(entry.scope?.include as any);
+          if (nested.length) visit(nested, next);
+        }
+      };
+      const normalized = this.normalizeIncludeList(include);
+      if (normalized.length) visit(normalized, []);
+      return results;
+    }
+
+    includePathKey(path: string[]): string {
+      return path.join('/');
+    }
+
+    mergeIncludePaths(paths: string[][]): string[][] {
+      const out: string[][] = [];
+      const seen = new Set<string>();
+      for (const path of paths) {
+        const key = this.includePathKey(path);
+        if (!key) continue;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        out.push(path);
+      }
+      return out;
+    }
+
+    diffIncludePaths(before: string[][], after: string[][]): string[][] {
+      const beforeSet = new Set(before.map((path) => this.includePathKey(path)));
+      return after.filter((path) => !beforeSet.has(this.includePathKey(path)));
+    }
+
+    stripInjectedIncludesFromEntities(
+      entities: AnyObject[],
+      params: { injectedPaths: string[][]; clientPaths: string[][] },
+    ): void {
+      const { injectedPaths, clientPaths } = params;
+      if (!entities.length || !injectedPaths.length) return;
+      const clientPrefixSet = new Set<string>();
+      for (const path of clientPaths) {
+        for (let i = 1; i <= path.length; i++) {
+          const key = this.includePathKey(path.slice(0, i));
+          if (key) clientPrefixSet.add(key);
+        }
+      }
+
+      const stripPath = (value: unknown, segments: string[]) => {
+        if (!segments.length) return;
+        if (value == null) return;
+        if (Array.isArray(value)) {
+          for (const item of value) stripPath(item, segments);
+          return;
+        }
+        if (typeof value !== 'object') return;
+        const obj = value as AnyObject;
+        if (segments.length === 1) {
+          delete obj[segments[0]!];
+          return;
+        }
+        const [head, ...rest] = segments;
+        stripPath(obj[head!], rest);
+      };
+
+      for (const injected of injectedPaths) {
+        if (!injected.length) continue;
+        const injectedKey = this.includePathKey(injected);
+        if (clientPrefixSet.has(injectedKey)) continue;
+        const rootKey = injected[0]!;
+        if (!clientPrefixSet.has(rootKey)) {
+          for (const entity of entities) {
+            delete entity[rootKey];
+          }
+          continue;
+        }
+        for (const entity of entities) {
+          stripPath(entity, injected);
+        }
+      }
+    }
+
     ensureIncludePath(include: NormalizedInclusion[], path: string[]) {
       const [current, ...rest] = path;
       if (!current) return;
@@ -8285,6 +8372,8 @@ export function defineODataCrudController(def: EntitySetDef) {
       if (preferences.respondAsync) this.throwPreferenceNotSupported('respond-async');
 
       const baseFilter: Filter<CrudEntity> = filter ? { ...filter } : {};
+      let clientIncludePaths: string[][] = this.extractIncludePaths(baseFilter.include);
+      const injectedIncludePaths: string[][] = [];
       const dataSource = (this.repository as { dataSource?: juggler.DataSource }).dataSource;
       const applySupported = this.isApplyEnabled();
       const aggregationEnabled = Boolean(
@@ -8462,6 +8551,7 @@ export function defineODataCrudController(def: EntitySetDef) {
         hadClientExpand = Array.isArray(baseFilter.include)
           ? baseFilter.include.length > 0
           : Boolean(baseFilter.include);
+        clientIncludePaths = this.extractIncludePaths(baseFilter.include);
         if (applyPlan?.pushdownWhere) {
           const existingWhere = baseFilter.where as CrudWhere | undefined;
           const planWhere = applyPlan.pushdownWhere as CrudWhere;
@@ -8469,6 +8559,7 @@ export function defineODataCrudController(def: EntitySetDef) {
           baseFilter.where = combinedWhere ?? planWhere;
         }
         if (applyPlan) {
+          const includeBefore = this.extractIncludePaths(baseFilter.include);
           const relationsToInclude = this.collectAggregationRelations(applyPlan);
           if (relationsToInclude.length) {
             const additions = relationsToInclude.map((relation) => ({ relation }));
@@ -8482,7 +8573,10 @@ export function defineODataCrudController(def: EntitySetDef) {
               modelRelations,
             );
           }
+          const includeAfter = this.extractIncludePaths(baseFilter.include);
+          injectedIncludePaths.push(...this.diffIncludePaths(includeBefore, includeAfter));
         } else if (aggregationSpec) {
+          const includeBefore = this.extractIncludePaths(baseFilter.include);
           const fallbackSpec: AggregationSpec = {
             groupBy: [...aggregationSpec.groupBy],
             aggregates: aggregationSpec.aggregates.map((expr) => ({ ...expr })),
@@ -8514,6 +8608,8 @@ export function defineODataCrudController(def: EntitySetDef) {
               modelRelations,
             );
           }
+          const includeAfter = this.extractIncludePaths(baseFilter.include);
+          injectedIncludePaths.push(...this.diffIncludePaths(includeBefore, includeAfter));
         }
         this.ensureEtagField(baseFilter);
         // apply $search if present
@@ -8599,7 +8695,10 @@ export function defineODataCrudController(def: EntitySetDef) {
             'Combining $apply with lambda expressions is not supported.',
           );
         }
+        const includeBefore = this.extractIncludePaths(baseFilter.include);
         this.ensureLambdasInclusion(baseFilter, lambdaExpressions);
+        const includeAfter = this.extractIncludePaths(baseFilter.include);
+        injectedIncludePaths.push(...this.diffIncludePaths(includeBefore, includeAfter));
       }
       if (lambdaExpressionTree) {
         if (aggregationSpec) {
@@ -8609,7 +8708,10 @@ export function defineODataCrudController(def: EntitySetDef) {
         }
         const rootLambdas = this.collectRootLambdasFromExpression(lambdaExpressionTree);
         if (rootLambdas.length) {
+          const includeBefore = this.extractIncludePaths(baseFilter.include);
           this.ensureLambdasInclusion(baseFilter, rootLambdas);
+          const includeAfter = this.extractIncludePaths(baseFilter.include);
+          injectedIncludePaths.push(...this.diffIncludePaths(includeBefore, includeAfter));
         }
       }
 
@@ -8779,7 +8881,10 @@ export function defineODataCrudController(def: EntitySetDef) {
         postFilterExpr = this.combinePostFilterExpressions(postFilterExpr, navigationFilterExpr);
         navigationFilterExpr = undefined;
         if (postFilterExpr) {
+          const includeBefore = this.extractIncludePaths(baseFilter.include);
           this.ensureNavigationInclusionForExpression(baseFilter, postFilterExpr);
+          const includeAfter = this.extractIncludePaths(baseFilter.include);
+          injectedIncludePaths.push(...this.diffIncludePaths(includeBefore, includeAfter));
         }
       }
       const requiresPostFilter = Boolean(postFilterExpr) || planRequiresPostProcessing;
@@ -9025,6 +9130,10 @@ export function defineODataCrudController(def: EntitySetDef) {
           }
 
           this.ensureODataHeaders();
+          this.stripInjectedIncludesFromEntities(paged, {
+            injectedPaths: this.mergeIncludePaths(injectedIncludePaths),
+            clientPaths: this.mergeIncludePaths(clientIncludePaths),
+          });
           const decorated = paged.map((item) => this.decoratePlainEntity(item) ?? item);
           const aggregatedTombstones = deltaEnabled
             ? this.buildRemovedBuckets(
@@ -9207,6 +9316,10 @@ export function defineODataCrudController(def: EntitySetDef) {
                 nextLinkToken = pagination.token;
               }
               this.ensureODataHeaders();
+              this.stripInjectedIncludesFromEntities(paged, {
+                injectedPaths: this.mergeIncludePaths(injectedIncludePaths),
+                clientPaths: this.mergeIncludePaths(clientIncludePaths),
+              });
               const result = {
                 '@odata.context': contextBase,
                 ...(inlineCountRequested && totalCount !== undefined
@@ -9349,6 +9462,10 @@ export function defineODataCrudController(def: EntitySetDef) {
             }
 
             this.ensureODataHeaders();
+            this.stripInjectedIncludesFromEntities(paged, {
+              injectedPaths: this.mergeIncludePaths(injectedIncludePaths),
+              clientPaths: this.mergeIncludePaths(clientIncludePaths),
+            });
             const result = {
               '@odata.context': contextBase,
               ...(inlineCountRequested && totalCount !== undefined
@@ -9541,6 +9658,10 @@ export function defineODataCrudController(def: EntitySetDef) {
                 this.applyComputeExpressions(ordered, computeExpressions);
 
                 this.ensureODataHeaders();
+                this.stripInjectedIncludesFromEntities(ordered, {
+                  injectedPaths: this.mergeIncludePaths(injectedIncludePaths),
+                  clientPaths: this.mergeIncludePaths(clientIncludePaths),
+                });
                 const result = {
                   '@odata.context': contextBase,
                   ...(inlineCountRequested ? { '@odata.count': totalCount! } : {}),
@@ -9619,6 +9740,10 @@ export function defineODataCrudController(def: EntitySetDef) {
           const paged = this.sliceResults(ordered, requestedOffset, requestedLimit);
 
           this.ensureODataHeaders();
+          this.stripInjectedIncludesFromEntities(paged, {
+            injectedPaths: this.mergeIncludePaths(injectedIncludePaths),
+            clientPaths: this.mergeIncludePaths(clientIncludePaths),
+          });
           const result = {
             '@odata.context': contextBase,
             ...(inlineCountRequested ? { '@odata.count': filtered.length } : {}),
@@ -9757,6 +9882,10 @@ export function defineODataCrudController(def: EntitySetDef) {
         }
 
         this.ensureODataHeaders();
+        this.stripInjectedIncludesFromEntities(paged, {
+          injectedPaths: this.mergeIncludePaths(injectedIncludePaths),
+          clientPaths: this.mergeIncludePaths(clientIncludePaths),
+        });
         const decorated = this.decoratePlainEntities(paged);
         const combined = tombstones.length ? [...decorated, ...tombstones] : decorated;
         this.recordTelemetryStats({ rows: combined.length });

@@ -1769,7 +1769,7 @@ describe('OData component acceptance', () => {
   it('supports lambda any filters', async () => {
     const res = await client
       .get('/odata/Products')
-      .query({ $filter: 'orderItems/any(i: i/unitPrice gt 800)' })
+      .query({ $expand: 'orderItems', $filter: 'orderItems/any(i: i/unitPrice gt 800)' })
       .expect(200);
 
     expect(res.body.value).to.be.Array();
@@ -1783,6 +1783,7 @@ describe('OData component acceptance', () => {
     const res = await client
       .get('/odata/Products')
       .query({
+        $expand: 'orderItems',
         $filter: 'orderItems/any(i: i/unitPrice gt 800) and orderItems/any(i: i/unitPrice gt 700)',
       })
       .expect(200);
@@ -1798,7 +1799,7 @@ describe('OData component acceptance', () => {
   it('supports negated lambda any filters', async () => {
     const res = await client
       .get('/odata/Products')
-      .query({ $filter: 'not orderItems/any(i: i/unitPrice gt 800)' })
+      .query({ $expand: 'orderItems', $filter: 'not orderItems/any(i: i/unitPrice gt 800)' })
       .expect(200);
 
     expect(res.body.value).to.be.Array();
@@ -1811,7 +1812,7 @@ describe('OData component acceptance', () => {
   it('supports negated lambda all filters', async () => {
     const res = await client
       .get('/odata/Products')
-      .query({ $filter: 'not orderItems/all(i: i/unitPrice gt 999999)' })
+      .query({ $expand: 'orderItems', $filter: 'not orderItems/all(i: i/unitPrice gt 999999)' })
       .expect(200);
 
     expect(res.body.value).to.be.Array();
@@ -1826,7 +1827,10 @@ describe('OData component acceptance', () => {
   it('supports lambda filters combined with additional predicates', async () => {
     const res = await client
       .get('/odata/Products')
-      .query({ $filter: 'orderItems/any(i: i/unitPrice gt 800) and price gt 1000' })
+      .query({
+        $expand: 'orderItems',
+        $filter: 'orderItems/any(i: i/unitPrice gt 800) and price gt 1000',
+      })
       .expect(200);
 
     expect(res.body.value).to.be.Array();
