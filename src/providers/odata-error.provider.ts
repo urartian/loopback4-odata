@@ -137,6 +137,11 @@ export class ODataErrorProvider implements Provider<Reject> {
       case 'lambda-or-unsupported':
       case 'through-relation-unsupported':
       case 'pushdown-join-count-exceeded':
+      case 'invalid-datetimeoffset-literal':
+      case 'invalid-date-literal':
+      case 'invalid-guid-literal':
+      case 'invalid-int64-literal':
+      case 'invalid-decimal-literal':
         return code;
       default:
         return undefined;

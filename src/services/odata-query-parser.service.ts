@@ -260,7 +260,10 @@ function tokenize(filter: string): string[] {
     }
 
     if (!inString) {
-      if (char === '(' || char === ')' || char === ',' || char === ':') {
+      // Note: ':' is used by lambda aliases (e.g. nav/any(x: ...)), but it is also a
+      // valid character inside DateTimeOffset literals (e.g. 2026-01-03T10:20:30Z).
+      // We keep ':' as part of tokens unless it appears as a standalone token due to whitespace.
+      if (char === '(' || char === ')' || char === ',') {
         if (current) {
           tokens.push(current);
           current = '';
@@ -299,6 +302,39 @@ function applyTransform(operand: Operand, transform: OperandTransform): Operand 
   return { ...operand, transform };
 }
 
+function tryParseNumericToken(token: string): number | undefined {
+  const trimmed = String(token ?? '').trim();
+  if (!trimmed) return undefined;
+
+  // Preserve large/high-precision numerics as strings so controller-side coercion can decide
+  // how to interpret them (e.g. decimal/int64), avoiding JS precision loss.
+  const intMatch = /^-?\d+$/.test(trimmed);
+  if (intMatch) {
+    const digits = trimmed.replace(/^-?/, '');
+    if (digits.length > 15) return undefined;
+    const numeric = Number(trimmed);
+    if (!Number.isSafeInteger(numeric)) return undefined;
+    return numeric;
+  }
+
+  const decimalOrExponent = /^-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?$/.test(trimmed);
+  if (decimalOrExponent) {
+    const [significand] = trimmed.split(/[eE]/);
+    const fraction = significand.includes('.') ? (significand.split('.')[1] ?? '') : '';
+    const significantDigits = significand
+      .replace(/^-?/, '')
+      .replace('.', '')
+      .replace(/^0+/, '').length;
+    if (fraction.length > 15) return undefined;
+    if (significantDigits > 15) return undefined;
+    const numeric = Number(trimmed);
+    if (!Number.isFinite(numeric)) return undefined;
+    return numeric;
+  }
+
+  return undefined;
+}
+
 function parseOperand(tokens: string[], index: number): [Operand, number] {
   const token = tokens[index];
   if (token == null) {
@@ -334,10 +370,8 @@ function parseOperand(tokens: string[], index: number): [Operand, number] {
     return [{ kind: 'literal', value: token === 'true' }, index + 1];
   }
 
-  const numeric = Number(token);
-  if (!Number.isNaN(numeric)) {
-    return [{ kind: 'literal', value: numeric }, index + 1];
-  }
+  const numeric = tryParseNumericToken(token);
+  if (numeric !== undefined) return [{ kind: 'literal', value: numeric }, index + 1];
 
   return [{ kind: 'field', name: token }, index + 1];
 }
@@ -836,6 +870,17 @@ function tryParseLambda(
     alias = alias.slice(0, -1);
   } else if (innerTokens[0] === ':') {
     innerTokens.shift();
+  } else if (alias.includes(':')) {
+    const idx = alias.indexOf(':');
+    const before = alias.slice(0, idx);
+    const after = alias.slice(idx + 1);
+    if (!before) {
+      throw new Error('Malformed lambda expression: expected alias before ":".');
+    }
+    alias = before;
+    if (after) {
+      innerTokens.unshift(after);
+    }
   } else {
     throw new Error('Malformed lambda expression: expected ":" after alias.');
   }
@@ -882,8 +927,8 @@ function parseLiteral(token: string): unknown {
   if (lower === 'false') return false;
   if (lower === 'null') return null;
 
-  const numeric = Number(token);
-  if (!Number.isNaN(numeric)) return numeric;
+  const numeric = tryParseNumericToken(token);
+  if (numeric !== undefined) return numeric;
 
   return token;
 }

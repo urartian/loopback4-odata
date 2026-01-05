@@ -107,6 +107,12 @@ import {
   NavigationPathError,
 } from '../util/navigation-path';
 import {
+  normalizeGuidStringLiteral,
+  parseDateStringLiteral,
+  parseInt64StringLiteral,
+  unwrapODataTypedLiteral,
+} from '../util/odata-literals';
+import {
   PrimitivePropertyKind,
   classifyPrimitiveProperty,
   resolveStructuredPropertySegments,
@@ -5097,10 +5103,223 @@ export function defineODataCrudController(def: EntitySetDef) {
       }
     }
 
+    badRequestWithCode(message: string, code: string): HttpErrors.HttpError {
+      const err = new HttpErrors.BadRequest(message);
+      (err as AnyObject).code = code;
+      return err;
+    }
+
+    resolveFilterPropertyDefinition(field: string):
+      | {
+          modelCtor: typeof Entity;
+          propertyName: string;
+          propertyDef: PropertyDefinition | undefined;
+        }
+      | undefined {
+      if (!field || typeof field !== 'string') return undefined;
+
+      if (!field.includes('/')) {
+        return {
+          modelCtor: this.entityCtor,
+          propertyName: field,
+          propertyDef: this.getModelPropertyDefinition(this.entityCtor, field),
+        };
+      }
+
+      try {
+        const resolved = resolveNavigationPath(this.entityCtor, field, {
+          maxDepth: this.cfg?.maxExpandDepth ?? 5,
+        });
+
+        if (!resolved.propertyPath) return undefined;
+        const segments = resolved.propertyPath.split('/').filter(Boolean);
+        if (segments.length !== 1) return undefined;
+
+        const baseModel = resolved.joins.length ? resolved.targetModel : this.entityCtor;
+        const propertyName = segments[0]!;
+        return {
+          modelCtor: baseModel,
+          propertyName,
+          propertyDef: this.getModelPropertyDefinition(baseModel, propertyName),
+        };
+      } catch (error) {
+        if (error instanceof NavigationPathError) return undefined;
+        throw error;
+      }
+    }
+
+    coerceFilterLiteralForProperty(field: string, value: unknown): unknown {
+      const resolved = this.resolveFilterPropertyDefinition(field);
+      if (!resolved) return value;
+
+      const { propertyDef } = resolved;
+      if (value === null) return null;
+      if (value === undefined) return value;
+
+      if (this.isGuidProperty(propertyDef)) {
+        const normalized =
+          typeof value === 'string'
+            ? normalizeGuidStringLiteral(value)
+            : normalizeGuidStringLiteral(String(value));
+        if (!normalized) {
+          throw this.badRequestWithCode(
+            `Invalid GUID literal for ${field}.`,
+            'invalid-guid-literal',
+          );
+        }
+        return normalized;
+      }
+
+      const plan = this.classifyProperty(propertyDef);
+      if (!plan) return value;
+
+      switch (plan.kind) {
+        case 'datetimeoffset': {
+          const raw = typeof value === 'string' ? value.trim() : value;
+          if (typeof raw === 'string') {
+            const asDate = parseDateStringLiteral(raw);
+            const unwrapped = unwrapODataTypedLiteral(raw, 'datetimeoffset');
+            const candidateSource = unwrapped ?? raw;
+            const candidate = asDate ? `${asDate}T00:00:00Z` : candidateSource;
+            const normalized = this.normalizeDateTimeOffsetString(candidate);
+            if (!normalized) {
+              throw this.badRequestWithCode(
+                `Invalid DateTimeOffset literal for ${field}.`,
+                'invalid-datetimeoffset-literal',
+              );
+            }
+            const parsed = new Date(normalized);
+            if (Number.isNaN(parsed.getTime())) {
+              throw this.badRequestWithCode(
+                `Invalid DateTimeOffset literal for ${field}.`,
+                'invalid-datetimeoffset-literal',
+              );
+            }
+            return parsed;
+          }
+          if (raw instanceof Date) {
+            if (Number.isNaN(raw.getTime())) {
+              throw this.badRequestWithCode(
+                `Invalid DateTimeOffset literal for ${field}.`,
+                'invalid-datetimeoffset-literal',
+              );
+            }
+            return raw;
+          }
+          throw this.badRequestWithCode(
+            `Invalid DateTimeOffset literal for ${field}.`,
+            'invalid-datetimeoffset-literal',
+          );
+        }
+        case 'date': {
+          const raw = typeof value === 'string' ? value.trim() : value;
+          if (raw instanceof Date) {
+            if (Number.isNaN(raw.getTime())) {
+              throw this.badRequestWithCode(
+                `Invalid Date literal for ${field}.`,
+                'invalid-date-literal',
+              );
+            }
+            return raw.toISOString().slice(0, 10);
+          }
+          if (typeof raw !== 'string') {
+            throw this.badRequestWithCode(
+              `Invalid Date literal for ${field}.`,
+              'invalid-date-literal',
+            );
+          }
+          const normalized = parseDateStringLiteral(raw);
+          if (!normalized) {
+            throw this.badRequestWithCode(
+              `Invalid Date literal for ${field}.`,
+              'invalid-date-literal',
+            );
+          }
+          return normalized;
+        }
+        case 'int64': {
+          if (typeof value === 'number') {
+            if (
+              !Number.isFinite(value) ||
+              !Number.isSafeInteger(value) ||
+              !Number.isInteger(value)
+            ) {
+              throw this.badRequestWithCode(
+                `Invalid Int64 literal for ${field}.`,
+                'invalid-int64-literal',
+              );
+            }
+            return value.toFixed(0);
+          }
+          const normalized = parseInt64StringLiteral(String(value));
+          if (!normalized) {
+            throw this.badRequestWithCode(
+              `Invalid Int64 literal for ${field}.`,
+              'invalid-int64-literal',
+            );
+          }
+          return normalized;
+        }
+        case 'decimal': {
+          const raw =
+            typeof value === 'string'
+              ? (unwrapODataTypedLiteral(value, 'decimal') ?? value)
+              : value;
+          const normalized = this.normalizeDecimalValue(raw);
+          if (!normalized) {
+            throw this.badRequestWithCode(
+              `Invalid Decimal literal for ${field}.`,
+              'invalid-decimal-literal',
+            );
+          }
+          return normalized.value;
+        }
+        default:
+          return value;
+      }
+    }
+
+    coerceFilterExpressionLiterals(
+      expr: ParsedExpression | undefined,
+    ): ParsedExpression | undefined {
+      if (!expr) return expr;
+      switch (expr.operator) {
+        case 'comparison': {
+          const coerced = this.coerceFilterLiteralForProperty(expr.field, expr.value);
+          return coerced === expr.value ? expr : { ...expr, value: coerced };
+        }
+        case 'logical': {
+          const next = expr.expressions.map(
+            (child) => this.coerceFilterExpressionLiterals(child) ?? child,
+          );
+          return { ...expr, expressions: next };
+        }
+        case 'not': {
+          const inner = this.coerceFilterExpressionLiterals(expr.expr) ?? expr.expr;
+          return inner === expr.expr ? expr : { ...expr, expr: inner };
+        }
+        case 'lambda': {
+          const predicate = this.coerceFilterExpressionLiterals(expr.predicate) ?? expr.predicate;
+          return predicate === expr.predicate ? expr : { ...expr, predicate };
+        }
+        default:
+          return expr;
+      }
+    }
+
     compareValues(a: unknown, b: unknown): number {
       if (a === b) return 0;
       if (a == null) return -1;
       if (b == null) return 1;
+      if (a instanceof Date || b instanceof Date) {
+        const aTime = a instanceof Date ? a.getTime() : Number.NaN;
+        const bTime = b instanceof Date ? b.getTime() : Number.NaN;
+        if (!Number.isNaN(aTime) && !Number.isNaN(bTime)) {
+          if (aTime < bTime) return -1;
+          if (aTime > bTime) return 1;
+          return 0;
+        }
+      }
       if (typeof a === 'number' && typeof b === 'number') {
         if (a < b) return -1;
         if (a > b) return 1;
@@ -7964,7 +8183,7 @@ export function defineODataCrudController(def: EntitySetDef) {
         }
         lambdaExpressions = parsed.lambdas ?? [];
         lambdaExpressionTree = parsed.lambdaExpression;
-        postFilterExpr = parsed.postFilter;
+        postFilterExpr = this.coerceFilterExpressionLiterals(parsed.postFilter);
         unsupportedFunctions = parsed.unsupportedFunctions ?? [];
         skipTokenValue = parsed.skipToken;
         const computeAliases = computeExpressions?.map((item) => item.alias) ?? [];
@@ -7996,7 +8215,8 @@ export function defineODataCrudController(def: EntitySetDef) {
             `Unsupported filter functions in strict mode: ${unsupportedFunctions.join(', ')}`,
           );
         }
-        const splitWhere = this.splitWhereExpression(parsed.whereExpression);
+        const coercedWhereExpression = this.coerceFilterExpressionLiterals(parsed.whereExpression);
+        const splitWhere = this.splitWhereExpression(coercedWhereExpression);
         if (splitWhere.structuredExpr) {
           if (this.cfg?.strict) {
             this.validateParsedExpressionFields(splitWhere.structuredExpr, '$filter');
@@ -9076,7 +9296,8 @@ export function defineODataCrudController(def: EntitySetDef) {
         if (parsed.compute?.length) {
           throw new HttpErrors.BadRequest('$compute is not supported for $count responses.');
         }
-        const splitWhere = this.splitWhereExpression(parsed.whereExpression);
+        const coercedWhereExpression = this.coerceFilterExpressionLiterals(parsed.whereExpression);
+        const splitWhere = this.splitWhereExpression(coercedWhereExpression);
         if (splitWhere.structuredExpr) {
           if (this.cfg?.strict) {
             this.validateParsedExpressionFields(splitWhere.structuredExpr, '$filter');
@@ -9113,8 +9334,15 @@ export function defineODataCrudController(def: EntitySetDef) {
         delete (parsed as { whereExpression?: ParsedExpression }).whereExpression;
         const parsedFilter = { ...parsed } as Filter<CrudEntity> & { inlineCount?: boolean };
         delete (parsedFilter as { inlineCount?: boolean }).inlineCount;
-        postFilterExpr = parsed.postFilter;
-        unsupportedFunctions = parsed.unsupportedFunctions ?? [];
+        postFilterExpr = this.combinePostFilterExpressions(
+          postFilterExpr,
+          this.coerceFilterExpressionLiterals(parsed.postFilter),
+        );
+        const combinedUnsupported = [
+          ...(parsed.unsupportedFunctions ?? []),
+          ...(unsupportedFunctions ?? []),
+        ];
+        unsupportedFunctions = Array.from(new Set(combinedUnsupported));
         if (postFilterExpr && unsupportedFunctions.length && this.cfg?.strict) {
           throw new HttpErrors.BadRequest(
             `Unsupported filter functions in strict mode: ${unsupportedFunctions.join(', ')}`,
@@ -9280,7 +9508,7 @@ export function defineODataCrudController(def: EntitySetDef) {
         this.enforceApplyCapability(applySupported, parsed);
         this.applyFormatPreference(parsed.format);
         computeExpressions = parsed.compute;
-        postFilterExpr = parsed.postFilter;
+        postFilterExpr = this.coerceFilterExpressionLiterals(parsed.postFilter);
         unsupportedFunctions = parsed.unsupportedFunctions ?? [];
         if (postFilterExpr && unsupportedFunctions.length && this.cfg?.strict) {
           throw new HttpErrors.BadRequest(
