@@ -151,6 +151,9 @@ import {
 import {
   buildPostgresLambdaCountQuery,
   buildPostgresLambdaIdQuery,
+  buildPostgresFilterCountQuery,
+  buildPostgresFilterIdQuery,
+  supportsPostgresLambdaPushdown,
 } from '../util/postgres-lambda-pushdown';
 import { acceptsAnyMediaType } from '../util/accept';
 import { normalizeBasePath } from '../util/base-path';
@@ -162,6 +165,16 @@ import {
   ODataMediaWriteResult,
   PropertyBackedMediaHandler,
 } from '../services/odata-media-handler';
+
+const POSTGRES_PUSHABLE_FILTER_FUNCTIONS = new Set([
+  'trim',
+  'concat',
+  'month',
+  'day',
+  'hour',
+  'minute',
+  'second',
+]);
 
 type WriteTxState = {
   dataSource: juggler.DataSource;
@@ -4727,6 +4740,81 @@ export function defineODataCrudController(def: EntitySetDef) {
       );
     }
 
+    ensureNavigationInclusionForExpression(filter: Filter<CrudEntity>, expr: ParsedExpression) {
+      const includePaths = this.collectNavigationIncludePathsFromExpression(expr);
+      if (!includePaths.length) return;
+      const includeList = this.normalizeIncludeList(filter.include);
+      for (const includePath of includePaths) {
+        this.ensureIncludePath(includeList, includePath);
+      }
+      filter.include = includeList;
+      ensureIncludeProjection(
+        filter as Filter<AnyObject>,
+        filter.include as InclusionFilter[] | undefined,
+        modelRelations,
+      );
+    }
+
+    collectNavigationIncludePathsFromExpression(expr: ParsedExpression): string[][] {
+      const results: string[][] = [];
+      const dedupe = new Set<string>();
+      const maxDepth = this.cfg?.maxExpandDepth ?? 5;
+
+      const add = (path: string[]) => {
+        const key = path.join('/');
+        if (!key) return;
+        if (dedupe.has(key)) return;
+        dedupe.add(key);
+        results.push(path);
+      };
+
+      const tryField = (field: string | undefined) => {
+        if (!field || typeof field !== 'string' || !field.includes('/')) return;
+        try {
+          const resolved = resolveNavigationPath(this.entityCtor, field, { maxDepth });
+          if (!resolved.joins.length) return;
+          if (resolved.joins.some((join) => join.relationType === 'hasMany')) return;
+          add(resolved.joins.map((join) => join.relationName));
+        } catch (error) {
+          if (error instanceof NavigationPathError) return;
+          throw error;
+        }
+      };
+
+      const visit = (node: ParsedExpression) => {
+        switch (node.operator) {
+          case 'comparison':
+          case 'function':
+          case 'fncmp':
+          case 'datepart':
+          case 'indexofcmp':
+          case 'substrcmp':
+          case 'lengthcmp':
+            tryField(node.field);
+            return;
+          case 'stringfncmp':
+            for (const arg of node.args) {
+              if (arg.kind === 'field') tryField(arg.name);
+            }
+            return;
+          case 'logical':
+            for (const child of node.expressions) visit(child);
+            return;
+          case 'not':
+            visit(node.expr);
+            return;
+          case 'lambda':
+            visit(node.predicate);
+            return;
+          default:
+            return;
+        }
+      };
+
+      visit(expr);
+      return results;
+    }
+
     collectNestedLambdaIncludePaths(lambda: LambdaExpression): string[][] {
       const results: string[][] = [];
       const dedupe = new Set<string>();
@@ -8197,6 +8285,7 @@ export function defineODataCrudController(def: EntitySetDef) {
       if (preferences.respondAsync) this.throwPreferenceNotSupported('respond-async');
 
       const baseFilter: Filter<CrudEntity> = filter ? { ...filter } : {};
+      const dataSource = (this.repository as { dataSource?: juggler.DataSource }).dataSource;
       const applySupported = this.isApplyEnabled();
       const aggregationEnabled = Boolean(
         def.capabilities?.aggregation ?? this.cfg?.capabilities?.aggregation,
@@ -8299,9 +8388,16 @@ export function defineODataCrudController(def: EntitySetDef) {
         }
         this.applyFormatPreference(parsed.format);
         if (postFilterExpr && unsupportedFunctions.length && this.cfg?.strict) {
-          throw new HttpErrors.BadRequest(
-            `Unsupported filter functions in strict mode: ${unsupportedFunctions.join(', ')}`,
+          const allPushdownable = unsupportedFunctions.every((fn) =>
+            POSTGRES_PUSHABLE_FILTER_FUNCTIONS.has(fn),
           );
+          const canAttemptPushdown =
+            allPushdownable && dataSource && supportsPostgresLambdaPushdown(dataSource);
+          if (!canAttemptPushdown) {
+            throw new HttpErrors.BadRequest(
+              `Unsupported filter functions in strict mode: ${unsupportedFunctions.join(', ')}`,
+            );
+          }
         }
         const coercedWhereExpression = this.coerceFilterExpressionLiterals(parsed.whereExpression);
         const splitWhere = this.splitWhereExpression(coercedWhereExpression);
@@ -8671,6 +8767,21 @@ export function defineODataCrudController(def: EntitySetDef) {
           ? baseFilter.limit
           : undefined;
       const planRequiresPostProcessing = this.planRequiresPostProcessing(applyPlan);
+      if (
+        navigationFilterExpr &&
+        (postFilterExpr || planRequiresPostProcessing) &&
+        !this.cfg?.strict &&
+        !deltaEnabled &&
+        !deltaTokenValue &&
+        !lambdaExpressions.length &&
+        !lambdaExpressionTree
+      ) {
+        postFilterExpr = this.combinePostFilterExpressions(postFilterExpr, navigationFilterExpr);
+        navigationFilterExpr = undefined;
+        if (postFilterExpr) {
+          this.ensureNavigationInclusionForExpression(baseFilter, postFilterExpr);
+        }
+      }
       const requiresPostFilter = Boolean(postFilterExpr) || planRequiresPostProcessing;
 
       const op: CrudOperation = 'READ';
@@ -8953,6 +9064,12 @@ export function defineODataCrudController(def: EntitySetDef) {
         }
 
         if (navigationFilterExpr) {
+          if (postFilterExpr || planRequiresPostProcessing) {
+            throw this.badRequestWithCode(
+              'Combining navigation-property filters with post-filter evaluation is not supported for pushdown.',
+              'navigation-filter-requires-pushdown',
+            );
+          }
           if (lambdaExpressions.length || lambdaExpressionTree) {
             throw this.badRequestWithCode(
               'Combining navigation-property filters with lambda expressions is not supported for pushdown.',
@@ -9104,6 +9221,153 @@ export function defineODataCrudController(def: EntitySetDef) {
               ctx.result = result;
               return result;
             }
+          }
+        }
+
+        if (
+          postFilterExpr &&
+          !aggregationSpec &&
+          !applyPlan &&
+          !navigationFilterExpr &&
+          !lambdaExpressions.length &&
+          !lambdaExpressionTree &&
+          !deltaEnabled &&
+          !deltaTokenValue
+        ) {
+          const maxJoinCount =
+            this.cfg?.filter?.pushdownMaxJoinCount ?? this.cfg?.lambda?.pushdownMaxJoinCount;
+          const countBuilt =
+            inlineCountRequested && dataSource
+              ? buildPostgresFilterCountQuery({
+                  dataSource,
+                  modelCtor,
+                  expression: postFilterExpr,
+                  where: baseFilter.where as Where<AnyObject> | undefined,
+                  maxJoinCount,
+                })
+              : undefined;
+
+          const idsBuilt = dataSource
+            ? buildPostgresFilterIdQuery({
+                dataSource,
+                modelCtor,
+                expression: postFilterExpr,
+                where: baseFilter.where as Where<AnyObject> | undefined,
+                order: baseFilter.order as Filter<CrudEntity>['order'],
+                limit: baseFilter.limit,
+                offset: baseFilter.offset,
+                maxJoinCount,
+              })
+            : ({ declineReason: 'missing-datasource' } as any);
+
+          const declined =
+            !dataSource || !('sql' in idsBuilt)
+              ? (idsBuilt?.declineReason ?? 'unsupported-datasource')
+              : inlineCountRequested && countBuilt && !('sql' in countBuilt)
+                ? ((countBuilt as any).declineReason ?? 'count-declined')
+                : undefined;
+
+          if (!declined) {
+            let totalCount: number | undefined;
+            if (inlineCountRequested && countBuilt && 'sql' in countBuilt) {
+              const countRows = await dataSource!.execute(
+                countBuilt.sql,
+                countBuilt.params,
+                options,
+              );
+              const row = Array.isArray(countRows)
+                ? (countRows[0] as AnyObject | undefined)
+                : undefined;
+              const raw = row?.count ?? row?.COUNT ?? row?.Count;
+              const value =
+                typeof raw === 'bigint'
+                  ? Number(raw)
+                  : typeof raw === 'number'
+                    ? raw
+                    : raw != null
+                      ? Number(raw)
+                      : undefined;
+              if (value !== undefined && Number.isFinite(value)) {
+                totalCount = Math.trunc(value);
+              } else if (this.cfg?.strict) {
+                throw new HttpErrors.InternalServerError(
+                  'Failed to resolve inline $count from the datasource response.',
+                );
+              }
+            }
+
+            const idRows = await dataSource!.execute(idsBuilt.sql, idsBuilt.params, options);
+            const rows = Array.isArray(idRows) ? (idRows as AnyObject[]) : [];
+            const ids = rows
+              .map((row) => row?.[idsBuilt.idProperty] ?? row?.[idsBuilt.idProperty.toLowerCase()])
+              .filter((id) => id !== undefined && id !== null);
+
+            const fetchFilter: Filter<CrudEntity> = { ...baseFilter };
+            delete fetchFilter.order;
+            delete fetchFilter.limit;
+            delete fetchFilter.offset;
+            const idWhere = { [idsBuilt.idProperty]: { inq: ids } } as CrudWhere;
+            const combined = this.combineWithAnd([
+              fetchFilter.where as CrudWhere | undefined,
+              idWhere,
+            ]);
+            fetchFilter.where = combined ?? idWhere;
+
+            const entities = ids.length ? await this.repository.find(fetchFilter, options) : [];
+            const plainEntities = entities.map((entity) => this.toPlainEntity(entity) ?? {});
+            const ordered = ids.length
+              ? (() => {
+                  const byId = new Map<string, AnyObject>();
+                  for (const entity of plainEntities) {
+                    const value = (entity as AnyObject)[idsBuilt.idProperty];
+                    if (value === undefined || value === null) continue;
+                    byId.set(String(value), entity);
+                  }
+                  return ids
+                    .map((id) => byId.get(String(id)))
+                    .filter((entity): entity is AnyObject => Boolean(entity));
+                })()
+              : [];
+
+            this.applyComputeExpressions(ordered, computeExpressions);
+            let nextLinkToken: string | undefined;
+            let paged: AnyObject[] = ordered;
+            if (serverPagingEnabled) {
+              const effectivePageSize =
+                pageSize ??
+                this.resolvePageSize(undefined, {
+                  maxPageSize: paginationLimits.maxPageSize,
+                  context: 'collection',
+                });
+              const pagination = this.applyServerDrivenPaging(
+                ordered,
+                orderDescriptors,
+                effectivePageSize,
+              );
+              paged = pagination.items;
+              nextLinkToken = pagination.token;
+            }
+
+            this.ensureODataHeaders();
+            const result = {
+              '@odata.context': contextBase,
+              ...(inlineCountRequested && totalCount !== undefined
+                ? { '@odata.count': totalCount }
+                : {}),
+              value: this.decoratePlainEntities(paged),
+            } as AnyObject;
+            if (serverPagingEnabled && nextLinkToken) {
+              result['@odata.nextLink'] = this.buildNextLink(nextLinkToken);
+            }
+            this.recordTelemetryStats({ rows: paged.length });
+            ctx.result = result;
+            return result;
+          }
+
+          if (this.cfg?.strict && unsupportedFunctions.length) {
+            throw new HttpErrors.BadRequest(
+              `Unsupported filter functions in strict mode: ${unsupportedFunctions.join(', ')}`,
+            );
           }
         }
 
@@ -9637,9 +9901,17 @@ export function defineODataCrudController(def: EntitySetDef) {
         ];
         unsupportedFunctions = Array.from(new Set(combinedUnsupported));
         if (postFilterExpr && unsupportedFunctions.length && this.cfg?.strict) {
-          throw new HttpErrors.BadRequest(
-            `Unsupported filter functions in strict mode: ${unsupportedFunctions.join(', ')}`,
+          const dataSource = (this.repository as { dataSource?: juggler.DataSource }).dataSource;
+          const allPushdownable = unsupportedFunctions.every((fn) =>
+            POSTGRES_PUSHABLE_FILTER_FUNCTIONS.has(fn),
           );
+          const canAttemptPushdown =
+            allPushdownable && dataSource && supportsPostgresLambdaPushdown(dataSource);
+          if (!canAttemptPushdown) {
+            throw new HttpErrors.BadRequest(
+              `Unsupported filter functions in strict mode: ${unsupportedFunctions.join(', ')}`,
+            );
+          }
         }
         delete (parsedFilter as { postFilter?: ParsedExpression }).postFilter;
         delete (parsedFilter as { unsupportedFunctions?: string[] }).unsupportedFunctions;
@@ -9684,6 +9956,19 @@ export function defineODataCrudController(def: EntitySetDef) {
           : [];
       if (rootLambdas.length) {
         this.ensureLambdasInclusion(baseFilter, rootLambdas);
+      }
+      if (
+        navigationFilterExpr &&
+        postFilterExpr &&
+        !this.cfg?.strict &&
+        !rootLambdas.length &&
+        !lambdaExpressionTree
+      ) {
+        postFilterExpr = this.combinePostFilterExpressions(postFilterExpr, navigationFilterExpr);
+        navigationFilterExpr = undefined;
+        if (postFilterExpr) {
+          this.ensureNavigationInclusionForExpression(baseFilter, postFilterExpr);
+        }
       }
 
       const op: CrudOperation = 'READ';
@@ -9756,6 +10041,45 @@ export function defineODataCrudController(def: EntitySetDef) {
             throw this.badRequestWithCode(
               'Navigation-property filters require pushdown for this request.',
               'navigation-filter-requires-pushdown',
+            );
+          }
+        }
+
+        if (postFilterExpr && !rootLambdas.length && !lambdaExpressionTree) {
+          const dataSource = (this.repository as { dataSource?: juggler.DataSource }).dataSource;
+          const maxJoinCount =
+            this.cfg?.filter?.pushdownMaxJoinCount ?? this.cfg?.lambda?.pushdownMaxJoinCount;
+          const built = dataSource
+            ? buildPostgresFilterCountQuery({
+                dataSource,
+                modelCtor,
+                expression: postFilterExpr,
+                where: baseFilter.where as Where<AnyObject> | undefined,
+                maxJoinCount,
+              })
+            : ({ declineReason: 'missing-datasource' } as any);
+
+          if ('sql' in built) {
+            const rows = await dataSource!.execute(built.sql, built.params, options);
+            const row = Array.isArray(rows) ? (rows[0] as AnyObject | undefined) : undefined;
+            const raw = row?.count ?? row?.COUNT ?? row?.Count;
+            const value =
+              typeof raw === 'bigint'
+                ? Number(raw)
+                : typeof raw === 'number'
+                  ? raw
+                  : raw != null
+                    ? Number(raw)
+                    : 0;
+            this.ensureODataHeaders();
+            const result = `${Number.isFinite(value) ? Math.trunc(value) : 0}`;
+            ctx.result = result;
+            return result;
+          }
+
+          if (this.cfg?.strict && unsupportedFunctions.length) {
+            throw new HttpErrors.BadRequest(
+              `Unsupported filter functions in strict mode: ${unsupportedFunctions.join(', ')}`,
             );
           }
         }
