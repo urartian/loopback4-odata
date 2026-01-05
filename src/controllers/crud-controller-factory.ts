@@ -4127,6 +4127,27 @@ export function defineODataCrudController(def: EntitySetDef) {
       return normalized > 0 ? normalized : 2000;
     }
 
+    resolveMaxPostFilterScanRows(): number {
+      const configured = this.cfg?.filter?.maxPostFilterScanRows;
+      const value = configured ?? 5000;
+      const normalized = Number.isFinite(value) && (value as number) > 0 ? Math.floor(value) : 5000;
+      return normalized > 0 ? normalized : 5000;
+    }
+
+    requireTopWhenPostFilter(): boolean {
+      return this.cfg?.filter?.requireTopWhenPostFilter !== false;
+    }
+
+    applyPlanHasTopStage(plan: ApplyExecutionPlan | undefined): boolean {
+      if (!plan) return false;
+      if (plan.postTop != null) return true;
+      if (plan.stages?.some((stage) => stage.top != null)) return true;
+      if (plan.concat?.length) {
+        return plan.concat.some((branch) => this.applyPlanHasTopStage(branch));
+      }
+      return false;
+    }
+
     shouldWarnOnLambdaFallback(): boolean {
       const configured = this.cfg?.lambda?.warnOnLambdaFallback;
       if (configured === false) return false;
@@ -8652,11 +8673,6 @@ export function defineODataCrudController(def: EntitySetDef) {
       const planRequiresPostProcessing = this.planRequiresPostProcessing(applyPlan);
       const requiresPostFilter = Boolean(postFilterExpr) || planRequiresPostProcessing;
 
-      if (requiresPostFilter) {
-        delete baseFilter.offset;
-        delete baseFilter.limit;
-      }
-
       const op: CrudOperation = 'READ';
       const scope: CrudScope = 'collection';
       const ctx = this.buildHookContext({
@@ -9349,7 +9365,50 @@ export function defineODataCrudController(def: EntitySetDef) {
           return result;
         }
 
-        const results = await this.repository.find(baseFilter, options);
+        if (requiresPostFilter) {
+          const applyHasTopStage = this.applyPlanHasTopStage(applyPlan);
+          const boundedByRequest =
+            serverPagingEnabled === true ||
+            applyHasTopStage === true ||
+            clientTopProvided !== undefined;
+          if (this.cfg?.strict && !boundedByRequest) {
+            throw this.badRequestWithCode(
+              'Post-filter evaluation requires pushdown for this request.',
+              'postfilter-requires-pushdown',
+            );
+          }
+          const requireExplicitTop =
+            this.requireTopWhenPostFilter() &&
+            clientTopProvided === undefined &&
+            serverPagingEnabled === false &&
+            applyHasTopStage === false;
+          if (requireExplicitTop) {
+            throw this.badRequestWithCode(
+              'The $top query option is required when the request requires post-filter evaluation.',
+              'postfilter-top-required',
+            );
+          }
+        }
+
+        const fetchFilter: Filter<CrudEntity> = requiresPostFilter
+          ? (() => {
+              const maxRows = this.resolveMaxPostFilterScanRows();
+              const next: Filter<CrudEntity> = { ...baseFilter };
+              next.limit = maxRows + 1;
+              return next;
+            })()
+          : baseFilter;
+
+        const results = await this.repository.find(fetchFilter, options);
+        if (requiresPostFilter) {
+          const maxRows = this.resolveMaxPostFilterScanRows();
+          if (results.length > maxRows) {
+            throw this.badRequestWithCode(
+              `Post-filter scan exceeds the server limit of ${maxRows} rows. Refine $filter.`,
+              'postfilter-scan-limit-exceeded',
+            );
+          }
+        }
         let workingResults = results.map((entity) => this.toPlainEntity(entity) ?? {});
 
         if (applyPlan && !aggregationSpec) {
@@ -9732,7 +9791,21 @@ export function defineODataCrudController(def: EntitySetDef) {
           return result;
         }
         if (postFilterExpr) {
-          const entities = await this.repository.find(baseFilter, options);
+          if (this.cfg?.strict) {
+            throw this.badRequestWithCode(
+              'Post-filter evaluation is not allowed in strict mode.',
+              'postfilter-requires-pushdown',
+            );
+          }
+          const maxRows = this.resolveMaxPostFilterScanRows();
+          const fetchFilter: Filter<CrudEntity> = { ...baseFilter, offset: 0, limit: maxRows + 1 };
+          const entities = await this.repository.find(fetchFilter, options);
+          if (entities.length > maxRows) {
+            throw this.badRequestWithCode(
+              `Post-filter scan exceeds the server limit of ${maxRows} rows. Refine $filter.`,
+              'postfilter-scan-limit-exceeded',
+            );
+          }
           const plain = entities.map((entity) => this.toPlainEntity(entity) ?? {});
           const filtered = this.applyPostFilter(plain, postFilterExpr);
           this.ensureODataHeaders();

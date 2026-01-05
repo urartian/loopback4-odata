@@ -48,6 +48,17 @@ describe('OData config validation', () => {
     expect(() => validateODataConfig(config)).to.throw(/ODataConfig\.filter\.pushdownMaxJoinCount/);
   });
 
+  it('throws for invalid post-filter scan guardrails', () => {
+    const config: ODataConfig = {
+      tokenSecret: 'test-secret',
+      filter: { maxPostFilterScanRows: 0 },
+    };
+
+    expect(() => validateODataConfig(config)).to.throw(
+      /ODataConfig\.filter\.maxPostFilterScanRows/,
+    );
+  });
+
   it('throws for invalid entity pagination overrides', () => {
     expect(() =>
       validatePaginationLimits('EntitySet "Products".pagination', { maxTop: -5 }),

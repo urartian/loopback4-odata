@@ -144,6 +144,9 @@ export class ODataErrorProvider implements Provider<Reject> {
       case 'invalid-decimal-literal':
       case 'in-list-too-large':
       case 'navigation-filter-requires-pushdown':
+      case 'postfilter-requires-pushdown':
+      case 'postfilter-top-required':
+      case 'postfilter-scan-limit-exceeded':
         return code;
       default:
         return undefined;

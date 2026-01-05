@@ -260,6 +260,15 @@ export interface ODataPaginationConfig {
 export interface ODataFilterConfig {
   maxInListItems?: number; // maximum allowed items inside `in (...)`
   pushdownMaxJoinCount?: number; // maximum joins allowed for $filter pushdown (e.g. to-one navigation filters)
+  /**
+   * Maximum number of rows that may be scanned in-memory when evaluating $filter post-processing.
+   * When exceeded, the request is rejected instead of falling back to an unbounded scan.
+   */
+  maxPostFilterScanRows?: number;
+  /**
+   * When true (default), require client-provided $top when a request needs post-filter evaluation.
+   */
+  requireTopWhenPostFilter?: boolean;
 }
 
 export interface ODataLambdaConfig {
