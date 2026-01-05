@@ -208,7 +208,7 @@ function translateWhere(
               ? 'LIKE'
               : 'NOT LIKE';
           opClauses.push(
-            `${columnExpr} ${comparator} ${placeholder(params, operand)} ESCAPE '\\\\'`,
+            `${columnExpr} ${comparator} ${placeholder(params, operand)} ESCAPE E'\\\\'`,
           );
           break;
         }
@@ -363,7 +363,7 @@ function translatePredicateExpression(
         transformed !== resolved.sql ? 'LIKE' : expr.caseInsensitive ? 'ILIKE' : 'LIKE';
       const negated = expr.negated === true ? 'NOT ' : '';
       return {
-        sql: `${transformed} ${negated}${comparator} ${placeholder(params, pattern)} ESCAPE '\\\\'`,
+        sql: `${transformed} ${negated}${comparator} ${placeholder(params, pattern)} ESCAPE E'\\\\'`,
         joinCount: 0,
       };
     }

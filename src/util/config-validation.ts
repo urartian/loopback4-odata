@@ -132,6 +132,7 @@ export function validateFilterConfig(label: string, filter?: ODataFilterConfig):
   if (!filter) return;
   const target = filter as AnyObject;
   assignPositive(target, 'maxInListItems', label);
+  assignPositive(target, 'pushdownMaxJoinCount', label);
 }
 
 function assignPositive(target: AnyObject, key: string, parentLabel = 'ODataConfig'): void {

@@ -107,6 +107,10 @@ import {
   NavigationPathError,
 } from '../util/navigation-path';
 import {
+  buildPostgresNavigationFilterCountQuery,
+  buildPostgresNavigationFilterIdQuery,
+} from '../util/postgres-navigation-filter-pushdown';
+import {
   normalizeGuidStringLiteral,
   parseDateStringLiteral,
   parseInt64StringLiteral,
@@ -5486,6 +5490,9 @@ export function defineODataCrudController(def: EntitySetDef) {
           return !options.requireProperty;
         }
         const baseModel = hasNavigation ? resolved.targetModel : this.entityCtor;
+        if (hasNavigation && propertySegments.length === 1) {
+          return this.isPrimitiveModelProperty(baseModel, propertySegments[0]!);
+        }
         return this.validateStructuredPropertyPath(baseModel, propertySegments);
       } catch (error) {
         if (error instanceof NavigationPathError) {
@@ -5507,6 +5514,7 @@ export function defineODataCrudController(def: EntitySetDef) {
         const resolved = resolveNavigationPath(this.entityCtor, field, {
           maxDepth: this.cfg?.maxExpandDepth ?? 5,
         });
+        if (resolved.joins.length) return true;
         const propertySegments = resolved.propertyPath?.split('/').filter(Boolean) ?? [];
         if (!propertySegments.length) return false;
         const baseModel = resolved.joins.length ? resolved.targetModel : this.entityCtor;
@@ -5519,6 +5527,38 @@ export function defineODataCrudController(def: EntitySetDef) {
         }
         throw error;
       }
+    }
+
+    containsNavigationPushdownFilter(expr: ParsedExpression): boolean {
+      const maxDepth = this.cfg?.maxExpandDepth ?? 5;
+      const visit = (node: ParsedExpression): boolean => {
+        switch (node.operator) {
+          case 'comparison': {
+            const field = node.field;
+            if (!field || typeof field !== 'string' || !field.includes('/')) return false;
+            try {
+              const resolved = resolveNavigationPath(this.entityCtor, field, { maxDepth });
+              if (!resolved.joins.length) return false;
+              if (!resolved.propertyPath) return false;
+              if (resolved.propertyPath.includes('/')) return false;
+              if (resolved.joins.some((join) => join.relationType === 'hasMany')) return false;
+              return true;
+            } catch (error) {
+              if (error instanceof NavigationPathError) return false;
+              throw error;
+            }
+          }
+          case 'logical':
+            return node.expressions.some((child) => visit(child));
+          case 'not':
+            return visit(node.expr);
+          case 'lambda':
+            return visit(node.predicate);
+          default:
+            return false;
+        }
+      };
+      return visit(expr);
     }
 
     pathRequiresStructuredLookup(modelCtor: typeof Entity, segments: string[]): boolean {
@@ -8149,6 +8189,7 @@ export function defineODataCrudController(def: EntitySetDef) {
       let lambdaExpressions: LambdaExpression[] = [];
       let lambdaExpressionTree: ParsedExpression | undefined;
       let postFilterExpr: ParsedExpression | undefined;
+      let navigationFilterExpr: ParsedExpression | undefined;
       let unsupportedFunctions: string[] = [];
       let deltaTokenValue: string | undefined;
       let deltaEnabled = false;
@@ -8247,10 +8288,14 @@ export function defineODataCrudController(def: EntitySetDef) {
           if (this.cfg?.strict) {
             this.validateParsedExpressionFields(splitWhere.structuredExpr, '$filter');
           }
-          postFilterExpr = this.combinePostFilterExpressions(
-            postFilterExpr,
-            splitWhere.structuredExpr,
-          );
+          if (this.containsNavigationPushdownFilter(splitWhere.structuredExpr)) {
+            navigationFilterExpr = splitWhere.structuredExpr;
+          } else {
+            postFilterExpr = this.combinePostFilterExpressions(
+              postFilterExpr,
+              splitWhere.structuredExpr,
+            );
+          }
         }
         if (splitWhere.repoExpr) {
           try {
@@ -8891,6 +8936,161 @@ export function defineODataCrudController(def: EntitySetDef) {
           return result;
         }
 
+        if (navigationFilterExpr) {
+          if (lambdaExpressions.length || lambdaExpressionTree) {
+            throw this.badRequestWithCode(
+              'Combining navigation-property filters with lambda expressions is not supported for pushdown.',
+              'navigation-filter-requires-pushdown',
+            );
+          } else if (deltaEnabled || deltaTokenValue) {
+            throw this.badRequestWithCode(
+              'Navigation-property filters require pushdown for this request.',
+              'navigation-filter-requires-pushdown',
+            );
+          } else {
+            const dataSource = (this.repository as { dataSource?: juggler.DataSource }).dataSource;
+            const maxJoinCount =
+              this.cfg?.filter?.pushdownMaxJoinCount ?? this.cfg?.lambda?.pushdownMaxJoinCount;
+            const maxDepth = this.cfg?.maxExpandDepth;
+
+            const countBuilt =
+              inlineCountRequested && dataSource
+                ? buildPostgresNavigationFilterCountQuery({
+                    dataSource,
+                    modelCtor,
+                    expression: navigationFilterExpr,
+                    where: baseFilter.where as Where<AnyObject> | undefined,
+                    maxDepth,
+                    maxJoinCount,
+                  })
+                : undefined;
+
+            const idsBuilt = dataSource
+              ? buildPostgresNavigationFilterIdQuery({
+                  dataSource,
+                  modelCtor,
+                  expression: navigationFilterExpr,
+                  where: baseFilter.where as Where<AnyObject> | undefined,
+                  order: baseFilter.order as Filter<CrudEntity>['order'],
+                  limit: baseFilter.limit,
+                  offset: baseFilter.offset,
+                  maxDepth,
+                  maxJoinCount,
+                })
+              : ({ declineReason: 'missing-datasource' } as any);
+
+            const declined =
+              !dataSource || !('sql' in idsBuilt)
+                ? (idsBuilt?.declineReason ?? 'unsupported-datasource')
+                : inlineCountRequested && countBuilt && !('sql' in countBuilt)
+                  ? ((countBuilt as any).declineReason ?? 'count-declined')
+                  : undefined;
+
+            if (declined) {
+              throw this.badRequestWithCode(
+                `Navigation-property filter pushdown is required but not eligible (${declined}).`,
+                'navigation-filter-requires-pushdown',
+              );
+            } else {
+              let totalCount: number | undefined;
+              if (inlineCountRequested && countBuilt && 'sql' in countBuilt) {
+                const countRows = await dataSource!.execute(
+                  countBuilt.sql,
+                  countBuilt.params,
+                  options,
+                );
+                const row = Array.isArray(countRows)
+                  ? (countRows[0] as AnyObject | undefined)
+                  : undefined;
+                const raw = row?.count ?? row?.COUNT ?? row?.Count;
+                const value =
+                  typeof raw === 'bigint'
+                    ? Number(raw)
+                    : typeof raw === 'number'
+                      ? raw
+                      : raw != null
+                        ? Number(raw)
+                        : undefined;
+                if (value !== undefined && Number.isFinite(value)) {
+                  totalCount = Math.trunc(value);
+                } else if (this.cfg?.strict) {
+                  throw new HttpErrors.InternalServerError(
+                    'Failed to resolve inline $count from the datasource response.',
+                  );
+                }
+              }
+
+              const idRows = await dataSource!.execute(idsBuilt.sql, idsBuilt.params, options);
+              const rows = Array.isArray(idRows) ? (idRows as AnyObject[]) : [];
+              const ids = rows
+                .map(
+                  (row) => row?.[idsBuilt.idProperty] ?? row?.[idsBuilt.idProperty.toLowerCase()],
+                )
+                .filter((id) => id !== undefined && id !== null);
+
+              const fetchFilter: Filter<CrudEntity> = { ...baseFilter };
+              delete fetchFilter.order;
+              delete fetchFilter.limit;
+              delete fetchFilter.offset;
+              const idWhere = { [idsBuilt.idProperty]: { inq: ids } } as CrudWhere;
+              const combined = this.combineWithAnd([
+                fetchFilter.where as CrudWhere | undefined,
+                idWhere,
+              ]);
+              fetchFilter.where = combined ?? idWhere;
+
+              const entities = ids.length ? await this.repository.find(fetchFilter, options) : [];
+              const plainEntities = entities.map((entity) => this.toPlainEntity(entity) ?? {});
+              const ordered = ids.length
+                ? (() => {
+                    const byId = new Map<string, AnyObject>();
+                    for (const entity of plainEntities) {
+                      const value = (entity as AnyObject)[idsBuilt.idProperty];
+                      if (value === undefined || value === null) continue;
+                      byId.set(String(value), entity);
+                    }
+                    return ids
+                      .map((id) => byId.get(String(id)))
+                      .filter((entity): entity is AnyObject => Boolean(entity));
+                  })()
+                : [];
+
+              this.applyComputeExpressions(ordered, computeExpressions);
+              let nextLinkToken: string | undefined;
+              let paged: AnyObject[] = ordered;
+              if (serverPagingEnabled) {
+                const effectivePageSize =
+                  pageSize ??
+                  this.resolvePageSize(undefined, {
+                    maxPageSize: paginationLimits.maxPageSize,
+                    context: 'collection',
+                  });
+                const pagination = this.applyServerDrivenPaging(
+                  ordered,
+                  orderDescriptors,
+                  effectivePageSize,
+                );
+                paged = pagination.items;
+                nextLinkToken = pagination.token;
+              }
+              this.ensureODataHeaders();
+              const result = {
+                '@odata.context': contextBase,
+                ...(inlineCountRequested && totalCount !== undefined
+                  ? { '@odata.count': totalCount }
+                  : {}),
+                value: this.decoratePlainEntities(paged),
+              } as AnyObject;
+              if (serverPagingEnabled && nextLinkToken) {
+                result['@odata.nextLink'] = this.buildNextLink(nextLinkToken);
+              }
+              this.recordTelemetryStats({ rows: paged.length });
+              ctx.result = result;
+              return result;
+            }
+          }
+        }
+
         if (lambdaExpressions.length || lambdaExpressionTree) {
           const expressionTree = lambdaExpressionTree;
           const rootLambdas = lambdaExpressions.length
@@ -9293,6 +9493,7 @@ export function defineODataCrudController(def: EntitySetDef) {
       const baseFilter: Filter<CrudEntity> = {};
       const applySupported = this.isApplyEnabled();
       let postFilterExpr: ParsedExpression | undefined;
+      let navigationFilterExpr: ParsedExpression | undefined;
       let unsupportedFunctions: string[] = [];
       let lambdaExpressions: LambdaExpression[] = [];
       let lambdaExpressionTree: ParsedExpression | undefined;
@@ -9330,10 +9531,14 @@ export function defineODataCrudController(def: EntitySetDef) {
           if (this.cfg?.strict) {
             this.validateParsedExpressionFields(splitWhere.structuredExpr, '$filter');
           }
-          postFilterExpr = this.combinePostFilterExpressions(
-            postFilterExpr,
-            splitWhere.structuredExpr,
-          );
+          if (this.containsNavigationPushdownFilter(splitWhere.structuredExpr)) {
+            navigationFilterExpr = splitWhere.structuredExpr;
+          } else {
+            postFilterExpr = this.combinePostFilterExpressions(
+              postFilterExpr,
+              splitWhere.structuredExpr,
+            );
+          }
         }
         if (splitWhere.repoExpr) {
           try {
@@ -9435,6 +9640,67 @@ export function defineODataCrudController(def: EntitySetDef) {
 
       const execDefault = async () => {
         const options = this.repositoryOptions();
+
+        if (
+          navigationFilterExpr &&
+          !rootLambdas.length &&
+          !lambdaExpressionTree &&
+          !postFilterExpr
+        ) {
+          const dataSource = (this.repository as { dataSource?: juggler.DataSource }).dataSource;
+          const maxJoinCount =
+            this.cfg?.filter?.pushdownMaxJoinCount ?? this.cfg?.lambda?.pushdownMaxJoinCount;
+          const maxDepth = this.cfg?.maxExpandDepth;
+
+          const built = dataSource
+            ? buildPostgresNavigationFilterCountQuery({
+                dataSource,
+                modelCtor,
+                expression: navigationFilterExpr,
+                where: baseFilter.where as Where<AnyObject> | undefined,
+                maxDepth,
+                maxJoinCount,
+              })
+            : ({ declineReason: 'missing-datasource' } as any);
+
+          if ('sql' in built) {
+            const rows = await dataSource!.execute(built.sql, built.params, options);
+            const row = Array.isArray(rows) ? (rows[0] as AnyObject | undefined) : undefined;
+            const raw = row?.count ?? row?.COUNT ?? row?.Count;
+            const value =
+              typeof raw === 'bigint'
+                ? Number(raw)
+                : typeof raw === 'number'
+                  ? raw
+                  : raw != null
+                    ? Number(raw)
+                    : 0;
+            this.ensureODataHeaders();
+            const result = `${Number.isFinite(value) ? Math.trunc(value) : 0}`;
+            ctx.result = result;
+            return result;
+          }
+
+          throw this.badRequestWithCode(
+            `Navigation-property filter pushdown is required but not eligible (${built.declineReason}).`,
+            'navigation-filter-requires-pushdown',
+          );
+        }
+        if (navigationFilterExpr) {
+          if (rootLambdas.length || lambdaExpressionTree) {
+            throw this.badRequestWithCode(
+              'Combining navigation-property filters with lambda expressions is not supported for pushdown.',
+              'navigation-filter-requires-pushdown',
+            );
+          }
+          if (postFilterExpr) {
+            throw this.badRequestWithCode(
+              'Navigation-property filters require pushdown for this request.',
+              'navigation-filter-requires-pushdown',
+            );
+          }
+        }
+
         if (rootLambdas.length || lambdaExpressionTree) {
           const fetchFilter: Filter<CrudEntity> = { ...baseFilter };
           delete fetchFilter.order;

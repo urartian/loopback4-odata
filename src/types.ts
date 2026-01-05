@@ -259,6 +259,7 @@ export interface ODataPaginationConfig {
 
 export interface ODataFilterConfig {
   maxInListItems?: number; // maximum allowed items inside `in (...)`
+  pushdownMaxJoinCount?: number; // maximum joins allowed for $filter pushdown (e.g. to-one navigation filters)
 }
 
 export interface ODataLambdaConfig {
