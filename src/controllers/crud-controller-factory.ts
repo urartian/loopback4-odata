@@ -172,6 +172,8 @@ import {
 } from '../services/odata-media-handler';
 
 const POSTGRES_PUSHABLE_FILTER_FUNCTIONS = new Set([
+  'tolower',
+  'toupper',
   'trim',
   'concat',
   'month',
@@ -5052,6 +5054,18 @@ export function defineODataCrudController(def: EntitySetDef) {
               throw new Error(`Unsupported comparator: ${expr.comparator}`);
           }
         }
+        case 'transformcmp': {
+          const left = this.resolvePredicateValue(expr.field, current, alias, root, bindings);
+          if (left == null) {
+            if (expr.value === null) return expr.comparator === 'eq';
+            return expr.comparator === 'neq';
+          }
+          if (typeof left !== 'string') return false;
+          const transformed =
+            expr.transform === 'tolower' ? left.toLowerCase() : left.toUpperCase();
+          if (expr.value === null) return expr.comparator === 'neq';
+          return expr.comparator === 'eq' ? transformed === expr.value : transformed !== expr.value;
+        }
         case 'function': {
           const value = this.resolvePredicateValue(expr.field, current, alias, root, bindings);
           if (typeof value !== 'string') return false;
@@ -5632,6 +5646,21 @@ export function defineODataCrudController(def: EntitySetDef) {
               throw error;
             }
           }
+          case 'transformcmp': {
+            const field = node.field;
+            if (!field || typeof field !== 'string' || !field.includes('/')) return false;
+            try {
+              const resolved = resolveNavigationPath(this.entityCtor, field, { maxDepth });
+              if (!resolved.joins.length) return false;
+              if (!resolved.propertyPath) return false;
+              if (resolved.propertyPath.includes('/')) return false;
+              if (resolved.joins.some((join) => join.relationType === 'hasMany')) return false;
+              return true;
+            } catch (error) {
+              if (error instanceof NavigationPathError) return false;
+              throw error;
+            }
+          }
           case 'logical':
             return node.expressions.some((child) => visit(child));
           case 'not':
@@ -5674,6 +5703,10 @@ export function defineODataCrudController(def: EntitySetDef) {
     } {
       switch (expr.operator) {
         case 'comparison':
+          return this.isStructuredFieldPath(expr.field)
+            ? { structuredExpr: expr }
+            : { repoExpr: expr };
+        case 'transformcmp':
           return this.isStructuredFieldPath(expr.field)
             ? { structuredExpr: expr }
             : { repoExpr: expr };
@@ -5740,6 +5773,8 @@ export function defineODataCrudController(def: EntitySetDef) {
         case 'substrcmp':
         case 'lengthcmp':
           return [expr.field];
+        case 'transformcmp':
+          return [expr.field];
         case 'stringfncmp':
           return expr.args
             .filter((arg): arg is FunctionArg & { kind: 'field' } => arg.kind === 'field')
@@ -5752,6 +5787,10 @@ export function defineODataCrudController(def: EntitySetDef) {
     validateParsedExpressionFields(expr: ParsedExpression, clause: string) {
       switch (expr.operator) {
         case 'comparison': {
+          this.ensureFieldAllowedStrict(expr.field, clause);
+          return;
+        }
+        case 'transformcmp': {
           this.ensureFieldAllowedStrict(expr.field, clause);
           return;
         }

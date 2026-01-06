@@ -204,6 +204,41 @@ describe('parseODataQuery extended filter grammar', () => {
     assert(parsed.postFilter, 'Expected postFilter expression');
     assert.deepStrictEqual(parsed.unsupportedFunctions, ['month']);
   });
+
+  it('marks tolower() comparisons for post-processing', () => {
+    const parsed = parseODataQuery({ $filter: "tolower(name) eq 'laptop'" });
+    assert.equal(parsed.where, undefined);
+    assert(parsed.postFilter, 'Expected postFilter expression');
+    assert.deepStrictEqual(parsed.unsupportedFunctions, ['tolower']);
+    assert.equal(parsed.postFilter.operator, 'transformcmp');
+    if (parsed.postFilter.operator === 'transformcmp') {
+      assert.equal(parsed.postFilter.transform, 'tolower');
+      assert.equal(parsed.postFilter.field, 'name');
+      assert.equal(parsed.postFilter.comparator, 'eq');
+      assert.equal(parsed.postFilter.value, 'laptop');
+    }
+  });
+
+  it('marks toupper() null comparisons for post-processing', () => {
+    const parsed = parseODataQuery({ $filter: 'toupper(name) ne null' });
+    assert.equal(parsed.where, undefined);
+    assert(parsed.postFilter, 'Expected postFilter expression');
+    assert.deepStrictEqual(parsed.unsupportedFunctions, ['toupper']);
+    assert.equal(parsed.postFilter.operator, 'transformcmp');
+    if (parsed.postFilter.operator === 'transformcmp') {
+      assert.equal(parsed.postFilter.transform, 'toupper');
+      assert.equal(parsed.postFilter.field, 'name');
+      assert.equal(parsed.postFilter.comparator, 'neq');
+      assert.equal(parsed.postFilter.value, null);
+    }
+  });
+
+  it('rejects non-string literals in tolower() comparisons', () => {
+    assert.throws(
+      () => parseODataQuery({ $filter: 'tolower(name) eq 1' }),
+      /string or null literal/i,
+    );
+  });
 });
 
 describe('parseODataQuery in operator', () => {

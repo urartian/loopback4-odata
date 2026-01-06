@@ -112,4 +112,52 @@ describe('Postgres $filter function pushdown', () => {
     assert.equal(result.params.length, 1);
     assert.equal(result.params[0], 1);
   });
+
+  it('builds SQL for tolower(field) eq value comparisons', () => {
+    const dataSource = stubPostgresDataSource();
+    const expr: ParsedExpression = {
+      operator: 'transformcmp',
+      transform: 'tolower',
+      field: 'name',
+      comparator: 'eq',
+      value: 'x',
+    };
+
+    const result = buildPostgresFilterIdQuery({
+      dataSource,
+      modelCtor: Widget,
+      expression: expr,
+      where: undefined,
+      order: ['id ASC'],
+      limit: 10,
+      offset: 0,
+    });
+
+    assert('sql' in result);
+    assert.match(result.sql, /LOWER\s*\(\s*r\."name"\s*\)\s*=\s*\$1/i);
+    assert.equal(result.params.length, 1);
+    assert.equal(result.params[0], 'x');
+  });
+
+  it('builds SQL for toupper(field) ne null comparisons', () => {
+    const dataSource = stubPostgresDataSource();
+    const expr: ParsedExpression = {
+      operator: 'transformcmp',
+      transform: 'toupper',
+      field: 'name',
+      comparator: 'neq',
+      value: null,
+    };
+
+    const result = buildPostgresFilterCountQuery({
+      dataSource,
+      modelCtor: Widget,
+      expression: expr,
+      where: undefined,
+    });
+
+    assert('sql' in result);
+    assert.match(result.sql, /UPPER\s*\(\s*r\."name"\s*\)\s+IS\s+NOT\s+NULL/i);
+    assert.equal(result.params.length, 0);
+  });
 });

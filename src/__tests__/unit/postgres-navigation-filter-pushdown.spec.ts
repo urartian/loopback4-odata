@@ -97,6 +97,34 @@ describe('Postgres navigation-property filter pushdown', () => {
     assert.equal(result.params[0], 1000);
   });
 
+  it('builds EXISTS SQL for to-one navigation tolower() comparisons', () => {
+    const dataSource = stubPostgresDataSource();
+    const expr: ParsedExpression = {
+      operator: 'transformcmp',
+      transform: 'tolower',
+      field: 'product/name',
+      comparator: 'eq',
+      value: 'widget',
+    };
+
+    const result = buildPostgresNavigationFilterIdQuery({
+      dataSource,
+      modelCtor: OrderItem,
+      expression: expr,
+      where: { quantity: { gt: 1 } } as any,
+      order: ['id ASC'],
+      limit: 10,
+      offset: 0,
+    });
+
+    assert('sql' in result);
+    assert.match(result.sql, /EXISTS\s*\(SELECT 1 FROM/i);
+    assert.match(result.sql, /LOWER\s*\(\s*t\d+\."name"\s*\)\s*=\s*\$2/i);
+    assert.equal(result.params.length, 2);
+    assert.equal(result.params[0], 1);
+    assert.equal(result.params[1], 'widget');
+  });
+
   it('declines when maxJoinCount is exceeded', () => {
     const dataSource = stubPostgresDataSource();
     const expr: ParsedExpression = {

@@ -244,7 +244,8 @@ function translateNavPredicateExpression(options: {
 }): SqlFragment | undefined {
   const { expr } = options;
   switch (expr.operator) {
-    case 'comparison': {
+    case 'comparison':
+    case 'transformcmp': {
       if (!expr.field.includes('/')) return undefined;
       const start = options.params.length;
       let resolved: ResolvedNavigationPath;
@@ -358,7 +359,13 @@ function translateNavPredicateExpression(options: {
         options.params.length = start;
         return undefined;
       }
-      const columnExpr = `${lastAlias}.${propertyColumn}`;
+      const rawColumnExpr = `${lastAlias}.${propertyColumn}`;
+      const columnExpr =
+        expr.operator === 'transformcmp'
+          ? expr.transform === 'tolower'
+            ? `LOWER(${rawColumnExpr})`
+            : `UPPER(${rawColumnExpr})`
+          : rawColumnExpr;
 
       const whereClauses: string[] = [];
       whereClauses.push(
@@ -374,7 +381,30 @@ function translateNavPredicateExpression(options: {
         lte: '<=',
       };
 
-      if (expr.comparator === 'inq' || expr.comparator === 'nin') {
+      if (expr.operator === 'transformcmp') {
+        if (expr.value === null) {
+          if (expr.comparator === 'eq') whereClauses.push(`${columnExpr} IS NULL`);
+          else if (expr.comparator === 'neq') whereClauses.push(`${columnExpr} IS NOT NULL`);
+          else {
+            options.params.length = start;
+            return undefined;
+          }
+        } else {
+          const value = expr.value;
+          if (typeof value !== 'string') {
+            options.params.length = start;
+            return undefined;
+          }
+          if (expr.comparator === 'eq') {
+            whereClauses.push(`${columnExpr} = ${placeholder(options.params, value)}`);
+          } else if (expr.comparator === 'neq') {
+            whereClauses.push(`${columnExpr} <> ${placeholder(options.params, value)}`);
+          } else {
+            options.params.length = start;
+            return undefined;
+          }
+        }
+      } else if (expr.comparator === 'inq' || expr.comparator === 'nin') {
         if (!Array.isArray(expr.value)) {
           options.params.length = start;
           return undefined;
@@ -466,6 +496,8 @@ function translateNavPredicateExpression(options: {
 function containsNavPaths(expr: ParsedExpression): boolean {
   switch (expr.operator) {
     case 'comparison':
+      return typeof expr.field === 'string' && expr.field.includes('/');
+    case 'transformcmp':
       return typeof expr.field === 'string' && expr.field.includes('/');
     case 'logical':
       return expr.expressions.some(containsNavPaths);

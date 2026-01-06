@@ -172,6 +172,13 @@ export type ParsedExpression =
   | { operator: 'not'; expr: ParsedExpression }
   | FunctionExpression
   | {
+      operator: 'transformcmp';
+      transform: 'tolower' | 'toupper';
+      field: string;
+      comparator: 'eq' | 'neq';
+      value: string | null;
+    }
+  | {
       operator: 'fncmp';
       name: 'round' | 'floor' | 'ceiling' | 'year';
       field: string;
@@ -843,6 +850,9 @@ function parseComparison(
   const lambda = tryParseLambda(tokens, index, ctx);
   if (lambda) return lambda;
 
+  const transformCmp = parseTransformComparison(tokens, index);
+  if (transformCmp) return transformCmp;
+
   const stringFnCmp = parseStringFunctionComparison(tokens, index);
   if (stringFnCmp) {
     return [stringFnCmp[0], stringFnCmp[1]];
@@ -898,6 +908,79 @@ function parseComparison(
       value,
     },
     index + 3,
+  ];
+}
+
+function parseTransformComparison(
+  tokens: string[],
+  index: number,
+):
+  | [
+      {
+        operator: 'transformcmp';
+        transform: 'tolower' | 'toupper';
+        field: string;
+        comparator: 'eq' | 'neq';
+        value: string | null;
+      },
+      number,
+    ]
+  | undefined {
+  const transformToken = tokens[index]?.toLowerCase();
+  if (transformToken !== 'tolower' && transformToken !== 'toupper') return undefined;
+  if (tokens[index + 1] !== '(') return undefined;
+
+  const field = tokens[index + 2];
+  const closing = tokens[index + 3];
+  if (!field || closing !== ')') {
+    throw new Error(`${transformToken} requires a single field argument.`);
+  }
+  if (
+    field.startsWith("'") ||
+    field.endsWith("'") ||
+    field === '(' ||
+    field === ')' ||
+    field === ',' ||
+    field.toLowerCase() === 'null' ||
+    field.toLowerCase() === 'true' ||
+    field.toLowerCase() === 'false' ||
+    /^-?\d/.test(field) ||
+    /^(datetimeoffset|date|guid|decimal|int64)'/i.test(field)
+  ) {
+    throw new Error(`${transformToken} requires a single field argument.`);
+  }
+
+  const comparatorToken = tokens[index + 4]?.toLowerCase();
+  if (comparatorToken !== 'eq' && comparatorToken !== 'ne') {
+    throw new Error(`${transformToken} comparisons support only eq/ne.`);
+  }
+
+  const valueToken = tokens[index + 5];
+  if (valueToken == null) {
+    throw new Error(`${transformToken} comparisons require a string or null literal.`);
+  }
+
+  const rawLower = valueToken.toLowerCase();
+  const isNull = rawLower === 'null';
+  const isStringLiteral = valueToken.startsWith("'") && valueToken.endsWith("'");
+  if (!isNull && !isStringLiteral) {
+    throw new Error(`${transformToken} comparisons require a string or null literal.`);
+  }
+
+  const value = parseLiteral(valueToken);
+  if (value !== null && typeof value !== 'string') {
+    throw new Error(`${transformToken} comparisons require a string or null literal.`);
+  }
+
+  return [
+    {
+      operator: 'transformcmp',
+      transform: transformToken as 'tolower' | 'toupper',
+      field,
+      comparator: comparatorToken === 'eq' ? 'eq' : 'neq',
+      value,
+    },
+    index + 6,
   ];
 }
 
@@ -1174,6 +1257,9 @@ function validateLambdaExpressionTree(expr: ParsedExpression, options?: ParseOpt
         return;
       }
       case 'comparison':
+        assertAliasedField(node.field, aliasesInScope, lambdaPaths);
+        return;
+      case 'transformcmp':
         assertAliasedField(node.field, aliasesInScope, lambdaPaths);
         return;
       case 'function':
@@ -1493,6 +1579,10 @@ function buildWhere(expr: ParsedExpression, options?: ParseOptions): Where<AnyOb
     throw new UnsupportedFilterError([expr.part]);
   }
 
+  if (expr.operator === 'transformcmp') {
+    throw new UnsupportedFilterError([expr.transform]);
+  }
+
   if (expr.operator === 'not') {
     const inner = expr.expr;
     if (inner.operator === 'comparison') {
@@ -1548,6 +1638,9 @@ function buildWhere(expr: ParsedExpression, options?: ParseOptions): Where<AnyOb
     }
     if (inner.operator === 'datepart') {
       throw new UnsupportedFilterError([inner.part]);
+    }
+    if (inner.operator === 'transformcmp') {
+      throw new UnsupportedFilterError([inner.transform]);
     }
   }
   if (expr.operator === 'comparison') {

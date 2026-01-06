@@ -146,4 +146,18 @@ describe('CRUD controller post-filter guardrails', () => {
     expect(findCalls[0]?.limit).to.equal(3);
     expect((result as any).value).to.have.length(1);
   });
+
+  it('evaluates tolower()/toupper() transform comparisons in post-filter mode', async () => {
+    const controller = createController(
+      { $filter: "tolower(name) eq 'x'" },
+      { strict: false, filter: { maxPostFilterScanRows: 10, requireTopWhenPostFilter: false } },
+      {
+        find: async () => [{ id: 1, name: 'X' }, { id: 2, name: 'y' }, { id: 3 }],
+        count: async () => ({ count: 0 }),
+      },
+    );
+
+    const result = await controller.list();
+    expect((result as any).value.map((item: any) => item.id)).to.eql([1]);
+  });
 });

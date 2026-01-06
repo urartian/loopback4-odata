@@ -314,6 +314,26 @@ function translatePredicateExpression(
         joinCount: 0,
       };
     }
+    case 'transformcmp': {
+      const resolved = resolvePredicateField(expr.field, ctx);
+      if (!resolved) return undefined;
+      const leftSql =
+        expr.transform === 'tolower' ? `LOWER(${resolved.sql})` : `UPPER(${resolved.sql})`;
+
+      if (expr.value === null) {
+        if (expr.comparator === 'eq') return { sql: `${leftSql} IS NULL`, joinCount: 0 };
+        if (expr.comparator === 'neq') return { sql: `${leftSql} IS NOT NULL`, joinCount: 0 };
+        return undefined;
+      }
+      if (typeof expr.value !== 'string') return undefined;
+      if (expr.comparator === 'eq') {
+        return { sql: `${leftSql} = ${placeholder(params, expr.value)}`, joinCount: 0 };
+      }
+      if (expr.comparator === 'neq') {
+        return { sql: `${leftSql} <> ${placeholder(params, expr.value)}`, joinCount: 0 };
+      }
+      return undefined;
+    }
     case 'logical': {
       const start = params.length;
       const parts: string[] = [];
