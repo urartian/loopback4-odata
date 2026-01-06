@@ -1056,6 +1056,25 @@ this.bind(ODATA_BINDINGS.CONFIG).to({
 
 > **Notes:** `FilterFunctions` only advertises `$filter` functions. Operators like `in (...)` are not represented there. Presets and lists are normalized (trimmed, lowercased, de-duplicated).
 
+### Capabilities defaults (FilterRestrictions)
+
+The service also emits `Org.OData.Capabilities.V1.FilterRestrictions` per entity set. By default, it marks any **to-many** navigation properties (`hasMany` / `hasManyThrough`) as non-filterable (since the server rejects to-many navigation filters outside lambdas).
+
+You can add additional hints (or override booleans) via config:
+
+```ts
+this.bind(ODATA_BINDINGS.CONFIG).to({
+  ...currentConfig,
+  capabilities: {
+    ...currentConfig.capabilities,
+    filterRestrictions: {
+      requiresFilter: false,
+      nonFilterableProperties: ['internalFlag'],
+    },
+  },
+} satisfies ODataConfig);
+```
+
 For mixed datasources (or per-entity differences), prefer per-entity-set overrides:
 
 ```ts

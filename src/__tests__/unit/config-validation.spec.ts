@@ -54,6 +54,12 @@ describe('OData config validation', () => {
       capabilities: {
         filterFunctionsPreset: 'POSTGRES' as any,
         filterFunctions: [' Contains ', 'contains', 'STARTSWITH', '  '],
+        filterRestrictions: {
+          filterable: 'true' as unknown as boolean,
+          requiresFilter: 'false' as unknown as boolean,
+          nonFilterableProperties: [' sku ', 'sku', '  '],
+          nonFilterableNavigationProperties: [' gadgets ', 'gadgets', ''],
+        },
       },
     };
 
@@ -61,6 +67,12 @@ describe('OData config validation', () => {
 
     expect(config.capabilities?.filterFunctionsPreset).to.equal('postgres');
     expect(config.capabilities?.filterFunctions).to.deepEqual(['contains', 'startswith']);
+    expect(config.capabilities?.filterRestrictions).to.deepEqual({
+      filterable: true,
+      requiresFilter: false,
+      nonFilterableProperties: ['sku'],
+      nonFilterableNavigationProperties: ['gadgets'],
+    });
   });
 
   it('throws for invalid capabilities filterFunctionsPreset', () => {

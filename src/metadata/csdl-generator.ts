@@ -28,6 +28,7 @@ import {
   ODataDeleteRestrictionsConfig,
   ODataSearchRestrictionsConfig,
   ODataSearchExpression,
+  ODataFilterRestrictionsConfig,
 } from '../types';
 import { getODataSearchableProps } from '../decorators/search.decorators';
 import { stableStringify } from '../util/token-signing';
@@ -215,10 +216,59 @@ function mergeCapabilities(
       defaults?.searchRestrictions,
       overrides?.searchRestrictions,
     ),
+    filterRestrictions: mergeFilterRestrictions(
+      defaults?.filterRestrictions,
+      overrides?.filterRestrictions,
+    ),
   };
 }
 
 const SIMPLE_IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+function mergeFilterRestrictions(
+  defaults?: ODataFilterRestrictionsConfig,
+  overrides?: ODataFilterRestrictionsConfig,
+): ODataFilterRestrictionsConfig | undefined {
+  if (!defaults && !overrides) return undefined;
+  return {
+    filterable: overrides?.filterable ?? defaults?.filterable,
+    requiresFilter: overrides?.requiresFilter ?? defaults?.requiresFilter,
+    nonFilterableProperties:
+      overrides?.nonFilterableProperties ?? defaults?.nonFilterableProperties,
+    nonFilterableNavigationProperties:
+      overrides?.nonFilterableNavigationProperties ?? defaults?.nonFilterableNavigationProperties,
+  };
+}
+
+function deriveToManyNavigationProperties(set: EntitySetDef): string[] {
+  const definition = (set.modelCtor as typeof Entity).definition as ModelDefinition | undefined;
+  const relations = (definition?.relations ?? {}) as RelationDefinitionMap;
+  const names = Object.entries(relations)
+    .filter(([_name, def]) => Boolean((def as AnyObject)?.targetsMany))
+    .map(([name]) => name);
+  return Array.from(new Set(names)).sort();
+}
+
+function resolveFilterRestrictions(
+  set: EntitySetDef,
+  effective: EffectiveCapabilities,
+): Required<Pick<ODataFilterRestrictionsConfig, 'filterable'>> &
+  ODataFilterRestrictionsConfig & { nonFilterableNavigationProperties: string[] } {
+  const derivedToMany = deriveToManyNavigationProperties(set);
+  const configured = effective.filterRestrictions;
+  const configuredNav = Array.isArray(configured?.nonFilterableNavigationProperties)
+    ? configured!.nonFilterableNavigationProperties!
+    : [];
+  const nonFilterableNavigationProperties = Array.from(
+    new Set([...derivedToMany, ...configuredNav]),
+  );
+  return {
+    filterable: configured?.filterable ?? true,
+    requiresFilter: configured?.requiresFilter,
+    nonFilterableProperties: configured?.nonFilterableProperties,
+    nonFilterableNavigationProperties,
+  };
+}
 
 function registerEnumType(
   context: SchemaBuildContext,
@@ -1285,6 +1335,62 @@ export class CsdlGenerator {
         );
         capabilityAnnotationsJson['@Org.OData.Capabilities.V1.FilterFunctions'] = filterFunctions;
       }
+
+      const filterRestrictions = resolveFilterRestrictions(set, capabilities);
+      const filterRestrictionsXml: string[] = [
+        '        <Annotation Term="Org.OData.Capabilities.V1.FilterRestrictions">',
+        '          <Record>',
+        `            <PropertyValue Property="Filterable" Bool="${filterRestrictions.filterable ? 'true' : 'false'}"/>`,
+      ];
+      const filterRestrictionsJson: Record<string, unknown> = {
+        Filterable: Boolean(filterRestrictions.filterable),
+      };
+      if (filterRestrictions.requiresFilter !== undefined) {
+        filterRestrictionsXml.push(
+          `            <PropertyValue Property="RequiresFilter" Bool="${filterRestrictions.requiresFilter ? 'true' : 'false'}"/>`,
+        );
+        filterRestrictionsJson.RequiresFilter = Boolean(filterRestrictions.requiresFilter);
+      }
+      if (
+        Array.isArray(filterRestrictions.nonFilterableProperties) &&
+        filterRestrictions.nonFilterableProperties.length
+      ) {
+        filterRestrictionsXml.push(
+          '            <PropertyValue Property="NonFilterableProperties">',
+        );
+        filterRestrictionsXml.push('              <Collection>');
+        const jsonPaths: Array<Record<string, unknown>> = [];
+        for (const prop of filterRestrictions.nonFilterableProperties) {
+          filterRestrictionsXml.push(
+            `                <PropertyPath>${xmlEscape(prop)}</PropertyPath>`,
+          );
+          jsonPaths.push({ $PropertyPath: prop });
+        }
+        filterRestrictionsXml.push('              </Collection>');
+        filterRestrictionsXml.push('            </PropertyValue>');
+        filterRestrictionsJson.NonFilterableProperties = jsonPaths;
+      }
+      if (filterRestrictions.nonFilterableNavigationProperties.length) {
+        filterRestrictionsXml.push(
+          '            <PropertyValue Property="NonFilterableNavigationProperties">',
+        );
+        filterRestrictionsXml.push('              <Collection>');
+        const navPaths: Array<Record<string, unknown>> = [];
+        for (const prop of filterRestrictions.nonFilterableNavigationProperties) {
+          filterRestrictionsXml.push(
+            `                <NavigationPropertyPath>${xmlEscape(prop)}</NavigationPropertyPath>`,
+          );
+          navPaths.push({ $NavigationPropertyPath: prop });
+        }
+        filterRestrictionsXml.push('              </Collection>');
+        filterRestrictionsXml.push('            </PropertyValue>');
+        filterRestrictionsJson.NonFilterableNavigationProperties = navPaths;
+      }
+      filterRestrictionsXml.push('          </Record>');
+      filterRestrictionsXml.push('        </Annotation>');
+      capabilityAnnotationsXml.push(...filterRestrictionsXml);
+      capabilityAnnotationsJson['@Org.OData.Capabilities.V1.FilterRestrictions'] =
+        filterRestrictionsJson;
 
       if (capabilities.aggregation) {
         const methodsForJson = capabilities.aggregationMethods?.length

@@ -249,6 +249,9 @@ describe('CsdlGenerator', () => {
     expect(
       xml.includes('Annotation Term="Org.OData.Capabilities.V1.FilterFunctions"'),
     ).to.be.true();
+    expect(
+      xml.includes('Annotation Term="Org.OData.Capabilities.V1.FilterRestrictions"'),
+    ).to.be.true();
     expect(xml.includes('Annotation Term="Org.OData.Capabilities.V1.Aggregate"')).to.be.true();
     expect(
       xml.includes('Annotation Term="Org.OData.Capabilities.V1.NavigationRestrictions"'),
@@ -434,6 +437,13 @@ describe('CsdlGenerator', () => {
     expect(container.Widgets['@Org.OData.Capabilities.V1.ApplySupported'].ApplySupported).to.equal(
       true,
     );
+    expect(container.Widgets['@Org.OData.Capabilities.V1.FilterRestrictions'].Filterable).to.equal(
+      true,
+    );
+    expect(
+      container.Widgets['@Org.OData.Capabilities.V1.FilterRestrictions']
+        .NonFilterableNavigationProperties,
+    ).to.containDeep([{ $NavigationPropertyPath: 'gadgets' }]);
     expect(container.Gadgets.$Type).to.equal('Catalog.Gadget');
     expect(container.AdvancedWidgets.$Type).to.equal('Catalog.AdvancedWidget');
     expect(container.ping.$Function).to.equal('Catalog.ping');

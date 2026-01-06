@@ -162,6 +162,13 @@ export interface ODataSearchRestrictionsConfig {
   unsupportedExpressions?: ODataSearchExpression[];
 }
 
+export interface ODataFilterRestrictionsConfig {
+  filterable?: boolean;
+  requiresFilter?: boolean;
+  nonFilterableProperties?: string[];
+  nonFilterableNavigationProperties?: string[];
+}
+
 export interface ODataCapabilitiesConfig {
   filterFunctions?: string[];
   filterFunctionsPreset?: 'default' | 'postgres';
@@ -176,6 +183,7 @@ export interface ODataCapabilitiesConfig {
   updateRestrictions?: ODataUpdateRestrictionsConfig;
   deleteRestrictions?: ODataDeleteRestrictionsConfig;
   searchRestrictions?: ODataSearchRestrictionsConfig;
+  filterRestrictions?: ODataFilterRestrictionsConfig;
 }
 
 export interface ODataCapabilityDefaults extends ODataCapabilitiesConfig {

@@ -132,6 +132,44 @@ export function validateCapabilitiesConfig(
       target.filterFunctions = normalized;
     }
   }
+
+  if ('filterRestrictions' in target) {
+    const value = target.filterRestrictions;
+    if (value !== undefined && value !== null) {
+      if (typeof value !== 'object' || Array.isArray(value)) {
+        throw new Error(`${label}.filterRestrictions must be an object.`);
+      }
+      const fr = value as AnyObject;
+      if ('filterable' in fr) {
+        const normalized = normalizeBoolean(
+          fr.filterable,
+          `${label}.filterRestrictions.filterable`,
+        );
+        if (normalized !== undefined) fr.filterable = normalized;
+      }
+      if ('requiresFilter' in fr) {
+        const normalized = normalizeBoolean(
+          fr.requiresFilter,
+          `${label}.filterRestrictions.requiresFilter`,
+        );
+        if (normalized !== undefined) fr.requiresFilter = normalized;
+      }
+      if ('nonFilterableProperties' in fr) {
+        const normalized = normalizeStringArray(
+          fr.nonFilterableProperties,
+          `${label}.filterRestrictions.nonFilterableProperties`,
+        );
+        if (normalized !== undefined) fr.nonFilterableProperties = normalized;
+      }
+      if ('nonFilterableNavigationProperties' in fr) {
+        const normalized = normalizeStringArray(
+          fr.nonFilterableNavigationProperties,
+          `${label}.filterRestrictions.nonFilterableNavigationProperties`,
+        );
+        if (normalized !== undefined) fr.nonFilterableNavigationProperties = normalized;
+      }
+    }
+  }
 }
 
 export function validatePaginationLimits(label: string, pagination?: ODataPaginationConfig): void {
@@ -371,6 +409,17 @@ function normalizeBoolean(value: unknown, label: string): boolean | undefined {
     if (normalized === 'false') return false;
   }
   throw new Error(`${label} must be a boolean.`);
+}
+
+function normalizeStringArray(value: unknown, label: string): string[] | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (!Array.isArray(value)) {
+    throw new Error(`${label} must be an array.`);
+  }
+  const normalized = value
+    .map((item) => (typeof item === 'string' ? item.trim() : ''))
+    .filter((item) => Boolean(item));
+  return Array.from(new Set(normalized));
 }
 
 function validateTenantQuotas(label: string, quotas: ODataTenantQuotaConfig): void {
