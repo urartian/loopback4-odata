@@ -947,7 +947,7 @@ Run `npm test` to compile the TypeScript specs and execute the unit suite. Accep
 - [x] Opt-in `$search` with boolean operators (AND/OR/NOT), quoted phrases, per-field configuration, and guardrails
 - [x] Configurable CSDL namespace/container names and JSON CSDL output with enriched primitive facets
 - [x] Complex types, enum types, and referential constraints reflected in generated CSDL (XML & JSON)
-- [x] Capabilities annotations (filter functions, count/navigation restrictions, permissions, streams, insert/update/delete/search restrictions) to describe service behaviors to OData clients
+- [x] Capabilities annotations (filter functions/restrictions, count/navigation restrictions, permissions, streams, insert/update/delete/search restrictions) to describe service behaviors to OData clients
 - [x] Derived LoopBack models surface `$BaseType` so inheritance is reflected in the generated CSDL
 - [x] Deep insert support for `hasOne`/`hasMany` relations (opt-in per entity set, multi-level traversal)
 - [x] Navigation `$ref` endpoints for `hasOne`/`hasMany` relations (link/unlink existing entities)
@@ -963,7 +963,7 @@ GET /odata/Products?$search="coffee beans" AND grinder NOT decaf
 
 The example above matches products that include the phrase "coffee beans", also mention "grinder", and omit anything containing "decaf".
 
-String helpers such as `trim`/`concat` and date part functions (`month`, `day`, `hour`, `minute`, `second`) are processed automatically when `strict=false`. In strict mode these functions return `400 Bad Request` unless the backing connector provides native support.
+String helpers such as `trim`/`concat` and date part functions (`month`, `day`, `hour`, `minute`, `second`) are processed automatically when `strict=false`. In strict mode they are accepted only when the server can guarantee correct execution (for example via Postgres pushdown); otherwise they return `400 Bad Request`.
 
 ## Configuration
 
@@ -1055,6 +1055,23 @@ this.bind(ODATA_BINDINGS.CONFIG).to({
 ```
 
 > **Notes:** `FilterFunctions` only advertises `$filter` functions. Operators like `in (...)` are not represented there. Presets and lists are normalized (trimmed, lowercased, de-duplicated).
+
+### `$filter` not implemented (yet)
+
+This library focuses on a predictable subset of `$filter` that can be enforced in `strict=true` and pushed down efficiently on Postgres. If a client sends anything outside this subset, behavior is:
+
+- `strict=true`: rejected with `400 Bad Request`
+- `strict=false`: may still be rejected (or bounded post-filtered) depending on whether the expression can be evaluated safely
+
+Notable `$filter` features that are currently **not** implemented:
+
+- Type functions: `cast(...)`, `isof(...)`
+- String functions: `replace(...)` (and most other string functions beyond what `$metadata` advertises)
+- Arithmetic expressions/operators in `$filter` (`add`, `sub`, `mul`, `div`, `mod`)
+- Spatial/geo functions (all `geo.*` and geography/geometry operators)
+- Enum flag operator `has`
+- Deep function composition (e.g. `replace(tolower(name), 'a', 'b') eq '...'`)
+- To-many navigation path filters outside lambdas (e.g. `items/quantity gt 0`); only lambda forms like `items/any(i: i/quantity gt 0)` are supported
 
 ### Capabilities defaults (FilterRestrictions)
 
@@ -2099,8 +2116,7 @@ Telemetry respects LoopBack’s logging pipeline—you can forward the enriched 
 - [ ] Draft workflow for deep updates
 - [ ] Additional `$apply` pushdown adapters (MSSQL, Mongo aggregation)
 - [ ] Deep update / draft handling for composition hierarchies
-- [x] Opt-in cascade delete for composition-style relations (hook/transaction-aware)
-- [ ] Richer lambda grammar/pushdown coverage (deeper nesting, broader function support, and remaining boolean/operator edge cases)
+- [ ] Lambda long-tail: lift current caps and cover remaining boolean/operator/function edge cases (beyond the current supported subset)
 - [ ] Virtual/calculated field exposure with CSDL annotations
 
 ## Contributing
