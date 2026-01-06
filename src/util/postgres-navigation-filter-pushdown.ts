@@ -151,7 +151,7 @@ function translateWhere(
     const ops = value as AnyObject;
     const opClauses: string[] = [];
     const caseInsensitive =
-      typeof ops.options === 'string' ? ops.options.toLowerCase().includes('i') : false;
+      typeof ops.options === 'string' ? ops.options.toLowerCase() === 'i' : false;
 
     for (const [op, operand] of Object.entries(ops)) {
       if (op === 'options') continue;
@@ -185,9 +185,28 @@ function translateWhere(
             opClauses.push(op === 'inq' ? 'FALSE' : 'TRUE');
             break;
           }
-          const placeholders = operand.map((entry) => placeholder(params, entry)).join(', ');
+          const hasNull = operand.some((entry) => entry === null);
+          const nonNull = operand.filter((entry) => entry !== null);
           const comparator = op === 'inq' ? 'IN' : 'NOT IN';
-          opClauses.push(`${columnExpr} ${comparator} (${placeholders})`);
+          const listSql = nonNull.length
+            ? `${columnExpr} ${comparator} (${nonNull.map((entry) => placeholder(params, entry)).join(', ')})`
+            : undefined;
+          const nullSql = hasNull
+            ? op === 'inq'
+              ? `${columnExpr} IS NULL`
+              : `${columnExpr} IS NOT NULL`
+            : undefined;
+          if (op === 'inq') {
+            if (nullSql && listSql) opClauses.push(`(${nullSql} OR ${listSql})`);
+            else if (nullSql) opClauses.push(nullSql);
+            else if (listSql) opClauses.push(listSql);
+            else opClauses.push('FALSE');
+          } else {
+            if (nullSql && listSql) opClauses.push(`(${nullSql} AND ${listSql})`);
+            else if (nullSql) opClauses.push(nullSql);
+            else if (listSql) opClauses.push(listSql);
+            else opClauses.push('TRUE');
+          }
           break;
         }
         case 'like':

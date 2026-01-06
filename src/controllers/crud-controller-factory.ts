@@ -160,6 +160,10 @@ import {
   buildPostgresFilterIdQuery,
   supportsPostgresLambdaPushdown,
 } from '../util/postgres-lambda-pushdown';
+import {
+  buildPostgresMixedFilterCountQuery,
+  buildPostgresMixedFilterIdQuery,
+} from '../util/postgres-filter-pushdown';
 import { acceptsAnyMediaType } from '../util/accept';
 import { normalizeBasePath } from '../util/base-path';
 import { escapeLikeLiteral } from '../util/like-escaping';
@@ -8823,7 +8827,7 @@ export function defineODataCrudController(def: EntitySetDef) {
       const planRequiresPostProcessing = this.planRequiresPostProcessing(applyPlan);
       if (
         navigationFilterExpr &&
-        (postFilterExpr || planRequiresPostProcessing) &&
+        planRequiresPostProcessing &&
         !this.cfg?.strict &&
         !deltaEnabled &&
         !deltaTokenValue &&
@@ -8854,7 +8858,7 @@ export function defineODataCrudController(def: EntitySetDef) {
         const maxDepth = this.cfg?.maxExpandDepth;
         const canAttemptPushdown = dataSource && supportsPostgresLambdaPushdown(dataSource);
         const idsBuilt = canAttemptPushdown
-          ? buildPostgresNavigationFilterIdQuery({
+          ? buildPostgresMixedFilterIdQuery({
               dataSource: dataSource!,
               modelCtor,
               expression: navigationFilterExpr,
@@ -8868,7 +8872,7 @@ export function defineODataCrudController(def: EntitySetDef) {
           : ({ declineReason: 'unsupported-datasource' } as any);
         const countBuilt =
           inlineCountRequested && canAttemptPushdown
-            ? buildPostgresNavigationFilterCountQuery({
+            ? buildPostgresMixedFilterCountQuery({
                 dataSource: dataSource!,
                 modelCtor,
                 expression: navigationFilterExpr,
@@ -9180,12 +9184,6 @@ export function defineODataCrudController(def: EntitySetDef) {
         }
 
         if (navigationFilterExpr) {
-          if (postFilterExpr || planRequiresPostProcessing) {
-            throw this.badRequestWithCode(
-              'Combining navigation-property filters with post-filter evaluation is not supported for pushdown.',
-              'navigation-filter-requires-pushdown',
-            );
-          }
           if (lambdaExpressions.length || lambdaExpressionTree) {
             throw this.badRequestWithCode(
               'Combining navigation-property filters with lambda expressions is not supported for pushdown.',
@@ -9197,17 +9195,32 @@ export function defineODataCrudController(def: EntitySetDef) {
               'navigation-filter-requires-pushdown',
             );
           } else {
+            if (planRequiresPostProcessing) {
+              throw this.badRequestWithCode(
+                'Navigation-property filters require pushdown for this request.',
+                'navigation-filter-requires-pushdown',
+              );
+            }
             const dataSource = (this.repository as { dataSource?: juggler.DataSource }).dataSource;
             const maxJoinCount =
               this.cfg?.filter?.pushdownMaxJoinCount ?? this.cfg?.lambda?.pushdownMaxJoinCount;
             const maxDepth = this.cfg?.maxExpandDepth;
 
+            const expressionForPushdown = (() => {
+              if (!postFilterExpr) return navigationFilterExpr;
+              if (this.containsNavigationPushdownFilter(postFilterExpr)) return postFilterExpr;
+              return (
+                this.combinePostFilterExpressions(postFilterExpr, navigationFilterExpr) ??
+                navigationFilterExpr
+              );
+            })();
+
             const countBuilt =
               inlineCountRequested && dataSource
-                ? buildPostgresNavigationFilterCountQuery({
+                ? buildPostgresMixedFilterCountQuery({
                     dataSource,
                     modelCtor,
-                    expression: navigationFilterExpr,
+                    expression: expressionForPushdown,
                     where: baseFilter.where as Where<AnyObject> | undefined,
                     maxDepth,
                     maxJoinCount,
@@ -9215,10 +9228,10 @@ export function defineODataCrudController(def: EntitySetDef) {
                 : undefined;
 
             const idsBuilt = dataSource
-              ? buildPostgresNavigationFilterIdQuery({
+              ? buildPostgresMixedFilterIdQuery({
                   dataSource,
                   modelCtor,
-                  expression: navigationFilterExpr,
+                  expression: expressionForPushdown,
                   where: baseFilter.where as Where<AnyObject> | undefined,
                   order: baseFilter.order as Filter<CrudEntity>['order'],
                   limit: baseFilter.limit,
@@ -9236,10 +9249,23 @@ export function defineODataCrudController(def: EntitySetDef) {
                   : undefined;
 
             if (declined) {
-              throw this.badRequestWithCode(
-                `Navigation-property filter pushdown is required but not eligible (${declined}).`,
-                'navigation-filter-requires-pushdown',
+              if (this.cfg?.strict) {
+                throw this.badRequestWithCode(
+                  `Navigation-property filter pushdown is required but not eligible (${declined}).`,
+                  'navigation-filter-requires-pushdown',
+                );
+              }
+              postFilterExpr = this.combinePostFilterExpressions(
+                postFilterExpr,
+                navigationFilterExpr,
               );
+              navigationFilterExpr = undefined;
+              if (postFilterExpr) {
+                const includeBefore = this.extractIncludePaths(baseFilter.include);
+                this.ensureNavigationInclusionForExpression(baseFilter, postFilterExpr);
+                const includeAfter = this.extractIncludePaths(baseFilter.include);
+                injectedIncludePaths.push(...this.diffIncludePaths(includeBefore, includeAfter));
+              }
             } else {
               let totalCount: number | undefined;
               if (inlineCountRequested && countBuilt && 'sql' in countBuilt) {
