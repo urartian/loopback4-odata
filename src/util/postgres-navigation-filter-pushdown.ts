@@ -7,6 +7,7 @@ import {
 } from './navigation-path';
 import { ParsedExpression } from '../services/odata-query-parser.service';
 import { supportsPostgresLambdaPushdown } from './postgres-lambda-pushdown';
+import { escapeLikeLiteral } from './like-escaping';
 
 export interface NavigationFilterPushdownBuildResult {
   sql: string;
@@ -460,6 +461,163 @@ function translateNavPredicateExpression(options: {
         joinCount: joinSegments.length,
       };
     }
+    case 'function': {
+      if (expr.name !== 'contains' && expr.name !== 'startswith' && expr.name !== 'endswith') {
+        return undefined;
+      }
+      if (!expr.field.includes('/')) return undefined;
+      const value = expr.args?.[0];
+      if (typeof value !== 'string') return undefined;
+
+      const start = options.params.length;
+      let resolved: ResolvedNavigationPath;
+      try {
+        resolved = resolveNavigationPath(options.modelCtor, expr.field, {
+          maxDepth: options.maxDepth,
+        });
+      } catch (error) {
+        options.params.length = start;
+        if (error instanceof NavigationPathError) return undefined;
+        throw error;
+      }
+
+      const supported = isSupportedNavPath(resolved);
+      if (!supported) {
+        options.params.length = start;
+        return undefined;
+      }
+
+      const joinSegments = supported.joins;
+      const property = supported.property;
+
+      const aliases = joinSegments.map((_j, idx) => `t${idx + 1}`);
+      const first = joinSegments[0]!;
+      const firstAlias = aliases[0]!;
+      const firstTableMetaRaw = inferSqlMetadata(first.targetModel, options.dataSource);
+      if (!firstTableMetaRaw?.tableName) {
+        options.params.length = start;
+        return undefined;
+      }
+      options.metaCache.set(first.targetModel, {
+        tableName: firstTableMetaRaw.tableName,
+        schema: firstTableMetaRaw.schema,
+        columnMap: firstTableMetaRaw.columnMap ?? {},
+      });
+
+      const from = `${buildTableRef({
+        tableName: firstTableMetaRaw.tableName,
+        schema: firstTableMetaRaw.schema,
+        columnMap: firstTableMetaRaw.columnMap ?? {},
+      })} AS ${firstAlias}`;
+
+      const joinClauses: string[] = [];
+      for (let i = 1; i < joinSegments.length; i++) {
+        const seg = joinSegments[i]!;
+        const prev = joinSegments[i - 1]!;
+        const alias = aliases[i]!;
+        const prevAlias = aliases[i - 1]!;
+        const metaRaw = inferSqlMetadata(seg.targetModel, options.dataSource);
+        if (!metaRaw?.tableName) {
+          options.params.length = start;
+          return undefined;
+        }
+        options.metaCache.set(seg.targetModel, {
+          tableName: metaRaw.tableName,
+          schema: metaRaw.schema,
+          columnMap: metaRaw.columnMap ?? {},
+        });
+
+        const sourceColumn = resolveColumn(
+          prev.targetModel,
+          seg.sourceKey,
+          options.dataSource,
+          options.metaCache,
+        );
+        const targetColumn = resolveColumn(
+          seg.targetModel,
+          seg.targetKey,
+          options.dataSource,
+          options.metaCache,
+        );
+        if (!sourceColumn || !targetColumn) {
+          options.params.length = start;
+          return undefined;
+        }
+        joinClauses.push(
+          `JOIN ${buildTableRef({
+            tableName: metaRaw.tableName,
+            schema: metaRaw.schema,
+            columnMap: metaRaw.columnMap ?? {},
+          })} AS ${alias} ON ${alias}.${targetColumn} = ${prevAlias}.${sourceColumn}`,
+        );
+      }
+
+      const rootSourceColumn = resolveColumn(
+        first.sourceModel,
+        first.sourceKey,
+        options.dataSource,
+        options.metaCache,
+      );
+      const rootTargetColumn = resolveColumn(
+        first.targetModel,
+        first.targetKey,
+        options.dataSource,
+        options.metaCache,
+      );
+      if (!rootSourceColumn || !rootTargetColumn) {
+        options.params.length = start;
+        return undefined;
+      }
+
+      const lastJoin = joinSegments[joinSegments.length - 1]!;
+      const lastAlias = aliases[aliases.length - 1]!;
+      const propertyColumn = resolveColumn(
+        lastJoin.targetModel,
+        property,
+        options.dataSource,
+        options.metaCache,
+      );
+      if (!propertyColumn) {
+        options.params.length = start;
+        return undefined;
+      }
+      const rawColumnExpr = `${lastAlias}.${propertyColumn}`;
+      const transformed =
+        expr.transform === 'tolower'
+          ? `LOWER(${rawColumnExpr})`
+          : expr.transform === 'toupper'
+            ? `UPPER(${rawColumnExpr})`
+            : rawColumnExpr;
+
+      const escaped = escapeLikeLiteral(value);
+      const pattern =
+        expr.name === 'contains'
+          ? `%${escaped}%`
+          : expr.name === 'startswith'
+            ? `${escaped}%`
+            : `%${escaped}`;
+
+      const comparator =
+        transformed !== rawColumnExpr ? 'LIKE' : expr.caseInsensitive ? 'ILIKE' : 'LIKE';
+      const negated = expr.negated === true ? 'NOT ' : '';
+
+      const whereClauses: string[] = [];
+      whereClauses.push(
+        `${firstAlias}.${rootTargetColumn} = ${options.rootAlias}.${rootSourceColumn}`,
+      );
+      whereClauses.push(
+        `${transformed} ${negated}${comparator} ${placeholder(options.params, pattern)} ESCAPE E'\\\\'`,
+      );
+
+      const whereSql = whereClauses.length
+        ? `WHERE ${whereClauses.map((c) => `(${c})`).join(' AND ')}`
+        : '';
+
+      return {
+        sql: `EXISTS (SELECT 1 FROM ${from} ${joinClauses.join(' ')} ${whereSql})`,
+        joinCount: joinSegments.length,
+      };
+    }
     case 'logical': {
       const start = options.params.length;
       const parts: string[] = [];
@@ -498,6 +656,8 @@ function containsNavPaths(expr: ParsedExpression): boolean {
     case 'comparison':
       return typeof expr.field === 'string' && expr.field.includes('/');
     case 'transformcmp':
+      return typeof expr.field === 'string' && expr.field.includes('/');
+    case 'function':
       return typeof expr.field === 'string' && expr.field.includes('/');
     case 'logical':
       return expr.expressions.some(containsNavPaths);

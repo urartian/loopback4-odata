@@ -97,6 +97,63 @@ describe('Postgres navigation-property filter pushdown', () => {
     assert.equal(result.params[0], 1000);
   });
 
+  it('builds EXISTS SQL for to-one navigation contains() predicates', () => {
+    const dataSource = stubPostgresDataSource();
+    const expr: ParsedExpression = {
+      operator: 'function',
+      name: 'contains',
+      field: 'product/name',
+      args: ['Coffee'],
+      caseInsensitive: true,
+    };
+
+    const result = buildPostgresNavigationFilterIdQuery({
+      dataSource,
+      modelCtor: OrderItem,
+      expression: expr,
+      where: { quantity: { gt: 1 } } as any,
+      order: ['id ASC'],
+      limit: 10,
+      offset: 0,
+    });
+
+    assert('sql' in result);
+    assert.match(result.sql, /EXISTS\s*\(SELECT 1 FROM/i);
+    assert.match(result.sql, /\bILIKE\b/i);
+    assert.match(result.sql, /ESCAPE\s+E'\\\\'/i);
+    assert.equal(result.params.length, 2);
+    assert.equal(result.params[0], 1);
+    assert.equal(result.params[1], '%Coffee%');
+  });
+
+  it('builds EXISTS SQL for to-one navigation contains(tolower(...)) predicates using LOWER(col) LIKE', () => {
+    const dataSource = stubPostgresDataSource();
+    const expr: ParsedExpression = {
+      operator: 'function',
+      name: 'contains',
+      field: 'product/name',
+      args: ['coffee'],
+      caseInsensitive: true,
+      transform: 'tolower',
+    } as any;
+
+    const result = buildPostgresNavigationFilterIdQuery({
+      dataSource,
+      modelCtor: OrderItem,
+      expression: expr,
+      where: undefined,
+      order: undefined,
+      limit: 10,
+      offset: 0,
+    });
+
+    assert('sql' in result);
+    assert.match(result.sql, /LOWER\s*\(\s*t\d+\."name"\s*\)\s+LIKE\s+\$1/i);
+    assert.match(result.sql, /ESCAPE\s+E'\\\\'/i);
+    assert.equal(result.params.length, 1);
+    assert.equal(result.params[0], '%coffee%');
+  });
+
   it('builds EXISTS SQL for to-one navigation tolower() comparisons', () => {
     const dataSource = stubPostgresDataSource();
     const expr: ParsedExpression = {
@@ -123,6 +180,30 @@ describe('Postgres navigation-property filter pushdown', () => {
     assert.equal(result.params.length, 2);
     assert.equal(result.params[0], 1);
     assert.equal(result.params[1], 'widget');
+  });
+
+  it('declines to-many navigation contains() predicates outside lambdas', () => {
+    const dataSource = stubPostgresDataSource();
+    const expr: ParsedExpression = {
+      operator: 'function',
+      name: 'contains',
+      field: 'orders/id',
+      args: ['1'],
+      caseInsensitive: true,
+    } as any;
+
+    const result = buildPostgresNavigationFilterIdQuery({
+      dataSource,
+      modelCtor: Product,
+      expression: expr,
+      where: undefined,
+      order: undefined,
+      limit: 10,
+      offset: 0,
+    });
+
+    assert('declineReason' in result);
+    assert.equal((result as any).declineReason, 'unsupported-navigation-filter');
   });
 
   it('declines when maxJoinCount is exceeded', () => {

@@ -179,6 +179,18 @@ describe('OData component acceptance', () => {
     expect(res.body.value.map((item: any) => item.name)).to.containEql('Laptop');
   });
 
+  it('supports nav-path contains() filters in strict=false without leaking injected includes', async function (this: SkipContext) {
+    await rebuildApp(this, { strict: false });
+    const res = await client
+      .get('/odata/OrderItems')
+      .query({ $filter: "contains(product/name,'Coffee')", $top: '50' })
+      .expect(200);
+
+    expect(res.body.value).to.be.Array();
+    expect(res.body.value).to.not.be.empty();
+    expect(res.body.value.some((item: any) => item.product !== undefined)).to.equal(false);
+  });
+
   it('serializes DateTimeOffset properties using ISO 8601 format', async () => {
     const res = await client.get('/odata/Products').expect(200);
     expect(res.body.value).to.be.Array();

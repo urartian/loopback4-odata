@@ -5661,6 +5661,31 @@ export function defineODataCrudController(def: EntitySetDef) {
               throw error;
             }
           }
+          case 'function': {
+            const field = node.field;
+            if (!field || typeof field !== 'string' || !field.includes('/')) return false;
+            if (
+              node.name !== 'contains' &&
+              node.name !== 'startswith' &&
+              node.name !== 'endswith'
+            ) {
+              return false;
+            }
+            try {
+              const resolved = resolveNavigationPath(this.entityCtor, field, { maxDepth });
+              if (!resolved.joins.length) return false;
+              if (!resolved.propertyPath) return false;
+              if (resolved.propertyPath.includes('/')) return false;
+              if (resolved.joins.some((join) => join.relationType === 'hasMany')) return false;
+              if (!this.isPrimitiveModelProperty(resolved.targetModel, resolved.propertyPath)) {
+                return false;
+              }
+              return true;
+            } catch (error) {
+              if (error instanceof NavigationPathError) return false;
+              throw error;
+            }
+          }
           case 'logical':
             return node.expressions.some((child) => visit(child));
           case 'not':
@@ -8814,6 +8839,61 @@ export function defineODataCrudController(def: EntitySetDef) {
           injectedIncludePaths.push(...this.diffIncludePaths(includeBefore, includeAfter));
         }
       }
+      if (
+        navigationFilterExpr &&
+        !postFilterExpr &&
+        !planRequiresPostProcessing &&
+        !this.cfg?.strict &&
+        !deltaEnabled &&
+        !deltaTokenValue &&
+        !lambdaExpressions.length &&
+        !lambdaExpressionTree
+      ) {
+        const maxJoinCount =
+          this.cfg?.filter?.pushdownMaxJoinCount ?? this.cfg?.lambda?.pushdownMaxJoinCount;
+        const maxDepth = this.cfg?.maxExpandDepth;
+        const canAttemptPushdown = dataSource && supportsPostgresLambdaPushdown(dataSource);
+        const idsBuilt = canAttemptPushdown
+          ? buildPostgresNavigationFilterIdQuery({
+              dataSource: dataSource!,
+              modelCtor,
+              expression: navigationFilterExpr,
+              where: baseFilter.where as Where<AnyObject> | undefined,
+              order: baseFilter.order as Filter<CrudEntity>['order'],
+              limit: baseFilter.limit,
+              offset: baseFilter.offset,
+              maxDepth,
+              maxJoinCount,
+            })
+          : ({ declineReason: 'unsupported-datasource' } as any);
+        const countBuilt =
+          inlineCountRequested && canAttemptPushdown
+            ? buildPostgresNavigationFilterCountQuery({
+                dataSource: dataSource!,
+                modelCtor,
+                expression: navigationFilterExpr,
+                where: baseFilter.where as Where<AnyObject> | undefined,
+                maxDepth,
+                maxJoinCount,
+              })
+            : undefined;
+        const declined =
+          !canAttemptPushdown || !('sql' in idsBuilt)
+            ? (idsBuilt?.declineReason ?? 'unsupported-datasource')
+            : inlineCountRequested && countBuilt && !('sql' in countBuilt)
+              ? ((countBuilt as any).declineReason ?? 'count-declined')
+              : undefined;
+        if (declined) {
+          postFilterExpr = this.combinePostFilterExpressions(postFilterExpr, navigationFilterExpr);
+          navigationFilterExpr = undefined;
+          if (postFilterExpr) {
+            const includeBefore = this.extractIncludePaths(baseFilter.include);
+            this.ensureNavigationInclusionForExpression(baseFilter, postFilterExpr);
+            const includeAfter = this.extractIncludePaths(baseFilter.include);
+            injectedIncludePaths.push(...this.diffIncludePaths(includeBefore, includeAfter));
+          }
+        }
+      }
       const requiresPostFilter = Boolean(postFilterExpr) || planRequiresPostProcessing;
 
       const op: CrudOperation = 'READ';
@@ -10015,15 +10095,31 @@ export function defineODataCrudController(def: EntitySetDef) {
       }
       if (
         navigationFilterExpr &&
-        postFilterExpr &&
         !this.cfg?.strict &&
         !rootLambdas.length &&
         !lambdaExpressionTree
       ) {
-        postFilterExpr = this.combinePostFilterExpressions(postFilterExpr, navigationFilterExpr);
-        navigationFilterExpr = undefined;
-        if (postFilterExpr) {
-          this.ensureNavigationInclusionForExpression(baseFilter, postFilterExpr);
+        const dataSource = (this.repository as { dataSource?: juggler.DataSource }).dataSource;
+        const canAttemptPushdown = dataSource && supportsPostgresLambdaPushdown(dataSource);
+        const maxJoinCount =
+          this.cfg?.filter?.pushdownMaxJoinCount ?? this.cfg?.lambda?.pushdownMaxJoinCount;
+        const maxDepth = this.cfg?.maxExpandDepth;
+        const built = canAttemptPushdown
+          ? buildPostgresNavigationFilterCountQuery({
+              dataSource: dataSource!,
+              modelCtor,
+              expression: navigationFilterExpr,
+              where: baseFilter.where as Where<AnyObject> | undefined,
+              maxDepth,
+              maxJoinCount,
+            })
+          : ({ declineReason: 'unsupported-datasource' } as any);
+        if (!canAttemptPushdown || !('sql' in built)) {
+          postFilterExpr = this.combinePostFilterExpressions(postFilterExpr, navigationFilterExpr);
+          navigationFilterExpr = undefined;
+          if (postFilterExpr) {
+            this.ensureNavigationInclusionForExpression(baseFilter, postFilterExpr);
+          }
         }
       }
 
