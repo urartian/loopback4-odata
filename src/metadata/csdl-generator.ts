@@ -32,6 +32,7 @@ import {
 import { getODataSearchableProps } from '../decorators/search.decorators';
 import { stableStringify } from '../util/token-signing';
 import { isEntityCtor, isModelCtor } from '../util/model-helpers';
+import { resolveFilterFunctions } from '../util/filter-functions';
 
 const EDM_NAMESPACE = 'http://docs.oasis-open.org/odata/ns/edm';
 const EDMX_NAMESPACE = 'http://docs.oasis-open.org/odata/ns/edmx';
@@ -95,19 +96,6 @@ interface ResolvedEdmType {
 type EffectiveCapabilities = ODataCapabilitiesConfig & {
   navigationRestrictionDefaults?: ODataNavigationRestriction;
 };
-
-const DEFAULT_FILTER_FUNCTIONS = [
-  'contains',
-  'startswith',
-  'endswith',
-  'indexof',
-  'substring',
-  'length',
-  'round',
-  'floor',
-  'ceiling',
-  'year',
-];
 
 const SEARCH_EXPRESSION_ENUM_MAP: Record<string, string> = {
   none: 'Org.OData.Capabilities.V1.SearchExpressions/none',
@@ -1282,7 +1270,11 @@ export class CsdlGenerator {
         };
       }
 
-      const filterFunctions = capabilities.filterFunctions ?? DEFAULT_FILTER_FUNCTIONS;
+      const filterFunctions = resolveFilterFunctions({
+        entitySet: set.capabilities,
+        defaults: defaultCapabilities,
+        label: `EntitySet "${set.name}".capabilities`,
+      });
       if (filterFunctions && filterFunctions.length) {
         capabilityAnnotationsXml.push(
           '        <Annotation Term="Org.OData.Capabilities.V1.FilterFunctions">',

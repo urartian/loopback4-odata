@@ -164,6 +164,7 @@ export interface ODataSearchRestrictionsConfig {
 
 export interface ODataCapabilitiesConfig {
   filterFunctions?: string[];
+  filterFunctionsPreset?: 'default' | 'postgres';
   countable?: boolean;
   navigationRestrictions?: Record<string, ODataNavigationRestriction>;
   permissions?: ODataEntityPermission[];

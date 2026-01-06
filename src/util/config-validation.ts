@@ -13,7 +13,9 @@ import {
   ODataTelemetryLevel,
   ODataTenantQuotaConfig,
   ODataWriteTransactionsConfig,
+  ODataCapabilitiesConfig,
 } from '../types';
+import { normalizeFilterFunctionsList, validateFilterFunctionsPreset } from './filter-functions';
 
 const validatedConfigs = new WeakSet<ODataConfig>();
 const TELEMETRY_LEVELS: ReadonlySet<ODataTelemetryLevel> = new Set([
@@ -51,6 +53,9 @@ export function validateODataConfig(config: ODataConfig): void {
     throw new Error('ODataConfig.tokenSecret must be configured.');
   }
   config.tokenSecret = config.tokenSecret.trim();
+  if (config.capabilities) {
+    validateCapabilitiesConfig('ODataConfig.capabilities', config.capabilities);
+  }
   if (config.pagination) {
     validatePaginationLimits('ODataConfig.pagination', config.pagination);
   }
@@ -100,6 +105,32 @@ export function validateODataConfig(config: ODataConfig): void {
   }
   if (config.composition) {
     validateCompositionConfig(config.composition);
+  }
+}
+
+export function validateCapabilitiesConfig(
+  label: string,
+  capabilities?: ODataCapabilitiesConfig,
+): void {
+  if (!capabilities) return;
+  const target = capabilities as AnyObject;
+  if ('filterFunctionsPreset' in target) {
+    const normalized = validateFilterFunctionsPreset(
+      target.filterFunctionsPreset,
+      `${label}.filterFunctionsPreset`,
+    );
+    if (normalized !== undefined) {
+      target.filterFunctionsPreset = normalized;
+    }
+  }
+  if ('filterFunctions' in target) {
+    const normalized = normalizeFilterFunctionsList(
+      target.filterFunctions,
+      `${label}.filterFunctions`,
+    );
+    if (normalized !== undefined) {
+      target.filterFunctions = normalized;
+    }
   }
 }
 

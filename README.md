@@ -1024,6 +1024,50 @@ this.bind(ODATA_BINDINGS.CONFIG).to({
 } as ODataConfig);
 ```
 
+### Capabilities presets (FilterFunctions)
+
+The service advertises supported `$filter` functions in `$metadata` via `Org.OData.Capabilities.V1.FilterFunctions`. To keep this aligned with the library’s implementation without maintaining long arrays, you can use a preset (no runtime connector auto-detection):
+
+- `filterFunctionsPreset: 'default'`: legacy/minimal set (matches previous default behavior)
+- `filterFunctionsPreset: 'postgres'`: Postgres-ready set aligned with implemented pushdowns (includes `trim`, `concat`, `month`, etc.)
+
+```ts
+import { ODATA_BINDINGS, ODataConfig, FILTER_FUNCTIONS_POSTGRES } from '@loopback/odata';
+
+const currentConfig = this.getSync(ODATA_BINDINGS.CONFIG) as ODataConfig;
+
+this.bind(ODATA_BINDINGS.CONFIG).to({
+  ...currentConfig,
+  capabilities: {
+    ...currentConfig.capabilities,
+    filterFunctionsPreset: 'postgres',
+  },
+} satisfies ODataConfig);
+
+// or explicitly:
+this.bind(ODATA_BINDINGS.CONFIG).to({
+  ...currentConfig,
+  capabilities: {
+    ...currentConfig.capabilities,
+    filterFunctions: FILTER_FUNCTIONS_POSTGRES,
+  },
+} satisfies ODataConfig);
+```
+
+> **Notes:** `FilterFunctions` only advertises `$filter` functions. Operators like `in (...)` are not represented there. Presets and lists are normalized (trimmed, lowercased, de-duplicated).
+
+For mixed datasources (or per-entity differences), prefer per-entity-set overrides:
+
+```ts
+import { FILTER_FUNCTIONS_POSTGRES, type EntitySetDef } from '@loopback/odata';
+
+export const PurchasesSet: EntitySetDef = {
+  name: 'Purchases',
+  modelCtor: Purchase,
+  capabilities: { filterFunctions: FILTER_FUNCTIONS_POSTGRES },
+};
+```
+
 > **Important:** `capabilities` is a nested object. Flags such as `aggregation`, `applySupported`, or `filterFunctions` belong under `config.capabilities`. If you bind a brand-new config object without copying the defaults registered by `ODataComponent`, those flags disappear and features like `$apply` aggregations are reported as not implemented. Prefer `this.getSync(ODATA_BINDINGS.CONFIG)` and spread the existing value before applying overrides.
 
 ```ts

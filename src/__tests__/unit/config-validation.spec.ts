@@ -48,6 +48,32 @@ describe('OData config validation', () => {
     expect(() => validateODataConfig(config)).to.throw(/ODataConfig\.filter\.pushdownMaxJoinCount/);
   });
 
+  it('normalizes capabilities filterFunctions and validates filterFunctionsPreset', () => {
+    const config: ODataConfig = {
+      tokenSecret: 'test-secret',
+      capabilities: {
+        filterFunctionsPreset: 'POSTGRES' as any,
+        filterFunctions: [' Contains ', 'contains', 'STARTSWITH', '  '],
+      },
+    };
+
+    validateODataConfig(config);
+
+    expect(config.capabilities?.filterFunctionsPreset).to.equal('postgres');
+    expect(config.capabilities?.filterFunctions).to.deepEqual(['contains', 'startswith']);
+  });
+
+  it('throws for invalid capabilities filterFunctionsPreset', () => {
+    const config: ODataConfig = {
+      tokenSecret: 'test-secret',
+      capabilities: {
+        filterFunctionsPreset: 'nope' as any,
+      },
+    };
+
+    expect(() => validateODataConfig(config)).to.throw(/capabilities\.filterFunctionsPreset/);
+  });
+
   it('throws for invalid post-filter scan guardrails', () => {
     const config: ODataConfig = {
       tokenSecret: 'test-secret',
