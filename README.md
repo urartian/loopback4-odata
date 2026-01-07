@@ -1063,6 +1063,64 @@ This library focuses on a predictable subset of `$filter` that can be enforced i
 - `strict=true`: rejected with `400 Bad Request`
 - `strict=false`: may still be rejected (or bounded post-filtered) depending on whether the expression can be evaluated safely
 
+### Supported `$filter` summary
+
+At a high level, the server supports:
+
+- Boolean logic: nested `and` / `or` / `not` with parentheses
+- Comparisons: `eq`/`ne`/`gt`/`ge`/`lt`/`le`, including `null`/`true`/`false`
+- Typed literals + model-aware coercion: `guid'...'`, `date'...'`, `datetimeoffset'...'`, `int64'...'` (and `123L`), `decimal'...'`
+- `in (...)`: parsed as `inq` with `capabilities.filter.maxInListItems` guardrail (null-safe)
+- String filtering: `contains`/`startswith`/`endswith`, and direct `tolower(...)`/`toupper(...)` comparisons (plus Postgres pushdown for supported patterns)
+- Date parts: `month/day/hour/minute/second` comparisons (Postgres pushdown)
+- Navigation paths:
+  - To-one chains (`belongsTo`/`hasOne`) ending in primitive fields are supported (Postgres pushdown when available; bounded fallback otherwise)
+  - To-many navigation filters are supported only via lambdas (`any`/`all`)
+- Lambdas (`any`/`all`): nested (depth capped), top-level `or` support, Postgres pushdown when enabled, and bounded fallback when pushdown declines
+
+For the exact set of supported `$filter` functions, rely on `$metadata` (`Org.OData.Capabilities.V1.FilterFunctions`) or the `filterFunctionsPreset` presets (`default` / `postgres`).
+
+### `$filter` examples
+
+Basic comparisons:
+
+```http
+GET /odata/Products?$filter=price ge 100 and active eq true
+```
+
+Typed literals (model-aware coercion):
+
+```http
+GET /odata/Orders?$filter=customerId eq guid'01234567-89ab-cdef-0123-456789abcdef'
+GET /odata/Orders?$filter=createdAt ge datetimeoffset'2026-01-03T10:20:30Z'
+```
+
+`in (...)` (null-safe; subject to `filter.maxInListItems`):
+
+```http
+GET /odata/Products?$filter=status in ('Open','Closed',null)
+```
+
+String filtering:
+
+```http
+GET /odata/Products?$filter=contains(name,'lap')
+GET /odata/Products?$filter=tolower(name) eq 'laptop'
+```
+
+To-one navigation path filters (Postgres pushdown when available; otherwise bounded fallback):
+
+```http
+GET /odata/Orders?$filter=customer/name eq 'Alice'&$top=50
+```
+
+To-many navigation filters via lambdas:
+
+```http
+GET /odata/Orders?$filter=items/any(i: i/quantity gt 0)
+GET /odata/Orders?$filter=items/all(i: i/cancelled eq false)
+```
+
 Notable `$filter` features that are currently **not** implemented:
 
 - Type functions: `cast(...)`, `isof(...)`
