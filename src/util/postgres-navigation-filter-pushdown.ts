@@ -8,6 +8,7 @@ import {
 import { ParsedExpression } from '../services/odata-query-parser.service';
 import { supportsPostgresLambdaPushdown } from './postgres-lambda-pushdown';
 import { escapeLikeLiteral } from './like-escaping';
+import { ODataErrorCodes } from '../odata-error-codes';
 
 export interface NavigationFilterPushdownBuildResult {
   sql: string;
@@ -759,7 +760,7 @@ export function buildPostgresNavigationFilterIdQuery(options: {
   }
   if (navBuilt.joinCount > maxJoinCount) {
     params.length = start;
-    return { declineReason: 'pushdown-join-count-exceeded' };
+    return { declineReason: ODataErrorCodes.PushdownJoinCountExceeded };
   }
 
   const whereParts = [baseWhereSql, navBuilt.sql].filter(Boolean) as string[];
@@ -857,7 +858,7 @@ export function buildPostgresNavigationFilterCountQuery(options: {
   }
   if (navBuilt.joinCount > maxJoinCount) {
     params.length = start;
-    return { declineReason: 'pushdown-join-count-exceeded' };
+    return { declineReason: ODataErrorCodes.PushdownJoinCountExceeded };
   }
 
   const whereParts = [baseWhereSql, navBuilt.sql].filter(Boolean) as string[];

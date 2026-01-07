@@ -15,6 +15,7 @@ export * from './services/postgres-apply-executor';
 export * from './services/tenant-throttle-store';
 export * from './services/redis-tenant-throttle.store';
 export * from './services/odata-media-handler';
+export * from './odata-error-codes';
 export * from './util/navigation-path';
 export * from './controllers/service-document.controller';
 export * from './spec/odata-visibility.spec-enhancer';

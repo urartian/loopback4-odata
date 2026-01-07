@@ -7,6 +7,7 @@ import { ODATA_VERSION } from '../constants';
 import { markUndocumentedOperation } from '../util/openapi';
 import { acceptsAnyMediaType } from '../util/accept';
 import { normalizeBasePath } from '../util/base-path';
+import { ODataErrorCodes } from '../odata-error-codes';
 
 const SERVICE_DOCUMENT_OPERATION_SPEC = markUndocumentedOperation({
   responses: {
@@ -70,7 +71,7 @@ export class ODataServiceDocumentController {
         if (!acceptsAnyMediaType(accept, ['application/json'])) {
           const err: any = new Error('NotAcceptable');
           err.statusCode = 406;
-          err.code = 'NotAcceptable';
+          err.code = ODataErrorCodes.NotAcceptable;
           throw err;
         }
       }

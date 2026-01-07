@@ -6,6 +6,7 @@ import { ODATA_VERSION } from '../constants';
 import { ODATA_BINDINGS } from '../keys';
 import { ODataConfig } from '../types';
 import { gatherRequestUrls, normalizeBasePath, pathMatches } from '../util/base-path';
+import { ODataErrorCodes } from '../odata-error-codes';
 
 type AnyObject = Record<string, unknown>;
 
@@ -21,6 +22,8 @@ type ExtendedHttpError = HttpError & {
 
 @injectable({ scope: BindingScope.SINGLETON })
 export class ODataErrorProvider implements Provider<Reject> {
+  private readonly stableCodes = new Set<string>(Object.values(ODataErrorCodes));
+
   constructor(
     @inject(RestBindings.ERROR_WRITER_OPTIONS, { optional: true })
     private readonly options: ErrorWriterOptions = {},
@@ -42,16 +45,16 @@ export class ODataErrorProvider implements Provider<Reject> {
 
       const normalizedError = this.normalizeODataError(request, err) as ExtendedHttpError;
       const httpError = normalizedError as ExtendedHttpError;
+      const explicitCode = typeof httpError.code === 'string' ? httpError.code : undefined;
+      const stableCode =
+        explicitCode && this.stableCodes.has(explicitCode) ? explicitCode : undefined;
       const statusCode =
-        httpError.statusCode ??
-        httpError.status ??
-        (httpError.code ? this.mapCodeToStatus(httpError.code) : undefined) ??
-        500;
-      const code = this.resolveErrorCode(httpError.code) ?? this.mapStatusToCode(statusCode);
+        httpError.statusCode ?? httpError.status ?? this.mapCodeToStatus(explicitCode) ?? 500;
+      const code = stableCode ?? this.mapStatusToCode(statusCode);
       const message = httpError.message || this.defaultMessage(statusCode);
       const target = httpError.target ?? null;
       const details = this.normalizeDetails(httpError);
-      const innererror = this.buildInnerError(httpError);
+      const innererror = this.buildInnerError(httpError, stableCode ? undefined : explicitCode);
 
       response.status(statusCode);
       if (!response.getHeader('OData-Version')) {
@@ -99,57 +102,31 @@ export class ODataErrorProvider implements Provider<Reject> {
   private mapStatusToCode(status: number): string {
     switch (status) {
       case 400:
-        return 'BadRequest';
+        return ODataErrorCodes.BadRequest;
       case 406:
-        return 'NotAcceptable';
+        return ODataErrorCodes.NotAcceptable;
       case 415:
-        return 'UnsupportedMediaType';
+        return ODataErrorCodes.UnsupportedMediaType;
       case 401:
-        return 'Unauthorized';
+        return ODataErrorCodes.Unauthorized;
       case 403:
-        return 'Forbidden';
+        return ODataErrorCodes.Forbidden;
       case 404:
-        return 'NotFound';
+        return ODataErrorCodes.NotFound;
       case 422:
-        return 'UnprocessableEntity';
+        return ODataErrorCodes.UnprocessableEntity;
       case 409:
-        return 'Conflict';
+        return ODataErrorCodes.Conflict;
       case 412:
-        return 'PreconditionFailed';
+        return ODataErrorCodes.PreconditionFailed;
       case 428:
-        return 'PreconditionRequired';
+        return ODataErrorCodes.PreconditionRequired;
+      case 413:
+        return ODataErrorCodes.PayloadTooLarge;
       case 501:
-        return 'NotImplemented';
+        return ODataErrorCodes.NotImplemented;
       default:
-        return 'InternalServerError';
-    }
-  }
-
-  private resolveErrorCode(code?: string): string | undefined {
-    switch (code) {
-      case 'PreferenceNotSupported':
-      case 'TenantResolutionFailed':
-      case 'TransactionCommitFailed':
-      case 'MultiDataSourceChangesetNotSupported':
-      case 'AtomicityGroupNotSupported':
-      case 'nested-lambda-depth-exceeded':
-      case 'lambda-alias-prefix-required':
-      case 'lambda-or-unsupported':
-      case 'through-relation-unsupported':
-      case 'pushdown-join-count-exceeded':
-      case 'invalid-datetimeoffset-literal':
-      case 'invalid-date-literal':
-      case 'invalid-guid-literal':
-      case 'invalid-int64-literal':
-      case 'invalid-decimal-literal':
-      case 'in-list-too-large':
-      case 'navigation-filter-requires-pushdown':
-      case 'postfilter-requires-pushdown':
-      case 'postfilter-top-required':
-      case 'postfilter-scan-limit-exceeded':
-        return code;
-      default:
-        return undefined;
+        return ODataErrorCodes.InternalServerError;
     }
   }
 
@@ -160,17 +137,17 @@ export class ODataErrorProvider implements Provider<Reject> {
       case 'VALIDATION_ERROR':
       case 'REQUEST_VALIDATION_FAILED':
         return 400;
-      case 'PreferenceNotSupported':
-      case 'MultiDataSourceChangesetNotSupported':
-      case 'AtomicityGroupNotSupported':
+      case ODataErrorCodes.PreferenceNotSupported:
+      case ODataErrorCodes.MultiDataSourceChangesetNotSupported:
+      case ODataErrorCodes.AtomicityGroupNotSupported:
         return 501;
-      case 'TenantResolutionFailed':
+      case ODataErrorCodes.TenantResolutionFailed:
         return 400;
-      case 'PreconditionFailed':
+      case ODataErrorCodes.PreconditionFailed:
         return 412;
-      case 'PreconditionRequired':
+      case ODataErrorCodes.PreconditionRequired:
         return 428;
-      case 'UnprocessableEntity':
+      case ODataErrorCodes.UnprocessableEntity:
         return 422;
       default:
         return undefined;
@@ -194,16 +171,16 @@ export class ODataErrorProvider implements Provider<Reject> {
     return [];
   }
 
-  private buildInnerError(error: ExtendedHttpError): object {
+  private buildInnerError(error: ExtendedHttpError, dbCode?: string): object {
     const inner: Record<string, unknown> = {};
     if (this.options.debug) {
       inner.stack = error.stack;
     }
-    if (error.innerError) {
-      return { ...inner, ...error.innerError };
+    if (error.innerError && typeof error.innerError === 'object') {
+      Object.assign(inner, error.innerError);
     }
-    if (Object.keys(inner).length === 0) {
-      return {};
+    if (dbCode && inner.dbCode === undefined) {
+      inner.dbCode = dbCode;
     }
     return inner;
   }

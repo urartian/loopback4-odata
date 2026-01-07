@@ -128,6 +128,16 @@ export class ProductODataController {}
 
 That’s it — the extension generates repository-backed CRUD endpoints automatically.
 
+### Errors and error codes
+
+OData endpoints return errors using an OData error payload (for example `{"error":{"code":"BadRequest","message":"..."}}`).
+
+- `error.code` is stable and intended for client logic (use it instead of parsing messages).
+- `error.message` is human-readable and may change; do not parse it for behavior.
+- If a downstream connector/database error bubbles up with its own string `err.code`, it is preserved as diagnostics under `error.innererror.dbCode` (not as `error.code`).
+
+The authoritative list of stable codes lives in `src/odata-error-codes.ts` (exported as `ODataErrorCodes` from `@loopback/odata`).
+
 ### Authentication & Authorization
 
 The component mirrors LoopBack’s authentication and authorization metadata from your controller onto every generated CRUD endpoint. Decorate your OData controller exactly as you would a regular REST controller and the extension takes care of the rest:

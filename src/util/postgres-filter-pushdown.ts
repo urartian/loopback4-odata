@@ -8,6 +8,7 @@ import {
 } from './navigation-path';
 import { ParsedExpression, FunctionArg } from '../services/odata-query-parser.service';
 import { supportsPostgresLambdaPushdown } from './postgres-lambda-pushdown';
+import { ODataErrorCodes } from '../odata-error-codes';
 
 export interface MixedFilterPushdownBuildResult {
   sql: string;
@@ -1205,7 +1206,7 @@ export function buildPostgresMixedFilterIdQuery(options: {
   }
   if (predicateBuilt.joinCount > maxJoinCount) {
     params.length = start;
-    return { declineReason: 'pushdown-join-count-exceeded' };
+    return { declineReason: ODataErrorCodes.PushdownJoinCountExceeded };
   }
 
   const whereParts = [baseWhereSql, predicateBuilt.sql].filter(Boolean) as string[];
@@ -1302,7 +1303,7 @@ export function buildPostgresMixedFilterCountQuery(options: {
   }
   if (predicateBuilt.joinCount > maxJoinCount) {
     params.length = start;
-    return { declineReason: 'pushdown-join-count-exceeded' };
+    return { declineReason: ODataErrorCodes.PushdownJoinCountExceeded };
   }
 
   const whereParts = [baseWhereSql, predicateBuilt.sql].filter(Boolean) as string[];

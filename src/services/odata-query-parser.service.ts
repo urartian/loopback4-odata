@@ -8,6 +8,7 @@ import {
 } from '@loopback/repository';
 import { HttpErrors } from '@loopback/rest';
 import { escapeLikeLiteral } from '../util/like-escaping';
+import { ODataErrorCodes } from '../odata-error-codes';
 
 const comparisonOperators: Record<string, string> = {
   eq: 'eq',
@@ -225,6 +226,12 @@ interface ParseOptions {
 }
 
 type ParseContext = { strict: boolean };
+
+function badRequestWithCode(message: string, code: string): HttpErrors.HttpError {
+  const err = new HttpErrors.BadRequest(message);
+  (err as AnyObject).code = code;
+  return err;
+}
 
 function isInListLiteralToken(token: string): boolean {
   const raw = String(token ?? '').trim();
@@ -818,7 +825,10 @@ function parseInComparison(
       continue;
     }
     if (ctx.strict && !isInListLiteralToken(token)) {
-      throw new Error('in operator requires literal list items.');
+      throw badRequestWithCode(
+        'in operator requires literal list items.',
+        ODataErrorCodes.InOperatorRequiresLiteralListItems,
+      );
     }
     values.push(parseLiteral(token));
     cursor += 1;
@@ -828,7 +838,10 @@ function parseInComparison(
     throw new Error('Malformed in expression. Expected closing parenthesis.');
   }
   if (!values.length) {
-    throw new Error('in operator requires at least one list item.');
+    throw badRequestWithCode(
+      'in operator requires at least one list item.',
+      ODataErrorCodes.InOperatorRequiresNonEmptyList,
+    );
   }
 
   return [
@@ -1222,7 +1235,7 @@ function assertAliasedField(field: string, aliasesInScope: string[], lambdaPaths
   if (!token || rest.length === 0 || !aliasesInScope.includes(token)) {
     throw new LambdaQueryRejectedError(
       'Fields inside lambda predicates must be prefixed with the lambda alias (lambda-alias-prefix-required).',
-      { reason: 'lambda-alias-prefix-required', paths: lambdaPaths },
+      { reason: ODataErrorCodes.LambdaAliasPrefixRequired, paths: lambdaPaths },
     );
   }
 }
@@ -1239,7 +1252,7 @@ function validateLambdaExpressionTree(expr: ParsedExpression, options?: ParseOpt
         if (nextDepth > maxDepth) {
           throw new LambdaQueryRejectedError(
             `Nested lambda expressions exceed the maximum supported depth of ${maxDepth} (nested-lambda-depth-exceeded).`,
-            { reason: 'nested-lambda-depth-exceeded', paths: lambdaPaths },
+            { reason: ODataErrorCodes.NestedLambdaDepthExceeded, paths: lambdaPaths },
           );
         }
 
@@ -1248,7 +1261,7 @@ function validateLambdaExpressionTree(expr: ParsedExpression, options?: ParseOpt
           if (!sourceAlias || !aliasesInScope.includes(sourceAlias) || node.path.length < 2) {
             throw new LambdaQueryRejectedError(
               'Nested lambda paths inside lambda predicates must start with an in-scope lambda alias (lambda-alias-prefix-required).',
-              { reason: 'lambda-alias-prefix-required', paths: lambdaPaths },
+              { reason: ODataErrorCodes.LambdaAliasPrefixRequired, paths: lambdaPaths },
             );
           }
         }
@@ -1296,7 +1309,7 @@ function validateLambdaExpressionTree(expr: ParsedExpression, options?: ParseOpt
         ) {
           throw new LambdaQueryRejectedError(
             'Lambda expressions combined with OR inside lambda predicates are not supported (lambda-or-unsupported).',
-            { reason: 'lambda-or-unsupported', paths: lambdaPaths },
+            { reason: ODataErrorCodes.LambdaOrUnsupported, paths: lambdaPaths },
           );
         }
         for (const child of node.expressions) {
@@ -1651,14 +1664,17 @@ function buildWhere(expr: ParsedExpression, options?: ParseOptions): Where<AnyOb
     }
     if (comparator === 'inq' || comparator === 'nin') {
       if (!Array.isArray(value)) {
-        throw new Error('in operator requires a list.');
+        throw badRequestWithCode(
+          'in operator requires a list.',
+          ODataErrorCodes.InOperatorRequiresList,
+        );
       }
       const limits = filterLimits(options);
       if (value.length > limits.maxInListItems) {
         const err = new HttpErrors.BadRequest(
           `in list exceeds maximum of ${limits.maxInListItems} items.`,
         );
-        (err as AnyObject).code = 'in-list-too-large';
+        (err as AnyObject).code = ODataErrorCodes.InListTooLarge;
         throw err;
       }
 

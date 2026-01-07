@@ -11,6 +11,7 @@ import {
   LambdaExpression,
   ParsedExpression,
 } from '../services/odata-query-parser.service';
+import { ODataErrorCodes } from '../odata-error-codes';
 
 export interface LambdaPushdownBuildResult {
   sql: string;
@@ -646,7 +647,7 @@ export function buildPostgresFilterIdQuery(options: {
   }
   if (built.joinCount > maxJoinCount) {
     params.length = start;
-    return { declineReason: 'pushdown-join-count-exceeded' };
+    return { declineReason: ODataErrorCodes.PushdownJoinCountExceeded };
   }
 
   const whereParts = [baseWhereSql, built.sql].filter(Boolean) as string[];
@@ -745,7 +746,7 @@ export function buildPostgresFilterCountQuery(options: {
   }
   if (built.joinCount > maxJoinCount) {
     params.length = start;
-    return { declineReason: 'pushdown-join-count-exceeded' };
+    return { declineReason: ODataErrorCodes.PushdownJoinCountExceeded };
   }
 
   const whereParts = [baseWhereSql, built.sql].filter(Boolean) as string[];
@@ -1068,7 +1069,7 @@ export function buildPostgresLambdaIdQuery(
     joinCount += built.joinCount;
     if (joinCount > maxJoinCount) {
       params.length = start;
-      return { declineReason: 'pushdown-join-count-exceeded' };
+      return { declineReason: ODataErrorCodes.PushdownJoinCountExceeded };
     }
     predicateClauses.push(built.sql);
   } else {
@@ -1106,7 +1107,7 @@ export function buildPostgresLambdaIdQuery(
       joinCount += clause.joinCount;
       if (joinCount > maxJoinCount) {
         params.length = start;
-        return { declineReason: 'pushdown-join-count-exceeded' };
+        return { declineReason: ODataErrorCodes.PushdownJoinCountExceeded };
       }
       predicateClauses.push(clause.sql);
     }
@@ -1247,7 +1248,7 @@ export function buildPostgresLambdaCountQuery(
     joinCount += built.joinCount;
     if (joinCount > maxJoinCount) {
       params.length = start;
-      return { declineReason: 'pushdown-join-count-exceeded' };
+      return { declineReason: ODataErrorCodes.PushdownJoinCountExceeded };
     }
     predicateClauses.push(built.sql);
   } else {
@@ -1285,7 +1286,7 @@ export function buildPostgresLambdaCountQuery(
       joinCount += clause.joinCount;
       if (joinCount > maxJoinCount) {
         params.length = start;
-        return { declineReason: 'pushdown-join-count-exceeded' };
+        return { declineReason: ODataErrorCodes.PushdownJoinCountExceeded };
       }
       predicateClauses.push(clause.sql);
     }
