@@ -273,6 +273,9 @@ function validateTelemetryConfig(telemetry: ODataTelemetryConfig): void {
 }
 
 function validateCorrelationConfig(cfg: ODataCorrelationConfig): void {
+  if (cfg.enabled !== undefined && cfg.enabled !== null && typeof cfg.enabled !== 'boolean') {
+    throw new Error('ODataConfig.correlation.enabled must be a boolean.');
+  }
   if (cfg.headerName !== undefined && cfg.headerName !== null) {
     if (typeof cfg.headerName !== 'string' || cfg.headerName.trim().length === 0) {
       throw new Error('ODataConfig.correlation.headerName must be a non-empty string.');
@@ -284,6 +287,29 @@ function validateCorrelationConfig(cfg: ODataCorrelationConfig): void {
       throw new Error('ODataConfig.correlation.responseHeaderName must be a non-empty string.');
     }
     cfg.responseHeaderName = cfg.responseHeaderName.trim();
+  }
+  if (
+    cfg.generateWhenMissing !== undefined &&
+    cfg.generateWhenMissing !== null &&
+    typeof cfg.generateWhenMissing !== 'boolean'
+  ) {
+    throw new Error('ODataConfig.correlation.generateWhenMissing must be a boolean.');
+  }
+  if (
+    cfg.propagateToRepositories !== undefined &&
+    cfg.propagateToRepositories !== null &&
+    typeof cfg.propagateToRepositories !== 'boolean'
+  ) {
+    throw new Error('ODataConfig.correlation.propagateToRepositories must be a boolean.');
+  }
+  if (cfg.repositoryOptionsKey !== undefined && cfg.repositoryOptionsKey !== null) {
+    if (
+      typeof cfg.repositoryOptionsKey !== 'string' ||
+      cfg.repositoryOptionsKey.trim().length === 0
+    ) {
+      throw new Error('ODataConfig.correlation.repositoryOptionsKey must be a non-empty string.');
+    }
+    cfg.repositoryOptionsKey = cfg.repositoryOptionsKey.trim();
   }
 }
 

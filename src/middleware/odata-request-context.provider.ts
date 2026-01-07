@@ -38,6 +38,7 @@ export class ODataRequestContextProvider implements Provider<Middleware> {
       }
 
       this.applyCorrelation(ctx, requestState, this.cfg?.correlation);
+      this.applyTenantId(ctx, requestState);
       const preferences = this.parseTelemetryPreferences(ctx.request.header('prefer'));
       if (preferences.size) {
         requestState.telemetryPreferences = preferences;
@@ -69,6 +70,9 @@ export class ODataRequestContextProvider implements Provider<Middleware> {
     state: ODataRequestState,
     config?: ODataCorrelationConfig,
   ): void {
+    if (config?.enabled === false) {
+      return;
+    }
     const headerName = (config?.headerName ?? 'x-correlation-id').toLowerCase();
     let correlationId = this.readHeader(ctx.request, headerName);
     if (!correlationId && config?.generateWhenMissing !== false) {
@@ -80,6 +84,19 @@ export class ODataRequestContextProvider implements Provider<Middleware> {
       if (responseHeader) {
         ctx.response.setHeader(responseHeader, correlationId);
       }
+    }
+  }
+
+  private applyTenantId(ctx: MiddlewareContext, state: ODataRequestState): void {
+    const resolver = this.cfg?.tenantResolver;
+    if (!resolver) return;
+    try {
+      const resolved = resolver(ctx.request as any);
+      if (typeof resolved === 'string' && resolved.trim().length) {
+        state.tenantId = resolved;
+      }
+    } catch {
+      // ignore tenant resolution errors in middleware; downstream guards may enforce tenancy
     }
   }
 

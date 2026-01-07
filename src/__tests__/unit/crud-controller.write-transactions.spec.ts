@@ -134,6 +134,105 @@ describe('CRUD controller writeTransactions', () => {
     expect(rollbackCount).to.equal(0);
   });
 
+  it('propagates correlationId into repository options', async () => {
+    const correlationId = 'cid-123';
+    const tx = {
+      async commit() {},
+      async rollback() {},
+    };
+    const ds = {
+      name: 'db',
+      async beginTransaction() {
+        return tx;
+      },
+    };
+    let seenOptions: any;
+    const repo = {
+      dataSource: ds,
+      async create(payload: any, options?: any) {
+        seenOptions = options;
+        return { id: 1, ...payload };
+      },
+    };
+
+    const controller = createController({
+      repo,
+      httpCtx: {
+        getSync: () => ({ correlationId }),
+      },
+      cfg: {
+        writeTransactions: { enabled: true, requireTransactionSupport: true },
+      },
+    });
+
+    await controller.create({ name: 'ok' } as any);
+    expect(seenOptions?.correlation?.correlationId).to.equal(correlationId);
+    expect(seenOptions).to.containEql({ transaction: tx });
+  });
+
+  it('does not propagate correlationId when disabled', async () => {
+    const correlationId = 'cid-123';
+    const tx = {
+      async commit() {},
+      async rollback() {},
+    };
+    const ds = {
+      name: 'db',
+      async beginTransaction() {
+        return tx;
+      },
+    };
+    let seenOptions: any;
+    const repo = {
+      dataSource: ds,
+      async create(payload: any, options?: any) {
+        seenOptions = options;
+        return { id: 1, ...payload };
+      },
+    };
+
+    const controller = createController({
+      repo,
+      httpCtx: {
+        getSync: () => ({ correlationId }),
+      },
+      cfg: {
+        correlation: { propagateToRepositories: false },
+        writeTransactions: { enabled: true, requireTransactionSupport: true },
+      },
+    });
+
+    await controller.create({ name: 'ok' } as any);
+    expect(seenOptions?.correlation).to.equal(undefined);
+    expect(seenOptions).to.containEql({ transaction: tx });
+  });
+
+  it('overwrites upstream option correlationId and preserves it for diagnostics', async () => {
+    const correlationId = 'cid-123';
+    const repo = {
+      async create(payload: any, options?: any) {
+        return { id: 1, ...payload, options };
+      },
+    };
+    const controller = createController({
+      repo,
+      httpCtx: {
+        getSync: () => ({ correlationId }),
+      },
+      cfg: {},
+    });
+
+    const built = (controller as any).buildRepositoryOptions({
+      correlation: { correlationId: 'upstream', extra: 'x' },
+    });
+
+    expect(built.correlation).to.containEql({
+      correlationId,
+      upstreamCorrelationId: 'upstream',
+      extra: 'x',
+    });
+  });
+
   it('rolls back when the handler throws', async () => {
     let commitCount = 0;
     let rollbackCount = 0;

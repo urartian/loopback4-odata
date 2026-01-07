@@ -2152,7 +2152,24 @@ Use `ODATA_BINDINGS.LOGGER` to plug in your preferred logger (e.g., Pino, Winsto
 | `correlation.headerName`                       | Request header inspected for correlation IDs (`x-correlation-id` default).                                                                                            |
 | `correlation.responseHeaderName`               | Header echoed back on responses; set when clients need confirmation of the correlation ID that was used.                                                              |
 | `correlation.generateWhenMissing`              | Generates a UUID when the client omits the correlation header (default `true`).                                                                                       |
-| `correlation.propagateToRepositories`          | Reserved for future use; when enabled, repository options will contain the correlation ID for downstream logging.                                                     |
+| `correlation.enabled`                          | Enables correlation ID capture/generation and propagation (default `true`).                                                                                           |
+| `correlation.propagateToRepositories`          | When `true` (default), LoopBack repository/connector options include correlation context for downstream logging/tracing.                                              |
+| `correlation.repositoryOptionsKey`             | Options property name used to store correlation context (default `correlation`).                                                                                      |
+
+#### Reading correlation in repositories
+
+When propagation is enabled, OData passes correlation context via the LoopBack `options` object to repository and connector calls:
+
+```ts
+async find(filter?: Filter<T>, options?: Options) {
+  const correlation = (options as any)?.correlation;
+  this.logger.info({ correlationId: correlation?.correlationId }, 'repo.find');
+  return super.find(filter, options);
+}
+```
+
+- The request `correlationId` is authoritative. If callers pass an existing `options.correlation.correlationId`, it is overwritten; the previous value is preserved as `options.correlation.upstreamCorrelationId` when present.
+- Use `correlation.repositoryOptionsKey` to change the property name from `correlation` to another key.
 
 #### Composition
 

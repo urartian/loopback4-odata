@@ -2635,6 +2635,15 @@ export class ODataBatchController {
       if (forbidden.has(name)) delete merged[name];
     }
 
+    const correlationCfg = this.cfg?.correlation;
+    if (correlationCfg?.enabled !== false) {
+      const headerName = (correlationCfg?.headerName ?? 'x-correlation-id').toLowerCase();
+      const correlationId = this.getRequestState()?.correlationId;
+      if (correlationId) {
+        merged[headerName] = correlationId;
+      }
+    }
+
     return merged;
   }
 

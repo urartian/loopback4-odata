@@ -7478,6 +7478,7 @@ export function defineODataCrudController(def: EntitySetDef) {
 
     async computeTombstones(
       keyCandidates: Record<string, unknown>[] | undefined,
+      options?: Options,
     ): Promise<AnyObject[]> {
       const entries = keyCandidates?.filter((entry) => entry && Object.keys(entry).length);
       if (!entries?.length) return [];
@@ -7494,7 +7495,7 @@ export function defineODataCrudController(def: EntitySetDef) {
         );
         if (seen.has(signature)) continue;
         seen.add(signature);
-        const existing = await this.repository.findOne({ where: candidate as CrudWhere });
+        const existing = await this.repository.findOne({ where: candidate as CrudWhere }, options);
         if (existing) continue;
         tombstones.push({
           ...candidate,
@@ -9894,7 +9895,9 @@ export function defineODataCrudController(def: EntitySetDef) {
             ? [deltaPayload.keyValues]
             : undefined;
         const tombstones =
-          deltaEnabled && tombstoneKeys?.length ? await this.computeTombstones(tombstoneKeys) : [];
+          deltaEnabled && tombstoneKeys?.length
+            ? await this.computeTombstones(tombstoneKeys, options)
+            : [];
 
         if (inlineCountRequested) {
           if (requiresPostFilter) {
@@ -11617,13 +11620,55 @@ export function defineODataCrudController(def: EntitySetDef) {
       return this.repositoryOptionsForEntitySet(setName);
     }
 
-    repositoryOptionsForEntitySet(entitySetName: string): Options | undefined {
+    buildRepositoryOptions(baseOptions?: Options, entitySetName = setName): Options | undefined {
       const state = this.atomicityState();
       const transaction =
         state?.getTransaction(entitySetName) ??
         state?.getTransaction(setName) ??
         this.writeTxState()?.transaction;
-      return transaction ? { transaction } : undefined;
+
+      const hasBaseOptions = Boolean(baseOptions && Object.keys(baseOptions).length > 0);
+      const options: Options | undefined = hasBaseOptions ? { ...(baseOptions as AnyObject) } : {};
+
+      if (transaction) {
+        (options as AnyObject).transaction = transaction;
+      }
+
+      const correlationCfg = this.cfg?.correlation;
+      const shouldPropagateCorrelation =
+        correlationCfg?.enabled !== false && correlationCfg?.propagateToRepositories !== false;
+
+      const requestState = this.getRequestTelemetryState();
+      const correlationId = requestState?.correlationId;
+      if (!shouldPropagateCorrelation || !correlationId) {
+        return options && Object.keys(options).length ? options : undefined;
+      }
+
+      const repositoryOptionsKey = correlationCfg?.repositoryOptionsKey ?? 'correlation';
+      const existingValue = (options as AnyObject)[repositoryOptionsKey];
+      const existing =
+        existingValue && typeof existingValue === 'object'
+          ? { ...(existingValue as AnyObject) }
+          : {};
+
+      const existingCorrelationId = existing.correlationId;
+      if (existingCorrelationId && existingCorrelationId !== correlationId) {
+        existing.upstreamCorrelationId ??= existingCorrelationId;
+      }
+      existing.correlationId = correlationId;
+      if (requestState?.tenantId) {
+        existing.tenantId = requestState.tenantId;
+      }
+      (options as AnyObject)[repositoryOptionsKey] = existing;
+
+      return options && Object.keys(options).length ? options : undefined;
+    }
+
+    repositoryOptionsForEntitySet(
+      entitySetName: string,
+      baseOptions?: Options,
+    ): Options | undefined {
+      return this.buildRepositoryOptions(baseOptions, entitySetName);
     }
 
     assertWriteDataSource(repo: AnyObject | undefined, hint: string): void {
