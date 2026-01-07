@@ -107,6 +107,21 @@ import {
   NavigationPathError,
 } from '../util/navigation-path';
 import {
+  buildPostgresNavigationFilterCountQuery,
+  buildPostgresNavigationFilterIdQuery,
+} from '../util/postgres-navigation-filter-pushdown';
+import {
+  normalizeGuidStringLiteral,
+  parseDateStringLiteral,
+  parseInt64StringLiteral,
+  unwrapODataTypedLiteral,
+} from '../util/odata-literals';
+import {
+  normalizeDateTimeOffsetString,
+  normalizeDecimalString,
+  toPlainDecimalString,
+} from '../util/odata-normalization';
+import {
   PrimitivePropertyKind,
   classifyPrimitiveProperty,
   resolveStructuredPropertySegments,
@@ -141,7 +156,14 @@ import {
 import {
   buildPostgresLambdaCountQuery,
   buildPostgresLambdaIdQuery,
+  buildPostgresFilterCountQuery,
+  buildPostgresFilterIdQuery,
+  supportsPostgresLambdaPushdown,
 } from '../util/postgres-lambda-pushdown';
+import {
+  buildPostgresMixedFilterCountQuery,
+  buildPostgresMixedFilterIdQuery,
+} from '../util/postgres-filter-pushdown';
 import { acceptsAnyMediaType } from '../util/accept';
 import { normalizeBasePath } from '../util/base-path';
 import { escapeLikeLiteral } from '../util/like-escaping';
@@ -152,6 +174,18 @@ import {
   ODataMediaWriteResult,
   PropertyBackedMediaHandler,
 } from '../services/odata-media-handler';
+
+const POSTGRES_PUSHABLE_FILTER_FUNCTIONS = new Set([
+  'tolower',
+  'toupper',
+  'trim',
+  'concat',
+  'month',
+  'day',
+  'hour',
+  'minute',
+  'second',
+]);
 
 type WriteTxState = {
   dataSource: juggler.DataSource;
@@ -1588,41 +1622,7 @@ export function defineODataCrudController(def: EntitySetDef) {
     }
 
     normalizeDateTimeOffsetString(raw: string): string | undefined {
-      const trimmed = raw.trim();
-      if (!trimmed) return undefined;
-
-      const canonical = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,7})?(?:Z|[+-]\d{2}:\d{2})$/;
-      if (canonical.test(trimmed)) return trimmed;
-
-      const partial =
-        /^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})(\.\d+)?(Z|z|[+-]\d{2}(?::?\d{2})?)?$/;
-      const match = partial.exec(trimmed);
-      if (!match) return undefined;
-
-      const [, date, time, fraction = '', offsetRaw = ''] = match;
-
-      let offset = offsetRaw ?? '';
-      if (!offset) {
-        offset = 'Z';
-      } else if (offset.toUpperCase() === 'Z') {
-        offset = 'Z';
-      } else {
-        const sign = offset[0];
-        let rest = offset.slice(1).replace(':', '');
-        if (!/^[+-]$/.test(sign) || rest.length > 4) return undefined;
-        if (!/^\d*$/.test(rest)) return undefined;
-        if (rest.length === 0) rest = '0000';
-        if (rest.length === 2) rest = `${rest}00`;
-        if (rest.length !== 4) return undefined;
-        const hours = rest.slice(0, 2);
-        const minutes = rest.slice(2, 4);
-        offset = `${sign}${hours}:${minutes}`;
-        if (offset === '+00:00' || offset === '-00:00') {
-          offset = 'Z';
-        }
-      }
-
-      return `${date}T${time}${fraction ?? ''}${offset}`;
+      return normalizeDateTimeOffsetString(raw);
     }
 
     normalizeDateValue(value: unknown): unknown {
@@ -1820,96 +1820,13 @@ export function defineODataCrudController(def: EntitySetDef) {
     }
 
     normalizeDecimalString(input: string): string | undefined {
-      const trimmed = input.trim();
-      if (!trimmed) return undefined;
-      const numeric = /^[+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?$/i;
-      if (!numeric.test(trimmed)) return undefined;
-      const sign = trimmed.startsWith('-') ? '-' : trimmed.startsWith('+') ? '' : '';
-      const unsigned = trimmed.replace(/^[+-]/, '');
-      if (!/e/i.test(unsigned)) {
-        return this.normalizePlainDecimal(sign, unsigned);
-      }
-      return this.normalizeScientificDecimal(sign, unsigned);
-    }
-
-    normalizePlainDecimal(sign: string, unsigned: string): string {
-      const parts = unsigned.split('.');
-      const integerPart = parts[0]?.length ? parts[0] : '0';
-      const fractionPart = parts[1] ?? '';
-      return this.combineDecimalParts(sign, integerPart, fractionPart);
-    }
-
-    normalizeScientificDecimal(sign: string, unsigned: string): string | undefined {
-      const exponentIndex = unsigned.toLowerCase().lastIndexOf('e');
-      if (exponentIndex < 0) return undefined;
-      const mantissa = unsigned.slice(0, exponentIndex);
-      const exponentRaw = unsigned.slice(exponentIndex + 1);
-      if (!mantissa) return undefined;
-      const exponent = Number(exponentRaw);
-      if (!Number.isFinite(exponent) || !Number.isInteger(exponent)) return undefined;
-      const exponentLimit = this.cfg?.maxDecimalExponentAbs ?? 1000;
-      if (exponentLimit > 0 && Math.abs(exponent) > exponentLimit) {
-        return undefined;
-      }
-      const normalizedMantissa = mantissa.replace(/^[+-]/, '');
-      const mantissaParts = normalizedMantissa.split('.');
-      const whole = mantissaParts[0] ?? '';
-      const decimals = mantissaParts[1] ?? '';
-      const digits = `${whole}${decimals}`;
-      if (!digits) return `${sign}0`;
-      const decimalIndex = whole.length;
-      const targetIndex = decimalIndex + exponent;
-      let integer: string;
-      let fraction: string;
-
-      if (targetIndex <= 0) {
-        integer = '0';
-        const zeros = '0'.repeat(Math.abs(targetIndex));
-        fraction = `${zeros}${digits}`;
-      } else if (targetIndex >= digits.length) {
-        const zeros = '0'.repeat(targetIndex - digits.length);
-        integer = `${digits}${zeros}`;
-        fraction = '';
-      } else {
-        integer = digits.slice(0, targetIndex);
-        fraction = digits.slice(targetIndex);
-      }
-
-      return this.combineDecimalParts(sign, integer, fraction);
-    }
-
-    combineDecimalParts(sign: string, integer: string, fraction: string): string {
-      const normalizedInteger = integer.replace(/^0+(?=\d)/, '') || '0';
-      const normalizedFraction = fraction.replace(/0+$/, '');
-      if (normalizedFraction) {
-        return `${sign}${normalizedInteger}.${normalizedFraction}`;
-      }
-      return `${sign}${normalizedInteger}`;
+      return normalizeDecimalString(input, {
+        maxExponentAbs: this.cfg?.maxDecimalExponentAbs ?? 1000,
+      });
     }
 
     toPlainString(value: number): string {
-      if (!Number.isFinite(value)) return String(value);
-      const str = value.toString();
-      if (!/e/i.test(str)) return str;
-      const [mantissa, exponentRaw] = str.toLowerCase().split('e');
-      const exponent = Number(exponentRaw);
-      if (!Number.isFinite(exponent)) return str;
-      const sign = mantissa.startsWith('-') ? '-' : '';
-      const normalizedMantissa = mantissa.replace(/^[+-]/, '');
-      const decimalIndex = normalizedMantissa.indexOf('.');
-      const digits = normalizedMantissa.replace('.', '');
-      const initialIndex = decimalIndex === -1 ? digits.length : decimalIndex;
-      const targetIndex = initialIndex + exponent;
-
-      if (targetIndex <= 0) {
-        return `${sign}0.${'0'.repeat(-targetIndex)}${digits}`.replace(/\.$/, '');
-      }
-      if (targetIndex >= digits.length) {
-        return `${sign}${digits}${'0'.repeat(targetIndex - digits.length)}`;
-      }
-      const integerPart = digits.slice(0, targetIndex) || '0';
-      const fractionalPart = digits.slice(targetIndex).replace(/0+$/, '');
-      return fractionalPart ? `${sign}${integerPart}.${fractionalPart}` : `${sign}${integerPart}`;
+      return toPlainDecimalString(value);
     }
 
     isDeepInsertEnabled(flagFromDefinition: boolean): boolean {
@@ -4117,6 +4034,27 @@ export function defineODataCrudController(def: EntitySetDef) {
       return normalized > 0 ? normalized : 2000;
     }
 
+    resolveMaxPostFilterScanRows(): number {
+      const configured = this.cfg?.filter?.maxPostFilterScanRows;
+      const value = configured ?? 5000;
+      const normalized = Number.isFinite(value) && (value as number) > 0 ? Math.floor(value) : 5000;
+      return normalized > 0 ? normalized : 5000;
+    }
+
+    requireTopWhenPostFilter(): boolean {
+      return this.cfg?.filter?.requireTopWhenPostFilter !== false;
+    }
+
+    applyPlanHasTopStage(plan: ApplyExecutionPlan | undefined): boolean {
+      if (!plan) return false;
+      if (plan.postTop != null) return true;
+      if (plan.stages?.some((stage) => stage.top != null)) return true;
+      if (plan.concat?.length) {
+        return plan.concat.some((branch) => this.applyPlanHasTopStage(branch));
+      }
+      return false;
+    }
+
     shouldWarnOnLambdaFallback(): boolean {
       const configured = this.cfg?.lambda?.warnOnLambdaFallback;
       if (configured === false) return false;
@@ -4696,6 +4634,81 @@ export function defineODataCrudController(def: EntitySetDef) {
       );
     }
 
+    ensureNavigationInclusionForExpression(filter: Filter<CrudEntity>, expr: ParsedExpression) {
+      const includePaths = this.collectNavigationIncludePathsFromExpression(expr);
+      if (!includePaths.length) return;
+      const includeList = this.normalizeIncludeList(filter.include);
+      for (const includePath of includePaths) {
+        this.ensureIncludePath(includeList, includePath);
+      }
+      filter.include = includeList;
+      ensureIncludeProjection(
+        filter as Filter<AnyObject>,
+        filter.include as InclusionFilter[] | undefined,
+        modelRelations,
+      );
+    }
+
+    collectNavigationIncludePathsFromExpression(expr: ParsedExpression): string[][] {
+      const results: string[][] = [];
+      const dedupe = new Set<string>();
+      const maxDepth = this.cfg?.maxExpandDepth ?? 5;
+
+      const add = (path: string[]) => {
+        const key = path.join('/');
+        if (!key) return;
+        if (dedupe.has(key)) return;
+        dedupe.add(key);
+        results.push(path);
+      };
+
+      const tryField = (field: string | undefined) => {
+        if (!field || typeof field !== 'string' || !field.includes('/')) return;
+        try {
+          const resolved = resolveNavigationPath(this.entityCtor, field, { maxDepth });
+          if (!resolved.joins.length) return;
+          if (resolved.joins.some((join) => join.relationType === 'hasMany')) return;
+          add(resolved.joins.map((join) => join.relationName));
+        } catch (error) {
+          if (error instanceof NavigationPathError) return;
+          throw error;
+        }
+      };
+
+      const visit = (node: ParsedExpression) => {
+        switch (node.operator) {
+          case 'comparison':
+          case 'function':
+          case 'fncmp':
+          case 'datepart':
+          case 'indexofcmp':
+          case 'substrcmp':
+          case 'lengthcmp':
+            tryField(node.field);
+            return;
+          case 'stringfncmp':
+            for (const arg of node.args) {
+              if (arg.kind === 'field') tryField(arg.name);
+            }
+            return;
+          case 'logical':
+            for (const child of node.expressions) visit(child);
+            return;
+          case 'not':
+            visit(node.expr);
+            return;
+          case 'lambda':
+            visit(node.predicate);
+            return;
+          default:
+            return;
+        }
+      };
+
+      visit(expr);
+      return results;
+    }
+
     collectNestedLambdaIncludePaths(lambda: LambdaExpression): string[][] {
       const results: string[][] = [];
       const dedupe = new Set<string>();
@@ -4798,6 +4811,93 @@ export function defineODataCrudController(def: EntitySetDef) {
         return include.map((entry) => this.cloneIncludeEntry(entry));
       }
       return [this.cloneIncludeEntry(include)];
+    }
+
+    extractIncludePaths(include: Filter<CrudEntity>['include']): string[][] {
+      const results: string[][] = [];
+      const visit = (entries: NormalizedInclusion[], prefix: string[]) => {
+        for (const entry of entries) {
+          const relation = entry.relation;
+          if (!relation) continue;
+          const next = [...prefix, relation];
+          results.push(next);
+          const nested = this.normalizeIncludeList(entry.scope?.include as any);
+          if (nested.length) visit(nested, next);
+        }
+      };
+      const normalized = this.normalizeIncludeList(include);
+      if (normalized.length) visit(normalized, []);
+      return results;
+    }
+
+    includePathKey(path: string[]): string {
+      return path.join('/');
+    }
+
+    mergeIncludePaths(paths: string[][]): string[][] {
+      const out: string[][] = [];
+      const seen = new Set<string>();
+      for (const path of paths) {
+        const key = this.includePathKey(path);
+        if (!key) continue;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        out.push(path);
+      }
+      return out;
+    }
+
+    diffIncludePaths(before: string[][], after: string[][]): string[][] {
+      const beforeSet = new Set(before.map((path) => this.includePathKey(path)));
+      return after.filter((path) => !beforeSet.has(this.includePathKey(path)));
+    }
+
+    stripInjectedIncludesFromEntities(
+      entities: AnyObject[],
+      params: { injectedPaths: string[][]; clientPaths: string[][] },
+    ): void {
+      const { injectedPaths, clientPaths } = params;
+      if (!entities.length || !injectedPaths.length) return;
+      const clientPrefixSet = new Set<string>();
+      for (const path of clientPaths) {
+        for (let i = 1; i <= path.length; i++) {
+          const key = this.includePathKey(path.slice(0, i));
+          if (key) clientPrefixSet.add(key);
+        }
+      }
+
+      const stripPath = (value: unknown, segments: string[]) => {
+        if (!segments.length) return;
+        if (value == null) return;
+        if (Array.isArray(value)) {
+          for (const item of value) stripPath(item, segments);
+          return;
+        }
+        if (typeof value !== 'object') return;
+        const obj = value as AnyObject;
+        if (segments.length === 1) {
+          delete obj[segments[0]!];
+          return;
+        }
+        const [head, ...rest] = segments;
+        stripPath(obj[head!], rest);
+      };
+
+      for (const injected of injectedPaths) {
+        if (!injected.length) continue;
+        const injectedKey = this.includePathKey(injected);
+        if (clientPrefixSet.has(injectedKey)) continue;
+        const rootKey = injected[0]!;
+        if (!clientPrefixSet.has(rootKey)) {
+          for (const entity of entities) {
+            delete entity[rootKey];
+          }
+          continue;
+        }
+        for (const entity of entities) {
+          stripPath(entity, injected);
+        }
+      }
     }
 
     ensureIncludePath(include: NormalizedInclusion[], path: string[]) {
@@ -4940,9 +5040,35 @@ export function defineODataCrudController(def: EntitySetDef) {
               return this.compareValues(left, right) < 0;
             case 'lte':
               return this.compareValues(left, right) <= 0;
+            case 'inq': {
+              if (!Array.isArray(right)) return false;
+              const hasNull = right.some((item) => item === null);
+              const nonNull = right.filter((item) => item !== null);
+              if (left == null) return hasNull;
+              return nonNull.some((item) => this.compareValues(left, item) === 0);
+            }
+            case 'nin': {
+              if (!Array.isArray(right)) return false;
+              const hasNull = right.some((item) => item === null);
+              const nonNull = right.filter((item) => item !== null);
+              if (left == null) return !hasNull;
+              return !nonNull.some((item) => this.compareValues(left, item) === 0);
+            }
             default:
               throw new Error(`Unsupported comparator: ${expr.comparator}`);
           }
+        }
+        case 'transformcmp': {
+          const left = this.resolvePredicateValue(expr.field, current, alias, root, bindings);
+          if (left == null) {
+            if (expr.value === null) return expr.comparator === 'eq';
+            return expr.comparator === 'neq';
+          }
+          if (typeof left !== 'string') return false;
+          const transformed =
+            expr.transform === 'tolower' ? left.toLowerCase() : left.toUpperCase();
+          if (expr.value === null) return expr.comparator === 'neq';
+          return expr.comparator === 'eq' ? transformed === expr.value : transformed !== expr.value;
         }
         case 'function': {
           const value = this.resolvePredicateValue(expr.field, current, alias, root, bindings);
@@ -5097,10 +5223,233 @@ export function defineODataCrudController(def: EntitySetDef) {
       }
     }
 
+    badRequestWithCode(message: string, code: string): HttpErrors.HttpError {
+      const err = new HttpErrors.BadRequest(message);
+      (err as AnyObject).code = code;
+      return err;
+    }
+
+    resolveFilterPropertyDefinition(field: string):
+      | {
+          modelCtor: typeof Entity;
+          propertyName: string;
+          propertyDef: PropertyDefinition | undefined;
+        }
+      | undefined {
+      if (!field || typeof field !== 'string') return undefined;
+
+      if (!field.includes('/')) {
+        return {
+          modelCtor: this.entityCtor,
+          propertyName: field,
+          propertyDef: this.getModelPropertyDefinition(this.entityCtor, field),
+        };
+      }
+
+      try {
+        const resolved = resolveNavigationPath(this.entityCtor, field, {
+          maxDepth: this.cfg?.maxExpandDepth ?? 5,
+        });
+
+        if (!resolved.propertyPath) return undefined;
+        const segments = resolved.propertyPath.split('/').filter(Boolean);
+        if (segments.length !== 1) return undefined;
+
+        const baseModel = resolved.joins.length ? resolved.targetModel : this.entityCtor;
+        const propertyName = segments[0]!;
+        return {
+          modelCtor: baseModel,
+          propertyName,
+          propertyDef: this.getModelPropertyDefinition(baseModel, propertyName),
+        };
+      } catch (error) {
+        if (error instanceof NavigationPathError) return undefined;
+        throw error;
+      }
+    }
+
+    coerceFilterLiteralForProperty(field: string, value: unknown): unknown {
+      const resolved = this.resolveFilterPropertyDefinition(field);
+      if (!resolved) return value;
+
+      const { propertyDef } = resolved;
+      if (value === null) return null;
+      if (value === undefined) return value;
+
+      if (this.isGuidProperty(propertyDef)) {
+        const normalized =
+          typeof value === 'string'
+            ? normalizeGuidStringLiteral(value)
+            : normalizeGuidStringLiteral(String(value));
+        if (!normalized) {
+          throw this.badRequestWithCode(
+            `Invalid GUID literal for ${field}.`,
+            'invalid-guid-literal',
+          );
+        }
+        return normalized;
+      }
+
+      const plan = this.classifyProperty(propertyDef);
+      if (!plan) return value;
+
+      switch (plan.kind) {
+        case 'datetimeoffset': {
+          const raw = typeof value === 'string' ? value.trim() : value;
+          if (typeof raw === 'string') {
+            const asDate = parseDateStringLiteral(raw);
+            const unwrapped = unwrapODataTypedLiteral(raw, 'datetimeoffset');
+            const candidateSource = unwrapped ?? raw;
+            const candidate = asDate ? `${asDate}T00:00:00Z` : candidateSource;
+            const normalized = this.normalizeDateTimeOffsetString(candidate);
+            if (!normalized) {
+              throw this.badRequestWithCode(
+                `Invalid DateTimeOffset literal for ${field}.`,
+                'invalid-datetimeoffset-literal',
+              );
+            }
+            const parsed = new Date(normalized);
+            if (Number.isNaN(parsed.getTime())) {
+              throw this.badRequestWithCode(
+                `Invalid DateTimeOffset literal for ${field}.`,
+                'invalid-datetimeoffset-literal',
+              );
+            }
+            return parsed;
+          }
+          if (raw instanceof Date) {
+            if (Number.isNaN(raw.getTime())) {
+              throw this.badRequestWithCode(
+                `Invalid DateTimeOffset literal for ${field}.`,
+                'invalid-datetimeoffset-literal',
+              );
+            }
+            return raw;
+          }
+          throw this.badRequestWithCode(
+            `Invalid DateTimeOffset literal for ${field}.`,
+            'invalid-datetimeoffset-literal',
+          );
+        }
+        case 'date': {
+          const raw = typeof value === 'string' ? value.trim() : value;
+          if (raw instanceof Date) {
+            if (Number.isNaN(raw.getTime())) {
+              throw this.badRequestWithCode(
+                `Invalid Date literal for ${field}.`,
+                'invalid-date-literal',
+              );
+            }
+            return raw.toISOString().slice(0, 10);
+          }
+          if (typeof raw !== 'string') {
+            throw this.badRequestWithCode(
+              `Invalid Date literal for ${field}.`,
+              'invalid-date-literal',
+            );
+          }
+          const normalized = parseDateStringLiteral(raw);
+          if (!normalized) {
+            throw this.badRequestWithCode(
+              `Invalid Date literal for ${field}.`,
+              'invalid-date-literal',
+            );
+          }
+          return normalized;
+        }
+        case 'int64': {
+          if (typeof value === 'number') {
+            if (
+              !Number.isFinite(value) ||
+              !Number.isSafeInteger(value) ||
+              !Number.isInteger(value)
+            ) {
+              throw this.badRequestWithCode(
+                `Invalid Int64 literal for ${field}.`,
+                'invalid-int64-literal',
+              );
+            }
+            return value.toFixed(0);
+          }
+          const normalized = parseInt64StringLiteral(String(value));
+          if (!normalized) {
+            throw this.badRequestWithCode(
+              `Invalid Int64 literal for ${field}.`,
+              'invalid-int64-literal',
+            );
+          }
+          return normalized;
+        }
+        case 'decimal': {
+          const raw =
+            typeof value === 'string'
+              ? (unwrapODataTypedLiteral(value, 'decimal') ?? value)
+              : value;
+          const normalized = this.normalizeDecimalValue(raw);
+          if (!normalized) {
+            throw this.badRequestWithCode(
+              `Invalid Decimal literal for ${field}.`,
+              'invalid-decimal-literal',
+            );
+          }
+          return normalized.value;
+        }
+        default:
+          return value;
+      }
+    }
+
+    coerceFilterExpressionLiterals(
+      expr: ParsedExpression | undefined,
+    ): ParsedExpression | undefined {
+      if (!expr) return expr;
+      switch (expr.operator) {
+        case 'comparison': {
+          if (
+            (expr.comparator === 'inq' || expr.comparator === 'nin') &&
+            Array.isArray(expr.value)
+          ) {
+            const values = expr.value.map((entry) => {
+              if (entry === null) return null;
+              return this.coerceFilterLiteralForProperty(expr.field, entry);
+            });
+            return { ...expr, value: values };
+          }
+          const coerced = this.coerceFilterLiteralForProperty(expr.field, expr.value);
+          return coerced === expr.value ? expr : { ...expr, value: coerced };
+        }
+        case 'logical': {
+          const next = expr.expressions.map(
+            (child) => this.coerceFilterExpressionLiterals(child) ?? child,
+          );
+          return { ...expr, expressions: next };
+        }
+        case 'not': {
+          const inner = this.coerceFilterExpressionLiterals(expr.expr) ?? expr.expr;
+          return inner === expr.expr ? expr : { ...expr, expr: inner };
+        }
+        case 'lambda': {
+          const predicate = this.coerceFilterExpressionLiterals(expr.predicate) ?? expr.predicate;
+          return predicate === expr.predicate ? expr : { ...expr, predicate };
+        }
+        default:
+          return expr;
+      }
+    }
+
     compareValues(a: unknown, b: unknown): number {
       if (a === b) return 0;
       if (a == null) return -1;
       if (b == null) return 1;
+      if (a instanceof Date || b instanceof Date) {
+        const aTime = a instanceof Date ? a.getTime() : Number.NaN;
+        const bTime = b instanceof Date ? b.getTime() : Number.NaN;
+        if (!Number.isNaN(aTime) && !Number.isNaN(bTime)) {
+          if (aTime < bTime) return -1;
+          if (aTime > bTime) return 1;
+          return 0;
+        }
+      }
       if (typeof a === 'number' && typeof b === 'number') {
         if (a < b) return -1;
         if (a > b) return 1;
@@ -5243,6 +5592,9 @@ export function defineODataCrudController(def: EntitySetDef) {
           return !options.requireProperty;
         }
         const baseModel = hasNavigation ? resolved.targetModel : this.entityCtor;
+        if (hasNavigation && propertySegments.length === 1) {
+          return this.isPrimitiveModelProperty(baseModel, propertySegments[0]!);
+        }
         return this.validateStructuredPropertyPath(baseModel, propertySegments);
       } catch (error) {
         if (error instanceof NavigationPathError) {
@@ -5264,6 +5616,7 @@ export function defineODataCrudController(def: EntitySetDef) {
         const resolved = resolveNavigationPath(this.entityCtor, field, {
           maxDepth: this.cfg?.maxExpandDepth ?? 5,
         });
+        if (resolved.joins.length) return true;
         const propertySegments = resolved.propertyPath?.split('/').filter(Boolean) ?? [];
         if (!propertySegments.length) return false;
         const baseModel = resolved.joins.length ? resolved.targetModel : this.entityCtor;
@@ -5276,6 +5629,78 @@ export function defineODataCrudController(def: EntitySetDef) {
         }
         throw error;
       }
+    }
+
+    containsNavigationPushdownFilter(expr: ParsedExpression): boolean {
+      const maxDepth = this.cfg?.maxExpandDepth ?? 5;
+      const visit = (node: ParsedExpression): boolean => {
+        switch (node.operator) {
+          case 'comparison': {
+            const field = node.field;
+            if (!field || typeof field !== 'string' || !field.includes('/')) return false;
+            try {
+              const resolved = resolveNavigationPath(this.entityCtor, field, { maxDepth });
+              if (!resolved.joins.length) return false;
+              if (!resolved.propertyPath) return false;
+              if (resolved.propertyPath.includes('/')) return false;
+              if (resolved.joins.some((join) => join.relationType === 'hasMany')) return false;
+              return true;
+            } catch (error) {
+              if (error instanceof NavigationPathError) return false;
+              throw error;
+            }
+          }
+          case 'transformcmp': {
+            const field = node.field;
+            if (!field || typeof field !== 'string' || !field.includes('/')) return false;
+            try {
+              const resolved = resolveNavigationPath(this.entityCtor, field, { maxDepth });
+              if (!resolved.joins.length) return false;
+              if (!resolved.propertyPath) return false;
+              if (resolved.propertyPath.includes('/')) return false;
+              if (resolved.joins.some((join) => join.relationType === 'hasMany')) return false;
+              return true;
+            } catch (error) {
+              if (error instanceof NavigationPathError) return false;
+              throw error;
+            }
+          }
+          case 'function': {
+            const field = node.field;
+            if (!field || typeof field !== 'string' || !field.includes('/')) return false;
+            if (
+              node.name !== 'contains' &&
+              node.name !== 'startswith' &&
+              node.name !== 'endswith'
+            ) {
+              return false;
+            }
+            try {
+              const resolved = resolveNavigationPath(this.entityCtor, field, { maxDepth });
+              if (!resolved.joins.length) return false;
+              if (!resolved.propertyPath) return false;
+              if (resolved.propertyPath.includes('/')) return false;
+              if (resolved.joins.some((join) => join.relationType === 'hasMany')) return false;
+              if (!this.isPrimitiveModelProperty(resolved.targetModel, resolved.propertyPath)) {
+                return false;
+              }
+              return true;
+            } catch (error) {
+              if (error instanceof NavigationPathError) return false;
+              throw error;
+            }
+          }
+          case 'logical':
+            return node.expressions.some((child) => visit(child));
+          case 'not':
+            return visit(node.expr);
+          case 'lambda':
+            return visit(node.predicate);
+          default:
+            return false;
+        }
+      };
+      return visit(expr);
     }
 
     pathRequiresStructuredLookup(modelCtor: typeof Entity, segments: string[]): boolean {
@@ -5307,6 +5732,10 @@ export function defineODataCrudController(def: EntitySetDef) {
     } {
       switch (expr.operator) {
         case 'comparison':
+          return this.isStructuredFieldPath(expr.field)
+            ? { structuredExpr: expr }
+            : { repoExpr: expr };
+        case 'transformcmp':
           return this.isStructuredFieldPath(expr.field)
             ? { structuredExpr: expr }
             : { repoExpr: expr };
@@ -5373,6 +5802,8 @@ export function defineODataCrudController(def: EntitySetDef) {
         case 'substrcmp':
         case 'lengthcmp':
           return [expr.field];
+        case 'transformcmp':
+          return [expr.field];
         case 'stringfncmp':
           return expr.args
             .filter((arg): arg is FunctionArg & { kind: 'field' } => arg.kind === 'field')
@@ -5385,6 +5816,10 @@ export function defineODataCrudController(def: EntitySetDef) {
     validateParsedExpressionFields(expr: ParsedExpression, clause: string) {
       switch (expr.operator) {
         case 'comparison': {
+          this.ensureFieldAllowedStrict(expr.field, clause);
+          return;
+        }
+        case 'transformcmp': {
           this.ensureFieldAllowedStrict(expr.field, clause);
           return;
         }
@@ -7893,6 +8328,9 @@ export function defineODataCrudController(def: EntitySetDef) {
       if (preferences.respondAsync) this.throwPreferenceNotSupported('respond-async');
 
       const baseFilter: Filter<CrudEntity> = filter ? { ...filter } : {};
+      let clientIncludePaths: string[][] = this.extractIncludePaths(baseFilter.include);
+      const injectedIncludePaths: string[][] = [];
+      const dataSource = (this.repository as { dataSource?: juggler.DataSource }).dataSource;
       const applySupported = this.isApplyEnabled();
       const aggregationEnabled = Boolean(
         def.capabilities?.aggregation ?? this.cfg?.capabilities?.aggregation,
@@ -7906,6 +8344,7 @@ export function defineODataCrudController(def: EntitySetDef) {
       let lambdaExpressions: LambdaExpression[] = [];
       let lambdaExpressionTree: ParsedExpression | undefined;
       let postFilterExpr: ParsedExpression | undefined;
+      let navigationFilterExpr: ParsedExpression | undefined;
       let unsupportedFunctions: string[] = [];
       let deltaTokenValue: string | undefined;
       let deltaEnabled = false;
@@ -7924,6 +8363,7 @@ export function defineODataCrudController(def: EntitySetDef) {
             maxSubstringLength: this.cfg?.maxSubstringLength,
             maxFilterFieldNameLength: this.cfg?.maxFilterFieldNameLength,
             maxLambdaExistsDepth: this.cfg?.lambda?.pushdownMaxExistsDepth,
+            maxInListItems: this.cfg?.filter?.maxInListItems,
           },
         );
         inlineCountRequested = parsed.inlineCount === true;
@@ -7943,6 +8383,7 @@ export function defineODataCrudController(def: EntitySetDef) {
             maxSubstringStart: this.cfg?.maxSubstringStart,
             maxSubstringLength: this.cfg?.maxSubstringLength,
             maxFilterFieldNameLength: this.cfg?.maxFilterFieldNameLength,
+            maxInListItems: this.cfg?.filter?.maxInListItems,
           });
           const pipelineHasOrder = this.planHasInternalOrder(applyPlan);
           if (
@@ -7964,7 +8405,7 @@ export function defineODataCrudController(def: EntitySetDef) {
         }
         lambdaExpressions = parsed.lambdas ?? [];
         lambdaExpressionTree = parsed.lambdaExpression;
-        postFilterExpr = parsed.postFilter;
+        postFilterExpr = this.coerceFilterExpressionLiterals(parsed.postFilter);
         unsupportedFunctions = parsed.unsupportedFunctions ?? [];
         skipTokenValue = parsed.skipToken;
         const computeAliases = computeExpressions?.map((item) => item.alias) ?? [];
@@ -7992,19 +8433,31 @@ export function defineODataCrudController(def: EntitySetDef) {
         }
         this.applyFormatPreference(parsed.format);
         if (postFilterExpr && unsupportedFunctions.length && this.cfg?.strict) {
-          throw new HttpErrors.BadRequest(
-            `Unsupported filter functions in strict mode: ${unsupportedFunctions.join(', ')}`,
+          const allPushdownable = unsupportedFunctions.every((fn) =>
+            POSTGRES_PUSHABLE_FILTER_FUNCTIONS.has(fn),
           );
+          const canAttemptPushdown =
+            allPushdownable && dataSource && supportsPostgresLambdaPushdown(dataSource);
+          if (!canAttemptPushdown) {
+            throw new HttpErrors.BadRequest(
+              `Unsupported filter functions in strict mode: ${unsupportedFunctions.join(', ')}`,
+            );
+          }
         }
-        const splitWhere = this.splitWhereExpression(parsed.whereExpression);
+        const coercedWhereExpression = this.coerceFilterExpressionLiterals(parsed.whereExpression);
+        const splitWhere = this.splitWhereExpression(coercedWhereExpression);
         if (splitWhere.structuredExpr) {
           if (this.cfg?.strict) {
             this.validateParsedExpressionFields(splitWhere.structuredExpr, '$filter');
           }
-          postFilterExpr = this.combinePostFilterExpressions(
-            postFilterExpr,
-            splitWhere.structuredExpr,
-          );
+          if (this.containsNavigationPushdownFilter(splitWhere.structuredExpr)) {
+            navigationFilterExpr = splitWhere.structuredExpr;
+          } else {
+            postFilterExpr = this.combinePostFilterExpressions(
+              postFilterExpr,
+              splitWhere.structuredExpr,
+            );
+          }
         }
         if (splitWhere.repoExpr) {
           try {
@@ -8013,6 +8466,7 @@ export function defineODataCrudController(def: EntitySetDef) {
               maxSubstringStart: this.cfg?.maxSubstringStart,
               maxSubstringLength: this.cfg?.maxSubstringLength,
               maxFilterFieldNameLength: this.cfg?.maxFilterFieldNameLength,
+              maxInListItems: this.cfg?.filter?.maxInListItems,
             }) as CrudWhere;
           } catch (error) {
             if (error instanceof UnsupportedFilterError) {
@@ -8053,6 +8507,7 @@ export function defineODataCrudController(def: EntitySetDef) {
         hadClientExpand = Array.isArray(baseFilter.include)
           ? baseFilter.include.length > 0
           : Boolean(baseFilter.include);
+        clientIncludePaths = this.extractIncludePaths(baseFilter.include);
         if (applyPlan?.pushdownWhere) {
           const existingWhere = baseFilter.where as CrudWhere | undefined;
           const planWhere = applyPlan.pushdownWhere as CrudWhere;
@@ -8060,6 +8515,7 @@ export function defineODataCrudController(def: EntitySetDef) {
           baseFilter.where = combinedWhere ?? planWhere;
         }
         if (applyPlan) {
+          const includeBefore = this.extractIncludePaths(baseFilter.include);
           const relationsToInclude = this.collectAggregationRelations(applyPlan);
           if (relationsToInclude.length) {
             const additions = relationsToInclude.map((relation) => ({ relation }));
@@ -8073,7 +8529,10 @@ export function defineODataCrudController(def: EntitySetDef) {
               modelRelations,
             );
           }
+          const includeAfter = this.extractIncludePaths(baseFilter.include);
+          injectedIncludePaths.push(...this.diffIncludePaths(includeBefore, includeAfter));
         } else if (aggregationSpec) {
+          const includeBefore = this.extractIncludePaths(baseFilter.include);
           const fallbackSpec: AggregationSpec = {
             groupBy: [...aggregationSpec.groupBy],
             aggregates: aggregationSpec.aggregates.map((expr) => ({ ...expr })),
@@ -8105,6 +8564,8 @@ export function defineODataCrudController(def: EntitySetDef) {
               modelRelations,
             );
           }
+          const includeAfter = this.extractIncludePaths(baseFilter.include);
+          injectedIncludePaths.push(...this.diffIncludePaths(includeBefore, includeAfter));
         }
         this.ensureEtagField(baseFilter);
         // apply $search if present
@@ -8190,7 +8651,10 @@ export function defineODataCrudController(def: EntitySetDef) {
             'Combining $apply with lambda expressions is not supported.',
           );
         }
+        const includeBefore = this.extractIncludePaths(baseFilter.include);
         this.ensureLambdasInclusion(baseFilter, lambdaExpressions);
+        const includeAfter = this.extractIncludePaths(baseFilter.include);
+        injectedIncludePaths.push(...this.diffIncludePaths(includeBefore, includeAfter));
       }
       if (lambdaExpressionTree) {
         if (aggregationSpec) {
@@ -8200,7 +8664,10 @@ export function defineODataCrudController(def: EntitySetDef) {
         }
         const rootLambdas = this.collectRootLambdasFromExpression(lambdaExpressionTree);
         if (rootLambdas.length) {
+          const includeBefore = this.extractIncludePaths(baseFilter.include);
           this.ensureLambdasInclusion(baseFilter, rootLambdas);
+          const includeAfter = this.extractIncludePaths(baseFilter.include);
+          injectedIncludePaths.push(...this.diffIncludePaths(includeBefore, includeAfter));
         }
       }
 
@@ -8358,12 +8825,80 @@ export function defineODataCrudController(def: EntitySetDef) {
           ? baseFilter.limit
           : undefined;
       const planRequiresPostProcessing = this.planRequiresPostProcessing(applyPlan);
-      const requiresPostFilter = Boolean(postFilterExpr) || planRequiresPostProcessing;
-
-      if (requiresPostFilter) {
-        delete baseFilter.offset;
-        delete baseFilter.limit;
+      if (
+        navigationFilterExpr &&
+        planRequiresPostProcessing &&
+        !this.cfg?.strict &&
+        !deltaEnabled &&
+        !deltaTokenValue &&
+        !lambdaExpressions.length &&
+        !lambdaExpressionTree
+      ) {
+        postFilterExpr = this.combinePostFilterExpressions(postFilterExpr, navigationFilterExpr);
+        navigationFilterExpr = undefined;
+        if (postFilterExpr) {
+          const includeBefore = this.extractIncludePaths(baseFilter.include);
+          this.ensureNavigationInclusionForExpression(baseFilter, postFilterExpr);
+          const includeAfter = this.extractIncludePaths(baseFilter.include);
+          injectedIncludePaths.push(...this.diffIncludePaths(includeBefore, includeAfter));
+        }
       }
+      if (
+        navigationFilterExpr &&
+        !postFilterExpr &&
+        !planRequiresPostProcessing &&
+        !this.cfg?.strict &&
+        !deltaEnabled &&
+        !deltaTokenValue &&
+        !lambdaExpressions.length &&
+        !lambdaExpressionTree
+      ) {
+        const maxJoinCount =
+          this.cfg?.filter?.pushdownMaxJoinCount ?? this.cfg?.lambda?.pushdownMaxJoinCount;
+        const maxDepth = this.cfg?.maxExpandDepth;
+        const canAttemptPushdown = dataSource && supportsPostgresLambdaPushdown(dataSource);
+        const idsBuilt = canAttemptPushdown
+          ? buildPostgresMixedFilterIdQuery({
+              dataSource: dataSource!,
+              modelCtor,
+              expression: navigationFilterExpr,
+              where: baseFilter.where as Where<AnyObject> | undefined,
+              order: baseFilter.order as Filter<CrudEntity>['order'],
+              limit: baseFilter.limit,
+              offset: baseFilter.offset,
+              maxDepth,
+              maxJoinCount,
+            })
+          : ({ declineReason: 'unsupported-datasource' } as any);
+        const countBuilt =
+          inlineCountRequested && canAttemptPushdown
+            ? buildPostgresMixedFilterCountQuery({
+                dataSource: dataSource!,
+                modelCtor,
+                expression: navigationFilterExpr,
+                where: baseFilter.where as Where<AnyObject> | undefined,
+                maxDepth,
+                maxJoinCount,
+              })
+            : undefined;
+        const declined =
+          !canAttemptPushdown || !('sql' in idsBuilt)
+            ? (idsBuilt?.declineReason ?? 'unsupported-datasource')
+            : inlineCountRequested && countBuilt && !('sql' in countBuilt)
+              ? ((countBuilt as any).declineReason ?? 'count-declined')
+              : undefined;
+        if (declined) {
+          postFilterExpr = this.combinePostFilterExpressions(postFilterExpr, navigationFilterExpr);
+          navigationFilterExpr = undefined;
+          if (postFilterExpr) {
+            const includeBefore = this.extractIncludePaths(baseFilter.include);
+            this.ensureNavigationInclusionForExpression(baseFilter, postFilterExpr);
+            const includeAfter = this.extractIncludePaths(baseFilter.include);
+            injectedIncludePaths.push(...this.diffIncludePaths(includeBefore, includeAfter));
+          }
+        }
+      }
+      const requiresPostFilter = Boolean(postFilterExpr) || planRequiresPostProcessing;
 
       const op: CrudOperation = 'READ';
       const scope: CrudScope = 'collection';
@@ -8606,6 +9141,10 @@ export function defineODataCrudController(def: EntitySetDef) {
           }
 
           this.ensureODataHeaders();
+          this.stripInjectedIncludesFromEntities(paged, {
+            injectedPaths: this.mergeIncludePaths(injectedIncludePaths),
+            clientPaths: this.mergeIncludePaths(clientIncludePaths),
+          });
           const decorated = paged.map((item) => this.decoratePlainEntity(item) ?? item);
           const aggregatedTombstones = deltaEnabled
             ? this.buildRemovedBuckets(
@@ -8642,6 +9181,344 @@ export function defineODataCrudController(def: EntitySetDef) {
           }
           ctx.result = result;
           return result;
+        }
+
+        if (navigationFilterExpr) {
+          if (lambdaExpressions.length || lambdaExpressionTree) {
+            throw this.badRequestWithCode(
+              'Combining navigation-property filters with lambda expressions is not supported for pushdown.',
+              'navigation-filter-requires-pushdown',
+            );
+          } else if (deltaEnabled || deltaTokenValue) {
+            throw this.badRequestWithCode(
+              'Navigation-property filters require pushdown for this request.',
+              'navigation-filter-requires-pushdown',
+            );
+          } else {
+            if (planRequiresPostProcessing) {
+              throw this.badRequestWithCode(
+                'Navigation-property filters require pushdown for this request.',
+                'navigation-filter-requires-pushdown',
+              );
+            }
+            const dataSource = (this.repository as { dataSource?: juggler.DataSource }).dataSource;
+            const maxJoinCount =
+              this.cfg?.filter?.pushdownMaxJoinCount ?? this.cfg?.lambda?.pushdownMaxJoinCount;
+            const maxDepth = this.cfg?.maxExpandDepth;
+
+            const expressionForPushdown = (() => {
+              if (!postFilterExpr) return navigationFilterExpr;
+              if (this.containsNavigationPushdownFilter(postFilterExpr)) return postFilterExpr;
+              return (
+                this.combinePostFilterExpressions(postFilterExpr, navigationFilterExpr) ??
+                navigationFilterExpr
+              );
+            })();
+
+            const countBuilt =
+              inlineCountRequested && dataSource
+                ? buildPostgresMixedFilterCountQuery({
+                    dataSource,
+                    modelCtor,
+                    expression: expressionForPushdown,
+                    where: baseFilter.where as Where<AnyObject> | undefined,
+                    maxDepth,
+                    maxJoinCount,
+                  })
+                : undefined;
+
+            const idsBuilt = dataSource
+              ? buildPostgresMixedFilterIdQuery({
+                  dataSource,
+                  modelCtor,
+                  expression: expressionForPushdown,
+                  where: baseFilter.where as Where<AnyObject> | undefined,
+                  order: baseFilter.order as Filter<CrudEntity>['order'],
+                  limit: baseFilter.limit,
+                  offset: baseFilter.offset,
+                  maxDepth,
+                  maxJoinCount,
+                })
+              : ({ declineReason: 'missing-datasource' } as any);
+
+            const declined =
+              !dataSource || !('sql' in idsBuilt)
+                ? (idsBuilt?.declineReason ?? 'unsupported-datasource')
+                : inlineCountRequested && countBuilt && !('sql' in countBuilt)
+                  ? ((countBuilt as any).declineReason ?? 'count-declined')
+                  : undefined;
+
+            if (declined) {
+              if (this.cfg?.strict) {
+                throw this.badRequestWithCode(
+                  `Navigation-property filter pushdown is required but not eligible (${declined}).`,
+                  'navigation-filter-requires-pushdown',
+                );
+              }
+              postFilterExpr = this.combinePostFilterExpressions(
+                postFilterExpr,
+                navigationFilterExpr,
+              );
+              navigationFilterExpr = undefined;
+              if (postFilterExpr) {
+                const includeBefore = this.extractIncludePaths(baseFilter.include);
+                this.ensureNavigationInclusionForExpression(baseFilter, postFilterExpr);
+                const includeAfter = this.extractIncludePaths(baseFilter.include);
+                injectedIncludePaths.push(...this.diffIncludePaths(includeBefore, includeAfter));
+              }
+            } else {
+              let totalCount: number | undefined;
+              if (inlineCountRequested && countBuilt && 'sql' in countBuilt) {
+                const countRows = await dataSource!.execute(
+                  countBuilt.sql,
+                  countBuilt.params,
+                  options,
+                );
+                const row = Array.isArray(countRows)
+                  ? (countRows[0] as AnyObject | undefined)
+                  : undefined;
+                const raw = row?.count ?? row?.COUNT ?? row?.Count;
+                const value =
+                  typeof raw === 'bigint'
+                    ? Number(raw)
+                    : typeof raw === 'number'
+                      ? raw
+                      : raw != null
+                        ? Number(raw)
+                        : undefined;
+                if (value !== undefined && Number.isFinite(value)) {
+                  totalCount = Math.trunc(value);
+                } else if (this.cfg?.strict) {
+                  throw new HttpErrors.InternalServerError(
+                    'Failed to resolve inline $count from the datasource response.',
+                  );
+                }
+              }
+
+              const idRows = await dataSource!.execute(idsBuilt.sql, idsBuilt.params, options);
+              const rows = Array.isArray(idRows) ? (idRows as AnyObject[]) : [];
+              const ids = rows
+                .map(
+                  (row) => row?.[idsBuilt.idProperty] ?? row?.[idsBuilt.idProperty.toLowerCase()],
+                )
+                .filter((id) => id !== undefined && id !== null);
+
+              const fetchFilter: Filter<CrudEntity> = { ...baseFilter };
+              delete fetchFilter.order;
+              delete fetchFilter.limit;
+              delete fetchFilter.offset;
+              const idWhere = { [idsBuilt.idProperty]: { inq: ids } } as CrudWhere;
+              const combined = this.combineWithAnd([
+                fetchFilter.where as CrudWhere | undefined,
+                idWhere,
+              ]);
+              fetchFilter.where = combined ?? idWhere;
+
+              const entities = ids.length ? await this.repository.find(fetchFilter, options) : [];
+              const plainEntities = entities.map((entity) => this.toPlainEntity(entity) ?? {});
+              const ordered = ids.length
+                ? (() => {
+                    const byId = new Map<string, AnyObject>();
+                    for (const entity of plainEntities) {
+                      const value = (entity as AnyObject)[idsBuilt.idProperty];
+                      if (value === undefined || value === null) continue;
+                      byId.set(String(value), entity);
+                    }
+                    return ids
+                      .map((id) => byId.get(String(id)))
+                      .filter((entity): entity is AnyObject => Boolean(entity));
+                  })()
+                : [];
+
+              this.applyComputeExpressions(ordered, computeExpressions);
+              let nextLinkToken: string | undefined;
+              let paged: AnyObject[] = ordered;
+              if (serverPagingEnabled) {
+                const effectivePageSize =
+                  pageSize ??
+                  this.resolvePageSize(undefined, {
+                    maxPageSize: paginationLimits.maxPageSize,
+                    context: 'collection',
+                  });
+                const pagination = this.applyServerDrivenPaging(
+                  ordered,
+                  orderDescriptors,
+                  effectivePageSize,
+                );
+                paged = pagination.items;
+                nextLinkToken = pagination.token;
+              }
+              this.ensureODataHeaders();
+              this.stripInjectedIncludesFromEntities(paged, {
+                injectedPaths: this.mergeIncludePaths(injectedIncludePaths),
+                clientPaths: this.mergeIncludePaths(clientIncludePaths),
+              });
+              const result = {
+                '@odata.context': contextBase,
+                ...(inlineCountRequested && totalCount !== undefined
+                  ? { '@odata.count': totalCount }
+                  : {}),
+                value: this.decoratePlainEntities(paged),
+              } as AnyObject;
+              if (serverPagingEnabled && nextLinkToken) {
+                result['@odata.nextLink'] = this.buildNextLink(nextLinkToken);
+              }
+              this.recordTelemetryStats({ rows: paged.length });
+              ctx.result = result;
+              return result;
+            }
+          }
+        }
+
+        if (
+          postFilterExpr &&
+          !aggregationSpec &&
+          !applyPlan &&
+          !navigationFilterExpr &&
+          !lambdaExpressions.length &&
+          !lambdaExpressionTree &&
+          !deltaEnabled &&
+          !deltaTokenValue
+        ) {
+          const maxJoinCount =
+            this.cfg?.filter?.pushdownMaxJoinCount ?? this.cfg?.lambda?.pushdownMaxJoinCount;
+          const countBuilt =
+            inlineCountRequested && dataSource
+              ? buildPostgresFilterCountQuery({
+                  dataSource,
+                  modelCtor,
+                  expression: postFilterExpr,
+                  where: baseFilter.where as Where<AnyObject> | undefined,
+                  maxJoinCount,
+                })
+              : undefined;
+
+          const idsBuilt = dataSource
+            ? buildPostgresFilterIdQuery({
+                dataSource,
+                modelCtor,
+                expression: postFilterExpr,
+                where: baseFilter.where as Where<AnyObject> | undefined,
+                order: baseFilter.order as Filter<CrudEntity>['order'],
+                limit: baseFilter.limit,
+                offset: baseFilter.offset,
+                maxJoinCount,
+              })
+            : ({ declineReason: 'missing-datasource' } as any);
+
+          const declined =
+            !dataSource || !('sql' in idsBuilt)
+              ? (idsBuilt?.declineReason ?? 'unsupported-datasource')
+              : inlineCountRequested && countBuilt && !('sql' in countBuilt)
+                ? ((countBuilt as any).declineReason ?? 'count-declined')
+                : undefined;
+
+          if (!declined) {
+            let totalCount: number | undefined;
+            if (inlineCountRequested && countBuilt && 'sql' in countBuilt) {
+              const countRows = await dataSource!.execute(
+                countBuilt.sql,
+                countBuilt.params,
+                options,
+              );
+              const row = Array.isArray(countRows)
+                ? (countRows[0] as AnyObject | undefined)
+                : undefined;
+              const raw = row?.count ?? row?.COUNT ?? row?.Count;
+              const value =
+                typeof raw === 'bigint'
+                  ? Number(raw)
+                  : typeof raw === 'number'
+                    ? raw
+                    : raw != null
+                      ? Number(raw)
+                      : undefined;
+              if (value !== undefined && Number.isFinite(value)) {
+                totalCount = Math.trunc(value);
+              } else if (this.cfg?.strict) {
+                throw new HttpErrors.InternalServerError(
+                  'Failed to resolve inline $count from the datasource response.',
+                );
+              }
+            }
+
+            const idRows = await dataSource!.execute(idsBuilt.sql, idsBuilt.params, options);
+            const rows = Array.isArray(idRows) ? (idRows as AnyObject[]) : [];
+            const ids = rows
+              .map((row) => row?.[idsBuilt.idProperty] ?? row?.[idsBuilt.idProperty.toLowerCase()])
+              .filter((id) => id !== undefined && id !== null);
+
+            const fetchFilter: Filter<CrudEntity> = { ...baseFilter };
+            delete fetchFilter.order;
+            delete fetchFilter.limit;
+            delete fetchFilter.offset;
+            const idWhere = { [idsBuilt.idProperty]: { inq: ids } } as CrudWhere;
+            const combined = this.combineWithAnd([
+              fetchFilter.where as CrudWhere | undefined,
+              idWhere,
+            ]);
+            fetchFilter.where = combined ?? idWhere;
+
+            const entities = ids.length ? await this.repository.find(fetchFilter, options) : [];
+            const plainEntities = entities.map((entity) => this.toPlainEntity(entity) ?? {});
+            const ordered = ids.length
+              ? (() => {
+                  const byId = new Map<string, AnyObject>();
+                  for (const entity of plainEntities) {
+                    const value = (entity as AnyObject)[idsBuilt.idProperty];
+                    if (value === undefined || value === null) continue;
+                    byId.set(String(value), entity);
+                  }
+                  return ids
+                    .map((id) => byId.get(String(id)))
+                    .filter((entity): entity is AnyObject => Boolean(entity));
+                })()
+              : [];
+
+            this.applyComputeExpressions(ordered, computeExpressions);
+            let nextLinkToken: string | undefined;
+            let paged: AnyObject[] = ordered;
+            if (serverPagingEnabled) {
+              const effectivePageSize =
+                pageSize ??
+                this.resolvePageSize(undefined, {
+                  maxPageSize: paginationLimits.maxPageSize,
+                  context: 'collection',
+                });
+              const pagination = this.applyServerDrivenPaging(
+                ordered,
+                orderDescriptors,
+                effectivePageSize,
+              );
+              paged = pagination.items;
+              nextLinkToken = pagination.token;
+            }
+
+            this.ensureODataHeaders();
+            this.stripInjectedIncludesFromEntities(paged, {
+              injectedPaths: this.mergeIncludePaths(injectedIncludePaths),
+              clientPaths: this.mergeIncludePaths(clientIncludePaths),
+            });
+            const result = {
+              '@odata.context': contextBase,
+              ...(inlineCountRequested && totalCount !== undefined
+                ? { '@odata.count': totalCount }
+                : {}),
+              value: this.decoratePlainEntities(paged),
+            } as AnyObject;
+            if (serverPagingEnabled && nextLinkToken) {
+              result['@odata.nextLink'] = this.buildNextLink(nextLinkToken);
+            }
+            this.recordTelemetryStats({ rows: paged.length });
+            ctx.result = result;
+            return result;
+          }
+
+          if (this.cfg?.strict && unsupportedFunctions.length) {
+            throw new HttpErrors.BadRequest(
+              `Unsupported filter functions in strict mode: ${unsupportedFunctions.join(', ')}`,
+            );
+          }
         }
 
         if (lambdaExpressions.length || lambdaExpressionTree) {
@@ -8814,6 +9691,10 @@ export function defineODataCrudController(def: EntitySetDef) {
                 this.applyComputeExpressions(ordered, computeExpressions);
 
                 this.ensureODataHeaders();
+                this.stripInjectedIncludesFromEntities(ordered, {
+                  injectedPaths: this.mergeIncludePaths(injectedIncludePaths),
+                  clientPaths: this.mergeIncludePaths(clientIncludePaths),
+                });
                 const result = {
                   '@odata.context': contextBase,
                   ...(inlineCountRequested ? { '@odata.count': totalCount! } : {}),
@@ -8892,6 +9773,10 @@ export function defineODataCrudController(def: EntitySetDef) {
           const paged = this.sliceResults(ordered, requestedOffset, requestedLimit);
 
           this.ensureODataHeaders();
+          this.stripInjectedIncludesFromEntities(paged, {
+            injectedPaths: this.mergeIncludePaths(injectedIncludePaths),
+            clientPaths: this.mergeIncludePaths(clientIncludePaths),
+          });
           const result = {
             '@odata.context': contextBase,
             ...(inlineCountRequested ? { '@odata.count': filtered.length } : {}),
@@ -8902,7 +9787,50 @@ export function defineODataCrudController(def: EntitySetDef) {
           return result;
         }
 
-        const results = await this.repository.find(baseFilter, options);
+        if (requiresPostFilter) {
+          const applyHasTopStage = this.applyPlanHasTopStage(applyPlan);
+          const boundedByRequest =
+            serverPagingEnabled === true ||
+            applyHasTopStage === true ||
+            clientTopProvided !== undefined;
+          if (this.cfg?.strict && !boundedByRequest) {
+            throw this.badRequestWithCode(
+              'Post-filter evaluation requires pushdown for this request.',
+              'postfilter-requires-pushdown',
+            );
+          }
+          const requireExplicitTop =
+            this.requireTopWhenPostFilter() &&
+            clientTopProvided === undefined &&
+            serverPagingEnabled === false &&
+            applyHasTopStage === false;
+          if (requireExplicitTop) {
+            throw this.badRequestWithCode(
+              'The $top query option is required when the request requires post-filter evaluation.',
+              'postfilter-top-required',
+            );
+          }
+        }
+
+        const fetchFilter: Filter<CrudEntity> = requiresPostFilter
+          ? (() => {
+              const maxRows = this.resolveMaxPostFilterScanRows();
+              const next: Filter<CrudEntity> = { ...baseFilter };
+              next.limit = maxRows + 1;
+              return next;
+            })()
+          : baseFilter;
+
+        const results = await this.repository.find(fetchFilter, options);
+        if (requiresPostFilter) {
+          const maxRows = this.resolveMaxPostFilterScanRows();
+          if (results.length > maxRows) {
+            throw this.badRequestWithCode(
+              `Post-filter scan exceeds the server limit of ${maxRows} rows. Refine $filter.`,
+              'postfilter-scan-limit-exceeded',
+            );
+          }
+        }
         let workingResults = results.map((entity) => this.toPlainEntity(entity) ?? {});
 
         if (applyPlan && !aggregationSpec) {
@@ -8987,6 +9915,10 @@ export function defineODataCrudController(def: EntitySetDef) {
         }
 
         this.ensureODataHeaders();
+        this.stripInjectedIncludesFromEntities(paged, {
+          injectedPaths: this.mergeIncludePaths(injectedIncludePaths),
+          clientPaths: this.mergeIncludePaths(clientIncludePaths),
+        });
         const decorated = this.decoratePlainEntities(paged);
         const combined = tombstones.length ? [...decorated, ...tombstones] : decorated;
         this.recordTelemetryStats({ rows: combined.length });
@@ -9046,6 +9978,7 @@ export function defineODataCrudController(def: EntitySetDef) {
       const baseFilter: Filter<CrudEntity> = {};
       const applySupported = this.isApplyEnabled();
       let postFilterExpr: ParsedExpression | undefined;
+      let navigationFilterExpr: ParsedExpression | undefined;
       let unsupportedFunctions: string[] = [];
       let lambdaExpressions: LambdaExpression[] = [];
       let lambdaExpressionTree: ParsedExpression | undefined;
@@ -9061,6 +9994,7 @@ export function defineODataCrudController(def: EntitySetDef) {
             maxSubstringLength: this.cfg?.maxSubstringLength,
             maxFilterFieldNameLength: this.cfg?.maxFilterFieldNameLength,
             maxLambdaExistsDepth: this.cfg?.lambda?.pushdownMaxExistsDepth,
+            maxInListItems: this.cfg?.filter?.maxInListItems,
           },
         );
         lambdaExpressions = parsed.lambdas ?? [];
@@ -9076,15 +10010,20 @@ export function defineODataCrudController(def: EntitySetDef) {
         if (parsed.compute?.length) {
           throw new HttpErrors.BadRequest('$compute is not supported for $count responses.');
         }
-        const splitWhere = this.splitWhereExpression(parsed.whereExpression);
+        const coercedWhereExpression = this.coerceFilterExpressionLiterals(parsed.whereExpression);
+        const splitWhere = this.splitWhereExpression(coercedWhereExpression);
         if (splitWhere.structuredExpr) {
           if (this.cfg?.strict) {
             this.validateParsedExpressionFields(splitWhere.structuredExpr, '$filter');
           }
-          postFilterExpr = this.combinePostFilterExpressions(
-            postFilterExpr,
-            splitWhere.structuredExpr,
-          );
+          if (this.containsNavigationPushdownFilter(splitWhere.structuredExpr)) {
+            navigationFilterExpr = splitWhere.structuredExpr;
+          } else {
+            postFilterExpr = this.combinePostFilterExpressions(
+              postFilterExpr,
+              splitWhere.structuredExpr,
+            );
+          }
         }
         if (splitWhere.repoExpr) {
           try {
@@ -9093,6 +10032,7 @@ export function defineODataCrudController(def: EntitySetDef) {
               maxSubstringStart: this.cfg?.maxSubstringStart,
               maxSubstringLength: this.cfg?.maxSubstringLength,
               maxFilterFieldNameLength: this.cfg?.maxFilterFieldNameLength,
+              maxInListItems: this.cfg?.filter?.maxInListItems,
             }) as CrudWhere;
           } catch (error) {
             if (error instanceof UnsupportedFilterError) {
@@ -9113,12 +10053,27 @@ export function defineODataCrudController(def: EntitySetDef) {
         delete (parsed as { whereExpression?: ParsedExpression }).whereExpression;
         const parsedFilter = { ...parsed } as Filter<CrudEntity> & { inlineCount?: boolean };
         delete (parsedFilter as { inlineCount?: boolean }).inlineCount;
-        postFilterExpr = parsed.postFilter;
-        unsupportedFunctions = parsed.unsupportedFunctions ?? [];
+        postFilterExpr = this.combinePostFilterExpressions(
+          postFilterExpr,
+          this.coerceFilterExpressionLiterals(parsed.postFilter),
+        );
+        const combinedUnsupported = [
+          ...(parsed.unsupportedFunctions ?? []),
+          ...(unsupportedFunctions ?? []),
+        ];
+        unsupportedFunctions = Array.from(new Set(combinedUnsupported));
         if (postFilterExpr && unsupportedFunctions.length && this.cfg?.strict) {
-          throw new HttpErrors.BadRequest(
-            `Unsupported filter functions in strict mode: ${unsupportedFunctions.join(', ')}`,
+          const dataSource = (this.repository as { dataSource?: juggler.DataSource }).dataSource;
+          const allPushdownable = unsupportedFunctions.every((fn) =>
+            POSTGRES_PUSHABLE_FILTER_FUNCTIONS.has(fn),
           );
+          const canAttemptPushdown =
+            allPushdownable && dataSource && supportsPostgresLambdaPushdown(dataSource);
+          if (!canAttemptPushdown) {
+            throw new HttpErrors.BadRequest(
+              `Unsupported filter functions in strict mode: ${unsupportedFunctions.join(', ')}`,
+            );
+          }
         }
         delete (parsedFilter as { postFilter?: ParsedExpression }).postFilter;
         delete (parsedFilter as { unsupportedFunctions?: string[] }).unsupportedFunctions;
@@ -9164,6 +10119,35 @@ export function defineODataCrudController(def: EntitySetDef) {
       if (rootLambdas.length) {
         this.ensureLambdasInclusion(baseFilter, rootLambdas);
       }
+      if (
+        navigationFilterExpr &&
+        !this.cfg?.strict &&
+        !rootLambdas.length &&
+        !lambdaExpressionTree
+      ) {
+        const dataSource = (this.repository as { dataSource?: juggler.DataSource }).dataSource;
+        const canAttemptPushdown = dataSource && supportsPostgresLambdaPushdown(dataSource);
+        const maxJoinCount =
+          this.cfg?.filter?.pushdownMaxJoinCount ?? this.cfg?.lambda?.pushdownMaxJoinCount;
+        const maxDepth = this.cfg?.maxExpandDepth;
+        const built = canAttemptPushdown
+          ? buildPostgresNavigationFilterCountQuery({
+              dataSource: dataSource!,
+              modelCtor,
+              expression: navigationFilterExpr,
+              where: baseFilter.where as Where<AnyObject> | undefined,
+              maxDepth,
+              maxJoinCount,
+            })
+          : ({ declineReason: 'unsupported-datasource' } as any);
+        if (!canAttemptPushdown || !('sql' in built)) {
+          postFilterExpr = this.combinePostFilterExpressions(postFilterExpr, navigationFilterExpr);
+          navigationFilterExpr = undefined;
+          if (postFilterExpr) {
+            this.ensureNavigationInclusionForExpression(baseFilter, postFilterExpr);
+          }
+        }
+      }
 
       const op: CrudOperation = 'READ';
       const scope: CrudScope = 'count';
@@ -9178,6 +10162,106 @@ export function defineODataCrudController(def: EntitySetDef) {
 
       const execDefault = async () => {
         const options = this.repositoryOptions();
+
+        if (
+          navigationFilterExpr &&
+          !rootLambdas.length &&
+          !lambdaExpressionTree &&
+          !postFilterExpr
+        ) {
+          const dataSource = (this.repository as { dataSource?: juggler.DataSource }).dataSource;
+          const maxJoinCount =
+            this.cfg?.filter?.pushdownMaxJoinCount ?? this.cfg?.lambda?.pushdownMaxJoinCount;
+          const maxDepth = this.cfg?.maxExpandDepth;
+
+          const built = dataSource
+            ? buildPostgresNavigationFilterCountQuery({
+                dataSource,
+                modelCtor,
+                expression: navigationFilterExpr,
+                where: baseFilter.where as Where<AnyObject> | undefined,
+                maxDepth,
+                maxJoinCount,
+              })
+            : ({ declineReason: 'missing-datasource' } as any);
+
+          if ('sql' in built) {
+            const rows = await dataSource!.execute(built.sql, built.params, options);
+            const row = Array.isArray(rows) ? (rows[0] as AnyObject | undefined) : undefined;
+            const raw = row?.count ?? row?.COUNT ?? row?.Count;
+            const value =
+              typeof raw === 'bigint'
+                ? Number(raw)
+                : typeof raw === 'number'
+                  ? raw
+                  : raw != null
+                    ? Number(raw)
+                    : 0;
+            this.ensureODataHeaders();
+            const result = `${Number.isFinite(value) ? Math.trunc(value) : 0}`;
+            ctx.result = result;
+            return result;
+          }
+
+          throw this.badRequestWithCode(
+            `Navigation-property filter pushdown is required but not eligible (${built.declineReason}).`,
+            'navigation-filter-requires-pushdown',
+          );
+        }
+        if (navigationFilterExpr) {
+          if (rootLambdas.length || lambdaExpressionTree) {
+            throw this.badRequestWithCode(
+              'Combining navigation-property filters with lambda expressions is not supported for pushdown.',
+              'navigation-filter-requires-pushdown',
+            );
+          }
+          if (postFilterExpr) {
+            throw this.badRequestWithCode(
+              'Navigation-property filters require pushdown for this request.',
+              'navigation-filter-requires-pushdown',
+            );
+          }
+        }
+
+        if (postFilterExpr && !rootLambdas.length && !lambdaExpressionTree) {
+          const dataSource = (this.repository as { dataSource?: juggler.DataSource }).dataSource;
+          const maxJoinCount =
+            this.cfg?.filter?.pushdownMaxJoinCount ?? this.cfg?.lambda?.pushdownMaxJoinCount;
+          const built = dataSource
+            ? buildPostgresFilterCountQuery({
+                dataSource,
+                modelCtor,
+                expression: postFilterExpr,
+                where: baseFilter.where as Where<AnyObject> | undefined,
+                maxJoinCount,
+              })
+            : ({ declineReason: 'missing-datasource' } as any);
+
+          if ('sql' in built) {
+            const rows = await dataSource!.execute(built.sql, built.params, options);
+            const row = Array.isArray(rows) ? (rows[0] as AnyObject | undefined) : undefined;
+            const raw = row?.count ?? row?.COUNT ?? row?.Count;
+            const value =
+              typeof raw === 'bigint'
+                ? Number(raw)
+                : typeof raw === 'number'
+                  ? raw
+                  : raw != null
+                    ? Number(raw)
+                    : 0;
+            this.ensureODataHeaders();
+            const result = `${Number.isFinite(value) ? Math.trunc(value) : 0}`;
+            ctx.result = result;
+            return result;
+          }
+
+          if (this.cfg?.strict && unsupportedFunctions.length) {
+            throw new HttpErrors.BadRequest(
+              `Unsupported filter functions in strict mode: ${unsupportedFunctions.join(', ')}`,
+            );
+          }
+        }
+
         if (rootLambdas.length || lambdaExpressionTree) {
           const fetchFilter: Filter<CrudEntity> = { ...baseFilter };
           delete fetchFilter.order;
@@ -9209,7 +10293,21 @@ export function defineODataCrudController(def: EntitySetDef) {
           return result;
         }
         if (postFilterExpr) {
-          const entities = await this.repository.find(baseFilter, options);
+          if (this.cfg?.strict) {
+            throw this.badRequestWithCode(
+              'Post-filter evaluation is not allowed in strict mode.',
+              'postfilter-requires-pushdown',
+            );
+          }
+          const maxRows = this.resolveMaxPostFilterScanRows();
+          const fetchFilter: Filter<CrudEntity> = { ...baseFilter, offset: 0, limit: maxRows + 1 };
+          const entities = await this.repository.find(fetchFilter, options);
+          if (entities.length > maxRows) {
+            throw this.badRequestWithCode(
+              `Post-filter scan exceeds the server limit of ${maxRows} rows. Refine $filter.`,
+              'postfilter-scan-limit-exceeded',
+            );
+          }
           const plain = entities.map((entity) => this.toPlainEntity(entity) ?? {});
           const filtered = this.applyPostFilter(plain, postFilterExpr);
           this.ensureODataHeaders();
@@ -9275,12 +10373,13 @@ export function defineODataCrudController(def: EntitySetDef) {
             maxSubstringLength: this.cfg?.maxSubstringLength,
             maxFilterFieldNameLength: this.cfg?.maxFilterFieldNameLength,
             maxLambdaExistsDepth: this.cfg?.lambda?.pushdownMaxExistsDepth,
+            maxInListItems: this.cfg?.filter?.maxInListItems,
           },
         );
         this.enforceApplyCapability(applySupported, parsed);
         this.applyFormatPreference(parsed.format);
         computeExpressions = parsed.compute;
-        postFilterExpr = parsed.postFilter;
+        postFilterExpr = this.coerceFilterExpressionLiterals(parsed.postFilter);
         unsupportedFunctions = parsed.unsupportedFunctions ?? [];
         if (postFilterExpr && unsupportedFunctions.length && this.cfg?.strict) {
           throw new HttpErrors.BadRequest(

@@ -48,6 +48,7 @@ export interface ApplyPlannerOptions {
   maxSubstringStart?: number;
   maxSubstringLength?: number;
   maxFilterFieldNameLength?: number;
+  maxInListItems?: number;
 }
 
 const DEFAULT_MAX_NAVIGATION_DEPTH = 5;
@@ -239,6 +240,7 @@ function buildWhereCandidate(
       maxSubstringStart: options.maxSubstringStart,
       maxSubstringLength: options.maxSubstringLength,
       maxFilterFieldNameLength: options.maxFilterFieldNameLength,
+      maxInListItems: options.maxInListItems,
     });
   } catch (err) {
     if (err instanceof UnsupportedFilterError) {

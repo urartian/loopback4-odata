@@ -13,6 +13,7 @@ import { CsdlGenerator } from '../../metadata/csdl-generator';
 import { EntitySetRegistry, EntitySetDef } from '../../registry/entityset-registry';
 import { odataSearchable } from '../../decorators/search.decorators';
 import { odataModel } from '../../decorators/model.decorator';
+import { FILTER_FUNCTIONS_POSTGRES } from '../../filter-functions';
 
 @model()
 class Dimensions extends Model {
@@ -93,6 +94,12 @@ class Widget extends Entity {
 class AdvancedWidget extends Widget {
   @property({ type: 'string' })
   feature?: string;
+}
+
+@model()
+class Thing extends Entity {
+  @property({ id: true, type: 'number' })
+  id!: number;
 }
 
 describe('CsdlGenerator', () => {
@@ -241,6 +248,9 @@ describe('CsdlGenerator', () => {
     ).to.be.true();
     expect(
       xml.includes('Annotation Term="Org.OData.Capabilities.V1.FilterFunctions"'),
+    ).to.be.true();
+    expect(
+      xml.includes('Annotation Term="Org.OData.Capabilities.V1.FilterRestrictions"'),
     ).to.be.true();
     expect(xml.includes('Annotation Term="Org.OData.Capabilities.V1.Aggregate"')).to.be.true();
     expect(
@@ -427,9 +437,58 @@ describe('CsdlGenerator', () => {
     expect(container.Widgets['@Org.OData.Capabilities.V1.ApplySupported'].ApplySupported).to.equal(
       true,
     );
+    expect(container.Widgets['@Org.OData.Capabilities.V1.FilterRestrictions'].Filterable).to.equal(
+      true,
+    );
+    expect(
+      container.Widgets['@Org.OData.Capabilities.V1.FilterRestrictions']
+        .NonFilterableNavigationProperties,
+    ).to.containDeep([{ $NavigationPropertyPath: 'gadgets' }]);
     expect(container.Gadgets.$Type).to.equal('Catalog.Gadget');
     expect(container.AdvancedWidgets.$Type).to.equal('Catalog.AdvancedWidget');
     expect(container.ping.$Function).to.equal('Catalog.ping');
+  });
+
+  it('expands filterFunctionsPreset for default capabilities', () => {
+    const localRegistry = new EntitySetRegistry();
+    localRegistry.register({ name: 'Things', modelCtor: Thing });
+    const localGenerator = new CsdlGenerator(localRegistry, {
+      namespace: 'Default',
+      entityContainerName: 'DefaultContainer',
+      tokenSecret: 'test-secret',
+      capabilities: { filterFunctionsPreset: 'postgres' },
+    });
+
+    const jsonDoc = localGenerator.generate('json');
+    const parsed = JSON.parse(jsonDoc);
+    const schema = parsed.Default;
+    const container = schema.DefaultContainer;
+    expect(container.Things['@Org.OData.Capabilities.V1.FilterFunctions']).to.deepEqual(
+      FILTER_FUNCTIONS_POSTGRES,
+    );
+  });
+
+  it('lets an entity-set preset override global filterFunctions', () => {
+    const localRegistry = new EntitySetRegistry();
+    localRegistry.register({
+      name: 'Things',
+      modelCtor: Thing,
+      capabilities: { filterFunctionsPreset: 'postgres' },
+    });
+    const localGenerator = new CsdlGenerator(localRegistry, {
+      namespace: 'Default',
+      entityContainerName: 'DefaultContainer',
+      tokenSecret: 'test-secret',
+      capabilities: { filterFunctions: ['contains'] },
+    });
+
+    const jsonDoc = localGenerator.generate('json');
+    const parsed = JSON.parse(jsonDoc);
+    const schema = parsed.Default;
+    const container = schema.DefaultContainer;
+    expect(container.Things['@Org.OData.Capabilities.V1.FilterFunctions']).to.deepEqual(
+      FILTER_FUNCTIONS_POSTGRES,
+    );
   });
 
   it('reports MIME types', () => {

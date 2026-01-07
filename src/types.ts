@@ -44,6 +44,7 @@ export interface ODataConfig {
   maxSubstringLength?: number; // caps substring() length argument
   maxFilterFieldNameLength?: number; // caps length of field identifiers in $filter
   maxDecimalExponentAbs?: number; // caps absolute exponent in decimal scientific notation normalization
+  filter?: ODataFilterConfig;
   // $apply pushdown
   enableApplyPushdown?: boolean; // opt-in for datastore-backed $apply execution
   pageSize?: number; // default page size for server-driven paging
@@ -161,8 +162,16 @@ export interface ODataSearchRestrictionsConfig {
   unsupportedExpressions?: ODataSearchExpression[];
 }
 
+export interface ODataFilterRestrictionsConfig {
+  filterable?: boolean;
+  requiresFilter?: boolean;
+  nonFilterableProperties?: string[];
+  nonFilterableNavigationProperties?: string[];
+}
+
 export interface ODataCapabilitiesConfig {
   filterFunctions?: string[];
+  filterFunctionsPreset?: 'default' | 'postgres';
   countable?: boolean;
   navigationRestrictions?: Record<string, ODataNavigationRestriction>;
   permissions?: ODataEntityPermission[];
@@ -174,6 +183,7 @@ export interface ODataCapabilitiesConfig {
   updateRestrictions?: ODataUpdateRestrictionsConfig;
   deleteRestrictions?: ODataDeleteRestrictionsConfig;
   searchRestrictions?: ODataSearchRestrictionsConfig;
+  filterRestrictions?: ODataFilterRestrictionsConfig;
 }
 
 export interface ODataCapabilityDefaults extends ODataCapabilitiesConfig {
@@ -254,6 +264,20 @@ export interface ODataPaginationConfig {
   maxSkip?: number; // maximum client-requested $skip
   maxPageSize?: number; // maximum server-driven page size for collections
   maxApplyPageSize?: number; // maximum server-driven page size for $apply pipelines
+}
+
+export interface ODataFilterConfig {
+  maxInListItems?: number; // maximum allowed items inside `in (...)`
+  pushdownMaxJoinCount?: number; // maximum joins allowed for $filter pushdown (e.g. to-one navigation filters)
+  /**
+   * Maximum number of rows that may be scanned in-memory when evaluating $filter post-processing.
+   * When exceeded, the request is rejected instead of falling back to an unbounded scan.
+   */
+  maxPostFilterScanRows?: number;
+  /**
+   * When true (default), require client-provided $top when a request needs post-filter evaluation.
+   */
+  requireTopWhenPostFilter?: boolean;
 }
 
 export interface ODataLambdaConfig {

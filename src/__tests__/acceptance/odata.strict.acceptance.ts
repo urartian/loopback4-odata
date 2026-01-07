@@ -185,6 +185,14 @@ describe('OData strict mode acceptance', () => {
     await client.get('/odata/OrderItems').query({ $filter: "notes/text eq 'foo'" }).expect(400);
   });
 
+  it('rejects mixed root+navigation filters when pushdown is unavailable', async () => {
+    const res = await client
+      .get('/odata/OrderItems')
+      .query({ $filter: 'order/total gt 0 or quantity gt 1' })
+      .expect(400);
+    expect(res.body?.error?.code).to.equal('navigation-filter-requires-pushdown');
+  });
+
   it('rejects unsupported indexof comparator in strict mode', async function () {
     // default strict app from beforeEach
     await client.get('/odata/Products').query({ $filter: "indexof(name,'Lap') eq 2" }).expect(400);

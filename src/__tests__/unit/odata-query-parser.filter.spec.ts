@@ -204,6 +204,79 @@ describe('parseODataQuery extended filter grammar', () => {
     assert(parsed.postFilter, 'Expected postFilter expression');
     assert.deepStrictEqual(parsed.unsupportedFunctions, ['month']);
   });
+
+  it('marks tolower() comparisons for post-processing', () => {
+    const parsed = parseODataQuery({ $filter: "tolower(name) eq 'laptop'" });
+    assert.equal(parsed.where, undefined);
+    assert(parsed.postFilter, 'Expected postFilter expression');
+    assert.deepStrictEqual(parsed.unsupportedFunctions, ['tolower']);
+    assert.equal(parsed.postFilter.operator, 'transformcmp');
+    if (parsed.postFilter.operator === 'transformcmp') {
+      assert.equal(parsed.postFilter.transform, 'tolower');
+      assert.equal(parsed.postFilter.field, 'name');
+      assert.equal(parsed.postFilter.comparator, 'eq');
+      assert.equal(parsed.postFilter.value, 'laptop');
+    }
+  });
+
+  it('marks toupper() null comparisons for post-processing', () => {
+    const parsed = parseODataQuery({ $filter: 'toupper(name) ne null' });
+    assert.equal(parsed.where, undefined);
+    assert(parsed.postFilter, 'Expected postFilter expression');
+    assert.deepStrictEqual(parsed.unsupportedFunctions, ['toupper']);
+    assert.equal(parsed.postFilter.operator, 'transformcmp');
+    if (parsed.postFilter.operator === 'transformcmp') {
+      assert.equal(parsed.postFilter.transform, 'toupper');
+      assert.equal(parsed.postFilter.field, 'name');
+      assert.equal(parsed.postFilter.comparator, 'neq');
+      assert.equal(parsed.postFilter.value, null);
+    }
+  });
+
+  it('rejects non-string literals in tolower() comparisons', () => {
+    assert.throws(
+      () => parseODataQuery({ $filter: 'tolower(name) eq 1' }),
+      /string or null literal/i,
+    );
+  });
+});
+
+describe('parseODataQuery in operator', () => {
+  it('translates in() lists into inq', () => {
+    const parsed = parseODataQuery({ $filter: "status in ('Open','Closed')" });
+    assert.deepStrictEqual(parsed.where, { status: { inq: ['Open', 'Closed'] } });
+  });
+
+  it('translates numeric in() lists into inq', () => {
+    const parsed = parseODataQuery({ $filter: 'id in (1,2,3)' });
+    assert.deepStrictEqual(parsed.where, { id: { inq: [1, 2, 3] } });
+  });
+
+  it('splits null out of in() list', () => {
+    const parsed = parseODataQuery({ $filter: "field in (null,'X')" });
+    assert.deepStrictEqual(parsed.where, {
+      or: [{ field: null }, { field: { inq: ['X'] } }],
+    });
+  });
+
+  it('rejects oversized in() lists with stable code', () => {
+    assert.throws(
+      () => parseODataQuery({ $filter: 'id in (1,2,3)' }, { maxInListItems: 2 }),
+      (err) => {
+        const anyErr = err as any;
+        return (
+          /exceeds maximum/i.test(anyErr?.message ?? '') && anyErr?.code === 'in-list-too-large'
+        );
+      },
+    );
+  });
+
+  it('rejects non-literal in() list items in strict mode', () => {
+    assert.throws(
+      () => parseODataQuery({ $filter: 'status in (Open)' }, { strict: true }),
+      /requires literal/i,
+    );
+  });
 });
 
 describe('parseODataQuery filter safety limits', () => {

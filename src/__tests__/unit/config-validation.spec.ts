@@ -30,6 +30,73 @@ describe('OData config validation', () => {
     expect(() => validateODataConfig(config)).to.throw(/ODataConfig\.pageSize/);
   });
 
+  it('throws for invalid filter guardrails', () => {
+    const config: ODataConfig = {
+      tokenSecret: 'test-secret',
+      filter: { maxInListItems: 0 },
+    };
+
+    expect(() => validateODataConfig(config)).to.throw(/ODataConfig\.filter\.maxInListItems/);
+  });
+
+  it('throws for invalid filter pushdown guardrails', () => {
+    const config: ODataConfig = {
+      tokenSecret: 'test-secret',
+      filter: { pushdownMaxJoinCount: 0 },
+    };
+
+    expect(() => validateODataConfig(config)).to.throw(/ODataConfig\.filter\.pushdownMaxJoinCount/);
+  });
+
+  it('normalizes capabilities filterFunctions and validates filterFunctionsPreset', () => {
+    const config: ODataConfig = {
+      tokenSecret: 'test-secret',
+      capabilities: {
+        filterFunctionsPreset: 'POSTGRES' as any,
+        filterFunctions: [' Contains ', 'contains', 'STARTSWITH', '  '],
+        filterRestrictions: {
+          filterable: 'true' as unknown as boolean,
+          requiresFilter: 'false' as unknown as boolean,
+          nonFilterableProperties: [' sku ', 'sku', '  '],
+          nonFilterableNavigationProperties: [' gadgets ', 'gadgets', ''],
+        },
+      },
+    };
+
+    validateODataConfig(config);
+
+    expect(config.capabilities?.filterFunctionsPreset).to.equal('postgres');
+    expect(config.capabilities?.filterFunctions).to.deepEqual(['contains', 'startswith']);
+    expect(config.capabilities?.filterRestrictions).to.deepEqual({
+      filterable: true,
+      requiresFilter: false,
+      nonFilterableProperties: ['sku'],
+      nonFilterableNavigationProperties: ['gadgets'],
+    });
+  });
+
+  it('throws for invalid capabilities filterFunctionsPreset', () => {
+    const config: ODataConfig = {
+      tokenSecret: 'test-secret',
+      capabilities: {
+        filterFunctionsPreset: 'nope' as any,
+      },
+    };
+
+    expect(() => validateODataConfig(config)).to.throw(/capabilities\.filterFunctionsPreset/);
+  });
+
+  it('throws for invalid post-filter scan guardrails', () => {
+    const config: ODataConfig = {
+      tokenSecret: 'test-secret',
+      filter: { maxPostFilterScanRows: 0 },
+    };
+
+    expect(() => validateODataConfig(config)).to.throw(
+      /ODataConfig\.filter\.maxPostFilterScanRows/,
+    );
+  });
+
   it('throws for invalid entity pagination overrides', () => {
     expect(() =>
       validatePaginationLimits('EntitySet "Products".pagination', { maxTop: -5 }),

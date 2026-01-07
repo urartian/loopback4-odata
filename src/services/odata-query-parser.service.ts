@@ -6,6 +6,7 @@ import {
   RelationDefinitionMap,
   Entity,
 } from '@loopback/repository';
+import { HttpErrors } from '@loopback/rest';
 import { escapeLikeLiteral } from '../util/like-escaping';
 
 const comparisonOperators: Record<string, string> = {
@@ -21,6 +22,7 @@ const DEFAULT_MAX_FILTER_PATTERN_LENGTH = 10_000;
 const DEFAULT_MAX_SUBSTRING_START = 10_000;
 const DEFAULT_MAX_SUBSTRING_LENGTH = 10_000;
 const DEFAULT_MAX_FILTER_FIELD_NAME_LENGTH = 256;
+const DEFAULT_MAX_IN_LIST_ITEMS = 100;
 const FILTER_FIELD_NAME_PATTERN = /^[_A-Za-z][0-9A-Za-z_./]*$/;
 const DANGEROUS_FIELD_NAMES = new Set(['__proto__', 'prototype', 'constructor']);
 
@@ -170,6 +172,13 @@ export type ParsedExpression =
   | { operator: 'not'; expr: ParsedExpression }
   | FunctionExpression
   | {
+      operator: 'transformcmp';
+      transform: 'tolower' | 'toupper';
+      field: string;
+      comparator: 'eq' | 'neq';
+      value: string | null;
+    }
+  | {
       operator: 'fncmp';
       name: 'round' | 'floor' | 'ceiling' | 'year';
       field: string;
@@ -212,6 +221,34 @@ interface ParseOptions {
   maxSubstringLength?: number;
   maxFilterFieldNameLength?: number;
   maxLambdaExistsDepth?: number;
+  maxInListItems?: number;
+}
+
+type ParseContext = { strict: boolean };
+
+function isInListLiteralToken(token: string): boolean {
+  const raw = String(token ?? '').trim();
+  if (!raw) return false;
+  if (raw.startsWith("'") && raw.endsWith("'")) return true;
+
+  const lower = raw.toLowerCase();
+  if (lower === 'null' || lower === 'true' || lower === 'false') return true;
+
+  if (/^-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?$/.test(raw)) return true;
+  if (/^-?\d+[lL]$/.test(raw)) return true;
+
+  if (/^(datetimeoffset|date|guid|decimal|int64)'/i.test(raw) && raw.endsWith("'")) return true;
+
+  if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return true;
+  if (
+    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,7})?(?:Z|z|[+-]\d{2}(?::?\d{2})?)?$/.test(raw)
+  ) {
+    return true;
+  }
+
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(raw)) return true;
+
+  return false;
 }
 
 export class UnsupportedFilterError extends Error {
@@ -260,7 +297,10 @@ function tokenize(filter: string): string[] {
     }
 
     if (!inString) {
-      if (char === '(' || char === ')' || char === ',' || char === ':') {
+      // Note: ':' is used by lambda aliases (e.g. nav/any(x: ...)), but it is also a
+      // valid character inside DateTimeOffset literals (e.g. 2026-01-03T10:20:30Z).
+      // We keep ':' as part of tokens unless it appears as a standalone token due to whitespace.
+      if (char === '(' || char === ')' || char === ',') {
         if (current) {
           tokens.push(current);
           current = '';
@@ -299,6 +339,39 @@ function applyTransform(operand: Operand, transform: OperandTransform): Operand 
   return { ...operand, transform };
 }
 
+function tryParseNumericToken(token: string): number | undefined {
+  const trimmed = String(token ?? '').trim();
+  if (!trimmed) return undefined;
+
+  // Preserve large/high-precision numerics as strings so controller-side coercion can decide
+  // how to interpret them (e.g. decimal/int64), avoiding JS precision loss.
+  const intMatch = /^-?\d+$/.test(trimmed);
+  if (intMatch) {
+    const digits = trimmed.replace(/^-?/, '');
+    if (digits.length > 15) return undefined;
+    const numeric = Number(trimmed);
+    if (!Number.isSafeInteger(numeric)) return undefined;
+    return numeric;
+  }
+
+  const decimalOrExponent = /^-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?$/.test(trimmed);
+  if (decimalOrExponent) {
+    const [significand] = trimmed.split(/[eE]/);
+    const fraction = significand.includes('.') ? (significand.split('.')[1] ?? '') : '';
+    const significantDigits = significand
+      .replace(/^-?/, '')
+      .replace('.', '')
+      .replace(/^0+/, '').length;
+    if (fraction.length > 15) return undefined;
+    if (significantDigits > 15) return undefined;
+    const numeric = Number(trimmed);
+    if (!Number.isFinite(numeric)) return undefined;
+    return numeric;
+  }
+
+  return undefined;
+}
+
 function parseOperand(tokens: string[], index: number): [Operand, number] {
   const token = tokens[index];
   if (token == null) {
@@ -334,10 +407,8 @@ function parseOperand(tokens: string[], index: number): [Operand, number] {
     return [{ kind: 'literal', value: token === 'true' }, index + 1];
   }
 
-  const numeric = Number(token);
-  if (!Number.isNaN(numeric)) {
-    return [{ kind: 'literal', value: numeric }, index + 1];
-  }
+  const numeric = tryParseNumericToken(token);
+  if (numeric !== undefined) return [{ kind: 'literal', value: numeric }, index + 1];
 
   return [{ kind: 'field', name: token }, index + 1];
 }
@@ -725,9 +796,62 @@ function parseLengthComparison(
   ];
 }
 
-function parseComparison(tokens: string[], index: number): [ParsedExpression, number] {
-  const lambda = tryParseLambda(tokens, index);
+function parseInComparison(
+  tokens: string[],
+  index: number,
+  ctx: ParseContext,
+): [ParsedExpression, number] | undefined {
+  const field = tokens[index];
+  const comparator = tokens[index + 1]?.toLowerCase();
+  if (!field || comparator !== 'in') return undefined;
+  if (tokens[index + 2] !== '(') {
+    throw new Error('Malformed in expression. Expected opening parenthesis.');
+  }
+
+  const values: unknown[] = [];
+  let cursor = index + 3;
+  while (cursor < tokens.length) {
+    const token = tokens[cursor];
+    if (token === ')') break;
+    if (token === ',') {
+      cursor += 1;
+      continue;
+    }
+    if (ctx.strict && !isInListLiteralToken(token)) {
+      throw new Error('in operator requires literal list items.');
+    }
+    values.push(parseLiteral(token));
+    cursor += 1;
+  }
+
+  if (tokens[cursor] !== ')') {
+    throw new Error('Malformed in expression. Expected closing parenthesis.');
+  }
+  if (!values.length) {
+    throw new Error('in operator requires at least one list item.');
+  }
+
+  return [
+    {
+      operator: 'comparison',
+      field,
+      comparator: 'inq',
+      value: values,
+    },
+    cursor + 1,
+  ];
+}
+
+function parseComparison(
+  tokens: string[],
+  index: number,
+  ctx: ParseContext,
+): [ParsedExpression, number] {
+  const lambda = tryParseLambda(tokens, index, ctx);
   if (lambda) return lambda;
+
+  const transformCmp = parseTransformComparison(tokens, index);
+  if (transformCmp) return transformCmp;
 
   const stringFnCmp = parseStringFunctionComparison(tokens, index);
   if (stringFnCmp) {
@@ -758,6 +882,9 @@ function parseComparison(tokens: string[], index: number): [ParsedExpression, nu
     return [fncmp[0], fncmp[1]];
   }
 
+  const inCmp = parseInComparison(tokens, index, ctx);
+  if (inCmp) return inCmp;
+
   const field = tokens[index];
   const comparator = tokens[index + 1];
   const valueToken = tokens[index + 2];
@@ -784,9 +911,83 @@ function parseComparison(tokens: string[], index: number): [ParsedExpression, nu
   ];
 }
 
+function parseTransformComparison(
+  tokens: string[],
+  index: number,
+):
+  | [
+      {
+        operator: 'transformcmp';
+        transform: 'tolower' | 'toupper';
+        field: string;
+        comparator: 'eq' | 'neq';
+        value: string | null;
+      },
+      number,
+    ]
+  | undefined {
+  const transformToken = tokens[index]?.toLowerCase();
+  if (transformToken !== 'tolower' && transformToken !== 'toupper') return undefined;
+  if (tokens[index + 1] !== '(') return undefined;
+
+  const field = tokens[index + 2];
+  const closing = tokens[index + 3];
+  if (!field || closing !== ')') {
+    throw new Error(`${transformToken} requires a single field argument.`);
+  }
+  if (
+    field.startsWith("'") ||
+    field.endsWith("'") ||
+    field === '(' ||
+    field === ')' ||
+    field === ',' ||
+    field.toLowerCase() === 'null' ||
+    field.toLowerCase() === 'true' ||
+    field.toLowerCase() === 'false' ||
+    /^-?\d/.test(field) ||
+    /^(datetimeoffset|date|guid|decimal|int64)'/i.test(field)
+  ) {
+    throw new Error(`${transformToken} requires a single field argument.`);
+  }
+
+  const comparatorToken = tokens[index + 4]?.toLowerCase();
+  if (comparatorToken !== 'eq' && comparatorToken !== 'ne') {
+    throw new Error(`${transformToken} comparisons support only eq/ne.`);
+  }
+
+  const valueToken = tokens[index + 5];
+  if (valueToken == null) {
+    throw new Error(`${transformToken} comparisons require a string or null literal.`);
+  }
+
+  const rawLower = valueToken.toLowerCase();
+  const isNull = rawLower === 'null';
+  const isStringLiteral = valueToken.startsWith("'") && valueToken.endsWith("'");
+  if (!isNull && !isStringLiteral) {
+    throw new Error(`${transformToken} comparisons require a string or null literal.`);
+  }
+
+  const value = parseLiteral(valueToken);
+  if (value !== null && typeof value !== 'string') {
+    throw new Error(`${transformToken} comparisons require a string or null literal.`);
+  }
+
+  return [
+    {
+      operator: 'transformcmp',
+      transform: transformToken as 'tolower' | 'toupper',
+      field,
+      comparator: comparatorToken === 'eq' ? 'eq' : 'neq',
+      value,
+    },
+    index + 6,
+  ];
+}
+
 function tryParseLambda(
   tokens: string[],
   index: number,
+  ctx: ParseContext,
 ): [LambdaExpressionNode, number] | undefined {
   const token = tokens[index];
   const match = token?.match(/^([A-Za-z_][A-Za-z0-9_\/]*)\/(any|all)$/i);
@@ -836,6 +1037,17 @@ function tryParseLambda(
     alias = alias.slice(0, -1);
   } else if (innerTokens[0] === ':') {
     innerTokens.shift();
+  } else if (alias.includes(':')) {
+    const idx = alias.indexOf(':');
+    const before = alias.slice(0, idx);
+    const after = alias.slice(idx + 1);
+    if (!before) {
+      throw new Error('Malformed lambda expression: expected alias before ":".');
+    }
+    alias = before;
+    if (after) {
+      innerTokens.unshift(after);
+    }
   } else {
     throw new Error('Malformed lambda expression: expected ":" after alias.');
   }
@@ -847,7 +1059,7 @@ function tryParseLambda(
     throw new Error('Lambda predicate is required.');
   }
 
-  const [predicate, consumed] = parseExpression(innerTokens, 0);
+  const [predicate, consumed] = parseExpression(innerTokens, 0, ctx);
   if (consumed !== innerTokens.length) {
     throw new Error('Unable to parse lambda predicate.');
   }
@@ -882,68 +1094,84 @@ function parseLiteral(token: string): unknown {
   if (lower === 'false') return false;
   if (lower === 'null') return null;
 
-  const numeric = Number(token);
-  if (!Number.isNaN(numeric)) return numeric;
+  const numeric = tryParseNumericToken(token);
+  if (numeric !== undefined) return numeric;
 
   return token;
 }
 
-function parsePrimary(tokens: string[], index: number): [ParsedExpression, number] {
+function parsePrimary(
+  tokens: string[],
+  index: number,
+  ctx: ParseContext,
+): [ParsedExpression, number] {
   const token = tokens[index];
   if (token === '(') {
-    const [expr, nextIndex] = parseExpression(tokens, index + 1);
+    const [expr, nextIndex] = parseExpression(tokens, index + 1, ctx);
     if (tokens[nextIndex] !== ')') {
       throw new Error('Unmatched parenthesis in filter expression.');
     }
     return [expr, nextIndex + 1];
   }
 
-  return parseComparison(tokens, index);
+  return parseComparison(tokens, index, ctx);
 }
 
-function parseExpression(tokens: string[], index: number): [ParsedExpression, number] {
-  return parseOr(tokens, index);
+function parseExpression(
+  tokens: string[],
+  index: number,
+  ctx: ParseContext,
+): [ParsedExpression, number] {
+  return parseOr(tokens, index, ctx);
 }
 
-function parseOr(tokens: string[], index: number): [ParsedExpression, number] {
-  let [left, nextIndex] = parseAnd(tokens, index);
+function parseOr(tokens: string[], index: number, ctx: ParseContext): [ParsedExpression, number] {
+  let [left, nextIndex] = parseAnd(tokens, index, ctx);
   while (nextIndex < tokens.length) {
     const token = tokens[nextIndex]?.toLowerCase();
     if (token !== 'or') break;
-    const [right, afterRight] = parseAnd(tokens, nextIndex + 1);
+    const [right, afterRight] = parseAnd(tokens, nextIndex + 1, ctx);
     left = { operator: 'logical', type: 'or', expressions: [left, right] };
     nextIndex = afterRight;
   }
   return [left, nextIndex];
 }
 
-function parseAnd(tokens: string[], index: number): [ParsedExpression, number] {
-  let [left, nextIndex] = parseUnary(tokens, index);
+function parseAnd(tokens: string[], index: number, ctx: ParseContext): [ParsedExpression, number] {
+  let [left, nextIndex] = parseUnary(tokens, index, ctx);
   while (nextIndex < tokens.length) {
     const token = tokens[nextIndex]?.toLowerCase();
     if (token !== 'and') break;
-    const [right, afterRight] = parseUnary(tokens, nextIndex + 1);
+    const [right, afterRight] = parseUnary(tokens, nextIndex + 1, ctx);
     left = { operator: 'logical', type: 'and', expressions: [left, right] };
     nextIndex = afterRight;
   }
   return [left, nextIndex];
 }
 
-function parseUnary(tokens: string[], index: number): [ParsedExpression, number] {
+function parseUnary(
+  tokens: string[],
+  index: number,
+  ctx: ParseContext,
+): [ParsedExpression, number] {
   const token = tokens[index]?.toLowerCase();
   if (token === 'not') {
-    const [expr, nextIndex] = parseUnary(tokens, index + 1);
+    const [expr, nextIndex] = parseUnary(tokens, index + 1, ctx);
     return [{ operator: 'not', expr }, nextIndex];
   }
-  return parsePrimary(tokens, index);
+  return parsePrimary(tokens, index, ctx);
 }
 
-function parseFilter(tokens: string[], startIndex = 0): [ParsedExpression, number] {
+function parseFilter(
+  tokens: string[],
+  startIndex = 0,
+  ctx: ParseContext,
+): [ParsedExpression, number] {
   if (startIndex >= tokens.length) {
     throw new Error('Empty filter expression');
   }
 
-  return parseExpression(tokens, startIndex);
+  return parseExpression(tokens, startIndex, ctx);
 }
 
 function containsLambda(expr: ParsedExpression): boolean {
@@ -1029,6 +1257,9 @@ function validateLambdaExpressionTree(expr: ParsedExpression, options?: ParseOpt
         return;
       }
       case 'comparison':
+        assertAliasedField(node.field, aliasesInScope, lambdaPaths);
+        return;
+      case 'transformcmp':
         assertAliasedField(node.field, aliasesInScope, lambdaPaths);
         return;
       case 'function':
@@ -1253,6 +1484,7 @@ function filterLimits(options?: ParseOptions) {
       options?.maxFilterFieldNameLength,
       DEFAULT_MAX_FILTER_FIELD_NAME_LENGTH,
     ),
+    maxInListItems: readPositiveLimit(options?.maxInListItems, DEFAULT_MAX_IN_LIST_ITEMS),
   };
 }
 
@@ -1347,6 +1579,10 @@ function buildWhere(expr: ParsedExpression, options?: ParseOptions): Where<AnyOb
     throw new UnsupportedFilterError([expr.part]);
   }
 
+  if (expr.operator === 'transformcmp') {
+    throw new UnsupportedFilterError([expr.transform]);
+  }
+
   if (expr.operator === 'not') {
     const inner = expr.expr;
     if (inner.operator === 'comparison') {
@@ -1357,6 +1593,8 @@ function buildWhere(expr: ParsedExpression, options?: ParseOptions): Where<AnyOb
         gte: 'lt',
         lt: 'gte',
         lte: 'gt',
+        inq: 'nin',
+        nin: 'inq',
       } as any;
       const comparator = inverse[inner.comparator] ?? 'neq';
       if (comparator === 'eq') {
@@ -1364,6 +1602,12 @@ function buildWhere(expr: ParsedExpression, options?: ParseOptions): Where<AnyOb
         return { [inner.field]: inner.value as any };
       }
       assertSafeFilterFieldName(inner.field, options);
+      if (comparator === 'inq' || comparator === 'nin') {
+        return buildWhere(
+          { operator: 'comparison', field: inner.field, comparator, value: inner.value },
+          options,
+        );
+      }
       return { [inner.field]: { [comparator]: inner.value } as AnyObject } as Where<AnyObject>;
     }
     if (inner.operator === 'function') {
@@ -1395,12 +1639,48 @@ function buildWhere(expr: ParsedExpression, options?: ParseOptions): Where<AnyOb
     if (inner.operator === 'datepart') {
       throw new UnsupportedFilterError([inner.part]);
     }
+    if (inner.operator === 'transformcmp') {
+      throw new UnsupportedFilterError([inner.transform]);
+    }
   }
   if (expr.operator === 'comparison') {
     const { field, comparator, value } = expr;
     assertSafeFilterFieldName(field, options);
     if (comparator === 'eq') {
       return { [field]: value };
+    }
+    if (comparator === 'inq' || comparator === 'nin') {
+      if (!Array.isArray(value)) {
+        throw new Error('in operator requires a list.');
+      }
+      const limits = filterLimits(options);
+      if (value.length > limits.maxInListItems) {
+        const err = new HttpErrors.BadRequest(
+          `in list exceeds maximum of ${limits.maxInListItems} items.`,
+        );
+        (err as AnyObject).code = 'in-list-too-large';
+        throw err;
+      }
+
+      const hasNull = value.some((entry) => entry === null);
+      const nonNull = value.filter((entry) => entry !== null);
+
+      if (comparator === 'inq') {
+        if (hasNull && nonNull.length) {
+          return { or: [{ [field]: null }, { [field]: { inq: nonNull } }] } as Where<AnyObject>;
+        }
+        if (hasNull) return { [field]: null } as Where<AnyObject>;
+        return { [field]: { inq: nonNull } } as Where<AnyObject>;
+      }
+
+      // nin: logical negation of the inq semantics above
+      if (hasNull && nonNull.length) {
+        return {
+          and: [{ [field]: { neq: null } }, { [field]: { nin: nonNull } }],
+        } as Where<AnyObject>;
+      }
+      if (hasNull) return { [field]: { neq: null } } as Where<AnyObject>;
+      return { [field]: { nin: nonNull } } as Where<AnyObject>;
     }
     return { [field]: { [comparator]: value } };
   }
@@ -1913,7 +2193,7 @@ function parseApplyFilter(body: string): ApplyFilterTransformation {
   if (!tokens.length) {
     throw new Error('filter() requires an expression.');
   }
-  const [expression, next] = parseFilter(tokens);
+  const [expression, next] = parseFilter(tokens, 0, { strict: false });
   if (next !== tokens.length) {
     throw new Error('Invalid filter() transformation.');
   }
@@ -2648,6 +2928,7 @@ export interface ParsedODataQuery extends Filter<AnyObject> {
 export function parseODataQuery(query: QueryObject, options: ParseOptions = {}): ParsedODataQuery {
   const filter: ParsedODataQuery = {};
   const { relations } = options;
+  const ctx: ParseContext = { strict: Boolean(options.strict) };
 
   if (options.strict) {
     const allowed = new Set([
@@ -2676,7 +2957,7 @@ export function parseODataQuery(query: QueryObject, options: ParseOptions = {}):
   if (filterExpr) {
     const tokens = tokenize(filterExpr);
     if (tokens.length) {
-      const [expr] = parseFilter(tokens);
+      const [expr] = parseFilter(tokens, 0, ctx);
       const rewritten = rewriteNegatedLambdas(expr);
       validateLambdaExpressionTree(rewritten, options);
       const { lambdas, predicate, lambdaExpression } = splitLambdaExpressions(rewritten);

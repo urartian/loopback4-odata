@@ -169,6 +169,28 @@ describe('OData component acceptance', () => {
     expect(res.body.value).to.not.be.empty();
   });
 
+  it('supports tolower() direct comparison filters', async function (this: SkipContext) {
+    await rebuildApp(this, { strict: false });
+    const res = await client
+      .get('/odata/Products')
+      .query({ $filter: "tolower(name) eq 'laptop'", $top: '50' })
+      .expect(200);
+    expect(res.body.value).to.be.Array();
+    expect(res.body.value.map((item: any) => item.name)).to.containEql('Laptop');
+  });
+
+  it('supports nav-path contains() filters in strict=false without leaking injected includes', async function (this: SkipContext) {
+    await rebuildApp(this, { strict: false });
+    const res = await client
+      .get('/odata/OrderItems')
+      .query({ $filter: "contains(product/name,'Coffee')", $top: '50' })
+      .expect(200);
+
+    expect(res.body.value).to.be.Array();
+    expect(res.body.value).to.not.be.empty();
+    expect(res.body.value.some((item: any) => item.product !== undefined)).to.equal(false);
+  });
+
   it('serializes DateTimeOffset properties using ISO 8601 format', async () => {
     const res = await client.get('/odata/Products').expect(200);
     expect(res.body.value).to.be.Array();
@@ -1769,7 +1791,7 @@ describe('OData component acceptance', () => {
   it('supports lambda any filters', async () => {
     const res = await client
       .get('/odata/Products')
-      .query({ $filter: 'orderItems/any(i: i/unitPrice gt 800)' })
+      .query({ $expand: 'orderItems', $filter: 'orderItems/any(i: i/unitPrice gt 800)' })
       .expect(200);
 
     expect(res.body.value).to.be.Array();
@@ -1783,6 +1805,7 @@ describe('OData component acceptance', () => {
     const res = await client
       .get('/odata/Products')
       .query({
+        $expand: 'orderItems',
         $filter: 'orderItems/any(i: i/unitPrice gt 800) and orderItems/any(i: i/unitPrice gt 700)',
       })
       .expect(200);
@@ -1798,7 +1821,7 @@ describe('OData component acceptance', () => {
   it('supports negated lambda any filters', async () => {
     const res = await client
       .get('/odata/Products')
-      .query({ $filter: 'not orderItems/any(i: i/unitPrice gt 800)' })
+      .query({ $expand: 'orderItems', $filter: 'not orderItems/any(i: i/unitPrice gt 800)' })
       .expect(200);
 
     expect(res.body.value).to.be.Array();
@@ -1811,7 +1834,7 @@ describe('OData component acceptance', () => {
   it('supports negated lambda all filters', async () => {
     const res = await client
       .get('/odata/Products')
-      .query({ $filter: 'not orderItems/all(i: i/unitPrice gt 999999)' })
+      .query({ $expand: 'orderItems', $filter: 'not orderItems/all(i: i/unitPrice gt 999999)' })
       .expect(200);
 
     expect(res.body.value).to.be.Array();
@@ -1826,7 +1849,10 @@ describe('OData component acceptance', () => {
   it('supports lambda filters combined with additional predicates', async () => {
     const res = await client
       .get('/odata/Products')
-      .query({ $filter: 'orderItems/any(i: i/unitPrice gt 800) and price gt 1000' })
+      .query({
+        $expand: 'orderItems',
+        $filter: 'orderItems/any(i: i/unitPrice gt 800) and price gt 1000',
+      })
       .expect(200);
 
     expect(res.body.value).to.be.Array();

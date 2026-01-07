@@ -6,7 +6,11 @@ import {
   NavigationPathError,
   ResolvedNavigationPath,
 } from './navigation-path';
-import { LambdaExpression, ParsedExpression } from '../services/odata-query-parser.service';
+import {
+  FunctionArg,
+  LambdaExpression,
+  ParsedExpression,
+} from '../services/odata-query-parser.service';
 
 export interface LambdaPushdownBuildResult {
   sql: string;
@@ -208,7 +212,7 @@ function translateWhere(
               ? 'LIKE'
               : 'NOT LIKE';
           opClauses.push(
-            `${columnExpr} ${comparator} ${placeholder(params, operand)} ESCAPE '\\\\'`,
+            `${columnExpr} ${comparator} ${placeholder(params, operand)} ESCAPE E'\\\\'`,
           );
           break;
         }
@@ -219,9 +223,28 @@ function translateWhere(
             opClauses.push(op === 'inq' ? 'FALSE' : 'TRUE');
             break;
           }
-          const placeholders = operand.map((entry) => placeholder(params, entry)).join(', ');
+          const hasNull = operand.some((entry) => entry === null);
+          const nonNull = operand.filter((entry) => entry !== null);
           const comparator = op === 'inq' ? 'IN' : 'NOT IN';
-          opClauses.push(`${columnExpr} ${comparator} (${placeholders})`);
+          const listSql = nonNull.length
+            ? `${columnExpr} ${comparator} (${nonNull.map((entry) => placeholder(params, entry)).join(', ')})`
+            : undefined;
+          const nullSql = hasNull
+            ? op === 'inq'
+              ? `${columnExpr} IS NULL`
+              : `${columnExpr} IS NOT NULL`
+            : undefined;
+          if (op === 'inq') {
+            if (nullSql && listSql) opClauses.push(`(${nullSql} OR ${listSql})`);
+            else if (nullSql) opClauses.push(nullSql);
+            else if (listSql) opClauses.push(listSql);
+            else opClauses.push('FALSE');
+          } else {
+            if (nullSql && listSql) opClauses.push(`(${nullSql} AND ${listSql})`);
+            else if (nullSql) opClauses.push(nullSql);
+            else if (listSql) opClauses.push(listSql);
+            else opClauses.push('TRUE');
+          }
           break;
         }
         case 'between': {
@@ -310,6 +333,26 @@ function translatePredicateExpression(
         joinCount: 0,
       };
     }
+    case 'transformcmp': {
+      const resolved = resolvePredicateField(expr.field, ctx);
+      if (!resolved) return undefined;
+      const leftSql =
+        expr.transform === 'tolower' ? `LOWER(${resolved.sql})` : `UPPER(${resolved.sql})`;
+
+      if (expr.value === null) {
+        if (expr.comparator === 'eq') return { sql: `${leftSql} IS NULL`, joinCount: 0 };
+        if (expr.comparator === 'neq') return { sql: `${leftSql} IS NOT NULL`, joinCount: 0 };
+        return undefined;
+      }
+      if (typeof expr.value !== 'string') return undefined;
+      if (expr.comparator === 'eq') {
+        return { sql: `${leftSql} = ${placeholder(params, expr.value)}`, joinCount: 0 };
+      }
+      if (expr.comparator === 'neq') {
+        return { sql: `${leftSql} <> ${placeholder(params, expr.value)}`, joinCount: 0 };
+      }
+      return undefined;
+    }
     case 'logical': {
       const start = params.length;
       const parts: string[] = [];
@@ -363,7 +406,79 @@ function translatePredicateExpression(
         transformed !== resolved.sql ? 'LIKE' : expr.caseInsensitive ? 'ILIKE' : 'LIKE';
       const negated = expr.negated === true ? 'NOT ' : '';
       return {
-        sql: `${transformed} ${negated}${comparator} ${placeholder(params, pattern)} ESCAPE '\\\\'`,
+        sql: `${transformed} ${negated}${comparator} ${placeholder(params, pattern)} ESCAPE E'\\\\'`,
+        joinCount: 0,
+      };
+    }
+    case 'stringfncmp': {
+      const value = typeof expr.value === 'string' ? expr.value : undefined;
+      if (value === undefined) return undefined;
+      if (!expr.args?.length) return undefined;
+
+      const resolveArg = (arg: FunctionArg): string | undefined => {
+        if (arg.kind === 'literal') {
+          return placeholder(params, arg.value);
+        }
+        const resolved = resolvePredicateField(arg.name, ctx);
+        if (!resolved) return undefined;
+        if (arg.transform === 'tolower') return `LOWER(${resolved.sql})`;
+        if (arg.transform === 'toupper') return `UPPER(${resolved.sql})`;
+        return resolved.sql;
+      };
+
+      if (expr.name === 'trim') {
+        if (expr.args.length !== 1) return undefined;
+        const operand = resolveArg(expr.args[0]!);
+        if (!operand) return undefined;
+        const comparator =
+          expr.comparator === 'eq' ? '=' : expr.comparator === 'neq' ? '<>' : undefined;
+        if (!comparator) return undefined;
+        return {
+          sql: `btrim(${operand}) ${comparator} ${placeholder(params, value)}`,
+          joinCount: 0,
+        };
+      }
+      if (expr.name === 'concat') {
+        if (expr.args.length < 2) return undefined;
+        const argsSql = expr.args.map(resolveArg);
+        if (argsSql.some((item) => !item)) return undefined;
+        const comparator =
+          expr.comparator === 'eq' ? '=' : expr.comparator === 'neq' ? '<>' : undefined;
+        if (!comparator) return undefined;
+        return {
+          sql: `concat(${(argsSql as string[]).join(', ')}) ${comparator} ${placeholder(params, value)}`,
+          joinCount: 0,
+        };
+      }
+      return undefined;
+    }
+    case 'datepart': {
+      const resolved = resolvePredicateField(expr.field, ctx);
+      if (!resolved) return undefined;
+      const comparatorMap: Record<string, string> = {
+        eq: '=',
+        neq: '<>',
+        gt: '>',
+        gte: '>=',
+        lt: '<',
+        lte: '<=',
+      };
+      const comparator = comparatorMap[expr.comparator];
+      if (!comparator) return undefined;
+      if (!Number.isFinite(expr.value)) return undefined;
+      const partMap: Record<string, string> = {
+        month: 'MONTH',
+        day: 'DAY',
+        hour: 'HOUR',
+        minute: 'MINUTE',
+        second: 'SECOND',
+      };
+      const part = partMap[expr.part];
+      if (!part) return undefined;
+      const source = `timezone('UTC', ${resolved.sql})`;
+      const extracted = `EXTRACT(${part} FROM ${source})`;
+      return {
+        sql: `${extracted} ${comparator} ${placeholder(params, expr.value)}`,
         joinCount: 0,
       };
     }
@@ -427,6 +542,224 @@ function translatePredicateExpression(
     default:
       return undefined;
   }
+}
+
+export interface FilterPushdownBuildResult {
+  sql: string;
+  params: unknown[];
+  idProperty: string;
+}
+
+export interface FilterPushdownCountBuildResult {
+  sql: string;
+  params: unknown[];
+}
+
+export interface FilterPushdownDecline {
+  declineReason: string;
+}
+
+function normalizeMaxJoinCount(maxJoinCount: unknown): number {
+  const n = Number(maxJoinCount);
+  if (Number.isFinite(n) && n > 0) return Math.floor(n);
+  return 8;
+}
+
+function normalizeOrder(order?: string | string[]): string[] {
+  if (!order) return [];
+  if (Array.isArray(order)) return order;
+  return [order];
+}
+
+export function buildPostgresFilterIdQuery(options: {
+  dataSource: juggler.DataSource;
+  modelCtor: typeof Entity;
+  expression: ParsedExpression;
+  where?: Where<AnyObject>;
+  order?: string | string[];
+  offset?: number;
+  limit?: number;
+  maxJoinCount?: number;
+}): FilterPushdownBuildResult | FilterPushdownDecline {
+  if (!supportsPostgresLambdaPushdown(options.dataSource)) {
+    return { declineReason: 'non-postgres' };
+  }
+
+  const idProperty = getSingleIdProperty(options.modelCtor);
+  if (!idProperty) {
+    return { declineReason: 'composite-or-missing-id' };
+  }
+
+  const metaCache = new Map<typeof Entity, SqlMetadata>();
+  const baseMetaRaw = inferSqlMetadata(options.modelCtor, options.dataSource);
+  if (!baseMetaRaw?.tableName) {
+    return { declineReason: 'missing-sql-metadata' };
+  }
+  metaCache.set(options.modelCtor, {
+    tableName: baseMetaRaw.tableName,
+    schema: baseMetaRaw.schema,
+    columnMap: baseMetaRaw.columnMap ?? {},
+  });
+
+  const rootAlias = 'r';
+  const idColumn = resolveColumn(options.modelCtor, idProperty, options.dataSource, metaCache);
+  if (!idColumn) {
+    return { declineReason: 'id-column-resolution' };
+  }
+
+  const params: unknown[] = [];
+  const whereCtx: WhereBuildContext = {
+    dataSource: options.dataSource,
+    modelCtor: options.modelCtor,
+    tableAlias: rootAlias,
+    metaCache,
+  };
+  const baseWhereSql = options.where ? translateWhere(options.where, whereCtx, params) : undefined;
+  if (options.where && !baseWhereSql) {
+    return { declineReason: 'unsupported-root-where' };
+  }
+
+  const start = params.length;
+  const maxJoinCount = normalizeMaxJoinCount(options.maxJoinCount);
+  let aliasCounter = 0;
+  const nextAlias = () => `t${++aliasCounter}`;
+  let built: SqlFragment | undefined;
+  try {
+    built = translatePredicateExpression(
+      options.expression,
+      {
+        dataSource: options.dataSource,
+        metaCache,
+        nextAlias,
+        bindings: {},
+        defaultBinding: { modelCtor: options.modelCtor, tableAlias: rootAlias },
+      },
+      params,
+    );
+  } catch {
+    params.length = start;
+    return { declineReason: 'unsupported-filter' };
+  }
+  if (!built) {
+    params.length = start;
+    return { declineReason: 'unsupported-filter' };
+  }
+  if (built.joinCount > maxJoinCount) {
+    params.length = start;
+    return { declineReason: 'pushdown-join-count-exceeded' };
+  }
+
+  const whereParts = [baseWhereSql, built.sql].filter(Boolean) as string[];
+  const whereClause = whereParts.length
+    ? `WHERE ${whereParts.map((p) => `(${p})`).join(' AND ')}`
+    : '';
+
+  const orderSqlParts: string[] = [];
+  for (const clause of normalizeOrder(options.order)) {
+    const trimmed = String(clause).trim();
+    if (!trimmed) continue;
+    const [fieldToken, dirToken] = trimmed.split(/\s+/);
+    const direction = (dirToken ?? 'ASC').toUpperCase();
+    if (direction !== 'ASC' && direction !== 'DESC') return { declineReason: 'unsupported-order' };
+    const col = resolveColumn(options.modelCtor, fieldToken, options.dataSource, metaCache);
+    if (!col) return { declineReason: 'unsupported-order' };
+    orderSqlParts.push(`${rootAlias}.${col} ${direction}`);
+  }
+  const orderClause = orderSqlParts.length ? `ORDER BY ${orderSqlParts.join(', ')}` : '';
+
+  const limit =
+    typeof options.limit === 'number' && Number.isFinite(options.limit) && options.limit > 0
+      ? Math.floor(options.limit)
+      : undefined;
+  const offset =
+    typeof options.offset === 'number' && Number.isFinite(options.offset) && options.offset > 0
+      ? Math.floor(options.offset)
+      : undefined;
+
+  const limitClause = limit ? `LIMIT ${limit}` : '';
+  const offsetClause = offset ? `OFFSET ${offset}` : '';
+
+  const sql =
+    `SELECT ${rootAlias}.${idColumn} AS ${quoteIdentifier(idProperty)} FROM ${buildTableRef({
+      tableName: baseMetaRaw.tableName,
+      schema: baseMetaRaw.schema,
+      columnMap: baseMetaRaw.columnMap ?? {},
+    })} AS ${rootAlias} ${whereClause} ${orderClause} ${limitClause} ${offsetClause}`.trim();
+
+  return { sql, params, idProperty };
+}
+
+export function buildPostgresFilterCountQuery(options: {
+  dataSource: juggler.DataSource;
+  modelCtor: typeof Entity;
+  expression: ParsedExpression;
+  where?: Where<AnyObject>;
+  maxJoinCount?: number;
+}): FilterPushdownCountBuildResult | FilterPushdownDecline {
+  if (!supportsPostgresLambdaPushdown(options.dataSource)) {
+    return { declineReason: 'non-postgres' };
+  }
+
+  const metaCache = new Map<typeof Entity, SqlMetadata>();
+  const baseMetaRaw = inferSqlMetadata(options.modelCtor, options.dataSource);
+  if (!baseMetaRaw?.tableName) {
+    return { declineReason: 'missing-sql-metadata' };
+  }
+  metaCache.set(options.modelCtor, {
+    tableName: baseMetaRaw.tableName,
+    schema: baseMetaRaw.schema,
+    columnMap: baseMetaRaw.columnMap ?? {},
+  });
+
+  const rootAlias = 'r';
+  const params: unknown[] = [];
+  const whereCtx: WhereBuildContext = {
+    dataSource: options.dataSource,
+    modelCtor: options.modelCtor,
+    tableAlias: rootAlias,
+    metaCache,
+  };
+  const baseWhereSql = options.where ? translateWhere(options.where, whereCtx, params) : undefined;
+  if (options.where && !baseWhereSql) {
+    return { declineReason: 'unsupported-root-where' };
+  }
+
+  const start = params.length;
+  const maxJoinCount = normalizeMaxJoinCount(options.maxJoinCount);
+  let aliasCounter = 0;
+  const nextAlias = () => `t${++aliasCounter}`;
+  const built = translatePredicateExpression(
+    options.expression,
+    {
+      dataSource: options.dataSource,
+      metaCache,
+      nextAlias,
+      bindings: {},
+      defaultBinding: { modelCtor: options.modelCtor, tableAlias: rootAlias },
+    },
+    params,
+  );
+  if (!built) {
+    params.length = start;
+    return { declineReason: 'unsupported-filter' };
+  }
+  if (built.joinCount > maxJoinCount) {
+    params.length = start;
+    return { declineReason: 'pushdown-join-count-exceeded' };
+  }
+
+  const whereParts = [baseWhereSql, built.sql].filter(Boolean) as string[];
+  const whereClause = whereParts.length
+    ? `WHERE ${whereParts.map((p) => `(${p})`).join(' AND ')}`
+    : '';
+
+  const sql = `SELECT COUNT(*) AS count FROM ${buildTableRef({
+    tableName: baseMetaRaw.tableName,
+    schema: baseMetaRaw.schema,
+    columnMap: baseMetaRaw.columnMap ?? {},
+  })} AS ${rootAlias} ${whereClause}`.trim();
+
+  return { sql, params };
 }
 
 function buildLambdaExistsClause(options: {

@@ -947,7 +947,7 @@ Run `npm test` to compile the TypeScript specs and execute the unit suite. Accep
 - [x] Opt-in `$search` with boolean operators (AND/OR/NOT), quoted phrases, per-field configuration, and guardrails
 - [x] Configurable CSDL namespace/container names and JSON CSDL output with enriched primitive facets
 - [x] Complex types, enum types, and referential constraints reflected in generated CSDL (XML & JSON)
-- [x] Capabilities annotations (filter functions, count/navigation restrictions, permissions, streams, insert/update/delete/search restrictions) to describe service behaviors to OData clients
+- [x] Capabilities annotations (filter functions/restrictions, count/navigation restrictions, permissions, streams, insert/update/delete/search restrictions) to describe service behaviors to OData clients
 - [x] Derived LoopBack models surface `$BaseType` so inheritance is reflected in the generated CSDL
 - [x] Deep insert support for `hasOne`/`hasMany` relations (opt-in per entity set, multi-level traversal)
 - [x] Navigation `$ref` endpoints for `hasOne`/`hasMany` relations (link/unlink existing entities)
@@ -963,7 +963,7 @@ GET /odata/Products?$search="coffee beans" AND grinder NOT decaf
 
 The example above matches products that include the phrase "coffee beans", also mention "grinder", and omit anything containing "decaf".
 
-String helpers such as `trim`/`concat` and date part functions (`month`, `day`, `hour`, `minute`, `second`) are processed automatically when `strict=false`. In strict mode these functions return `400 Bad Request` unless the backing connector provides native support.
+String helpers such as `trim`/`concat` and date part functions (`month`, `day`, `hour`, `minute`, `second`) are processed automatically when `strict=false`. In strict mode they are accepted only when the server can guarantee correct execution (for example via Postgres pushdown); otherwise they return `400 Bad Request`.
 
 ## Configuration
 
@@ -1022,6 +1022,144 @@ this.bind(ODATA_BINDINGS.CONFIG).to({
     });
   },
 } as ODataConfig);
+```
+
+### Capabilities presets (FilterFunctions)
+
+The service advertises supported `$filter` functions in `$metadata` via `Org.OData.Capabilities.V1.FilterFunctions`. To keep this aligned with the library’s implementation without maintaining long arrays, you can use a preset (no runtime connector auto-detection):
+
+- `filterFunctionsPreset: 'default'`: legacy/minimal set (matches previous default behavior)
+- `filterFunctionsPreset: 'postgres'`: Postgres-ready set aligned with implemented pushdowns (includes `trim`, `concat`, `month`, etc.)
+
+```ts
+import { ODATA_BINDINGS, ODataConfig, FILTER_FUNCTIONS_POSTGRES } from '@loopback/odata';
+
+const currentConfig = this.getSync(ODATA_BINDINGS.CONFIG) as ODataConfig;
+
+this.bind(ODATA_BINDINGS.CONFIG).to({
+  ...currentConfig,
+  capabilities: {
+    ...currentConfig.capabilities,
+    filterFunctionsPreset: 'postgres',
+  },
+} satisfies ODataConfig);
+
+// or explicitly:
+this.bind(ODATA_BINDINGS.CONFIG).to({
+  ...currentConfig,
+  capabilities: {
+    ...currentConfig.capabilities,
+    filterFunctions: FILTER_FUNCTIONS_POSTGRES,
+  },
+} satisfies ODataConfig);
+```
+
+> **Notes:** `FilterFunctions` only advertises `$filter` functions. Operators like `in (...)` are not represented there. Presets and lists are normalized (trimmed, lowercased, de-duplicated).
+
+### `$filter` not implemented (yet)
+
+This library focuses on a predictable subset of `$filter` that can be enforced in `strict=true` and pushed down efficiently on Postgres. If a client sends anything outside this subset, behavior is:
+
+- `strict=true`: rejected with `400 Bad Request`
+- `strict=false`: may still be rejected (or bounded post-filtered) depending on whether the expression can be evaluated safely
+
+### Supported `$filter` summary
+
+At a high level, the server supports:
+
+- Boolean logic: nested `and` / `or` / `not` with parentheses
+- Comparisons: `eq`/`ne`/`gt`/`ge`/`lt`/`le`, including `null`/`true`/`false`
+- Typed literals + model-aware coercion: `guid'...'`, `date'...'`, `datetimeoffset'...'`, `int64'...'` (and `123L`), `decimal'...'`
+- `in (...)`: parsed as `inq` with `capabilities.filter.maxInListItems` guardrail (null-safe)
+- String filtering: `contains`/`startswith`/`endswith`, and direct `tolower(...)`/`toupper(...)` comparisons (plus Postgres pushdown for supported patterns)
+- Date parts: `month/day/hour/minute/second` comparisons (Postgres pushdown)
+- Navigation paths:
+  - To-one chains (`belongsTo`/`hasOne`) ending in primitive fields are supported (Postgres pushdown when available; bounded fallback otherwise)
+  - To-many navigation filters are supported only via lambdas (`any`/`all`)
+- Lambdas (`any`/`all`): nested (depth capped), top-level `or` support, Postgres pushdown when enabled, and bounded fallback when pushdown declines
+
+For the exact set of supported `$filter` functions, rely on `$metadata` (`Org.OData.Capabilities.V1.FilterFunctions`) or the `filterFunctionsPreset` presets (`default` / `postgres`).
+
+### `$filter` examples
+
+Basic comparisons:
+
+```http
+GET /odata/Products?$filter=price ge 100 and active eq true
+```
+
+Typed literals (model-aware coercion):
+
+```http
+GET /odata/Orders?$filter=customerId eq guid'01234567-89ab-cdef-0123-456789abcdef'
+GET /odata/Orders?$filter=createdAt ge datetimeoffset'2026-01-03T10:20:30Z'
+```
+
+`in (...)` (null-safe; subject to `filter.maxInListItems`):
+
+```http
+GET /odata/Products?$filter=status in ('Open','Closed',null)
+```
+
+String filtering:
+
+```http
+GET /odata/Products?$filter=contains(name,'lap')
+GET /odata/Products?$filter=tolower(name) eq 'laptop'
+```
+
+To-one navigation path filters (Postgres pushdown when available; otherwise bounded fallback):
+
+```http
+GET /odata/Orders?$filter=customer/name eq 'Alice'&$top=50
+```
+
+To-many navigation filters via lambdas:
+
+```http
+GET /odata/Orders?$filter=items/any(i: i/quantity gt 0)
+GET /odata/Orders?$filter=items/all(i: i/cancelled eq false)
+```
+
+Notable `$filter` features that are currently **not** implemented:
+
+- Type functions: `cast(...)`, `isof(...)`
+- String functions: `replace(...)` (and most other string functions beyond what `$metadata` advertises)
+- Arithmetic expressions/operators in `$filter` (`add`, `sub`, `mul`, `div`, `mod`)
+- Spatial/geo functions (all `geo.*` and geography/geometry operators)
+- Enum flag operator `has`
+- Deep function composition (e.g. `replace(tolower(name), 'a', 'b') eq '...'`)
+- To-many navigation path filters outside lambdas (e.g. `items/quantity gt 0`); only lambda forms like `items/any(i: i/quantity gt 0)` are supported
+
+### Capabilities defaults (FilterRestrictions)
+
+The service also emits `Org.OData.Capabilities.V1.FilterRestrictions` per entity set. By default, it marks any **to-many** navigation properties (`hasMany` / `hasManyThrough`) as non-filterable (since the server rejects to-many navigation filters outside lambdas).
+
+You can add additional hints (or override booleans) via config:
+
+```ts
+this.bind(ODATA_BINDINGS.CONFIG).to({
+  ...currentConfig,
+  capabilities: {
+    ...currentConfig.capabilities,
+    filterRestrictions: {
+      requiresFilter: false,
+      nonFilterableProperties: ['internalFlag'],
+    },
+  },
+} satisfies ODataConfig);
+```
+
+For mixed datasources (or per-entity differences), prefer per-entity-set overrides:
+
+```ts
+import { FILTER_FUNCTIONS_POSTGRES, type EntitySetDef } from '@loopback/odata';
+
+export const PurchasesSet: EntitySetDef = {
+  name: 'Purchases',
+  modelCtor: Purchase,
+  capabilities: { filterFunctions: FILTER_FUNCTIONS_POSTGRES },
+};
 ```
 
 > **Important:** `capabilities` is a nested object. Flags such as `aggregation`, `applySupported`, or `filterFunctions` belong under `config.capabilities`. If you bind a brand-new config object without copying the defaults registered by `ODataComponent`, those flags disappear and features like `$apply` aggregations are reported as not implemented. Prefer `this.getSync(ODATA_BINDINGS.CONFIG)` and spread the existing value before applying overrides.
@@ -1186,7 +1324,7 @@ Any custom store only needs to implement the `TenantThrottleStore` interface (al
 - `lambda.pushdown`: Enables database pushdown for supported lambda filters (`'disabled' | 'postgres'`, default: `'disabled'`). When enabled and eligible, `any` translates to `EXISTS (...)` and `all` translates to `NOT EXISTS (... WHERE (predicate) IS NOT TRUE)` to preserve OData null semantics.
 - `lambda.pushdownStrict`: When `true`, rejects lambda queries that are not eligible for pushdown with `400 Bad Request` (default: `false`). When `false`, ineligible queries fall back to in-memory evaluation with guardrails.
 - Postgres lambda pushdown supports `hasManyThrough` (many-to-many) relations when the through model and FK metadata can be resolved; incomplete metadata declines with reason `through-relation-unsupported`.
-- Supported inside pushed-down lambda predicates: `contains/startswith/endswith` (with optional `tolower`/`toupper` wrappers) and `length(field) <op> N`.
+- Supported inside pushed-down lambda predicates: `contains/startswith/endswith` (with optional `tolower`/`toupper` wrappers), `length(field) <op> N`, and direct `tolower(field) eq|ne <string|null>` / `toupper(field) eq|ne <string|null>` comparisons. Note: `LOWER(col)` / `UPPER(col)` can bypass normal btree indexes; consider functional indexes (e.g. `CREATE INDEX ... ON ... (lower(col))`) or `citext` where appropriate.
 - `lambda.pushdownMaxExistsDepth`: Maximum allowed lambda nesting depth (default: `2`). Requests exceeding the limit return `400 Bad Request`.
 - `lambda.pushdownMaxJoinCount`: Maximum number of joins allowed in Postgres lambda pushdown SQL (default: `8`). If exceeded, pushdown is declined (or rejected in strict mode).
 - `strict` (default: true): Enables stricter validations and policies:
@@ -2036,8 +2174,7 @@ Telemetry respects LoopBack’s logging pipeline—you can forward the enriched 
 - [ ] Draft workflow for deep updates
 - [ ] Additional `$apply` pushdown adapters (MSSQL, Mongo aggregation)
 - [ ] Deep update / draft handling for composition hierarchies
-- [x] Opt-in cascade delete for composition-style relations (hook/transaction-aware)
-- [ ] Richer lambda grammar/pushdown coverage (deeper nesting, broader function support, and remaining boolean/operator edge cases)
+- [ ] Lambda long-tail: lift current caps and cover remaining boolean/operator/function edge cases (beyond the current supported subset)
 - [ ] Virtual/calculated field exposure with CSDL annotations
 
 ## Contributing

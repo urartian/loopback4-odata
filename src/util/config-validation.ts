@@ -5,6 +5,7 @@ import {
   ODataCompositionEnforcement,
   ODataCompositionDeletePolicy,
   ODataCorrelationConfig,
+  ODataFilterConfig,
   ODataLambdaConfig,
   ODataPaginationConfig,
   ODataTelemetryCategory,
@@ -12,7 +13,9 @@ import {
   ODataTelemetryLevel,
   ODataTenantQuotaConfig,
   ODataWriteTransactionsConfig,
+  ODataCapabilitiesConfig,
 } from '../types';
+import { normalizeFilterFunctionsList, validateFilterFunctionsPreset } from './filter-functions';
 
 const validatedConfigs = new WeakSet<ODataConfig>();
 const TELEMETRY_LEVELS: ReadonlySet<ODataTelemetryLevel> = new Set([
@@ -50,11 +53,17 @@ export function validateODataConfig(config: ODataConfig): void {
     throw new Error('ODataConfig.tokenSecret must be configured.');
   }
   config.tokenSecret = config.tokenSecret.trim();
+  if (config.capabilities) {
+    validateCapabilitiesConfig('ODataConfig.capabilities', config.capabilities);
+  }
   if (config.pagination) {
     validatePaginationLimits('ODataConfig.pagination', config.pagination);
   }
   if (config.lambda) {
     validateLambdaConfig('ODataConfig.lambda', config.lambda);
+  }
+  if (config.filter) {
+    validateFilterConfig('ODataConfig.filter', config.filter);
   }
   assignPositive(config as AnyObject, 'pageSize');
   assignPositive(config as AnyObject, 'maxTop');
@@ -99,6 +108,70 @@ export function validateODataConfig(config: ODataConfig): void {
   }
 }
 
+export function validateCapabilitiesConfig(
+  label: string,
+  capabilities?: ODataCapabilitiesConfig,
+): void {
+  if (!capabilities) return;
+  const target = capabilities as AnyObject;
+  if ('filterFunctionsPreset' in target) {
+    const normalized = validateFilterFunctionsPreset(
+      target.filterFunctionsPreset,
+      `${label}.filterFunctionsPreset`,
+    );
+    if (normalized !== undefined) {
+      target.filterFunctionsPreset = normalized;
+    }
+  }
+  if ('filterFunctions' in target) {
+    const normalized = normalizeFilterFunctionsList(
+      target.filterFunctions,
+      `${label}.filterFunctions`,
+    );
+    if (normalized !== undefined) {
+      target.filterFunctions = normalized;
+    }
+  }
+
+  if ('filterRestrictions' in target) {
+    const value = target.filterRestrictions;
+    if (value !== undefined && value !== null) {
+      if (typeof value !== 'object' || Array.isArray(value)) {
+        throw new Error(`${label}.filterRestrictions must be an object.`);
+      }
+      const fr = value as AnyObject;
+      if ('filterable' in fr) {
+        const normalized = normalizeBoolean(
+          fr.filterable,
+          `${label}.filterRestrictions.filterable`,
+        );
+        if (normalized !== undefined) fr.filterable = normalized;
+      }
+      if ('requiresFilter' in fr) {
+        const normalized = normalizeBoolean(
+          fr.requiresFilter,
+          `${label}.filterRestrictions.requiresFilter`,
+        );
+        if (normalized !== undefined) fr.requiresFilter = normalized;
+      }
+      if ('nonFilterableProperties' in fr) {
+        const normalized = normalizeStringArray(
+          fr.nonFilterableProperties,
+          `${label}.filterRestrictions.nonFilterableProperties`,
+        );
+        if (normalized !== undefined) fr.nonFilterableProperties = normalized;
+      }
+      if ('nonFilterableNavigationProperties' in fr) {
+        const normalized = normalizeStringArray(
+          fr.nonFilterableNavigationProperties,
+          `${label}.filterRestrictions.nonFilterableNavigationProperties`,
+        );
+        if (normalized !== undefined) fr.nonFilterableNavigationProperties = normalized;
+      }
+    }
+  }
+}
+
 export function validatePaginationLimits(label: string, pagination?: ODataPaginationConfig): void {
   if (!pagination) return;
   const target = pagination as AnyObject;
@@ -120,6 +193,23 @@ export function validateLambdaConfig(label: string, lambda?: ODataLambdaConfig):
       if (value !== 'disabled' && value !== 'postgres') {
         throw new Error(`${label}.pushdown must be "disabled" or "postgres".`);
       }
+    }
+  }
+}
+
+export function validateFilterConfig(label: string, filter?: ODataFilterConfig): void {
+  if (!filter) return;
+  const target = filter as AnyObject;
+  assignPositive(target, 'maxInListItems', label);
+  assignPositive(target, 'pushdownMaxJoinCount', label);
+  assignPositive(target, 'maxPostFilterScanRows', label);
+  if ('requireTopWhenPostFilter' in target) {
+    const normalized = normalizeBoolean(
+      target.requireTopWhenPostFilter,
+      `${label}.requireTopWhenPostFilter`,
+    );
+    if (normalized !== undefined) {
+      target.requireTopWhenPostFilter = normalized;
     }
   }
 }
@@ -319,6 +409,17 @@ function normalizeBoolean(value: unknown, label: string): boolean | undefined {
     if (normalized === 'false') return false;
   }
   throw new Error(`${label} must be a boolean.`);
+}
+
+function normalizeStringArray(value: unknown, label: string): string[] | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (!Array.isArray(value)) {
+    throw new Error(`${label} must be an array.`);
+  }
+  const normalized = value
+    .map((item) => (typeof item === 'string' ? item.trim() : ''))
+    .filter((item) => Boolean(item));
+  return Array.from(new Set(normalized));
 }
 
 function validateTenantQuotas(label: string, quotas: ODataTenantQuotaConfig): void {
