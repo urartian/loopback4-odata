@@ -546,6 +546,61 @@ this.bind(ODATA_BINDINGS.CONFIG).to({
 } as ODataConfig);
 ```
 
+### Handling Large Integer Types (BigInt/Int64)
+
+When working with large integer types like `bigint` in PostgreSQL or `int64` in OData, special care must be taken to avoid JavaScript's number precision limitations. JavaScript's `Number.MAX_SAFE_INTEGER` is `9007199254740991`, which is smaller than the maximum value for 64-bit integers (`9223372036854775807`).
+
+To properly handle large integers without precision loss:
+
+1. **Define the property as a string type with proper format specification:**
+
+```ts
+@property({
+  type: 'string',  // Use string type to preserve precision
+  jsonSchema: {
+    type: 'string',
+    format: 'int64',
+    dataType: 'int64'
+  },
+  postgresql: {
+    dataType: 'bigint'  // Still maps to bigint in the database
+  }
+})
+sequence?: string;  // Use string type in the application layer
+```
+
+2. **Avoid using `type: 'number'` for properties that might exceed `Number.MAX_SAFE_INTEGER`:**
+
+❌ **Incorrect:**
+
+```ts
+@property({
+  type: 'number',  // This can cause precision loss for large values
+  postgresql: {
+    dataType: 'bigint'
+  }
+})
+sequence?: number;
+```
+
+✅ **Correct:**
+
+```ts
+@property({
+  type: 'string',  // Preserves precision
+  jsonSchema: {
+    type: 'string',
+    format: 'int64'  // Tells OData to treat as int64
+  },
+  postgresql: {
+    dataType: 'bigint'  // Maps to bigint in database
+  }
+})
+sequence?: string;
+```
+
+This approach ensures that large integer values maintain their precision throughout the application layer while still being stored as the appropriate database type. The OData extension will properly handle `int64'9223372036854775807'` literals without precision loss when the property is defined as a string with the proper format specification.
+
 ### Key normalization
 
 Incoming URLs are normalized by a path-rewriter middleware so `/odata/Products(42)` becomes `/odata/Products/42` before routing. Key expressions are parsed strictly, escaped (including quotes and GUID prefixes), and capped at 4 KB; malformed or oversized segments are left untouched, which means the request proceeds with the original path and the framework responds with the usual 404/400.

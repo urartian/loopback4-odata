@@ -5366,19 +5366,27 @@ export function defineODataCrudController(def: EntitySetDef) {
           return normalized;
         }
         case 'int64': {
+          // Always treat int64 values as strings to avoid precision loss
+          // If value is already a number, it may have lost precision, so we should reject it
           if (typeof value === 'number') {
+            // Check if the number is safe for int64 range
             if (
               !Number.isFinite(value) ||
               !Number.isSafeInteger(value) ||
-              !Number.isInteger(value)
+              !Number.isInteger(value) ||
+              value < Number.MIN_SAFE_INTEGER ||
+              value > Number.MAX_SAFE_INTEGER
             ) {
               throw this.badRequestWithCode(
-                `Invalid Int64 literal for ${field}.`,
+                `Invalid Int64 literal for ${field}. Value may have lost precision.`,
                 ODataErrorCodes.InvalidInt64Literal,
               );
             }
+            // Convert safe integer to string
             return value.toFixed(0);
           }
+
+          // For string values, parse as int64 literal
           const normalized = parseInt64StringLiteral(String(value));
           if (!normalized) {
             throw this.badRequestWithCode(
@@ -10940,6 +10948,108 @@ export function defineODataCrudController(def: EntitySetDef) {
         const serialized = this.serializePrimitiveValue(rawValue, primitiveKind);
         this.response.type(serialized.contentType);
         this.response.send(serialized.body);
+        ctx.result = rawValue;
+        return rawValue;
+      };
+
+      const result = await execDefault();
+      ctx.result = result;
+      if (!this.response.headersSent) {
+        await this.runAfter(op, scope, ctx);
+      }
+      return ctx.result as unknown;
+    }
+
+    @get(
+      `/odata/${setName}/{id}/{property}`,
+      withODataSpecMetadata(
+        {
+          responses: {
+            '200': {
+              description: `Property value for ${setName}`,
+              content: {
+                'application/json': {
+                  schema: {
+                    type: 'object',
+                    required: ['@odata.context'],
+                    properties: {
+                      '@odata.context': { type: 'string' },
+                      value: {},
+                    },
+                  },
+                },
+              },
+            },
+            '204': { description: 'Property is null.' },
+          },
+        },
+        operationVisibility,
+      ),
+    )
+    async getEntityProperty(@idParam id: unknown, @param.path.string('property') property: string) {
+      const propertyName = property;
+      if (!propertyName) {
+        throw new HttpErrors.BadRequest('Property name is required.');
+      }
+      if (modelRelations && Object.prototype.hasOwnProperty.call(modelRelations, propertyName)) {
+        throw new HttpErrors.NotFound('Property does not expose a scalar value.');
+      }
+      const definition = modelDefinition?.properties?.[propertyName] as
+        | PropertyDefinition
+        | undefined;
+      if (!definition) {
+        throw new HttpErrors.NotFound('Property not found.');
+      }
+      const primitiveKind = classifyPrimitiveProperty(definition);
+      if (!primitiveKind) {
+        throw new HttpErrors.NotFound('Property does not expose a scalar value.');
+      }
+
+      const baseFilter: Filter<CrudEntity> = {
+        fields: { [propertyName]: true },
+      };
+      this.ensureEtagField(baseFilter);
+
+      const entityId = this.coerceParentId(id);
+      const op: CrudOperation = 'READ';
+      const scope: CrudScope = 'entity';
+      const ctx = this.buildHookContext({
+        operation: op,
+        scope,
+        id: entityId,
+        filter: baseFilter as any,
+        options: this.repositoryOptions(),
+      });
+      await this.enforceTenantLimit(op, scope);
+      await this.runBefore(op, scope, ctx);
+
+      const execDefault = async () => {
+        const options = this.repositoryOptions();
+        const entity = await this.repository.findById(entityId as any, baseFilter, options);
+        const plain = this.toPlainEntity(entity) ?? {};
+
+        const rawValue = (plain as AnyObject)[propertyName];
+        this.ensureODataHeaders();
+
+        if (rawValue === null || rawValue === undefined) {
+          this.response.status(204).end();
+          return undefined;
+        }
+
+        // Build OData context URL for the property
+        const contextUrl = `${contextBase}/${propertyName}`;
+        const responsePayload = {
+          '@odata.context': contextUrl,
+          value: rawValue,
+        };
+
+        // Add etag if available
+        const etag = this.computeEtagFromPlain(plain);
+        if (etag) {
+          this.response.set('ETag', encodeEtagToken(etag));
+        }
+
+        this.response.json(responsePayload);
         ctx.result = rawValue;
         return rawValue;
       };

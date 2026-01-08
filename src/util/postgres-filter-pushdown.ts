@@ -515,9 +515,23 @@ function translateRootStringFunction(
     if (expr.args.length < 2) return undefined;
     const parts: string[] = [];
     for (const arg of expr.args) {
-      const resolved = resolveArg(arg);
-      if (!resolved) return undefined;
-      parts.push(resolved);
+      // For concat function, handle literals differently to avoid parameter type issues in PostgreSQL
+      if (arg.kind === 'literal') {
+        // Use parameter placeholder but cast to text to avoid type ambiguity in PostgreSQL
+        const paramPlaceholder = placeholder(options.params, arg.value);
+        parts.push(`${paramPlaceholder}::TEXT`);
+      } else {
+        const name = arg.name;
+        if (typeof name !== 'string' || name.includes('/')) return undefined;
+        const column = resolveColumn(
+          options.modelCtor,
+          name,
+          options.dataSource,
+          options.metaCache,
+        );
+        if (!column) return undefined;
+        parts.push(`${options.tableAlias}.${column}`);
+      }
     }
     const op = expr.comparator === 'eq' ? '=' : '<>';
     return {
