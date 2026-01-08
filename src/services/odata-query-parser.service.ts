@@ -9,6 +9,7 @@ import {
 import { HttpErrors } from '@loopback/rest';
 import { escapeLikeLiteral } from '../util/like-escaping';
 import { ODataErrorCodes } from '../odata-error-codes';
+import { unwrapODataTypedLiteral } from '../util/odata-literals';
 
 const comparisonOperators: Record<string, string> = {
   eq: 'eq',
@@ -1096,6 +1097,28 @@ function tryParseLambda(
 
 function parseLiteral(token: string): unknown {
   if (!token) return token;
+
+  // Handle OData typed literals like guid'...', datetimeoffset'...', etc.
+  if (/^(datetimeoffset|date|guid|decimal|int64)'/i.test(token) && token.endsWith("'")) {
+    const lower = token.toLowerCase();
+    if (lower.startsWith("guid'")) {
+      const guidValue = unwrapODataTypedLiteral(token, 'guid');
+      if (guidValue !== undefined) return guidValue;
+    } else if (lower.startsWith("datetimeoffset'")) {
+      const dtValue = unwrapODataTypedLiteral(token, 'datetimeoffset');
+      if (dtValue !== undefined) return dtValue;
+    } else if (lower.startsWith("date'")) {
+      const dateValue = unwrapODataTypedLiteral(token, 'date');
+      if (dateValue !== undefined) return dateValue;
+    } else if (lower.startsWith("decimal'")) {
+      const decimalValue = unwrapODataTypedLiteral(token, 'decimal');
+      if (decimalValue !== undefined) return decimalValue;
+    } else if (lower.startsWith("int64'")) {
+      const int64Value = unwrapODataTypedLiteral(token, 'int64');
+      if (int64Value !== undefined) return int64Value;
+    }
+    // If unwrapODataTypedLiteral returns undefined, fall through to return the original token
+  }
 
   if (token.startsWith("'") && token.endsWith("'")) {
     const inner = token.slice(1, -1);
