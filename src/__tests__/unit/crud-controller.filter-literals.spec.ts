@@ -217,6 +217,23 @@ describe('CRUD controller $filter typed literal coercion', () => {
     expect(captured.where.recordNo).to.equal('12345678901234567890');
   });
 
+  it('handles maximum int64 value correctly without precision loss', async () => {
+    let captured: any;
+    const controller = createController(
+      { $filter: "recordNo eq int64'9223372036854775807'" },
+      {
+        find: async (filter: any) => {
+          captured = filter;
+          return [];
+        },
+        count: async () => ({ count: 0 }),
+      },
+    );
+
+    await controller.list();
+    expect(captured.where.recordNo).to.equal('9223372036854775807');
+  });
+
   it("supports decimal'...' wrappers for Decimal literals", async () => {
     let captured: any;
     const controller = createController(

@@ -5366,19 +5366,27 @@ export function defineODataCrudController(def: EntitySetDef) {
           return normalized;
         }
         case 'int64': {
+          // Always treat int64 values as strings to avoid precision loss
+          // If value is already a number, it may have lost precision, so we should reject it
           if (typeof value === 'number') {
+            // Check if the number is safe for int64 range
             if (
               !Number.isFinite(value) ||
               !Number.isSafeInteger(value) ||
-              !Number.isInteger(value)
+              !Number.isInteger(value) ||
+              value < Number.MIN_SAFE_INTEGER ||
+              value > Number.MAX_SAFE_INTEGER
             ) {
               throw this.badRequestWithCode(
-                `Invalid Int64 literal for ${field}.`,
+                `Invalid Int64 literal for ${field}. Value may have lost precision.`,
                 ODataErrorCodes.InvalidInt64Literal,
               );
             }
+            // Convert safe integer to string
             return value.toFixed(0);
           }
+
+          // For string values, parse as int64 literal
           const normalized = parseInt64StringLiteral(String(value));
           if (!normalized) {
             throw this.badRequestWithCode(
