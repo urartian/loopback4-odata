@@ -441,13 +441,33 @@ function translatePredicateExpression(
       }
       if (expr.name === 'concat') {
         if (expr.args.length < 2) return undefined;
-        const argsSql = expr.args.map(resolveArg);
-        if (argsSql.some((item) => !item)) return undefined;
+
+        const parts: string[] = [];
+        for (const arg of expr.args) {
+          // For concat function, handle literals differently to avoid parameter type issues in PostgreSQL
+          if (arg.kind === 'literal') {
+            // Use parameter placeholder but cast to text to avoid type ambiguity in PostgreSQL
+            const paramPlaceholder = placeholder(params, arg.value);
+            parts.push(`${paramPlaceholder}::TEXT`);
+          } else {
+            const resolved = resolvePredicateField(arg.name, ctx);
+            if (!resolved) return undefined;
+            if (arg.transform === 'tolower') {
+              parts.push(`LOWER(${resolved.sql})`);
+            } else if (arg.transform === 'toupper') {
+              parts.push(`UPPER(${resolved.sql})`);
+            } else {
+              parts.push(resolved.sql);
+            }
+          }
+        }
+
+        if (parts.some((item) => !item)) return undefined;
         const comparator =
           expr.comparator === 'eq' ? '=' : expr.comparator === 'neq' ? '<>' : undefined;
         if (!comparator) return undefined;
         return {
-          sql: `concat(${(argsSql as string[]).join(', ')}) ${comparator} ${placeholder(params, value)}`,
+          sql: `concat(${parts.join(', ')}) ${comparator} ${placeholder(params, value)}`,
           joinCount: 0,
         };
       }
