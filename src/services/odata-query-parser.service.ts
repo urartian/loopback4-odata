@@ -1747,7 +1747,7 @@ function buildWhere(expr: ParsedExpression, options?: ParseOptions): Where<AnyOb
   if (expr.operator === 'indexofcmp') {
     const { field, comparator, value, needle } = expr;
     assertSafeFilterFieldName(field, options);
-    if ((comparator === 'gte' && value >= 0) || (comparator === 'gt' && value > -1)) {
+    if ((comparator === 'gte' && value >= 0) || (comparator === 'gt' && value >= -1)) {
       const lit = escapeLikeLiteral(needle);
       return { [field]: { like: `%${lit}%`, options: 'i' } } as Where<AnyObject>;
     }
