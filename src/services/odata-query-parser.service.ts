@@ -1791,32 +1791,76 @@ function buildWhere(expr: ParsedExpression, options?: ParseOptions): Where<AnyOb
     const { name, field, comparator, value } = expr;
     assertSafeFilterFieldName(field, options);
     if (name === 'year') {
-      if (comparator !== 'eq') {
-        throw new Error('year() only supports eq comparator');
-      }
       const start = new Date(Date.UTC(value, 0, 1, 0, 0, 0, 0));
       const end = new Date(Date.UTC(value + 1, 0, 1, 0, 0, 0, 0));
-      return {
-        and: [{ [field]: { gte: start } }, { [field]: { lt: end } }],
-      } as Where<AnyObject>;
+      if (comparator === 'eq') {
+        return {
+          and: [{ [field]: { gte: start } }, { [field]: { lt: end } }],
+        } as Where<AnyObject>;
+      } else if (comparator === 'gte') {
+        return { [field]: { gte: start } } as Where<AnyObject>;
+      } else if (comparator === 'gt') {
+        return { [field]: { gte: end } } as Where<AnyObject>;
+      } else if (comparator === 'lte') {
+        return { [field]: { lt: end } } as Where<AnyObject>;
+      } else if (comparator === 'lt') {
+        return { [field]: { lt: start } } as Where<AnyObject>;
+      } else {
+        throw new Error(`year() does not support comparator: ${comparator}`);
+      }
     }
     if (name === 'floor') {
-      if (comparator !== 'eq') throw new Error('floor() only supports eq comparator');
-      return {
-        and: [{ [field]: { gte: value } }, { [field]: { lt: value + 1 } }],
-      } as Where<AnyObject>;
+      if (comparator === 'eq') {
+        return {
+          and: [{ [field]: { gte: value } }, { [field]: { lt: value + 1 } }],
+        } as Where<AnyObject>;
+      } else if (comparator === 'gte') {
+        return { [field]: { gte: value } } as Where<AnyObject>;
+      } else if (comparator === 'gt') {
+        return { [field]: { gte: value + 1 } } as Where<AnyObject>;
+      } else if (comparator === 'lte') {
+        return { [field]: { lt: value + 1 } } as Where<AnyObject>;
+      } else if (comparator === 'lt') {
+        return { [field]: { lt: value } } as Where<AnyObject>;
+      } else {
+        throw new Error(`floor() does not support comparator: ${comparator}`);
+      }
     }
     if (name === 'ceiling') {
-      if (comparator !== 'eq') throw new Error('ceiling() only supports eq comparator');
-      return {
-        and: [{ [field]: { gt: value - 1 } }, { [field]: { le: value } }],
-      } as Where<AnyObject>;
+      if (comparator === 'eq') {
+        return {
+          and: [{ [field]: { gt: value - 1 } }, { [field]: { le: value } }],
+        } as Where<AnyObject>;
+      } else if (comparator === 'gte') {
+        return { [field]: { gt: value - 1 } } as Where<AnyObject>;
+      } else if (comparator === 'gt') {
+        return { [field]: { gte: value } } as Where<AnyObject>;
+      } else if (comparator === 'lte') {
+        return { [field]: { lt: value + 1 } } as Where<AnyObject>;
+      } else if (comparator === 'lt') {
+        return { [field]: { lt: value } } as Where<AnyObject>;
+      } else {
+        throw new Error(`ceiling() does not support comparator: ${comparator}`);
+      }
     }
     if (name === 'round') {
-      if (comparator !== 'eq') throw new Error('round() only supports eq comparator');
       const lower = value - 0.5;
       const upper = value + 0.5;
-      return { and: [{ [field]: { gte: lower } }, { [field]: { lt: upper } }] } as Where<AnyObject>;
+      if (comparator === 'eq') {
+        return {
+          and: [{ [field]: { gte: lower } }, { [field]: { lt: upper } }],
+        } as Where<AnyObject>;
+      } else if (comparator === 'gte') {
+        return { [field]: { gte: lower } } as Where<AnyObject>;
+      } else if (comparator === 'gt') {
+        return { [field]: { gte: upper } } as Where<AnyObject>;
+      } else if (comparator === 'lte') {
+        return { [field]: { lt: upper } } as Where<AnyObject>;
+      } else if (comparator === 'lt') {
+        return { [field]: { lt: lower } } as Where<AnyObject>;
+      } else {
+        throw new Error(`round() does not support comparator: ${comparator}`);
+      }
     }
   }
 
