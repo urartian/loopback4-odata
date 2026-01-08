@@ -46,6 +46,7 @@ export function emitTelemetryEvent(
     telemetryEvent: options.event,
     telemetryCategory: options.category,
     correlationId: state?.correlationId,
+    tenantId: state?.tenantId,
     sampled: telemetry.sampled,
   };
   const context = {

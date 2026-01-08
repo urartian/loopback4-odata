@@ -11,6 +11,7 @@ import {
   LambdaExpression,
   ParsedExpression,
 } from '../services/odata-query-parser.service';
+import { ODataErrorCodes } from '../odata-error-codes';
 
 export interface LambdaPushdownBuildResult {
   sql: string;
@@ -440,13 +441,33 @@ function translatePredicateExpression(
       }
       if (expr.name === 'concat') {
         if (expr.args.length < 2) return undefined;
-        const argsSql = expr.args.map(resolveArg);
-        if (argsSql.some((item) => !item)) return undefined;
+
+        const parts: string[] = [];
+        for (const arg of expr.args) {
+          // For concat function, handle literals differently to avoid parameter type issues in PostgreSQL
+          if (arg.kind === 'literal') {
+            // Use parameter placeholder but cast to text to avoid type ambiguity in PostgreSQL
+            const paramPlaceholder = placeholder(params, arg.value);
+            parts.push(`${paramPlaceholder}::TEXT`);
+          } else {
+            const resolved = resolvePredicateField(arg.name, ctx);
+            if (!resolved) return undefined;
+            if (arg.transform === 'tolower') {
+              parts.push(`LOWER(${resolved.sql})`);
+            } else if (arg.transform === 'toupper') {
+              parts.push(`UPPER(${resolved.sql})`);
+            } else {
+              parts.push(resolved.sql);
+            }
+          }
+        }
+
+        if (parts.some((item) => !item)) return undefined;
         const comparator =
           expr.comparator === 'eq' ? '=' : expr.comparator === 'neq' ? '<>' : undefined;
         if (!comparator) return undefined;
         return {
-          sql: `concat(${(argsSql as string[]).join(', ')}) ${comparator} ${placeholder(params, value)}`,
+          sql: `concat(${parts.join(', ')}) ${comparator} ${placeholder(params, value)}`,
           joinCount: 0,
         };
       }
@@ -646,7 +667,7 @@ export function buildPostgresFilterIdQuery(options: {
   }
   if (built.joinCount > maxJoinCount) {
     params.length = start;
-    return { declineReason: 'pushdown-join-count-exceeded' };
+    return { declineReason: ODataErrorCodes.PushdownJoinCountExceeded };
   }
 
   const whereParts = [baseWhereSql, built.sql].filter(Boolean) as string[];
@@ -745,7 +766,7 @@ export function buildPostgresFilterCountQuery(options: {
   }
   if (built.joinCount > maxJoinCount) {
     params.length = start;
-    return { declineReason: 'pushdown-join-count-exceeded' };
+    return { declineReason: ODataErrorCodes.PushdownJoinCountExceeded };
   }
 
   const whereParts = [baseWhereSql, built.sql].filter(Boolean) as string[];
@@ -1068,7 +1089,7 @@ export function buildPostgresLambdaIdQuery(
     joinCount += built.joinCount;
     if (joinCount > maxJoinCount) {
       params.length = start;
-      return { declineReason: 'pushdown-join-count-exceeded' };
+      return { declineReason: ODataErrorCodes.PushdownJoinCountExceeded };
     }
     predicateClauses.push(built.sql);
   } else {
@@ -1106,7 +1127,7 @@ export function buildPostgresLambdaIdQuery(
       joinCount += clause.joinCount;
       if (joinCount > maxJoinCount) {
         params.length = start;
-        return { declineReason: 'pushdown-join-count-exceeded' };
+        return { declineReason: ODataErrorCodes.PushdownJoinCountExceeded };
       }
       predicateClauses.push(clause.sql);
     }
@@ -1247,7 +1268,7 @@ export function buildPostgresLambdaCountQuery(
     joinCount += built.joinCount;
     if (joinCount > maxJoinCount) {
       params.length = start;
-      return { declineReason: 'pushdown-join-count-exceeded' };
+      return { declineReason: ODataErrorCodes.PushdownJoinCountExceeded };
     }
     predicateClauses.push(built.sql);
   } else {
@@ -1285,7 +1306,7 @@ export function buildPostgresLambdaCountQuery(
       joinCount += clause.joinCount;
       if (joinCount > maxJoinCount) {
         params.length = start;
-        return { declineReason: 'pushdown-join-count-exceeded' };
+        return { declineReason: ODataErrorCodes.PushdownJoinCountExceeded };
       }
       predicateClauses.push(clause.sql);
     }

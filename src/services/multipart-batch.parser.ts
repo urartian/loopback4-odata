@@ -1,6 +1,7 @@
 import { Readable } from 'stream';
 import { HttpErrors } from '@loopback/rest';
 import { BufferQueue } from '../util/buffer-queue';
+import { ODataErrorCodes } from '../odata-error-codes';
 
 export interface ParsedBatch {
   requests: ParsedBatchRequest[];
@@ -77,7 +78,11 @@ class ParserContext {
       this.signal(
         `Operation count ${this.totalOperations} exceeds maxOperations=${maxOperations}.`,
       );
-      throw new HttpErrors.BadRequest('Batch payload exceeds the configured operation limit.');
+      const err = new HttpErrors.BadRequest(
+        'Batch payload exceeds the configured operation limit.',
+      );
+      (err as any).code = ODataErrorCodes.BatchOperationLimitExceeded;
+      throw err;
     }
 
     if (
@@ -90,7 +95,9 @@ class ParserContext {
       this.signal(
         `Changeset ${changesetId} contains ${positionInChangeset} operations which exceeds maxChangesetOperations=${maxChangesetOperations}.`,
       );
-      throw new HttpErrors.BadRequest('Changeset exceeds the configured operation limit.');
+      const err = new HttpErrors.BadRequest('Changeset exceeds the configured operation limit.');
+      (err as any).code = ODataErrorCodes.ChangesetOperationLimitExceeded;
+      throw err;
     }
   }
 
@@ -98,7 +105,11 @@ class ParserContext {
     const { maxPayloadBytes } = this.limits;
     if (maxPayloadBytes && maxPayloadBytes > 0 && totalBytes > maxPayloadBytes) {
       this.signal(`Payload size ${totalBytes} bytes exceeds maxPayloadBytes=${maxPayloadBytes}.`);
-      throw new HttpErrors.PayloadTooLarge('Batch payload exceeds the configured size limit.');
+      const err = new HttpErrors.PayloadTooLarge(
+        'Batch payload exceeds the configured size limit.',
+      );
+      (err as any).code = ODataErrorCodes.BatchPayloadSizeLimitExceeded;
+      throw err;
     }
   }
 
@@ -106,7 +117,11 @@ class ParserContext {
     const { maxDepth } = this.limits;
     if (maxDepth && maxDepth > 0 && nextDepth >= maxDepth) {
       this.signal(`Multipart nesting depth ${nextDepth} exceeds maxDepth=${maxDepth}.`);
-      throw new HttpErrors.BadRequest('Changeset nesting depth exceeds the configured limit.');
+      const err = new HttpErrors.BadRequest(
+        'Changeset nesting depth exceeds the configured limit.',
+      );
+      (err as any).code = ODataErrorCodes.BatchDepthLimitExceeded;
+      throw err;
     }
   }
 
@@ -114,7 +129,9 @@ class ParserContext {
     const { maxPartBodyBytes } = this.limits;
     if (maxPartBodyBytes && maxPartBodyBytes > 0 && size > maxPartBodyBytes) {
       this.signal(`Part body size ${size} bytes exceeds maxPartBodyBytes=${maxPartBodyBytes}.`);
-      throw new HttpErrors.PayloadTooLarge('Batch part exceeds the configured size limit.');
+      const err = new HttpErrors.PayloadTooLarge('Batch part exceeds the configured size limit.');
+      (err as any).code = ODataErrorCodes.BatchPartSizeLimitExceeded;
+      throw err;
     }
   }
 

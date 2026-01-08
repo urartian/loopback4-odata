@@ -70,6 +70,12 @@ function createRequestContextStub() {
   } as any;
 }
 
+function createRequestContextStubWithState(state: any) {
+  return {
+    getSync: () => state,
+  } as any;
+}
+
 const responseStub = {
   contentType: () => undefined,
   set: () => undefined,
@@ -123,6 +129,26 @@ function createControllerWithRegistry(
 }
 
 describe('$batch controller', () => {
+  it('injects correlation header into subrequests', async () => {
+    const correlationId = 'cid-123';
+    const controller = new ODataBatchController(
+      { handleRequest: async () => undefined } as any,
+      'http://localhost',
+      createRequestContextStubWithState({ correlationId }),
+      { get: async () => undefined } as any,
+      { findByName: () => undefined } as any,
+      noopLogger,
+      defaultConfig,
+    );
+
+    const headers = (controller as any).buildHeadersForRequest(
+      { id: '1', method: 'GET', url: '/odata/Orders' },
+      requestStub('application/json', { headers: { host: 'example.test' } }),
+    ) as Record<string, string>;
+
+    assert.equal(headers['x-correlation-id'], correlationId);
+  });
+
   it('returns batched responses in order', async () => {
     const controller = createController({
       '1': { status: 200, body: { value: [{ id: 1 }] } },

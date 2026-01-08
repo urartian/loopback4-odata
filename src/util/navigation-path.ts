@@ -1,6 +1,7 @@
 import { AnyObject, Entity, ModelDefinition, buildModelDefinition } from '@loopback/repository';
 import { ensureNavigationTargetKey } from './relation-metadata';
 import { isEntityCtor } from './model-helpers';
+import { ODataErrorCodes } from '../odata-error-codes';
 
 type RelationMeta = AnyObject & {
   name?: string;
@@ -75,12 +76,13 @@ export function resolveNavigationPath(
       if (!allowThrough) {
         throw new NavigationPathError(
           `Navigation path "${path}" references relation "${segment}" using hasManyThrough, which is not supported for pushdown.`,
+          ODataErrorCodes.ThroughRelationUnsupported,
         );
       }
       if (usedThrough) {
         throw new NavigationPathError(
           `Navigation path "${path}" references multiple hasManyThrough segments, which is not supported.`,
-          'through-relation-unsupported',
+          ODataErrorCodes.ThroughRelationUnsupported,
         );
       }
       const targetModel = resolveRelationTarget(relationMeta);
@@ -88,14 +90,14 @@ export function resolveNavigationPath(
       if (!through) {
         throw new NavigationPathError(
           `Navigation path "${path}" cannot resolve hasManyThrough metadata for relation "${segment}".`,
-          'through-relation-unsupported',
+          ODataErrorCodes.ThroughRelationUnsupported,
         );
       }
       const sourceDefinition = getModelDefinition(currentModel);
       if (!sourceDefinition) {
         throw new NavigationPathError(
           'Missing model definition while resolving navigation path.',
-          'through-relation-unsupported',
+          ODataErrorCodes.ThroughRelationUnsupported,
         );
       }
       const sourceId = getPrimaryKey(sourceDefinition);
@@ -113,7 +115,7 @@ export function resolveNavigationPath(
       if (!targetDefinition) {
         throw new NavigationPathError(
           'Missing model definition while resolving navigation path.',
-          'through-relation-unsupported',
+          ODataErrorCodes.ThroughRelationUnsupported,
         );
       }
       const targetId = getPrimaryKey(targetDefinition);

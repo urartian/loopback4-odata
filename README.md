@@ -128,6 +128,16 @@ export class ProductODataController {}
 
 That’s it — the extension generates repository-backed CRUD endpoints automatically.
 
+### Errors and error codes
+
+OData endpoints return errors using an OData error payload (for example `{"error":{"code":"BadRequest","message":"..."}}`).
+
+- `error.code` is stable and intended for client logic (use it instead of parsing messages).
+- `error.message` is human-readable and may change; do not parse it for behavior.
+- If a downstream connector/database error bubbles up with its own string `err.code`, it is preserved as diagnostics under `error.innererror.dbCode` (not as `error.code`).
+
+The authoritative list of stable codes lives in `src/odata-error-codes.ts` (exported as `ODataErrorCodes` from `@loopback/odata`).
+
 ### Authentication & Authorization
 
 The component mirrors LoopBack’s authentication and authorization metadata from your controller onto every generated CRUD endpoint. Decorate your OData controller exactly as you would a regular REST controller and the extension takes care of the rest:
@@ -535,6 +545,61 @@ this.bind(ODATA_BINDINGS.CONFIG).to({
   searchFields: { Products: ['name', 'sku'] },
 } as ODataConfig);
 ```
+
+### Handling Large Integer Types (BigInt/Int64)
+
+When working with large integer types like `bigint` in PostgreSQL or `int64` in OData, special care must be taken to avoid JavaScript's number precision limitations. JavaScript's `Number.MAX_SAFE_INTEGER` is `9007199254740991`, which is smaller than the maximum value for 64-bit integers (`9223372036854775807`).
+
+To properly handle large integers without precision loss:
+
+1. **Define the property as a string type with proper format specification:**
+
+```ts
+@property({
+  type: 'string',  // Use string type to preserve precision
+  jsonSchema: {
+    type: 'string',
+    format: 'int64',
+    dataType: 'int64'
+  },
+  postgresql: {
+    dataType: 'bigint'  // Still maps to bigint in the database
+  }
+})
+sequence?: string;  // Use string type in the application layer
+```
+
+2. **Avoid using `type: 'number'` for properties that might exceed `Number.MAX_SAFE_INTEGER`:**
+
+❌ **Incorrect:**
+
+```ts
+@property({
+  type: 'number',  // This can cause precision loss for large values
+  postgresql: {
+    dataType: 'bigint'
+  }
+})
+sequence?: number;
+```
+
+✅ **Correct:**
+
+```ts
+@property({
+  type: 'string',  // Preserves precision
+  jsonSchema: {
+    type: 'string',
+    format: 'int64'  // Tells OData to treat as int64
+  },
+  postgresql: {
+    dataType: 'bigint'  // Maps to bigint in database
+  }
+})
+sequence?: string;
+```
+
+This approach ensures that large integer values maintain their precision throughout the application layer while still being stored as the appropriate database type. The OData extension will properly handle `int64'9223372036854775807'` literals without precision loss when the property is defined as a string with the proper format specification.
 
 ### Key normalization
 
@@ -2142,7 +2207,24 @@ Use `ODATA_BINDINGS.LOGGER` to plug in your preferred logger (e.g., Pino, Winsto
 | `correlation.headerName`                       | Request header inspected for correlation IDs (`x-correlation-id` default).                                                                                            |
 | `correlation.responseHeaderName`               | Header echoed back on responses; set when clients need confirmation of the correlation ID that was used.                                                              |
 | `correlation.generateWhenMissing`              | Generates a UUID when the client omits the correlation header (default `true`).                                                                                       |
-| `correlation.propagateToRepositories`          | Reserved for future use; when enabled, repository options will contain the correlation ID for downstream logging.                                                     |
+| `correlation.enabled`                          | Enables correlation ID capture/generation and propagation (default `true`).                                                                                           |
+| `correlation.propagateToRepositories`          | When `true` (default), LoopBack repository/connector options include correlation context for downstream logging/tracing.                                              |
+| `correlation.repositoryOptionsKey`             | Options property name used to store correlation context (default `correlation`).                                                                                      |
+
+#### Reading correlation in repositories
+
+When propagation is enabled, OData passes correlation context via the LoopBack `options` object to repository and connector calls:
+
+```ts
+async find(filter?: Filter<T>, options?: Options) {
+  const correlation = (options as any)?.correlation;
+  this.logger.info({ correlationId: correlation?.correlationId }, 'repo.find');
+  return super.find(filter, options);
+}
+```
+
+- The request `correlationId` is authoritative. If callers pass an existing `options.correlation.correlationId`, it is overwritten; the previous value is preserved as `options.correlation.upstreamCorrelationId` when present.
+- Use `correlation.repositoryOptionsKey` to change the property name from `correlation` to another key.
 
 #### Composition
 

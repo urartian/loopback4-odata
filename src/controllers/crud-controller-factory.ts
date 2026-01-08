@@ -52,6 +52,7 @@ import {
 } from '../services/odata-query-parser.service';
 import { ODATA_ATOMICITY_STATE, ODATA_VERSION, ODATA_WRITE_TX_STATE } from '../constants';
 import { AtomicityRequestState } from '../types/batch';
+import { ODataErrorCodes } from '../odata-error-codes';
 import { Response } from '@loopback/rest';
 import {
   decodeIfMatchValues,
@@ -186,6 +187,13 @@ const POSTGRES_PUSHABLE_FILTER_FUNCTIONS = new Set([
   'minute',
   'second',
 ]);
+
+const STABLE_ODATA_ERROR_CODES = new Set<string>(Object.values(ODataErrorCodes));
+
+function resolveStableODataErrorCode(candidate: unknown, fallback: string): string {
+  if (typeof candidate === 'string' && STABLE_ODATA_ERROR_CODES.has(candidate)) return candidate;
+  return fallback;
+}
 
 type WriteTxState = {
   dataSource: juggler.DataSource;
@@ -1161,7 +1169,7 @@ export function defineODataCrudController(def: EntitySetDef) {
         const err = new HttpErrors.NotAcceptable(
           `Accept header must allow ${requirement} (${unique.join(', ')}).`,
         );
-        (err as any).code = 'NotAcceptable';
+        (err as any).code = ODataErrorCodes.NotAcceptable;
         throw err;
       }
     }
@@ -1182,7 +1190,7 @@ export function defineODataCrudController(def: EntitySetDef) {
         const err = new HttpErrors.UnsupportedMediaType(
           'Content-Type header is required for media requests.',
         );
-        (err as any).code = 'UnsupportedMediaType';
+        (err as any).code = ODataErrorCodes.UnsupportedMediaType;
         throw err;
       }
       return type;
@@ -5284,7 +5292,7 @@ export function defineODataCrudController(def: EntitySetDef) {
         if (!normalized) {
           throw this.badRequestWithCode(
             `Invalid GUID literal for ${field}.`,
-            'invalid-guid-literal',
+            ODataErrorCodes.InvalidGuidLiteral,
           );
         }
         return normalized;
@@ -5305,14 +5313,14 @@ export function defineODataCrudController(def: EntitySetDef) {
             if (!normalized) {
               throw this.badRequestWithCode(
                 `Invalid DateTimeOffset literal for ${field}.`,
-                'invalid-datetimeoffset-literal',
+                ODataErrorCodes.InvalidDateTimeOffsetLiteral,
               );
             }
             const parsed = new Date(normalized);
             if (Number.isNaN(parsed.getTime())) {
               throw this.badRequestWithCode(
                 `Invalid DateTimeOffset literal for ${field}.`,
-                'invalid-datetimeoffset-literal',
+                ODataErrorCodes.InvalidDateTimeOffsetLiteral,
               );
             }
             return parsed;
@@ -5321,14 +5329,14 @@ export function defineODataCrudController(def: EntitySetDef) {
             if (Number.isNaN(raw.getTime())) {
               throw this.badRequestWithCode(
                 `Invalid DateTimeOffset literal for ${field}.`,
-                'invalid-datetimeoffset-literal',
+                ODataErrorCodes.InvalidDateTimeOffsetLiteral,
               );
             }
             return raw;
           }
           throw this.badRequestWithCode(
             `Invalid DateTimeOffset literal for ${field}.`,
-            'invalid-datetimeoffset-literal',
+            ODataErrorCodes.InvalidDateTimeOffsetLiteral,
           );
         }
         case 'date': {
@@ -5337,7 +5345,7 @@ export function defineODataCrudController(def: EntitySetDef) {
             if (Number.isNaN(raw.getTime())) {
               throw this.badRequestWithCode(
                 `Invalid Date literal for ${field}.`,
-                'invalid-date-literal',
+                ODataErrorCodes.InvalidDateLiteral,
               );
             }
             return raw.toISOString().slice(0, 10);
@@ -5345,37 +5353,45 @@ export function defineODataCrudController(def: EntitySetDef) {
           if (typeof raw !== 'string') {
             throw this.badRequestWithCode(
               `Invalid Date literal for ${field}.`,
-              'invalid-date-literal',
+              ODataErrorCodes.InvalidDateLiteral,
             );
           }
           const normalized = parseDateStringLiteral(raw);
           if (!normalized) {
             throw this.badRequestWithCode(
               `Invalid Date literal for ${field}.`,
-              'invalid-date-literal',
+              ODataErrorCodes.InvalidDateLiteral,
             );
           }
           return normalized;
         }
         case 'int64': {
+          // Always treat int64 values as strings to avoid precision loss
+          // If value is already a number, it may have lost precision, so we should reject it
           if (typeof value === 'number') {
+            // Check if the number is safe for int64 range
             if (
               !Number.isFinite(value) ||
               !Number.isSafeInteger(value) ||
-              !Number.isInteger(value)
+              !Number.isInteger(value) ||
+              value < Number.MIN_SAFE_INTEGER ||
+              value > Number.MAX_SAFE_INTEGER
             ) {
               throw this.badRequestWithCode(
-                `Invalid Int64 literal for ${field}.`,
-                'invalid-int64-literal',
+                `Invalid Int64 literal for ${field}. Value may have lost precision.`,
+                ODataErrorCodes.InvalidInt64Literal,
               );
             }
+            // Convert safe integer to string
             return value.toFixed(0);
           }
+
+          // For string values, parse as int64 literal
           const normalized = parseInt64StringLiteral(String(value));
           if (!normalized) {
             throw this.badRequestWithCode(
               `Invalid Int64 literal for ${field}.`,
-              'invalid-int64-literal',
+              ODataErrorCodes.InvalidInt64Literal,
             );
           }
           return normalized;
@@ -5389,7 +5405,7 @@ export function defineODataCrudController(def: EntitySetDef) {
           if (!normalized) {
             throw this.badRequestWithCode(
               `Invalid Decimal literal for ${field}.`,
-              'invalid-decimal-literal',
+              ODataErrorCodes.InvalidDecimalLiteral,
             );
           }
           return normalized.value;
@@ -7470,6 +7486,7 @@ export function defineODataCrudController(def: EntitySetDef) {
 
     async computeTombstones(
       keyCandidates: Record<string, unknown>[] | undefined,
+      options?: Options,
     ): Promise<AnyObject[]> {
       const entries = keyCandidates?.filter((entry) => entry && Object.keys(entry).length);
       if (!entries?.length) return [];
@@ -7486,7 +7503,7 @@ export function defineODataCrudController(def: EntitySetDef) {
         );
         if (seen.has(signature)) continue;
         seen.add(signature);
-        const existing = await this.repository.findOne({ where: candidate as CrudWhere });
+        const existing = await this.repository.findOne({ where: candidate as CrudWhere }, options);
         if (existing) continue;
         tombstones.push({
           ...candidate,
@@ -7813,7 +7830,7 @@ export function defineODataCrudController(def: EntitySetDef) {
         return;
       }
       const err = new HttpErrors.NotAcceptable('Only JSON $format values are supported.');
-      (err as any).code = 'NotAcceptable';
+      (err as any).code = ODataErrorCodes.NotAcceptable;
       throw err;
     }
 
@@ -7831,7 +7848,7 @@ export function defineODataCrudController(def: EntitySetDef) {
         const err = new HttpErrors.NotAcceptable(
           `Accept header must allow one of: ${allowedTypes.join(', ')}.`,
         );
-        (err as any).code = 'NotAcceptable';
+        (err as any).code = ODataErrorCodes.NotAcceptable;
         throw err;
       }
     }
@@ -7846,7 +7863,7 @@ export function defineODataCrudController(def: EntitySetDef) {
       const ok = lower.includes('application/json') || lower.endsWith('+json');
       if (!ok) {
         const err = new HttpErrors.UnsupportedMediaType('Content-Type must be application/json.');
-        (err as any).code = 'UnsupportedMediaType';
+        (err as any).code = ODataErrorCodes.UnsupportedMediaType;
         throw err;
       }
     }
@@ -7958,7 +7975,7 @@ export function defineODataCrudController(def: EntitySetDef) {
           throw error;
         }
         const err = new HttpErrors.BadRequest('Unable to resolve tenant identifier from request.');
-        (err as AnyObject).code = 'TenantResolutionFailed';
+        (err as AnyObject).code = ODataErrorCodes.TenantResolutionFailed;
         throw err;
       }
     }
@@ -8028,7 +8045,7 @@ export function defineODataCrudController(def: EntitySetDef) {
 
     throwPreconditionFailed(message = 'ETag does not match the current resource version.') {
       const error = new HttpErrors.PreconditionFailed(message);
-      (error as any).code = 'PreconditionFailed';
+      (error as any).code = ODataErrorCodes.PreconditionFailed;
       throw error;
     }
 
@@ -9187,18 +9204,18 @@ export function defineODataCrudController(def: EntitySetDef) {
           if (lambdaExpressions.length || lambdaExpressionTree) {
             throw this.badRequestWithCode(
               'Combining navigation-property filters with lambda expressions is not supported for pushdown.',
-              'navigation-filter-requires-pushdown',
+              ODataErrorCodes.NavigationFilterRequiresPushdown,
             );
           } else if (deltaEnabled || deltaTokenValue) {
             throw this.badRequestWithCode(
               'Navigation-property filters require pushdown for this request.',
-              'navigation-filter-requires-pushdown',
+              ODataErrorCodes.NavigationFilterRequiresPushdown,
             );
           } else {
             if (planRequiresPostProcessing) {
               throw this.badRequestWithCode(
                 'Navigation-property filters require pushdown for this request.',
-                'navigation-filter-requires-pushdown',
+                ODataErrorCodes.NavigationFilterRequiresPushdown,
               );
             }
             const dataSource = (this.repository as { dataSource?: juggler.DataSource }).dataSource;
@@ -9252,7 +9269,7 @@ export function defineODataCrudController(def: EntitySetDef) {
               if (this.cfg?.strict) {
                 throw this.badRequestWithCode(
                   `Navigation-property filter pushdown is required but not eligible (${declined}).`,
-                  'navigation-filter-requires-pushdown',
+                  ODataErrorCodes.NavigationFilterRequiresPushdown,
                 );
               }
               postFilterExpr = this.combinePostFilterExpressions(
@@ -9598,9 +9615,16 @@ export function defineODataCrudController(def: EntitySetDef) {
                     paths: rootLambdas.map((lambda) => lambda.path.join('/')),
                   },
                 });
-                throw new HttpErrors.BadRequest(
-                  `Lambda pushdown is required but the query is not eligible (${countBuilt.declineReason}).`,
+                const rejectionCode = resolveStableODataErrorCode(
+                  countBuilt.declineReason,
+                  ODataErrorCodes.LambdaPushdownNotEligible,
                 );
+                const err = this.badRequestWithCode(
+                  `Lambda pushdown is required but the query is not eligible (${countBuilt.declineReason}).`,
+                  rejectionCode,
+                );
+                (err as AnyObject).details = [{ reason: countBuilt.declineReason }];
+                throw err;
               } else {
                 allowPushdown = false;
               }
@@ -9648,8 +9672,9 @@ export function defineODataCrudController(def: EntitySetDef) {
                 if (typeof requestedLimit !== 'number') {
                   const maxRows = this.resolveMaxLambdaScanRows();
                   if (ids.length > maxRows) {
-                    throw new HttpErrors.BadRequest(
+                    throw this.badRequestWithCode(
                       `Lambda filter scan exceeds the server limit of ${maxRows} rows. Add $top or refine $filter.`,
+                      ODataErrorCodes.LambdaScanLimitExceeded,
                     );
                   }
                 }
@@ -9716,9 +9741,16 @@ export function defineODataCrudController(def: EntitySetDef) {
                     paths: rootLambdas.map((lambda) => lambda.path.join('/')),
                   },
                 });
-                throw new HttpErrors.BadRequest(
-                  `Lambda pushdown is required but the query is not eligible (${built.declineReason}).`,
+                const rejectionCode = resolveStableODataErrorCode(
+                  built.declineReason,
+                  ODataErrorCodes.LambdaPushdownNotEligible,
                 );
+                const err = this.badRequestWithCode(
+                  `Lambda pushdown is required but the query is not eligible (${built.declineReason}).`,
+                  rejectionCode,
+                );
+                (err as AnyObject).details = [{ reason: built.declineReason }];
+                throw err;
               }
             }
           } else if (pushdownStrict && pushdownMode !== 'disabled') {
@@ -9735,9 +9767,12 @@ export function defineODataCrudController(def: EntitySetDef) {
                 paths: rootLambdas.map((lambda) => lambda.path.join('/')),
               },
             });
-            throw new HttpErrors.BadRequest(
+            const err = this.badRequestWithCode(
               `Lambda pushdown is required but the query is not eligible (${reason}).`,
+              ODataErrorCodes.LambdaPushdownNotEligible,
             );
+            (err as AnyObject).details = [{ reason }];
+            throw err;
           }
 
           const fetchFilter: Filter<CrudEntity> = { ...baseFilter };
@@ -9749,8 +9784,9 @@ export function defineODataCrudController(def: EntitySetDef) {
 
           const entities = await this.repository.find(fetchFilter, options);
           if (entities.length > maxLambdaScanRows) {
-            throw new HttpErrors.BadRequest(
+            throw this.badRequestWithCode(
               `Lambda filter scan exceeds the server limit of ${maxLambdaScanRows} rows. Add $top or refine $filter.`,
+              ODataErrorCodes.LambdaScanLimitExceeded,
             );
           }
           this.logLambdaFallback({
@@ -9796,7 +9832,7 @@ export function defineODataCrudController(def: EntitySetDef) {
           if (this.cfg?.strict && !boundedByRequest) {
             throw this.badRequestWithCode(
               'Post-filter evaluation requires pushdown for this request.',
-              'postfilter-requires-pushdown',
+              ODataErrorCodes.PostfilterRequiresPushdown,
             );
           }
           const requireExplicitTop =
@@ -9807,7 +9843,7 @@ export function defineODataCrudController(def: EntitySetDef) {
           if (requireExplicitTop) {
             throw this.badRequestWithCode(
               'The $top query option is required when the request requires post-filter evaluation.',
-              'postfilter-top-required',
+              ODataErrorCodes.PostfilterTopRequired,
             );
           }
         }
@@ -9827,7 +9863,7 @@ export function defineODataCrudController(def: EntitySetDef) {
           if (results.length > maxRows) {
             throw this.badRequestWithCode(
               `Post-filter scan exceeds the server limit of ${maxRows} rows. Refine $filter.`,
-              'postfilter-scan-limit-exceeded',
+              ODataErrorCodes.PostfilterScanLimitExceeded,
             );
           }
         }
@@ -9867,7 +9903,9 @@ export function defineODataCrudController(def: EntitySetDef) {
             ? [deltaPayload.keyValues]
             : undefined;
         const tombstones =
-          deltaEnabled && tombstoneKeys?.length ? await this.computeTombstones(tombstoneKeys) : [];
+          deltaEnabled && tombstoneKeys?.length
+            ? await this.computeTombstones(tombstoneKeys, options)
+            : [];
 
         if (inlineCountRequested) {
           if (requiresPostFilter) {
@@ -10004,7 +10042,7 @@ export function defineODataCrudController(def: EntitySetDef) {
           const err = new HttpErrors.NotAcceptable(
             '$format is not supported for $count responses.',
           );
-          (err as any).code = 'NotAcceptable';
+          (err as any).code = ODataErrorCodes.NotAcceptable;
           throw err;
         }
         if (parsed.compute?.length) {
@@ -10205,20 +10243,20 @@ export function defineODataCrudController(def: EntitySetDef) {
 
           throw this.badRequestWithCode(
             `Navigation-property filter pushdown is required but not eligible (${built.declineReason}).`,
-            'navigation-filter-requires-pushdown',
+            ODataErrorCodes.NavigationFilterRequiresPushdown,
           );
         }
         if (navigationFilterExpr) {
           if (rootLambdas.length || lambdaExpressionTree) {
             throw this.badRequestWithCode(
               'Combining navigation-property filters with lambda expressions is not supported for pushdown.',
-              'navigation-filter-requires-pushdown',
+              ODataErrorCodes.NavigationFilterRequiresPushdown,
             );
           }
           if (postFilterExpr) {
             throw this.badRequestWithCode(
               'Navigation-property filters require pushdown for this request.',
-              'navigation-filter-requires-pushdown',
+              ODataErrorCodes.NavigationFilterRequiresPushdown,
             );
           }
         }
@@ -10271,8 +10309,9 @@ export function defineODataCrudController(def: EntitySetDef) {
           fetchFilter.limit = maxLambdaScanRows + 1;
           const entities = await this.repository.find(fetchFilter, options);
           if (entities.length > maxLambdaScanRows) {
-            throw new HttpErrors.BadRequest(
+            throw this.badRequestWithCode(
               `Lambda filter scan exceeds the server limit of ${maxLambdaScanRows} rows. Add $top or refine $filter.`,
+              ODataErrorCodes.LambdaScanLimitExceeded,
             );
           }
           const plain = entities.map((entity) => this.toPlainEntity(entity) ?? {});
@@ -10296,7 +10335,7 @@ export function defineODataCrudController(def: EntitySetDef) {
           if (this.cfg?.strict) {
             throw this.badRequestWithCode(
               'Post-filter evaluation is not allowed in strict mode.',
-              'postfilter-requires-pushdown',
+              ODataErrorCodes.PostfilterRequiresPushdown,
             );
           }
           const maxRows = this.resolveMaxPostFilterScanRows();
@@ -10305,7 +10344,7 @@ export function defineODataCrudController(def: EntitySetDef) {
           if (entities.length > maxRows) {
             throw this.badRequestWithCode(
               `Post-filter scan exceeds the server limit of ${maxRows} rows. Refine $filter.`,
-              'postfilter-scan-limit-exceeded',
+              ODataErrorCodes.PostfilterScanLimitExceeded,
             );
           }
           const plain = entities.map((entity) => this.toPlainEntity(entity) ?? {});
@@ -10651,7 +10690,7 @@ export function defineODataCrudController(def: EntitySetDef) {
             const error = new HttpErrors.PreconditionRequired(
               'If-Match header is required when ETags are enabled.',
             );
-            (error as any).code = 'PreconditionRequired';
+            (error as any).code = ODataErrorCodes.PreconditionRequired;
             throw error;
           }
           if (
@@ -10786,7 +10825,7 @@ export function defineODataCrudController(def: EntitySetDef) {
             const error = new HttpErrors.PreconditionRequired(
               'If-Match header is required when ETags are enabled.',
             );
-            (error as any).code = 'PreconditionRequired';
+            (error as any).code = ODataErrorCodes.PreconditionRequired;
             throw error;
           }
           if (
@@ -10909,6 +10948,108 @@ export function defineODataCrudController(def: EntitySetDef) {
         const serialized = this.serializePrimitiveValue(rawValue, primitiveKind);
         this.response.type(serialized.contentType);
         this.response.send(serialized.body);
+        ctx.result = rawValue;
+        return rawValue;
+      };
+
+      const result = await execDefault();
+      ctx.result = result;
+      if (!this.response.headersSent) {
+        await this.runAfter(op, scope, ctx);
+      }
+      return ctx.result as unknown;
+    }
+
+    @get(
+      `/odata/${setName}/{id}/{property}`,
+      withODataSpecMetadata(
+        {
+          responses: {
+            '200': {
+              description: `Property value for ${setName}`,
+              content: {
+                'application/json': {
+                  schema: {
+                    type: 'object',
+                    required: ['@odata.context'],
+                    properties: {
+                      '@odata.context': { type: 'string' },
+                      value: {},
+                    },
+                  },
+                },
+              },
+            },
+            '204': { description: 'Property is null.' },
+          },
+        },
+        operationVisibility,
+      ),
+    )
+    async getEntityProperty(@idParam id: unknown, @param.path.string('property') property: string) {
+      const propertyName = property;
+      if (!propertyName) {
+        throw new HttpErrors.BadRequest('Property name is required.');
+      }
+      if (modelRelations && Object.prototype.hasOwnProperty.call(modelRelations, propertyName)) {
+        throw new HttpErrors.NotFound('Property does not expose a scalar value.');
+      }
+      const definition = modelDefinition?.properties?.[propertyName] as
+        | PropertyDefinition
+        | undefined;
+      if (!definition) {
+        throw new HttpErrors.NotFound('Property not found.');
+      }
+      const primitiveKind = classifyPrimitiveProperty(definition);
+      if (!primitiveKind) {
+        throw new HttpErrors.NotFound('Property does not expose a scalar value.');
+      }
+
+      const baseFilter: Filter<CrudEntity> = {
+        fields: { [propertyName]: true },
+      };
+      this.ensureEtagField(baseFilter);
+
+      const entityId = this.coerceParentId(id);
+      const op: CrudOperation = 'READ';
+      const scope: CrudScope = 'entity';
+      const ctx = this.buildHookContext({
+        operation: op,
+        scope,
+        id: entityId,
+        filter: baseFilter as any,
+        options: this.repositoryOptions(),
+      });
+      await this.enforceTenantLimit(op, scope);
+      await this.runBefore(op, scope, ctx);
+
+      const execDefault = async () => {
+        const options = this.repositoryOptions();
+        const entity = await this.repository.findById(entityId as any, baseFilter, options);
+        const plain = this.toPlainEntity(entity) ?? {};
+
+        const rawValue = (plain as AnyObject)[propertyName];
+        this.ensureODataHeaders();
+
+        if (rawValue === null || rawValue === undefined) {
+          this.response.status(204).end();
+          return undefined;
+        }
+
+        // Build OData context URL for the property
+        const contextUrl = `${contextBase}/${propertyName}`;
+        const responsePayload = {
+          '@odata.context': contextUrl,
+          value: rawValue,
+        };
+
+        // Add etag if available
+        const etag = this.computeEtagFromPlain(plain);
+        if (etag) {
+          this.response.set('ETag', encodeEtagToken(etag));
+        }
+
+        this.response.json(responsePayload);
         ctx.result = rawValue;
         return rawValue;
       };
@@ -11211,7 +11352,7 @@ export function defineODataCrudController(def: EntitySetDef) {
             const error = new HttpErrors.PreconditionRequired(
               'If-Match header is required when ETags are enabled.',
             );
-            (error as any).code = 'PreconditionRequired';
+            (error as any).code = ODataErrorCodes.PreconditionRequired;
             throw error;
           }
 
@@ -11375,7 +11516,7 @@ export function defineODataCrudController(def: EntitySetDef) {
             const error = new HttpErrors.PreconditionRequired(
               'If-Match header is required when ETags are enabled.',
             );
-            (error as any).code = 'PreconditionRequired';
+            (error as any).code = ODataErrorCodes.PreconditionRequired;
             throw error;
           }
 
@@ -11589,13 +11730,55 @@ export function defineODataCrudController(def: EntitySetDef) {
       return this.repositoryOptionsForEntitySet(setName);
     }
 
-    repositoryOptionsForEntitySet(entitySetName: string): Options | undefined {
+    buildRepositoryOptions(baseOptions?: Options, entitySetName = setName): Options | undefined {
       const state = this.atomicityState();
       const transaction =
         state?.getTransaction(entitySetName) ??
         state?.getTransaction(setName) ??
         this.writeTxState()?.transaction;
-      return transaction ? { transaction } : undefined;
+
+      const hasBaseOptions = Boolean(baseOptions && Object.keys(baseOptions).length > 0);
+      const options: Options | undefined = hasBaseOptions ? { ...(baseOptions as AnyObject) } : {};
+
+      if (transaction) {
+        (options as AnyObject).transaction = transaction;
+      }
+
+      const correlationCfg = this.cfg?.correlation;
+      const shouldPropagateCorrelation =
+        correlationCfg?.enabled !== false && correlationCfg?.propagateToRepositories !== false;
+
+      const requestState = this.getRequestTelemetryState();
+      const correlationId = requestState?.correlationId;
+      if (!shouldPropagateCorrelation || !correlationId) {
+        return options && Object.keys(options).length ? options : undefined;
+      }
+
+      const repositoryOptionsKey = correlationCfg?.repositoryOptionsKey ?? 'correlation';
+      const existingValue = (options as AnyObject)[repositoryOptionsKey];
+      const existing =
+        existingValue && typeof existingValue === 'object'
+          ? { ...(existingValue as AnyObject) }
+          : {};
+
+      const existingCorrelationId = existing.correlationId;
+      if (existingCorrelationId && existingCorrelationId !== correlationId) {
+        existing.upstreamCorrelationId ??= existingCorrelationId;
+      }
+      existing.correlationId = correlationId;
+      if (requestState?.tenantId) {
+        existing.tenantId = requestState.tenantId;
+      }
+      (options as AnyObject)[repositoryOptionsKey] = existing;
+
+      return options && Object.keys(options).length ? options : undefined;
+    }
+
+    repositoryOptionsForEntitySet(
+      entitySetName: string,
+      baseOptions?: Options,
+    ): Options | undefined {
+      return this.buildRepositoryOptions(baseOptions, entitySetName);
     }
 
     assertWriteDataSource(repo: AnyObject | undefined, hint: string): void {
@@ -11610,7 +11793,7 @@ export function defineODataCrudController(def: EntitySetDef) {
           const err = new HttpErrors.NotImplemented(
             `Atomicity group ${atomicity.groupId} would write across multiple datasources (${hint}).`,
           );
-          (err as any).code = 'MultiDataSourceChangesetNotSupported';
+          (err as any).code = ODataErrorCodes.MultiDataSourceChangesetNotSupported;
           throw err;
         }
         const expectedKey = atomicity.dataSourceKey;
@@ -11625,7 +11808,7 @@ export function defineODataCrudController(def: EntitySetDef) {
           const err = new HttpErrors.NotImplemented(
             `Atomicity group ${atomicity.groupId} would write across multiple datasources (${hint}).`,
           );
-          (err as any).code = 'MultiDataSourceChangesetNotSupported';
+          (err as any).code = ODataErrorCodes.MultiDataSourceChangesetNotSupported;
           throw err;
         }
       }
@@ -11640,7 +11823,7 @@ export function defineODataCrudController(def: EntitySetDef) {
       const err = new HttpErrors.NotImplemented(
         `Atomic writes across multiple datasources are not supported (${hint}).`,
       );
-      (err as any).code = 'NotImplemented';
+      (err as any).code = ODataErrorCodes.NotImplemented;
       throw err;
     }
 
@@ -11666,7 +11849,7 @@ export function defineODataCrudController(def: EntitySetDef) {
       const err = new HttpErrors.NotImplemented(
         `${message} Enable $batch changesets for atomic writes or use a transactional connector (for example PostgreSQL).`,
       );
-      (err as any).code = 'NotImplemented';
+      (err as any).code = ODataErrorCodes.NotImplemented;
       return err;
     }
 
@@ -11776,7 +11959,7 @@ export function defineODataCrudController(def: EntitySetDef) {
           const err = new HttpErrors.InternalServerError(
             'Failed to commit datasource transaction.',
           );
-          (err as any).code = 'TransactionCommitFailed';
+          (err as any).code = ODataErrorCodes.TransactionCommitFailed;
           throw err;
         }
         return result;
@@ -11970,7 +12153,7 @@ export function defineODataCrudController(def: EntitySetDef) {
           const err = new HttpErrors.NotImplemented(
             'Cascade delete requires transaction support for atomicity.',
           );
-          (err as any).code = 'NotImplemented';
+          (err as any).code = ODataErrorCodes.NotImplemented;
           throw err;
         }
         (this.request as any)[ODATA_WRITE_TX_STATE] = {
@@ -12003,7 +12186,7 @@ export function defineODataCrudController(def: EntitySetDef) {
           const err = new HttpErrors.NotImplemented(
             'Cascade delete requires transaction support for atomicity.',
           );
-          (err as any).code = 'NotImplemented';
+          (err as any).code = ODataErrorCodes.NotImplemented;
           throw err;
         }
         (this.request as any)[ODATA_WRITE_TX_STATE] = {
@@ -12046,7 +12229,7 @@ export function defineODataCrudController(def: EntitySetDef) {
           const err = new HttpErrors.InternalServerError(
             'Failed to commit datasource transaction.',
           );
-          (err as any).code = 'TransactionCommitFailed';
+          (err as any).code = ODataErrorCodes.TransactionCommitFailed;
           throw err;
         }
         return result;
@@ -12072,7 +12255,7 @@ export function defineODataCrudController(def: EntitySetDef) {
       const err = new HttpErrors.NotImplemented(
         `Cascade delete across multiple datasources is not supported (${hint}).`,
       );
-      (err as any).code = 'NotImplemented';
+      (err as any).code = ODataErrorCodes.NotImplemented;
       throw err;
     }
 
@@ -12350,7 +12533,7 @@ export function defineODataCrudController(def: EntitySetDef) {
           ', ',
         )}. Delete children first or enable cascade.`,
       );
-      (err as any).code = 'Conflict';
+      (err as any).code = ODataErrorCodes.Conflict;
       throw err;
     }
 
@@ -12418,7 +12601,7 @@ export function defineODataCrudController(def: EntitySetDef) {
               const err = new HttpErrors.NotImplemented(
                 `Cascade delete is not supported for relation ${relationName} because its target entity set is not registered.`,
               );
-              (err as any).code = 'NotImplemented';
+              (err as any).code = ODataErrorCodes.NotImplemented;
               throw err;
             }
             const options = this.repositoryOptionsForEntitySet(targetDef.name);
@@ -12469,7 +12652,7 @@ export function defineODataCrudController(def: EntitySetDef) {
                 const err = new HttpErrors.NotImplemented(
                   `Cascade delete is not supported for relation ${relationName} because its foreign key (keyTo) could not be resolved.`,
                 );
-                (err as any).code = 'NotImplemented';
+                (err as any).code = ODataErrorCodes.NotImplemented;
                 throw err;
               }
               const childModelDef =
@@ -12601,7 +12784,7 @@ export function defineODataCrudController(def: EntitySetDef) {
 
     throwPreferenceNotSupported(target: string) {
       const error = new HttpErrors.NotImplemented(`Prefer ${target} is not supported.`);
-      (error as any).code = 'PreferenceNotSupported';
+      (error as any).code = ODataErrorCodes.PreferenceNotSupported;
       (error as any).target = target;
       throw error;
     }

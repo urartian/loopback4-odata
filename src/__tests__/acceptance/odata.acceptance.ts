@@ -13,6 +13,7 @@ import {
 import { ODATA_BINDINGS } from '../../keys';
 import { ODataConfig } from '../../types';
 import { EntitySetRegistry } from '../../registry/entityset-registry';
+import { ODataErrorCodes } from '../../odata-error-codes';
 import {
   ODataApplyExecutorRegistry,
   ODataApplyExecutor,
@@ -2393,7 +2394,31 @@ describe('OData component acceptance', () => {
       .expect(400)
       .expect((res) => {
         expect(res.body.error?.message).to.match(/Content-ID/i);
+        expect(res.body.error?.code).to.equal(ODataErrorCodes.ContentIdReferenceInvalid);
       });
+  });
+
+  it('returns TransactionCommitFailed when write transaction commit fails', async function (this: SkipContext) {
+    await rebuildApp(
+      this,
+      { writeTransactions: { enabled: true, requireTransactionSupport: true } },
+      async (instance) => {
+        const dataSource = (await instance.get('datasources.db')) as AnyObject;
+        (dataSource as AnyObject).beginTransaction = async () => ({
+          commit: async () => {
+            throw new Error('commit failed');
+          },
+          rollback: async () => undefined,
+        });
+      },
+    );
+
+    const res = await client
+      .post('/odata/Products')
+      .send({ name: 'CommitFail', price: 10 })
+      .expect(500);
+
+    expect(res.body?.error?.code).to.equal(ODataErrorCodes.TransactionCommitFailed);
   });
 
   it('applies string predicates through REST filter', async () => {

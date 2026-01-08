@@ -43,6 +43,7 @@ import { isEntityCtor } from '../util/model-helpers';
 import { emitTelemetryEvent } from '../util/telemetry';
 import { rewriteODataUrl } from '../middleware/odata-path-rewriter';
 import { ensureModelDefinitionWithRelations } from '../util/model-definition';
+import { ODataErrorCodes } from '../odata-error-codes';
 
 const BATCH_OPERATION_SPEC = markUndocumentedOperation({
   responses: {
@@ -390,9 +391,11 @@ export class ODataBatchController {
               operations: groupRequests.length,
               maxChangesetOperations: maxChangesetOps,
             });
-            throw new HttpErrors.BadRequest(
+            const err = new HttpErrors.BadRequest(
               'Changeset exceeds the configured operation limit for $batch requests.',
             );
+            (err as AnyObject).code = ODataErrorCodes.ChangesetOperationLimitExceeded;
+            throw err;
           }
         }
       }
@@ -428,7 +431,7 @@ export class ODataBatchController {
                 atomicityGroup: groupId,
                 status,
                 body: this.odataError(
-                  'BatchExecutionError',
+                  ODataErrorCodes.BatchExecutionError,
                   (error as Error).message ?? 'Failed to execute atomicity group.',
                 ),
               }));
@@ -515,7 +518,11 @@ export class ODataBatchController {
         declaredBytes: declared,
         maxPayloadBytes: limits.maxPayloadBytes,
       });
-      throw new HttpErrors.PayloadTooLarge('Batch payload exceeds the configured size limit.');
+      const err = new HttpErrors.PayloadTooLarge(
+        'Batch payload exceeds the configured size limit.',
+      );
+      (err as AnyObject).code = ODataErrorCodes.BatchPayloadSizeLimitExceeded;
+      throw err;
     }
   }
 
@@ -528,7 +535,11 @@ export class ODataBatchController {
           computedBytes: approxBytes,
           maxPayloadBytes: limits.maxPayloadBytes,
         });
-        throw new HttpErrors.PayloadTooLarge('Batch payload exceeds the configured size limit.');
+        const err = new HttpErrors.PayloadTooLarge(
+          'Batch payload exceeds the configured size limit.',
+        );
+        (err as AnyObject).code = ODataErrorCodes.BatchPayloadSizeLimitExceeded;
+        throw err;
       }
     } catch (error) {
       this.warn('Failed to evaluate JSON batch payload size.', {
@@ -549,7 +560,9 @@ export class ODataBatchController {
           bytes: bodyBuffer.length,
           maxPartBodyBytes,
         });
-        throw new HttpErrors.PayloadTooLarge('Batch part exceeds the configured size limit.');
+        const err = new HttpErrors.PayloadTooLarge('Batch part exceeds the configured size limit.');
+        (err as AnyObject).code = ODataErrorCodes.BatchPartSizeLimitExceeded;
+        throw err;
       }
     });
   }
@@ -562,7 +575,11 @@ export class ODataBatchController {
         operations: count,
         maxOperations,
       });
-      throw new HttpErrors.BadRequest('Batch payload exceeds the configured operation limit.');
+      const err = new HttpErrors.BadRequest(
+        'Batch payload exceeds the configured operation limit.',
+      );
+      (err as AnyObject).code = ODataErrorCodes.BatchOperationLimitExceeded;
+      throw err;
     }
   }
 
@@ -904,7 +921,9 @@ export class ODataBatchController {
     const placeholder = this.extractContentIdToken(value);
     if (!placeholder) return;
     if (!this.resolveContentIdTokenValue(placeholder.token, contentIds)) {
-      throw new HttpErrors.BadRequest(`Unknown Content-ID reference ${value}.`);
+      const err = new HttpErrors.BadRequest(`Unknown Content-ID reference ${value}.`);
+      (err as AnyObject).code = ODataErrorCodes.ContentIdReferenceInvalid;
+      throw err;
     }
   }
 
@@ -967,7 +986,9 @@ export class ODataBatchController {
     if (!placeholder) return value;
     const resolved = this.resolveContentIdTokenValue(placeholder.token, contentIds);
     if (!resolved) {
-      throw new HttpErrors.BadRequest(`Unknown Content-ID reference ${value}.`);
+      const err = new HttpErrors.BadRequest(`Unknown Content-ID reference ${value}.`);
+      (err as AnyObject).code = ODataErrorCodes.ContentIdReferenceInvalid;
+      throw err;
     }
     if (placeholder.wrapper) {
       return `${placeholder.wrapper.prefix}${resolved}${placeholder.wrapper.suffix}`;
@@ -1322,7 +1343,9 @@ export class ODataBatchController {
 
   private serializeKeyValue(value: unknown, def?: PropertyDefinition): string {
     if (value === null || value === undefined) {
-      throw new HttpErrors.BadRequest('Missing key value for Content-ID reference.');
+      const err = new HttpErrors.BadRequest('Missing key value for Content-ID reference.');
+      (err as AnyObject).code = ODataErrorCodes.ContentIdReferenceInvalid;
+      throw err;
     }
     const type = def?.type;
     if (type === Number || type === 'number') {
@@ -1739,9 +1762,11 @@ export class ODataBatchController {
         requestOrder,
       );
       if (!referenced) {
-        throw new HttpErrors.BadRequest(
+        const err = new HttpErrors.BadRequest(
           `Invalid Content-ID reference ${firstRaw}: must reference an earlier request in the same changeset.`,
         );
+        (err as AnyObject).code = ODataErrorCodes.ContentIdReferenceInvalid;
+        throw err;
       }
       const baseSet = this.resolveAtomicityGroupEntitySetName(
         referenced,
@@ -1852,7 +1877,10 @@ export class ODataBatchController {
     if (!(error instanceof HttpErrors.HttpError)) return undefined;
     if (error.statusCode !== 501) return undefined;
     const code = (error as AnyObject).code;
-    if (code !== 'MultiDataSourceChangesetNotSupported' && code !== 'AtomicityGroupNotSupported') {
+    if (
+      code !== ODataErrorCodes.MultiDataSourceChangesetNotSupported &&
+      code !== ODataErrorCodes.AtomicityGroupNotSupported
+    ) {
       return undefined;
     }
     const details = (error as AnyObject).details as AnyObject | undefined;
@@ -1869,7 +1897,7 @@ export class ODataBatchController {
       dataSources,
       entitySets,
       logMessage:
-        code === 'MultiDataSourceChangesetNotSupported'
+        code === ODataErrorCodes.MultiDataSourceChangesetNotSupported
           ? 'Atomicity group rejected: multi-datasource changeset.'
           : 'Atomicity group rejected: unresolvable datasource.',
     };
@@ -1894,7 +1922,7 @@ export class ODataBatchController {
     const err = new HttpErrors.NotImplemented(
       `Atomicity group ${groupId} cannot be executed without transaction support. ${detail}`,
     );
-    (err as AnyObject).code = 'TransactionsNotSupported';
+    (err as AnyObject).code = ODataErrorCodes.TransactionsNotSupported;
     (err as AnyObject).details = { entitySets };
     return err;
   }
@@ -1907,7 +1935,7 @@ export class ODataBatchController {
     const err = new HttpErrors.NotImplemented(
       `Atomicity group ${groupId} would write to multiple datasources (${list}). Split into separate changesets or use a single datasource.`,
     );
-    (err as AnyObject).code = 'MultiDataSourceChangesetNotSupported';
+    (err as AnyObject).code = ODataErrorCodes.MultiDataSourceChangesetNotSupported;
     (err as AnyObject).details = { ...details, reason: 'multi-datasource' };
     return err;
   }
@@ -1919,7 +1947,7 @@ export class ODataBatchController {
     const err = new HttpErrors.NotImplemented(
       `Atomicity group ${groupId} contains a write request that cannot be mapped to a registered entity set; changeset atomicity cannot be guaranteed.`,
     );
-    (err as AnyObject).code = 'AtomicityGroupNotSupported';
+    (err as AnyObject).code = ODataErrorCodes.AtomicityGroupNotSupported;
     (err as AnyObject).details = { ...details, reason: 'unresolvable' };
     return err;
   }
@@ -2073,7 +2101,7 @@ export class ODataBatchController {
       return {
         id: request.id,
         status: 400,
-        body: this.odataError('InvalidUrl', `Invalid request URL: ${request.url}`),
+        body: this.odataError(ODataErrorCodes.InvalidUrl, `Invalid request URL: ${request.url}`),
       };
     }
 
@@ -2087,7 +2115,7 @@ export class ODataBatchController {
       return {
         id: request.id,
         status: 400,
-        body: this.odataError('InvalidMethod', 'Batch request method is required.'),
+        body: this.odataError(ODataErrorCodes.InvalidMethod, 'Batch request method is required.'),
       };
     }
 
@@ -2209,7 +2237,7 @@ export class ODataBatchController {
           resolve({
             id: request.id,
             status: 413,
-            body: this.odataError('ResponseTooLarge', limitMessage),
+            body: this.odataError(ODataErrorCodes.ResponseTooLarge, limitMessage),
           });
           return;
         }
@@ -2349,7 +2377,9 @@ export class ODataBatchController {
       return result;
     } catch (error) {
       const status = timedOut ? 504 : ((error as { statusCode?: number })?.statusCode ?? 500);
-      const code = timedOut ? 'BatchSubRequestTimeout' : 'BatchExecutionError';
+      const code = timedOut
+        ? ODataErrorCodes.BatchSubRequestTimeout
+        : ODataErrorCodes.BatchExecutionError;
       const message =
         (error as Error)?.message ??
         (timedOut ? 'Batch sub-request timeout.' : 'Failed to execute request.');
@@ -2408,7 +2438,10 @@ export class ODataBatchController {
         return {
           id: current.id,
           status: 400,
-          body: this.odataError('TooManyRedirects', 'Batch sub-request exceeded redirect limits.'),
+          body: this.odataError(
+            ODataErrorCodes.TooManyRedirects,
+            'Batch sub-request exceeded redirect limits.',
+          ),
         };
       }
       remainingRedirects -= 1;
@@ -2600,6 +2633,15 @@ export class ODataBatchController {
     ]);
     for (const name of Object.keys(merged)) {
       if (forbidden.has(name)) delete merged[name];
+    }
+
+    const correlationCfg = this.cfg?.correlation;
+    if (correlationCfg?.enabled !== false) {
+      const headerName = (correlationCfg?.headerName ?? 'x-correlation-id').toLowerCase();
+      const correlationId = this.getRequestState()?.correlationId;
+      if (correlationId) {
+        merged[headerName] = correlationId;
+      }
     }
 
     return merged;
@@ -3175,7 +3217,9 @@ export class ODataBatchController {
         depth,
         maxDepth,
       });
-      throw new HttpErrors.BadRequest('Batch request exceeds the configured nesting depth.');
+      const err = new HttpErrors.BadRequest('Batch request exceeds the configured nesting depth.');
+      (err as AnyObject).code = ODataErrorCodes.BatchDepthLimitExceeded;
+      throw err;
     }
   }
 

@@ -5,6 +5,7 @@ import { CsdlGenerator } from '../metadata/csdl-generator';
 import { ODataConfig } from '../types';
 import { markUndocumentedOperation } from '../util/openapi';
 import { acceptsAnyMediaType } from '../util/accept';
+import { ODataErrorCodes } from '../odata-error-codes';
 
 const METADATA_OPERATION_SPEC = markUndocumentedOperation({
   responses: {
@@ -37,7 +38,7 @@ export class ODataMetadataController {
         if (!acceptsAnyMediaType(accept, [desired])) {
           const err = new Error('NotAcceptable');
           (err as any).statusCode = 406;
-          (err as any).code = 'NotAcceptable';
+          (err as any).code = ODataErrorCodes.NotAcceptable;
           throw err;
         }
       }

@@ -117,9 +117,11 @@ export class ODataComponent implements Component {
         },
       },
       correlation: {
+        enabled: true,
         headerName: 'x-correlation-id',
         generateWhenMissing: true,
-        propagateToRepositories: false,
+        propagateToRepositories: true,
+        repositoryOptionsKey: 'correlation',
       },
       writeTransactions: {
         enabled: false,

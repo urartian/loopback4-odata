@@ -314,10 +314,18 @@ export interface ODataTelemetryConfig {
 }
 
 export interface ODataCorrelationConfig {
+  enabled?: boolean;
   headerName?: string;
   responseHeaderName?: string;
   generateWhenMissing?: boolean;
   propagateToRepositories?: boolean;
+  repositoryOptionsKey?: string;
+}
+
+export interface ODataCorrelationContext {
+  correlationId: string;
+  tenantId?: string;
+  upstreamCorrelationId?: string;
 }
 
 export interface ODataRequestLoggingConfig {
@@ -352,6 +360,7 @@ export interface ODataStatisticsState {
 
 export interface ODataRequestState {
   correlationId?: string;
+  tenantId?: string;
   telemetryPreferences?: Set<'statistics' | 'request-log'>;
   telemetry?: ODataTelemetryState;
   statistics?: ODataStatisticsState;
