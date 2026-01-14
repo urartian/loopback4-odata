@@ -718,7 +718,7 @@ class ProductController {
 ```
 
 - Actions map to `POST /odata/Products({id})/discount` (body contains parameters) and registered routes respect the usual LoopBack interceptors/middleware.
-- Functions map to `GET /odata/Products/premiumProducts?minPrice=1000` and return a collection via GET.
+- Functions map to `GET /odata/Products/premiumProducts?minPrice=1000` and return a collection via GET. Canonical OData invocation is also accepted: `GET /odata/Products/premiumProducts(minPrice=1000)` (and the namespace-qualified form `GET /odata/Products/Default.premiumProducts(minPrice=1000)`).
 - Set `rawResponse: true` in the decorator if you want to return a custom payload instead of the standard OData-formatted entity.
 - Decorated operations are listed automatically in `$metadata` (CSDL) as bound/unbound actions and functions.
 

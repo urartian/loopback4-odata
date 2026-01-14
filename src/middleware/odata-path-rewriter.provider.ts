@@ -5,6 +5,7 @@ import { ODATA_BINDINGS, ODataLogger } from '../keys';
 import { ODataConfig, ODataRequestState } from '../types';
 import { emitTelemetryEvent } from '../util/telemetry';
 import { RequestContext } from '@loopback/rest';
+import { EntitySetRegistry } from '../registry/entityset-registry';
 import {
   findMatchingRequestUrl,
   normalizeBasePath,
@@ -16,11 +17,13 @@ export class OdataPathRewriterProvider implements Provider<Middleware> {
   constructor(
     @inject(ODATA_BINDINGS.CONFIG) private readonly cfg: ODataConfig,
     @inject(ODATA_BINDINGS.LOGGER) private readonly logger: ODataLogger,
+    @inject(ODATA_BINDINGS.ENTITY_SET_REGISTRY) private readonly registry: EntitySetRegistry,
   ) {}
 
   value(): Middleware {
     const basePath = normalizeBasePath(this.cfg?.basePath);
     const needsRewrite = basePath !== '/odata';
+    let cachedOperationNames: Set<string> | undefined;
 
     const middleware: Middleware = async (ctx, next) => {
       const originalUrl = ctx.request.originalUrl ?? ctx.request.url ?? '';
@@ -46,9 +49,17 @@ export class OdataPathRewriterProvider implements Provider<Middleware> {
 
       let keyRewritten = false;
       if (targetsODataRoute) {
+        if (!cachedOperationNames) {
+          cachedOperationNames = new Set<string>();
+          for (const def of this.registry.list()) {
+            for (const op of def.actions ?? []) cachedOperationNames.add(op.name);
+            for (const op of def.functions ?? []) cachedOperationNames.add(op.name);
+          }
+        }
         const rewritten = rewriteODataUrl(normalizedUrl, {
           namespace: this.cfg?.namespace,
           namespaceAlias: this.cfg?.namespaceAlias,
+          operationNames: cachedOperationNames,
         });
         keyRewritten = rewritten !== normalizedUrl;
         if (keyRewritten) {
@@ -57,6 +68,7 @@ export class OdataPathRewriterProvider implements Provider<Middleware> {
       }
 
       if (basePathRewritten || keyRewritten) {
+        this.resetRequestUrlState(ctx.request);
         this.emitRewriteTelemetry(ctx, {
           originalUrl,
           rewrittenUrl: ctx.request.url ?? originalUrl,
@@ -70,6 +82,29 @@ export class OdataPathRewriterProvider implements Provider<Middleware> {
     };
 
     return middleware;
+  }
+
+  private resetRequestUrlState(request: unknown): void {
+    const req = request as any;
+    if (!req || typeof req !== 'object') return;
+    try {
+      delete req._parsedUrl;
+      delete req._parsedOriginalUrl;
+      delete req._query;
+      if (Object.prototype.hasOwnProperty.call(req, 'query')) {
+        delete req.query;
+      }
+    } catch {
+      // Best-effort: URL rewrite must never fail the request pipeline.
+    }
+
+    // LoopBack may read query params early. Ensure consumers see the rewritten query string.
+    const url = typeof req.url === 'string' ? req.url : '';
+    const queryIndex = url.indexOf('?');
+    const hashIndex = url.indexOf('#');
+    const queryString =
+      queryIndex >= 0 ? url.slice(queryIndex + 1, hashIndex >= 0 ? hashIndex : undefined) : '';
+    req.query = parseQueryString(queryString);
   }
 
   private emitRewriteTelemetry(ctx: MiddlewareContext, context: Record<string, unknown>) {
@@ -90,4 +125,27 @@ export class OdataPathRewriterProvider implements Provider<Middleware> {
       return undefined;
     }
   }
+}
+
+function parseQueryString(query: string): Record<string, unknown> {
+  const result: Record<string, unknown> = {};
+  if (!query) return result;
+
+  try {
+    const params = new URLSearchParams(query);
+    for (const [key, value] of params.entries()) {
+      const existing = result[key];
+      if (existing === undefined) {
+        result[key] = value;
+      } else if (Array.isArray(existing)) {
+        existing.push(value);
+      } else {
+        result[key] = [existing, value];
+      }
+    }
+  } catch {
+    return result;
+  }
+
+  return result;
 }

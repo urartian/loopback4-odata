@@ -107,4 +107,18 @@ describe('odataPathRewriter', () => {
     });
     assert.equal(rewritten, '/odata/Products/1/Lookup?code=ABC%27123');
   });
+
+  it('converts unqualified function calls into query parameters when operation names are known', () => {
+    const rewritten = rewriteODataUrl("/odata/readPendingApprovals(offerID='abc')", {
+      operationNames: ['readPendingApprovals'],
+    });
+    assert.equal(rewritten, '/odata/readPendingApprovals?offerID=abc');
+  });
+
+  it('converts unqualified bound function calls into query parameters when operation names are known', () => {
+    const rewritten = rewriteODataUrl('/odata/Products/premiumProducts(minPrice=1000)', {
+      operationNames: ['premiumProducts'],
+    });
+    assert.equal(rewritten, '/odata/Products/premiumProducts?minPrice=1000');
+  });
 });
