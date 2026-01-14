@@ -425,6 +425,16 @@ class ProductODataController {
     return this.products.find({ where: { price: { gte: minPrice } } });
   }
 
+  @odataFunction({
+    name: 'readPendingApprovals',
+    binding: 'unbound',
+    params: [{ name: 'offerID', type: 'Edm.String' }],
+    returnType: 'Edm.String',
+  })
+  async readPendingApprovals(query: { offerID?: string }) {
+    return query.offerID ?? '';
+  }
+
   @odataAction({
     name: 'resetInventory',
     binding: 'unbound',

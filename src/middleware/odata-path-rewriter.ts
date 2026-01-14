@@ -3,6 +3,13 @@ export const MAX_KEY_EXPRESSION_LENGTH = 4096;
 export interface RewriteOptions {
   namespace?: string;
   namespaceAlias?: string;
+  /**
+   * Optional set of known action/function names (unqualified).
+   *
+   * When present, segments like `/odata/Products/premiumProducts(minPrice=1000)` are treated as
+   * function calls (rewritten into query params) instead of entity key predicates.
+   */
+  operationNames?: ReadonlySet<string> | ReadonlyArray<string>;
 }
 
 export function rewriteODataUrl(url: string, options?: RewriteOptions): string {
@@ -55,6 +62,7 @@ function rewritePath(
 ): { path: string; extraQuery?: string } {
   if (!path.includes('(')) return { path };
 
+  const operationNames = normalizeOperationNames(options?.operationNames);
   let result = '';
   let index = 0;
   const queryFragments: string[] = [];
@@ -76,6 +84,17 @@ function rewritePath(
     const { keyExpression, closeIndex } = keySegment;
     const segmentStart = path.lastIndexOf('/', openIndex - 1) + 1;
     const segmentName = path.slice(segmentStart, openIndex);
+
+    if (operationNames?.has(segmentName)) {
+      const query = canonicalParametersToQuery(keyExpression);
+      if (query !== undefined) {
+        if (query) queryFragments.push(query);
+        result += path.slice(index, segmentStart) + segmentName;
+        index = closeIndex + 1;
+        continue;
+      }
+    }
+
     if (segmentName.includes('.')) {
       const query = canonicalParametersToQuery(keyExpression);
       if (query !== undefined) {
@@ -332,3 +351,12 @@ function normalizeLiteral(raw: string): string {
 }
 
 const KEY_PREFIX_REGEX = /^(?:[A-Za-z_][A-Za-z0-9_.]*)'/;
+
+function normalizeOperationNames(
+  input: RewriteOptions['operationNames'],
+): ReadonlySet<string> | undefined {
+  if (!input) return undefined;
+  if (input instanceof Set) return input;
+  if (Array.isArray(input)) return new Set(input.filter(Boolean));
+  return undefined;
+}

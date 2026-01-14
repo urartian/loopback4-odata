@@ -5,6 +5,7 @@ import { OdataPathRewriterProvider } from '../../middleware/odata-path-rewriter.
 import { ODataRequestContextProvider } from '../../middleware/odata-request-context.provider';
 import { RequestLoggingProvider } from '../../middleware/request-logging.provider';
 import { ODataLogger } from '../../keys';
+import { EntitySetRegistry } from '../../registry/entityset-registry';
 import { MiddlewareContext } from '@loopback/rest';
 
 const noopLogger: ODataLogger = {
@@ -27,7 +28,11 @@ const createMiddlewareContext = (url: string): MiddlewareContext => {
 
 describe('root basePath middleware handling', () => {
   it('rewrites root-mounted requests to /odata paths', async () => {
-    const provider = new OdataPathRewriterProvider({ basePath: '/' } as any, noopLogger);
+    const provider = new OdataPathRewriterProvider(
+      { basePath: '/' } as any,
+      noopLogger,
+      new EntitySetRegistry(),
+    );
     const middleware = provider.value();
     const ctx = createMiddlewareContext('/Products');
 
@@ -37,7 +42,11 @@ describe('root basePath middleware handling', () => {
   });
 
   it('preserves root query URLs when rewriting', async () => {
-    const provider = new OdataPathRewriterProvider({ basePath: '/' } as any, noopLogger);
+    const provider = new OdataPathRewriterProvider(
+      { basePath: '/' } as any,
+      noopLogger,
+      new EntitySetRegistry(),
+    );
     const middleware = provider.value();
     const ctx = createMiddlewareContext('/?foo=bar');
 
@@ -61,7 +70,11 @@ describe('root basePath middleware handling', () => {
   });
 
   it('does not rewrite non-OData routes containing parentheses', async () => {
-    const provider = new OdataPathRewriterProvider({ basePath: '/odata' } as any, noopLogger);
+    const provider = new OdataPathRewriterProvider(
+      { basePath: '/odata' } as any,
+      noopLogger,
+      new EntitySetRegistry(),
+    );
     const middleware = provider.value();
     const ctx = createMiddlewareContext('/assets/logo(1).png');
 
@@ -71,7 +84,11 @@ describe('root basePath middleware handling', () => {
   });
 
   it('skips rewriting when URL does not match custom service root', async () => {
-    const provider = new OdataPathRewriterProvider({ basePath: '/api/odata' } as any, noopLogger);
+    const provider = new OdataPathRewriterProvider(
+      { basePath: '/api/odata' } as any,
+      noopLogger,
+      new EntitySetRegistry(),
+    );
     const middleware = provider.value();
     const ctx = createMiddlewareContext('/public/files(2).json');
 
@@ -81,7 +98,11 @@ describe('root basePath middleware handling', () => {
   });
 
   it('rewrites canonical /odata URLs even when basePath is custom', async () => {
-    const provider = new OdataPathRewriterProvider({ basePath: '/api/odata' } as any, noopLogger);
+    const provider = new OdataPathRewriterProvider(
+      { basePath: '/api/odata' } as any,
+      noopLogger,
+      new EntitySetRegistry(),
+    );
     const middleware = provider.value();
     const ctx = createMiddlewareContext("/odata/Products(Key='ABC')");
 
@@ -91,7 +112,11 @@ describe('root basePath middleware handling', () => {
   });
 
   it('rewrites custom basePath requests after stripping prefix', async () => {
-    const provider = new OdataPathRewriterProvider({ basePath: '/api/odata' } as any, noopLogger);
+    const provider = new OdataPathRewriterProvider(
+      { basePath: '/api/odata' } as any,
+      noopLogger,
+      new EntitySetRegistry(),
+    );
     const middleware = provider.value();
     const ctx = createMiddlewareContext("/api/odata/Products(Key='XYZ')");
 
@@ -101,7 +126,11 @@ describe('root basePath middleware handling', () => {
   });
 
   it('uses originalUrl when Express strips the mounted basePath segment', async () => {
-    const provider = new OdataPathRewriterProvider({ basePath: '/api/odata' } as any, noopLogger);
+    const provider = new OdataPathRewriterProvider(
+      { basePath: '/api/odata' } as any,
+      noopLogger,
+      new EntitySetRegistry(),
+    );
     const middleware = provider.value();
     const ctx = createMiddlewareContext('/');
     (ctx.request as any).originalUrl = '/api/odata';

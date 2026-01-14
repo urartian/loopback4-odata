@@ -560,6 +560,25 @@ describe('OData component acceptance', () => {
     );
   });
 
+  it('invokes collection-bound functions using unqualified canonical syntax', async () => {
+    const res = await client.get('/odata/Products/premiumProducts(minPrice=1000)').expect(200);
+
+    expect(res.body.value).to.be.Array();
+    expect(res.body.value.every((item: { price: number }) => item.price >= 1000)).to.be.true();
+    expect(res.body['@odata.context']).to.equal(
+      '/odata/$metadata#Products/Default.premiumProducts',
+    );
+  });
+
+  it('invokes unbound functions using unqualified canonical syntax', async () => {
+    const res = await client
+      .get("/odata/readPendingApprovals(offerID='1ac53450-eb09-11f0-84ea-850fc6ec6785')")
+      .expect(200);
+
+    expect(res.body.value).to.equal('1ac53450-eb09-11f0-84ea-850fc6ec6785');
+    expect(res.body['@odata.context']).to.equal('/odata/$metadata#Default.readPendingApprovals');
+  });
+
   it('emits @odata.context fragments for unbound actions', async () => {
     const res = await client.post('/odata/resetInventory').send({ confirm: true }).expect(200);
 
