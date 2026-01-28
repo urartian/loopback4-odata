@@ -213,6 +213,20 @@ export class BigIntAsset extends Entity {
   libraryId?: typeof AssetLibrary.prototype.id;
 }
 
+@odataModel()
+@model()
+export class DecisionRule extends Entity {
+  @property({ id: true })
+  id!: number;
+
+  @property({
+    type: 'object',
+    required: true,
+    postgresql: { dataType: 'jsonb' },
+  })
+  decisionSchema!: object;
+}
+
 export class ProductRepository extends DefaultCrudRepository<Product, typeof Product.prototype.id> {
   public readonly orderItems: HasManyRepositoryFactory<OrderItem, typeof Product.prototype.id>;
   public readonly orders: HasManyThroughRepositoryFactory<
@@ -396,6 +410,18 @@ export class BigIntAssetRepository extends DefaultCrudRepository<
     this.registerInclusionResolver('library', this.library.inclusionResolver);
   }
 }
+
+export class DecisionRuleRepository extends DefaultCrudRepository<
+  DecisionRule,
+  typeof DecisionRule.prototype.id
+> {
+  constructor(@inject('datasources.db') dataSource: juggler.DataSource) {
+    super(DecisionRule, dataSource);
+  }
+}
+
+@odataController(DecisionRule)
+class DecisionRuleODataController {}
 
 @odataController(Product)
 class ProductODataController {
@@ -595,12 +621,14 @@ export async function givenODataApplication(
   app.repository(MediaAssetRepository);
   app.repository(AssetLibraryRepository);
   app.repository(BigIntAssetRepository);
+  app.repository(DecisionRuleRepository);
   app.component(ODataComponent);
   const currentConfig = app.getSync(ODATA_BINDINGS.CONFIG) as ODataConfig;
   app.bind(ODATA_BINDINGS.CONFIG).to({
     ...currentConfig,
     tokenSecret: 'test-secret',
   });
+  app.controller(DecisionRuleODataController);
   app.controller(ProductODataController);
   app.controller(OrderODataController);
   app.controller(OrderItemODataController);
@@ -618,6 +646,7 @@ export async function seedExampleData(app: TestApplication) {
   const mediaAssetRepo = await app.getRepository(MediaAssetRepository);
   const assetLibraryRepo = await app.getRepository(AssetLibraryRepository);
   const bigIntAssetRepo = await app.getRepository(BigIntAssetRepository);
+  const decisionRuleRepo = await app.getRepository(DecisionRuleRepository);
 
   const existingProducts = await productRepo.count();
   if (existingProducts.count > 0) return;
@@ -684,5 +713,10 @@ export async function seedExampleData(app: TestApplication) {
     mediaVersion: 'W/"big-asset-1"',
     size: Buffer.byteLength('Primary BigInt asset payload'),
     libraryId: library.id,
+  });
+
+  await decisionRuleRepo.create({
+    id: 1,
+    decisionSchema: { version: 1, rules: [{ when: { countryCode: 'US' }, then: { rate: 0.05 } }] },
   });
 }

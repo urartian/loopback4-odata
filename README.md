@@ -1560,6 +1560,49 @@ Handlers run inside the request scope, so repository injections, current-tenant 
 >
 > `$value` routes only interact with the media stream (and optional metadata fields configured via `mediaContentTypeField`, `mediaLengthField`, `mediaEtagField`). Updating scalar properties such as `title`, `description`, or custom columns still requires a JSON `PATCH /odata/<EntitySet>('{id}')` call. The controller intentionally separates these concerns so file uploads cannot silently overwrite regular entity data.
 
+### JSON Stream Properties (PostgreSQL `json`/`jsonb`)
+
+If you store JSON in a PostgreSQL `json`/`jsonb` column (or otherwise model it as an object), you can expose it to OData clients as a **stream property** (`Edm.Stream`) with `Core.MediaType = application/json` (similar to SAP CAP’s pattern).
+
+Model example:
+
+```ts
+@odataModel()
+export class DecisionRule extends Entity {
+  @property({ id: true })
+  id!: string;
+
+  @property({
+    type: 'object',
+    required: true,
+    postgresql: { dataType: 'jsonb' },
+  })
+  decisionSchema!: object;
+}
+```
+
+Behavior:
+
+- `$metadata` includes `decisionSchema` as `Edm.Stream` and annotates it with `Org.OData.Core.V1.MediaType="application/json"`.
+- Entity reads do **not** inline the JSON value; instead they expose per-property media annotations like `decisionSchema@odata.mediaReadLink` and `decisionSchema@odata.mediaContentType`.
+- Read the JSON payload via:
+  - `GET /odata/DecisionRules(<id>)/decisionSchema` (returns `application/json`)
+  - `GET /odata/DecisionRules(<id>)/decisionSchema/$value` (returns `application/json`)
+- Write the JSON via normal entity create/patch payloads (e.g., `POST /odata/DecisionRules` or `PATCH /odata/DecisionRules(<id>)`). Dedicated `PUT /.../<property>` stream writes are not currently implemented.
+
+If you can’t (or don’t want to) rely on connector metadata like `postgresql.dataType`, you can also force the mapping via JSON Schema hints:
+
+```ts
+@property({
+  type: 'object',
+  jsonSchema: {
+    'x-odata-type': 'Edm.Stream',
+    'x-odata-media-type': 'application/json',
+  },
+})
+decisionSchema!: object;
+```
+
 ### Server-driven Paging & `$skiptoken`
 
 Collection reads now default to server-driven paging. The component takes the smaller of the requested `$top` and the configured `pageSize` (default `200`), returns that many entities, and emits an `@odata.nextLink` that includes a signed `$skiptoken`. Tokens carry the ordering values plus an HMAC signature bound to the current request shape, so tampering or replaying the token outside its context is rejected with `400 Invalid $skiptoken`. Configure `tokenSecret` before boot; without it the component refuses to issue tokens.
