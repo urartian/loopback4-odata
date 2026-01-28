@@ -899,6 +899,12 @@ describe('OData component acceptance', () => {
     expect(res.headers['content-type']).to.match(/text\/plain/);
   });
 
+  it('serves JSON stream properties as application/json', async () => {
+    const res = await client.get('/odata/DecisionRules(1)/decisionSchema').expect(200);
+    expect(res.headers['content-type']).to.match(/application\/json/i);
+    expect(res.body).to.containDeep({ version: 1 });
+  });
+
   it('returns ISO strings for date $value properties', async () => {
     const entity = await client.get('/odata/Products(1)').expect(200);
     const updatedAt = entity.body.updatedAt;

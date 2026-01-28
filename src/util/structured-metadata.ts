@@ -9,7 +9,50 @@ import {
 import { ensureModelDefinitionWithRelations } from './model-definition';
 import { isModelCtor } from './model-helpers';
 
-export type PrimitivePropertyKind = 'string' | 'number' | 'boolean' | 'date' | 'buffer';
+export type PrimitivePropertyKind = 'string' | 'number' | 'boolean' | 'date' | 'buffer' | 'json';
+
+export function isJsonStreamProperty(definition: PropertyDefinition | undefined): boolean {
+  if (!definition) return false;
+  const defAny = definition as AnyObject;
+  const jsonSchema = (defAny?.jsonSchema ?? {}) as AnyObject;
+  const schemaType =
+    typeof jsonSchema.type === 'string' ? jsonSchema.type.toLowerCase() : undefined;
+  const schemaFormat =
+    typeof jsonSchema.format === 'string' ? jsonSchema.format.toLowerCase() : undefined;
+  const odataType =
+    typeof jsonSchema['x-odata-type'] === 'string'
+      ? String(jsonSchema['x-odata-type']).toLowerCase()
+      : undefined;
+  const explicitMediaType =
+    typeof jsonSchema['x-odata-media-type'] === 'string'
+      ? String(jsonSchema['x-odata-media-type']).toLowerCase()
+      : typeof jsonSchema.contentMediaType === 'string'
+        ? String(jsonSchema.contentMediaType).toLowerCase()
+        : undefined;
+
+  const rawType = defAny?.type;
+  const normalizedType =
+    typeof rawType === 'function'
+      ? rawType.name.toLowerCase()
+      : typeof rawType === 'string'
+        ? rawType.toLowerCase()
+        : undefined;
+
+  const pgType =
+    typeof defAny?.postgresql?.dataType === 'string'
+      ? String(defAny.postgresql.dataType).toLowerCase()
+      : undefined;
+
+  const isObjectLike = normalizedType === 'object' || rawType === Object || schemaType === 'object';
+  const isPostgresJson = pgType === 'json' || pgType === 'jsonb';
+  const isExplicitJson =
+    schemaFormat === 'json' ||
+    schemaFormat === 'jsonb' ||
+    explicitMediaType === 'application/json' ||
+    (odataType === 'edm.stream' && explicitMediaType === 'application/json');
+
+  return Boolean(isObjectLike && (isPostgresJson || isExplicitJson));
+}
 
 export interface StructuredPropertyNode {
   primitiveProps: Map<string, PrimitivePropertyKind>;
@@ -38,6 +81,7 @@ export function classifyPrimitiveProperty(
   definition: PropertyDefinition | undefined,
 ): PrimitivePropertyKind | undefined {
   if (!definition) return undefined;
+  if (isJsonStreamProperty(definition)) return 'json';
   const jsonSchema = (definition as AnyObject)?.jsonSchema ?? {};
   const schemaType =
     typeof jsonSchema.type === 'string' ? jsonSchema.type.toLowerCase() : undefined;

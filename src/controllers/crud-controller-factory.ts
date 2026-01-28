@@ -882,6 +882,7 @@ export function defineODataCrudController(def: EntitySetDef) {
       if (hasStream) {
         this.decorateMediaAnnotations(normalized, plain, etag);
       }
+      this.decorateStreamPropertyAnnotations(normalized, plain);
       if (!etag) return normalized;
       if (normalized['@odata.etag'] === etag) return normalized;
       return { ...normalized, '@odata.etag': etag };
@@ -1053,6 +1054,36 @@ export function defineODataCrudController(def: EntitySetDef) {
       const mediaEtag = this.readMediaEtag(source) ?? entityEtag;
       if (mediaEtag) {
         target['@odata.mediaEtag'] = mediaEtag;
+      }
+    }
+
+    decorateStreamPropertyAnnotations(target: AnyObject, source: AnyObject) {
+      const props = modelDefinition?.properties ?? {};
+      const streamProps: string[] = [];
+      for (const [name, def] of Object.entries(props)) {
+        if (classifyPrimitiveProperty(def as PropertyDefinition) === 'json') {
+          streamProps.push(name);
+        }
+      }
+      if (!streamProps.length) return;
+
+      let entityUrl = this.buildEntityLocationUrl(this.extractEntityId(source), source);
+      if (!entityUrl) {
+        const keyLiteral = this.buildEntityKeyLiteral(undefined, source);
+        if (keyLiteral) {
+          const basePath = normalizeBasePath(this.cfg?.basePath);
+          const prefix = basePath === '/' ? '' : basePath;
+          entityUrl = `${prefix}/${setName}${keyLiteral}`;
+        }
+      }
+      if (!entityUrl) return;
+
+      for (const name of streamProps) {
+        delete target[name];
+        const propUrl = `${entityUrl}/${encodeURIComponent(name)}`;
+        target[`${name}@odata.mediaReadLink`] = propUrl;
+        target[`${name}@odata.mediaEditLink`] = propUrl;
+        target[`${name}@odata.mediaContentType`] = 'application/json';
       }
     }
 
@@ -6201,6 +6232,19 @@ export function defineODataCrudController(def: EntitySetDef) {
             contentType: 'text/plain; charset=utf-8',
           };
         }
+        case 'json': {
+          if (value === null || value === undefined) {
+            return { body: '', contentType: 'application/json; charset=utf-8' };
+          }
+          if (typeof value === 'string') {
+            return { body: value, contentType: 'application/json; charset=utf-8' };
+          }
+          try {
+            return { body: JSON.stringify(value), contentType: 'application/json; charset=utf-8' };
+          } catch {
+            throw new HttpErrors.InternalServerError('Property value is not valid JSON.');
+          }
+        }
         case 'number': {
           const numeric = typeof value === 'number' ? value : Number(value);
           if (Number.isNaN(numeric) || !Number.isFinite(numeric)) {
@@ -11034,6 +11078,15 @@ export function defineODataCrudController(def: EntitySetDef) {
         if (rawValue === null || rawValue === undefined) {
           this.response.status(204).end();
           return undefined;
+        }
+
+        if (primitiveKind === 'json') {
+          this.ensureAcceptsJson(['application/json']);
+          const serialized = this.serializePrimitiveValue(rawValue, primitiveKind);
+          this.response.type(serialized.contentType);
+          this.response.send(serialized.body);
+          ctx.result = rawValue;
+          return rawValue;
         }
 
         // Build OData context URL for the property

@@ -34,6 +34,7 @@ import { getODataSearchableProps } from '../decorators/search.decorators';
 import { stableStringify } from '../util/token-signing';
 import { isEntityCtor, isModelCtor } from '../util/model-helpers';
 import { resolveFilterFunctions } from '../util/filter-functions';
+import { isJsonStreamProperty } from '../util/structured-metadata';
 
 const EDM_NAMESPACE = 'http://docs.oasis-open.org/odata/ns/edm';
 const EDMX_NAMESPACE = 'http://docs.oasis-open.org/odata/ns/edmx';
@@ -92,6 +93,14 @@ const PRIMITIVE_TYPE_MAP = new Map<unknown, string>([
 interface ResolvedEdmType {
   type: string;
   facets?: Record<string, unknown>;
+  annotations?: CsdlAnnotation[];
+}
+
+interface CsdlAnnotation {
+  term: string;
+  string?: string;
+  bool?: boolean;
+  path?: string;
 }
 
 type EffectiveCapabilities = ODataCapabilitiesConfig & {
@@ -452,8 +461,22 @@ function buildComplexType(
         propertySchema[facetName] = facetValue;
       }
     }
-    propertyLines.push(`      <Property ${attrs.join(' ')} />`);
+    if (resolved.annotations?.length) {
+      propertyLines.push(`      <Property ${attrs.join(' ')}>`);
+      for (const ann of resolved.annotations) {
+        propertyLines.push(buildInlineAnnotationXml(ann, 8));
+      }
+      propertyLines.push('      </Property>');
+    } else {
+      propertyLines.push(`      <Property ${attrs.join(' ')} />`);
+    }
     json[propertyName] = propertySchema;
+    if (resolved.annotations?.length) {
+      for (const ann of resolved.annotations) {
+        json[`${propertyName}@${ann.term}`] =
+          ann.path != null ? { $Path: ann.path } : ann.bool != null ? ann.bool : ann.string;
+      }
+    }
   }
 
   const xml = [
@@ -619,6 +642,13 @@ function resolveEdmType(
     }
   }
 
+  if (isJsonStreamProperty(def)) {
+    return {
+      type: 'Edm.Stream',
+      annotations: [{ term: 'Org.OData.Core.V1.MediaType', string: 'application/json' }],
+    };
+  }
+
   const resolved = resolvePrimitiveType(effectiveType, schema);
   if (!resolved) return undefined;
 
@@ -649,6 +679,21 @@ function resolveEdmType(
     type: resolved.type,
     facets: Object.keys(facets).length ? facets : undefined,
   };
+}
+
+function buildInlineAnnotationXml(ann: CsdlAnnotation, indentSpaces: number): string {
+  const indent = ' '.repeat(Math.max(0, indentSpaces));
+  const term = xmlEscape(ann.term);
+  if (ann.path != null) {
+    return `${indent}<Annotation Term="${term}"><Path>${xmlEscape(ann.path)}</Path></Annotation>`;
+  }
+  if (ann.bool != null) {
+    return `${indent}<Annotation Term="${term}" Bool="${ann.bool ? 'true' : 'false'}" />`;
+  }
+  if (ann.string != null) {
+    return `${indent}<Annotation Term="${term}" String="${xmlEscape(ann.string)}" />`;
+  }
+  return `${indent}<Annotation Term="${term}" />`;
 }
 
 function xmlEscape(value: string): string {
@@ -736,8 +781,20 @@ function buildEntityType(
       attrs.push('ConcurrencyMode="Fixed"');
       json[`${propertyName}@ConcurrencyMode`] = 'Fixed';
     }
-    propertyLines.push(`      <Property ${attrs.join(' ')} />`);
     json[propertyName] = propertySchema;
+    if (resolved.annotations?.length) {
+      for (const ann of resolved.annotations) {
+        json[`${propertyName}@${ann.term}`] =
+          ann.path != null ? { $Path: ann.path } : ann.bool != null ? ann.bool : ann.string;
+      }
+      propertyLines.push(`      <Property ${attrs.join(' ')}>`);
+      for (const ann of resolved.annotations) {
+        propertyLines.push(buildInlineAnnotationXml(ann, 8));
+      }
+      propertyLines.push('      </Property>');
+    } else {
+      propertyLines.push(`      <Property ${attrs.join(' ')} />`);
+    }
   }
 
   if (hasStream) {

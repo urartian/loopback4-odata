@@ -70,6 +70,13 @@ class Widget extends Entity {
   @property({ type: 'buffer' })
   data?: Buffer;
 
+  @property({
+    type: 'object',
+    required: true,
+    postgresql: { dataType: 'jsonb' },
+  })
+  decisionSchema!: object;
+
   @property({ type: 'array', itemType: 'string' })
   tags?: string[];
 
@@ -216,6 +223,8 @@ describe('CsdlGenerator', () => {
     expect(xml.includes('Precision="10"')).to.be.true();
     expect(xml.includes('Scale="2"')).to.be.true();
     expect(xml.includes('<Property Name="sku" Type="Edm.Guid" Nullable="true"')).to.be.true();
+    expect(xml.includes('<Property Name="decisionSchema" Type="Edm.Stream"')).to.be.true();
+    expect(xml.includes('Org.OData.Core.V1.MediaType" String="application/json"')).to.be.true();
     expect(
       xml.includes(
         '<Property Name="status" Type="Catalog.WidgetStatusEnum" Nullable="true" DefaultValue="draft"',
@@ -349,6 +358,10 @@ describe('CsdlGenerator', () => {
     expect(schema.Widget.price.Scale).to.equal(2);
     expect(schema.Widget.sku.$Type).to.equal('Edm.Guid');
     expect(schema.Widget.tags.$Type).to.equal('Collection(Edm.String)');
+    expect(schema.Widget.decisionSchema.$Type).to.equal('Edm.Stream');
+    expect(schema.Widget['decisionSchema@Org.OData.Core.V1.MediaType']).to.equal(
+      'application/json',
+    );
     expect(schema.Widget.dimensions.$Type).to.equal('Catalog.Dimensions');
     expect(schema.Widget['updatedAt@ConcurrencyMode']).to.equal('Fixed');
     expect(schema.Widget['@Org.OData.Core.V1.MediaETag']).to.containDeep({ $Path: 'sku' });
