@@ -2,6 +2,7 @@ import 'reflect-metadata';
 import { MetadataInspector } from '@loopback/core';
 import { model as applyModel, Model, MODEL_KEY } from '@loopback/repository';
 import { ODataCompositionEntitySetConfig } from '../types';
+import { registerODataModelCtor } from '../internal/odata-model-registry';
 const ODATA_MODEL_KEY = 'odata:model';
 
 export interface ODataModelOptions {
@@ -46,6 +47,7 @@ export function odataModel(opts: ODataModelOptions = {}) {
       applyModel(definition ?? {})(target as typeof Model);
     }
     Reflect.defineMetadata(ODATA_MODEL_KEY, opts, target);
+    registerODataModelCtor(target as typeof Model);
   };
 }
 

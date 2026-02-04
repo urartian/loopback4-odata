@@ -4,10 +4,23 @@ import { isModelCtor } from '../util/model-helpers';
 
 export type ODataBindingScope = 'collection' | 'entity' | 'unbound';
 
+export type ODataTypeRef = string | typeof Model | (() => string | typeof Model);
+
+export type ODataReturnType =
+  | ODataTypeRef
+  | {
+      collection: true;
+      type: ODataTypeRef;
+    };
+
+export function collectionOf(type: ODataTypeRef): ODataReturnType {
+  return { collection: true, type };
+}
+
 export interface ODataOperationOptions {
   name?: string;
   binding?: ODataBindingScope;
-  returnType?: string;
+  returnType?: ODataReturnType;
   rawResponse?: boolean;
 }
 
@@ -16,7 +29,7 @@ const FUNCTION_METADATA_KEY = 'odata:controller:functions';
 
 export interface OperationMeta extends Required<Omit<ODataOperationOptions, 'returnType'>> {
   parameters?: OperationParameter[];
-  returnType?: string;
+  returnType?: ODataReturnType;
   methodName: string;
 }
 

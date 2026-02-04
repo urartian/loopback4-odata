@@ -671,10 +671,10 @@ You can publish custom OData operations on top of the generated CRUD surface by 
 - `name` overrides the exported operation name (defaults to the method name).
 - `binding` selects the scope: `entity` (default), `collection`, or `unbound`.
 - `params` describes parameters for `$metadata` (each entry has `name` and optional `type`).
-- `returnType` sets the CSDL return type hint. Functions default to `Edm.String` when omitted.
+- `returnType` sets the CSDL return type hint. It can be an EDM string (`'Edm.Guid'`, `'Collection(Edm.String)'`, etc.), a LoopBack model constructor/factory (`DecisionPermissionConfig` or `() => DecisionPermissionConfig`), or `collectionOf(...)` for `Collection(...)` return types. Functions default to `Edm.String` when omitted.
 - `rawResponse` skips the default OData annotations (like `@odata.context`/`@odata.etag`) so you can return a bespoke payload.
 
-`params[].type` accepts either a literal EDM string (`'Edm.Guid'`, `'Collection(Edm.String)'`, etc.) or a LoopBack `@model()` constructor (pass the class or a factory such as `() => DecisionInput`). When you hand it a model the generator emits the referenced complex type in `$metadata`, so clients can discover the schema of your action payload without adding dummy properties to entities. Runtime requests are validated against the model definition, so unknown properties trigger `400 Bad Request` before your controller runs.
+`params[].type` and `returnType` accept either a literal EDM string (`'Edm.Guid'`, `'Collection(Edm.String)'`, etc.) or a LoopBack model constructor (pass the class or a factory such as `() => DecisionInput`). When you reference a model, the generator emits the referenced complex type in `$metadata`, so clients can discover the schema of your payload/return type without adding dummy properties to entities. Runtime requests are validated against the model definition, so unknown properties trigger `400 Bad Request` before your controller runs.
 
 At runtime the framework resolves method arguments this way:
 
@@ -721,6 +721,33 @@ class ProductController {
 - Functions map to `GET /odata/Products/premiumProducts?minPrice=1000` and return a collection via GET. Canonical OData invocation is also accepted: `GET /odata/Products/premiumProducts(minPrice=1000)` (and the namespace-qualified form `GET /odata/Products/Default.premiumProducts(minPrice=1000)`).
 - Set `rawResponse: true` in the decorator if you want to return a custom payload instead of the standard OData-formatted entity.
 - Decorated operations are listed automatically in `$metadata` (CSDL) as bound/unbound actions and functions.
+
+#### Complex return types
+
+Use a model constructor/factory to generate ComplexType metadata for operation return values. For collections, wrap the type with `collectionOf(...)` (or use a literal `Collection(...)` CSDL string):
+
+```ts
+import { odataFunction, collectionOf } from '@loopback/odata';
+import { DecisionPermissionConfig } from '../models/decision-permission-config.model';
+
+@odataFunction({
+  name: 'readDecisionPermissionConfig',
+  binding: 'unbound',
+  returnType: () => DecisionPermissionConfig,
+})
+async readDecisionPermissionConfig() {
+  return { id: '1', name: 'example' };
+}
+
+@odataFunction({
+  name: 'listDecisionPermissionConfigs',
+  binding: 'unbound',
+  returnType: collectionOf(() => DecisionPermissionConfig),
+})
+async listDecisionPermissionConfigs() {
+  return [{ id: '1', name: 'example' }];
+}
+```
 
 ### Controller Hooks & Overrides
 
