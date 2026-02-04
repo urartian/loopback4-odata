@@ -33,6 +33,21 @@ class ResetPayload extends Model {
   note?: string;
 }
 
+@odataModel()
+class DecisionPermissionConfig extends Model {
+  @property({ type: 'string', required: true })
+  id!: string;
+
+  @property({ type: 'string', required: true })
+  name!: string;
+}
+
+@odataModel()
+class ReturnOnlyConfig extends Model {
+  @property({ type: 'string', required: true })
+  code!: string;
+}
+
 @model()
 class Gadget extends Entity {
   @property({ id: true, type: 'number' })
@@ -176,6 +191,27 @@ describe('CsdlGenerator', () => {
           returnType: 'Edm.Int32',
         },
         {
+          name: 'readDecisionPermissionConfig',
+          methodName: 'readDecisionPermissionConfig',
+          binding: 'unbound',
+          rawResponse: false,
+          returnType: () => DecisionPermissionConfig,
+        },
+        {
+          name: 'listDecisionPermissionConfigs',
+          methodName: 'listDecisionPermissionConfigs',
+          binding: 'unbound',
+          rawResponse: false,
+          returnType: 'Collection(Catalog.DecisionPermissionConfig)',
+        },
+        {
+          name: 'listReturnOnlyConfigs',
+          methodName: 'listReturnOnlyConfigs',
+          binding: 'unbound',
+          rawResponse: false,
+          returnType: 'Collection(Catalog.ReturnOnlyConfig)',
+        },
+        {
           name: 'ping',
           methodName: 'ping',
           binding: 'unbound',
@@ -232,10 +268,20 @@ describe('CsdlGenerator', () => {
     ).to.be.true();
     expect(xml.includes('<ComplexType Name="Dimensions">')).to.be.true();
     expect(xml.includes('<ComplexType Name="ResetPayload">')).to.be.true();
+    expect(xml.includes('<ComplexType Name="DecisionPermissionConfig">')).to.be.true();
+    expect(xml.includes('<ComplexType Name="ReturnOnlyConfig">')).to.be.true();
     expect(
       xml.includes('<Property Name="dimensions" Type="Catalog.Dimensions" Nullable="true"'),
     ).to.be.true();
     expect(xml.includes('Parameter Name="payload" Type="Catalog.ResetPayload"')).to.be.true();
+    expect(xml.includes('<Function Name="readDecisionPermissionConfig">')).to.be.true();
+    expect(xml.includes('<ReturnType Type="Catalog.DecisionPermissionConfig"')).to.be.true();
+    expect(xml.includes('<Function Name="listDecisionPermissionConfigs">')).to.be.true();
+    expect(
+      xml.includes('<ReturnType Type="Collection(Catalog.DecisionPermissionConfig)"'),
+    ).to.be.true();
+    expect(xml.includes('<Function Name="listReturnOnlyConfigs">')).to.be.true();
+    expect(xml.includes('<ReturnType Type="Collection(Catalog.ReturnOnlyConfig)"')).to.be.true();
     expect(xml.includes('<EnumType Name="WidgetStatusEnum"')).to.be.true();
     expect(xml.includes('<Member Name="draft" Value="0"')).to.be.true();
     expect(xml.includes('Annotation Term="Org.OData.Core.V1.HasStream" Bool="true"')).to.be.true();
@@ -369,6 +415,10 @@ describe('CsdlGenerator', () => {
     expect(schema.Dimensions.width.$Type).to.equal('Edm.Double');
     expect(schema.ResetPayload.$Kind).to.equal('ComplexType');
     expect(schema.ResetPayload.confirm.$Type).to.equal('Edm.Boolean');
+    expect(schema.DecisionPermissionConfig.$Kind).to.equal('ComplexType');
+    expect(schema.DecisionPermissionConfig.id.$Type).to.equal('Edm.String');
+    expect(schema.ReturnOnlyConfig.$Kind).to.equal('ComplexType');
+    expect(schema.ReturnOnlyConfig.code.$Type).to.equal('Edm.String');
     expect(schema.Widget.status.$Type).to.equal('Catalog.WidgetStatusEnum');
     expect(schema.WidgetStatusEnum.$Kind).to.equal('EnumType');
     expect(schema.WidgetStatusEnum.Members).to.have.length(3);
@@ -398,6 +448,27 @@ describe('CsdlGenerator', () => {
     expect(schema.topWidgets.$Kind).to.equal('Function');
     expect(schema.topWidgets.$IsBound).to.equal(true);
     expect(schema.topWidgets.$ReturnType.$Type).to.equal('Edm.Int32');
+
+    expect(schema).to.have.property('readDecisionPermissionConfig');
+    expect(schema.readDecisionPermissionConfig.$Kind).to.equal('Function');
+    expect(schema.readDecisionPermissionConfig.$IsBound).to.equal(undefined);
+    expect(schema.readDecisionPermissionConfig.$ReturnType.$Type).to.equal(
+      'Catalog.DecisionPermissionConfig',
+    );
+
+    expect(schema).to.have.property('listDecisionPermissionConfigs');
+    expect(schema.listDecisionPermissionConfigs.$Kind).to.equal('Function');
+    expect(schema.listDecisionPermissionConfigs.$IsBound).to.equal(undefined);
+    expect(schema.listDecisionPermissionConfigs.$ReturnType.$Type).to.equal(
+      'Collection(Catalog.DecisionPermissionConfig)',
+    );
+
+    expect(schema).to.have.property('listReturnOnlyConfigs');
+    expect(schema.listReturnOnlyConfigs.$Kind).to.equal('Function');
+    expect(schema.listReturnOnlyConfigs.$IsBound).to.equal(undefined);
+    expect(schema.listReturnOnlyConfigs.$ReturnType.$Type).to.equal(
+      'Collection(Catalog.ReturnOnlyConfig)',
+    );
 
     expect(schema).to.have.property('CatalogService');
     const container = schema.CatalogService;

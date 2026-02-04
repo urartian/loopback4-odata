@@ -13,6 +13,8 @@ import { ODATA_BINDINGS } from '../keys';
 import {
   getODataActions,
   getODataFunctions,
+  ODataReturnType,
+  ODataTypeRef,
   OperationMeta,
   OperationParameter,
   OperationParameterType,
@@ -31,6 +33,7 @@ import {
   ODataFilterRestrictionsConfig,
 } from '../types';
 import { getODataSearchableProps } from '../decorators/search.decorators';
+import { resolveODataModelCtor } from '../internal/odata-model-registry';
 import { stableStringify } from '../util/token-signing';
 import { isEntityCtor, isModelCtor } from '../util/model-helpers';
 import { resolveFilterFunctions } from '../util/filter-functions';
@@ -1937,12 +1940,14 @@ export class CsdlGenerator {
     }
 
     const name = xmlEscape(op.name);
-    let returnTypeLine = '';
-    if (op.returnType) {
-      returnTypeLine = `  <ReturnType Type="${xmlEscape(op.returnType)}" />`;
-    } else if (kind === 'Function') {
-      returnTypeLine = '  <ReturnType Type="Edm.String" />';
-    }
+    const resolvedReturnType = op.returnType
+      ? this.resolveOperationReturnType(op.returnType, context)
+      : undefined;
+    const effectiveReturnType =
+      resolvedReturnType ?? (kind === 'Function' ? 'Edm.String' : undefined);
+    const returnTypeLine = effectiveReturnType
+      ? `  <ReturnType Type="${xmlEscape(effectiveReturnType)}" />`
+      : '';
 
     const schemaLines = [
       `    <${kind} Name="${name}"${isBound ? ' IsBound="true"' : ''}>`,
@@ -1991,10 +1996,9 @@ export class CsdlGenerator {
     if (parameters.length) {
       jsonOp.$Parameter = parameters;
     }
-    const returnType = op.returnType ?? (kind === 'Function' ? 'Edm.String' : undefined);
-    if (returnType) {
+    if (effectiveReturnType) {
       jsonOp.$ReturnType = {
-        $Type: returnType,
+        $Type: effectiveReturnType,
       };
     }
 
@@ -2040,6 +2044,77 @@ export class CsdlGenerator {
       }
     }
     return 'Edm.String';
+  }
+
+  private resolveOperationReturnType(
+    hint: ODataReturnType,
+    context: SchemaBuildContext,
+  ): string | undefined {
+    return this.resolveOperationTypeRef(hint, context);
+  }
+
+  private resolveOperationTypeRef(
+    hint: ODataReturnType | ODataTypeRef,
+    context: SchemaBuildContext,
+  ): string | undefined {
+    if (!hint) return undefined;
+    if (typeof hint === 'object' && (hint as { collection?: boolean }).collection === true) {
+      const inner = this.resolveOperationTypeRef((hint as { type: ODataTypeRef }).type, context);
+      if (!inner) return undefined;
+      return this.isCollectionTypeString(inner) ? inner : `Collection(${inner})`;
+    }
+
+    const unwrapped = this.unwrapOperationParameterType(hint as OperationParameterType);
+    if (!unwrapped) return undefined;
+    if (typeof unwrapped === 'string') {
+      return this.normalizeOperationTypeString(unwrapped, context);
+    }
+
+    const ctor = unwrapped;
+    if (isEntityCtor(ctor as typeof Entity)) {
+      const definition = (ctor as typeof Entity).definition as ModelDefinition | undefined;
+      const entityName = definition?.name ?? (ctor as { name?: string }).name ?? 'Entity';
+      return `${context.namespace}.${entityName}`;
+    }
+
+    if (isModelCtor(ctor)) {
+      const complex = ensureComplexType(ctor, context);
+      if (complex) return `${context.namespace}.${complex.name}`;
+    }
+    return undefined;
+  }
+
+  private normalizeOperationTypeString(type: string, context: SchemaBuildContext): string {
+    const trimmed = type.trim();
+    if (!trimmed) return 'Edm.String';
+
+    const collectionInner = this.parseCollectionTypeString(trimmed);
+    if (collectionInner) {
+      const inner = this.normalizeOperationTypeString(collectionInner, context);
+      return this.isCollectionTypeString(inner) ? inner : `Collection(${inner})`;
+    }
+
+    if (trimmed.startsWith('Edm.')) return trimmed;
+
+    // If the return type references a known @odataModel() complex type by name, ensure it is emitted
+    // and normalize to the generator's namespace + reserved type name.
+    const candidateName = trimmed.split('.').pop() ?? trimmed;
+    const ctor = resolveODataModelCtor(candidateName);
+    if (ctor && isModelCtor(ctor)) {
+      const complex = ensureComplexType(ctor, context);
+      if (complex) return `${context.namespace}.${complex.name}`;
+    }
+
+    return trimmed;
+  }
+
+  private parseCollectionTypeString(type: string): string | undefined {
+    const match = /^Collection\((.+)\)$/.exec(type.trim());
+    return match?.[1]?.trim();
+  }
+
+  private isCollectionTypeString(type: string): boolean {
+    return /^Collection\(.+\)$/.test(type.trim());
   }
 
   private unwrapOperationParameterType(
