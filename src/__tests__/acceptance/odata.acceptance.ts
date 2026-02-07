@@ -163,6 +163,47 @@ describe('OData component acceptance', () => {
     expect(productsEntry.url).to.equal('Products');
   });
 
+  it('includes singleton entries in the service document', async () => {
+    const res = await client.get('/odata').expect(200);
+    const singletonEntry = res.body.value.find(
+      (item: { name: string }) => item.name === 'PrimaryLibrary',
+    );
+    expect(singletonEntry).to.be.Object();
+    expect(singletonEntry.kind).to.equal('Singleton');
+    expect(singletonEntry.url).to.equal('PrimaryLibrary');
+  });
+
+  it('emits singleton definitions in $metadata', async () => {
+    const res = await client.get('/odata/$metadata').expect(200);
+    expect(res.text.includes('<Singleton Name="PrimaryLibrary"')).to.be.true();
+  });
+
+  it('serves singleton entities and supports navigation and $ref', async () => {
+    const singleton = await client.get('/odata/PrimaryLibrary').expect(200);
+    expect(singleton.body['@odata.context']).to.equal('/odata/$metadata#PrimaryLibrary');
+    expect(singleton.body.name).to.equal('Primary Library');
+
+    const nav = await client.get('/odata/PrimaryLibrary/assets').expect(200);
+    expect(nav.body['@odata.context']).to.equal('/odata/$metadata#PrimaryLibrary/assets');
+    expect(nav.body.value).to.be.Array();
+    expect(nav.body.value.length).to.be.greaterThan(0);
+
+    await client.del(`/odata/PrimaryLibrary/assets(${BIG_INT_ASSET_ID})/$ref`).expect(204);
+    const afterUnlink = await client.get(`/odata/BigIntAssets(${BIG_INT_ASSET_ID})`).expect(200);
+    expect(afterUnlink.body.libraryId).to.equal(null);
+
+    await client
+      .post('/odata/PrimaryLibrary/assets/$ref')
+      .send({ '@odata.id': `/odata/BigIntAssets(${BIG_INT_ASSET_ID})` })
+      .expect(204);
+    const afterLink = await client.get(`/odata/BigIntAssets(${BIG_INT_ASSET_ID})`).expect(200);
+    expect(afterLink.body.libraryId).to.equal(1);
+
+    const spec = await client.get('/openapi.json').expect(200);
+    expect(spec.body.paths?.['/odata/PrimaryLibrary/assets/$ref']).to.be.Object();
+    expect(spec.body.paths?.['/odata/PrimaryLibrary/assets/{targetKey}/$ref']).to.be.Object();
+  });
+
   it('serves product collections with OData metadata', async () => {
     const res = await client.get('/odata/Products').expect(200);
     expect(res.body['@odata.context']).to.match(/Products$/);

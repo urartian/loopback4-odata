@@ -1,7 +1,7 @@
 import 'reflect-metadata';
 import { MetadataInspector } from '@loopback/core';
 import { model as applyModel, Model, MODEL_KEY } from '@loopback/repository';
-import { ODataCompositionEntitySetConfig } from '../types';
+import { ODataCompositionEntitySetConfig, ODataSingletonConfig } from '../types';
 import { registerODataModelCtor } from '../internal/odata-model-registry';
 const ODATA_MODEL_KEY = 'odata:model';
 
@@ -12,6 +12,13 @@ export interface ODataModelOptions {
   lbModel?: NonNullable<Parameters<typeof applyModel>[0]>;
   entitySetName?: string;
   etag?: string | string[];
+  /**
+   * Declares a singleton entity for this model.
+   *
+   * The singleton is exposed under `/odata/<singleton.name>` and points to a single instance
+   * backed by the same repository as the entity set.
+   */
+  singleton?: ODataSingletonConfig;
   deepInsert?: boolean;
   deepUpdate?: boolean;
   applyPushdown?: boolean;

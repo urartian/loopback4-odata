@@ -69,6 +69,8 @@ import {
   validateCompositionCascadeCycles,
   validateCompositionResolvedConfig,
 } from '../util/composition-validation';
+import { defineODataSingletonController } from '../controllers/singleton-controller-factory';
+import { ODataSingletonConfig } from '../types';
 
 @injectable({ tags: { booters: 'odata' } })
 export class ODataBooter implements Booter {
@@ -85,6 +87,48 @@ export class ODataBooter implements Booter {
   private readonly missingParamsWarnings = new Set<string>();
   private metadataPath?: string;
   private operationNamespace?: string;
+  private readonly identifierPattern = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+  private validateSingletonConfig(
+    singleton: ODataSingletonConfig,
+    entitySetName: string,
+    modelCtor: typeof Entity,
+  ): ODataSingletonConfig {
+    const name = singleton?.name?.trim?.() ? singleton.name.trim() : '';
+    if (!name) {
+      throw new Error(`Singleton name is required for model ${modelCtor.name}.`);
+    }
+    if (!this.identifierPattern.test(name)) {
+      throw new Error(`Singleton "${name}" for model ${modelCtor.name} is not a valid identifier.`);
+    }
+    if (name.toLowerCase() === entitySetName.toLowerCase()) {
+      throw new Error(
+        `Singleton "${name}" for model ${modelCtor.name} conflicts with its entity set name "${entitySetName}".`,
+      );
+    }
+    const hasStaticId = Object.prototype.hasOwnProperty.call(singleton, 'id');
+    const hasResolver = typeof singleton.resolveId === 'function';
+    if ((hasStaticId && hasResolver) || (!hasStaticId && !hasResolver)) {
+      throw new Error(
+        `Singleton "${name}" for model ${modelCtor.name} must specify exactly one of "id" or "resolveId".`,
+      );
+    }
+
+    for (const existing of this.registry.list()) {
+      if (existing.name?.toLowerCase?.() === name.toLowerCase()) {
+        throw new Error(
+          `Singleton "${name}" for model ${modelCtor.name} conflicts with existing entity set "${existing.name}".`,
+        );
+      }
+      if (existing.singleton?.name?.toLowerCase?.() === name.toLowerCase()) {
+        throw new Error(
+          `Singleton "${name}" for model ${modelCtor.name} conflicts with existing singleton "${existing.singleton.name}".`,
+        );
+      }
+    }
+
+    return { ...singleton, name };
+  }
 
   private identifyCompositionRelations(
     modelCtor: typeof Entity | undefined,
@@ -278,6 +322,9 @@ export class ODataBooter implements Booter {
         });
       }
       const hasStream = Boolean(modelMeta?.hasStream);
+      const singleton = modelMeta?.singleton
+        ? this.validateSingletonConfig(modelMeta.singleton, setName, modelCtor)
+        : undefined;
       const mediaField = modelMeta?.mediaField;
       const mediaContentTypeField = modelMeta?.mediaContentTypeField;
       const mediaEtagField = modelMeta?.mediaEtagField;
@@ -300,6 +347,7 @@ export class ODataBooter implements Booter {
         deltaEnabled,
         deltaField,
         documentInOpenApi,
+        singleton,
         hasStream,
         mediaField,
         mediaContentTypeField,
@@ -334,6 +382,11 @@ export class ODataBooter implements Booter {
       this.app.controller(CrudController);
       this.registerOperations(def, ctor);
       this.registerNavigationRefRoutes(def, modelDefinition, CrudController);
+      if (singleton) {
+        const SingletonController = defineODataSingletonController(def, CrudController, singleton);
+        this.app.controller(SingletonController);
+        this.registerSingletonNavigationRefRoutes(def, modelDefinition, CrudController, singleton);
+      }
     }
 
     const compositionEnforcement = this.config?.composition?.enforcement ?? 'database';
@@ -774,6 +827,97 @@ export class ODataBooter implements Booter {
     }
   }
 
+  private registerSingletonNavigationRefRoutes(
+    def: EntitySetDef,
+    modelDefinition: ModelDefinition | undefined,
+    controllerCtor: Function,
+    singleton: ODataSingletonConfig,
+  ) {
+    if (this.config?.enableNavigationRefEndpoints === false) return;
+    const relations = (modelDefinition?.relations ?? {}) as Record<string, any>;
+    if (!relations || !Object.keys(relations).length) return;
+
+    const basePath = `/odata/${singleton.name}`;
+    const bindingKey = `controllers.${controllerCtor.name}`;
+    const app = this.app as RestApplication;
+    const visibility = def.documentInOpenApi === false ? 'undocumented' : 'documented';
+
+    for (const [relationName, relationMeta] of Object.entries(relations)) {
+      const relationType = relationMeta?.type ?? relationMeta?.relationType;
+      if (relationType !== 'hasMany' && relationType !== 'hasOne') continue;
+      if (relationMeta?.through) continue;
+      if (!ensureNavigationTargetKey(relationMeta as AnyObject)) continue;
+
+      const linkVerb = relationMeta.targetsMany ? 'post' : 'put';
+      const linkPath = `${basePath}/${relationName}/$ref`;
+      const linkSpec: OperationObject = this.applyGeneratedRouteMetadata(
+        {
+          responses: {
+            '204': { description: 'Reference successfully set.' },
+          },
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  required: ['@odata.id'],
+                  properties: {
+                    '@odata.id': { type: 'string' },
+                  },
+                },
+              },
+            },
+          },
+        },
+        visibility,
+      );
+
+      app.route(
+        new ODataSingletonNavigationRefRoute(
+          linkVerb,
+          linkPath,
+          linkSpec,
+          controllerCtor,
+          bindingKey,
+          singleton,
+          'link',
+          relationName,
+          Boolean(relationMeta.targetsMany),
+        ),
+      );
+
+      const deletePath = relationMeta.targetsMany
+        ? `${basePath}/${relationName}/{targetKey}/$ref`
+        : `${basePath}/${relationName}/$ref`;
+      const deleteSpec: OperationObject = this.applyGeneratedRouteMetadata(
+        {
+          responses: {
+            '204': { description: 'Reference removed.' },
+          },
+          parameters: relationMeta.targetsMany
+            ? [{ name: 'targetKey', in: 'path', required: true, schema: { type: 'string' } }]
+            : undefined,
+        },
+        visibility,
+      );
+
+      app.route(
+        new ODataSingletonNavigationRefRoute(
+          'delete',
+          deletePath,
+          deleteSpec,
+          controllerCtor,
+          bindingKey,
+          singleton,
+          'unlink',
+          relationName,
+          Boolean(relationMeta.targetsMany),
+        ),
+      );
+    }
+  }
+
   private buildOperationRoute(
     op: OperationMeta,
     controllerCtor: Function,
@@ -1147,6 +1291,126 @@ class ODataNavigationRefRoute extends ControllerRoute<object> {
     const paramValue = params?.targetKey;
     if (paramValue == null || typeof paramValue === 'string') {
       if (paramValue !== undefined) return paramValue as string | undefined;
+    }
+
+    const segments = requestContext.request.path.split('/').filter(Boolean);
+    const relationIndex = segments.lastIndexOf(this.relationName);
+    if (relationIndex >= 0 && relationIndex + 1 < segments.length) {
+      const candidate = segments[relationIndex + 1];
+      if (candidate && candidate !== '$ref') {
+        return candidate;
+      }
+    }
+    return undefined;
+  }
+}
+
+class ODataSingletonNavigationRefRoute extends ControllerRoute<object> {
+  private readonly controllerBindingKey: string;
+  private readonly singleton: ODataSingletonConfig;
+  private readonly relationName: string;
+  private readonly operation: 'link' | 'unlink';
+  private readonly targetsMany: boolean;
+
+  constructor(
+    verb: 'post' | 'put' | 'delete',
+    path: string,
+    spec: OperationObject,
+    controllerCtor: Function,
+    controllerBindingKey: string,
+    singleton: ODataSingletonConfig,
+    operation: 'link' | 'unlink',
+    relationName: string,
+    targetsMany: boolean,
+  ) {
+    super(
+      verb,
+      path,
+      spec,
+      controllerCtor as ControllerClass<object>,
+      async (ctx) => ctx.get(controllerBindingKey as any),
+      operation === 'link' ? 'linkNavigationRef' : 'unlinkNavigationRef',
+    );
+    this.controllerBindingKey = controllerBindingKey;
+    this.singleton = singleton;
+    this.relationName = relationName;
+    this.operation = operation;
+    this.targetsMany = targetsMany;
+  }
+
+  async invokeHandler(requestContext: RequestContext, _args: unknown[]): Promise<unknown> {
+    let controller: AnyObject;
+    try {
+      controller = (await requestContext.get(CoreBindings.CONTROLLER_CURRENT)) as AnyObject;
+    } catch (error) {
+      if ((error as AnyObject)?.code !== 'KEY_NOT_FOUND') throw error;
+      controller = (await requestContext.get(this.controllerBindingKey as any)) as AnyObject;
+    }
+
+    const parentId = await this.resolveSingletonId(requestContext);
+    const methodName = this.operation === 'link' ? 'linkNavigationRef' : 'unlinkNavigationRef';
+    const invocationArgs: unknown[] = [this.relationName, parentId];
+
+    if (this.operation === 'link') {
+      invocationArgs.push(this.extractTargetUri(requestContext));
+    } else {
+      invocationArgs.push(this.targetsMany ? this.extractTargetKey(requestContext) : undefined);
+    }
+
+    const result = await invokeMethod(controller, methodName, requestContext, invocationArgs, {
+      source: new RouteSource(this),
+    });
+
+    if (!requestContext.response.headersSent) {
+      if (!requestContext.response.getHeader('OData-Version')) {
+        requestContext.response.set('OData-Version', ODATA_VERSION);
+      }
+      requestContext.response.status(204).end();
+    }
+
+    return result;
+  }
+
+  private async resolveSingletonId(requestContext: RequestContext): Promise<unknown> {
+    if (typeof this.singleton.resolveId === 'function') {
+      const id = await this.singleton.resolveId({
+        request: requestContext.request,
+        response: requestContext.response,
+        httpCtx: requestContext,
+      });
+      if (id === null || id === undefined) {
+        throw new HttpErrors.NotFound('Singleton entity not found.');
+      }
+      return id;
+    }
+    if (Object.prototype.hasOwnProperty.call(this.singleton, 'id')) {
+      const id = (this.singleton as AnyObject).id;
+      if (id === null || id === undefined) {
+        throw new HttpErrors.NotFound('Singleton entity not found.');
+      }
+      return id;
+    }
+    throw new HttpErrors.InternalServerError('Singleton key resolver is not configured.');
+  }
+
+  private extractTargetUri(requestContext: RequestContext): string | undefined {
+    const body = requestContext.request.body;
+    if (body && typeof body === 'object') {
+      const value = (body as Record<string, unknown>)['@odata.id'];
+      if (value == null || typeof value === 'string') {
+        return value as string | undefined;
+      }
+    }
+    throw new HttpErrors.BadRequest('Invalid @odata.id in request body.');
+  }
+
+  private extractTargetKey(requestContext: RequestContext): string | undefined {
+    const params = requestContext.request.params as Record<string, unknown> | undefined;
+    const raw = params?.targetKey;
+    if (raw == null || typeof raw === 'string') {
+      if (raw !== undefined) return raw as string | undefined;
+    } else {
+      throw new HttpErrors.BadRequest('Invalid target key.');
     }
 
     const segments = requestContext.request.path.split('/').filter(Boolean);

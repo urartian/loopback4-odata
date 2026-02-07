@@ -128,6 +128,45 @@ export class ProductODataController {}
 
 That’s it — the extension generates repository-backed CRUD endpoints automatically.
 
+## Singletons
+
+OData V4 **singletons** expose a single entity instance at a stable URL (for example `/odata/Me`)
+while reusing the same model/repository and CSDL `EntityType` as the backing entity set.
+
+Declare a singleton on the model via `@odataModel({ singleton: ... })`:
+
+```ts
+@odataModel({
+  entitySetName: 'Users',
+  singleton: {
+    name: 'Me',
+    resolveId: async ({ request }) => (request as any).user.id,
+  },
+})
+export class User extends Entity {}
+```
+
+Static singleton (fixed key):
+
+```ts
+@odataModel({
+  entitySetName: 'Settings',
+  singleton: { name: 'Settings', id: 1 },
+})
+export class AppSettings extends Entity {}
+```
+
+Endpoints (examples):
+
+- `GET /odata/Me`
+- `PATCH /odata/Me` and `PUT /odata/Me`
+- Navigation reads like `GET /odata/Me/Orders`
+- `$ref` routes like `POST /odata/Me/Orders/$ref`, `PUT /odata/Me/Manager/$ref`,
+  and `DELETE /odata/Me/Orders(<key>)/$ref` (relation-dependent)
+
+The service document (`GET /odata`) and `$metadata` include singleton entries. `DELETE /odata/<Singleton>`
+is only allowed when `singleton.nullable: true`.
+
 ### Errors and error codes
 
 OData endpoints return errors using an OData error payload (for example `{"error":{"code":"BadRequest","message":"..."}}`).

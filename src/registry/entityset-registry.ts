@@ -8,6 +8,7 @@ import {
   ODataCapabilitiesConfig,
   ODataCompositionEntitySetConfig,
   ODataCompositionResolvedConfig,
+  ODataSingletonConfig,
 } from '../types';
 import { validatePaginationLimits } from '../util/config-validation';
 
@@ -27,6 +28,7 @@ export interface EntitySetDef<T extends Entity = Entity> {
   transactionCapabilityLocked?: boolean;
   actions?: OperationMeta[];
   functions?: OperationMeta[];
+  singleton?: ODataSingletonConfig;
   etagProperties?: string[];
   securityMetadata?: ControllerSecurityMetadata;
   securityMethodAliases?: MethodAliasMap;

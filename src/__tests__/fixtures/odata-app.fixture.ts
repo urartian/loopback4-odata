@@ -165,7 +165,12 @@ export class MediaAsset extends Entity {
   data?: Buffer;
 }
 
-@odataModel()
+@odataModel({
+  singleton: {
+    name: 'PrimaryLibrary',
+    id: 1,
+  },
+})
 @model()
 export class AssetLibrary extends Entity {
   @property({ id: true, generated: true })

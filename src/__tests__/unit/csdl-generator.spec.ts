@@ -134,6 +134,7 @@ describe('CsdlGenerator', () => {
     const widgets: EntitySetDef = registry.register({
       name: 'Widgets',
       modelCtor: Widget,
+      singleton: { name: 'PrimaryWidget', id: 1 },
       etagProperties: ['updatedAt'],
       hasStream: true,
       mediaField: 'data',
@@ -331,6 +332,7 @@ describe('CsdlGenerator', () => {
     expect(xml.includes('<Function Name="ping"')).to.be.true();
     expect(xml.includes('Annotation Term="Org.OData.Core.V1.Permissions"')).to.be.true();
     expect(xml.includes('<EntityContainer Name="CatalogService">')).to.be.true();
+    expect(xml.includes('<Singleton Name="PrimaryWidget"')).to.be.true();
     expect(
       xml.includes('Annotation Term="Org.OData.Capabilities.V1.InsertRestrictions"'),
     ).to.be.true();
@@ -474,6 +476,8 @@ describe('CsdlGenerator', () => {
     const container = schema.CatalogService;
     expect(container.$Kind).to.equal('EntityContainer');
     expect(container.Widgets.$Type).to.equal('Catalog.Widget');
+    expect(container.PrimaryWidget.$Kind).to.equal('Singleton');
+    expect(container.PrimaryWidget.$Type).to.equal('Catalog.Widget');
     expect(container.Widgets.$NavigationPropertyBinding.gadgets).to.equal('Gadgets');
     expect(container.Widgets['@Org.OData.Core.V1.OptimisticConcurrency'][0].$PropertyPath).to.equal(
       'updatedAt',

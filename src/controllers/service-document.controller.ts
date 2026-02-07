@@ -42,7 +42,7 @@ const SERVICE_DOCUMENT_OPERATION_SPEC = markUndocumentedOperation({
 
 interface ServiceDocumentEntry {
   name: string;
-  kind: 'EntitySet';
+  kind: 'EntitySet' | 'Singleton';
   url: string;
 }
 
@@ -82,13 +82,23 @@ export class ODataServiceDocumentController {
 
     const serviceRoot = normalizeBasePath(this.config.basePath);
     const contextUrl = serviceRoot === '/' ? '/$metadata' : `${serviceRoot}/$metadata`;
+    const entitySets = this.registry.list().map((def) => ({
+      name: def.name,
+      kind: 'EntitySet' as const,
+      url: def.name,
+    }));
+    const singletons = this.registry
+      .list()
+      .map((def) => def.singleton)
+      .filter((singleton): singleton is NonNullable<typeof singleton> => Boolean(singleton))
+      .map((singleton) => ({
+        name: singleton.name,
+        kind: 'Singleton' as const,
+        url: singleton.name,
+      }));
     const payload: ServiceDocumentPayload = {
       '@odata.context': contextUrl,
-      value: this.registry.list().map((def) => ({
-        name: def.name,
-        kind: 'EntitySet',
-        url: def.name,
-      })),
+      value: [...entitySets, ...singletons],
     };
 
     return payload;

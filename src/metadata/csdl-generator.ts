@@ -1655,6 +1655,37 @@ export class CsdlGenerator {
       Object.assign(entitySetJson, capabilityAnnotationsJson);
       jsonEntitySets[set.name] = entitySetJson;
 
+      if (set.singleton?.name) {
+        const singletonName = set.singleton.name;
+        const singletonLines = [
+          `      <Singleton Name="${xmlEscape(singletonName)}" Type="${namespace}.${xmlEscape(entityType.name)}">`,
+          ...navigationBindings,
+          ...concurrencyAnnotation,
+          '      </Singleton>',
+        ];
+        containerSetsXml.push(singletonLines.join('\n'));
+
+        const singletonJson: Record<string, unknown> = {
+          $Kind: 'Singleton',
+          $Type: `${namespace}.${entityType.name}`,
+        };
+        if (entityType.navigationBindings.length) {
+          const bindings: Record<string, string> = {};
+          for (const binding of entityType.navigationBindings) {
+            bindings[binding.path] = binding.target;
+          }
+          singletonJson.$NavigationPropertyBinding = bindings;
+        }
+        if (set.etagProperties?.length) {
+          singletonJson['@Org.OData.Core.V1.OptimisticConcurrency'] = set.etagProperties.map(
+            (prop) => ({
+              $PropertyPath: prop,
+            }),
+          );
+        }
+        jsonEntitySets[singletonName] = singletonJson;
+      }
+
       const entityName = (set.modelCtor as typeof Entity).definition?.name ?? set.modelCtor.name;
       const actions = set.actions ?? [];
       for (const action of actions) {
