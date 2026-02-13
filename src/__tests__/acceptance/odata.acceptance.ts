@@ -163,6 +163,74 @@ describe('OData component acceptance', () => {
     expect(productsEntry.url).to.equal('Products');
   });
 
+  it('includes singleton entries in the service document', async () => {
+    const res = await client.get('/odata').expect(200);
+    const singletonEntry = res.body.value.find(
+      (item: { name: string }) => item.name === 'PrimaryLibrary',
+    );
+    expect(singletonEntry).to.be.Object();
+    expect(singletonEntry.kind).to.equal('Singleton');
+    expect(singletonEntry.url).to.equal('PrimaryLibrary');
+  });
+
+  it('emits singleton definitions in $metadata', async () => {
+    const res = await client.get('/odata/$metadata').expect(200);
+    expect(res.text.includes('<Singleton Name="PrimaryLibrary"')).to.be.true();
+  });
+
+  it('serves singleton entities and supports navigation and $ref', async () => {
+    const singleton = await client.get('/odata/PrimaryLibrary').expect(200);
+    expect(singleton.body['@odata.context']).to.equal('/odata/$metadata#PrimaryLibrary');
+    expect(singleton.body.name).to.equal('Primary Library');
+
+    const nav = await client.get('/odata/PrimaryLibrary/assets').expect(200);
+    expect(nav.body['@odata.context']).to.equal('/odata/$metadata#PrimaryLibrary/assets');
+    expect(nav.body.value).to.be.Array();
+    expect(nav.body.value.length).to.be.greaterThan(0);
+
+    await client.del(`/odata/PrimaryLibrary/assets(${BIG_INT_ASSET_ID})/$ref`).expect(204);
+    const afterUnlink = await client.get(`/odata/BigIntAssets(${BIG_INT_ASSET_ID})`).expect(200);
+    expect(afterUnlink.body.libraryId).to.equal(null);
+
+    await client
+      .post('/odata/PrimaryLibrary/assets/$ref')
+      .send({ '@odata.id': `/odata/BigIntAssets(${BIG_INT_ASSET_ID})` })
+      .expect(204);
+    const afterLink = await client.get(`/odata/BigIntAssets(${BIG_INT_ASSET_ID})`).expect(200);
+    expect(afterLink.body.libraryId).to.equal(1);
+
+    const spec = await client.get('/openapi.json').expect(200);
+    expect(spec.body.paths?.['/odata/PrimaryLibrary/assets/$ref']).to.be.Object();
+    expect(spec.body.paths?.['/odata/PrimaryLibrary/assets/{targetKey}/$ref']).to.be.Object();
+  });
+
+  it('supports singletonOnly models by omitting the entity set and rejecting POST', async () => {
+    const doc = await client.get('/odata').expect(200);
+    const entitySetEntry = doc.body.value.find(
+      (item: { name: string; kind: string }) =>
+        item.name === 'Settings' && item.kind === 'EntitySet',
+    );
+    expect(entitySetEntry).to.equal(undefined);
+    const singletonEntry = doc.body.value.find(
+      (item: { name: string; kind: string }) =>
+        item.name === 'Settings' && item.kind === 'Singleton',
+    );
+    expect(singletonEntry).to.be.Object();
+
+    const res = await client.get('/odata/Settings').expect(200);
+    expect(res.body['@odata.context']).to.equal('/odata/$metadata#Settings');
+    expect(res.body.value).to.equal(undefined);
+    expect(res.body.id).to.equal('1');
+
+    const post = await client.post('/odata/Settings').send({ name: 'nope' }).expect(405);
+    expect(post.body.error).to.be.Object();
+    expect(post.body.error.code).to.equal('MethodNotAllowed');
+
+    const meta = await client.get('/odata/$metadata').expect(200);
+    expect(meta.text.includes('<Singleton Name="Settings"')).to.be.true();
+    expect(meta.text.includes('<EntitySet Name="Settings"')).to.be.false();
+  });
+
   it('serves product collections with OData metadata', async () => {
     const res = await client.get('/odata/Products').expect(200);
     expect(res.body['@odata.context']).to.match(/Products$/);

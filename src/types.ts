@@ -68,6 +68,35 @@ export interface ODataConfig {
   composition?: ODataCompositionConfig;
 }
 
+export interface ODataSingletonResolveContext {
+  request: import('@loopback/rest').Request;
+  response: import('@loopback/rest').Response;
+  httpCtx: import('@loopback/rest').RequestContext;
+}
+
+export type ODataSingletonIdResolver = (
+  ctx: ODataSingletonResolveContext,
+) => unknown | Promise<unknown>;
+
+export interface ODataSingletonConfig {
+  /**
+   * Singleton name exposed under `/odata/<name>`, e.g. "Me".
+   */
+  name: string;
+  /**
+   * Static singleton key. Exactly one of `id` or `resolveId` must be provided.
+   */
+  id?: unknown;
+  /**
+   * Contextual singleton key resolver (per-request). Exactly one of `id` or `resolveId` must be provided.
+   */
+  resolveId?: ODataSingletonIdResolver;
+  /**
+   * When true, DELETE is allowed and the singleton may not exist (404 on GET).
+   */
+  nullable?: boolean;
+}
+
 export interface ODataWriteTransactionsConfig {
   enabled?: boolean; // default false
   isolationLevel?: 'READ_COMMITTED' | 'REPEATABLE_READ' | 'SERIALIZABLE'; // default READ_COMMITTED

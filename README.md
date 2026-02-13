@@ -128,6 +128,94 @@ export class ProductODataController {}
 
 That’s it — the extension generates repository-backed CRUD endpoints automatically.
 
+## Singletons
+
+OData V4 **singletons** expose a single entity instance at a stable URL (for example `/odata/Me`)
+while reusing the same model/repository and CSDL `EntityType` as the backing entity set.
+
+### Entity sets vs singletons (important)
+
+By default, declaring a `singleton` **does not disable** the entity set endpoints for that model.
+When you decorate a model with both `entitySetName` and `singleton`, this extension exposes **two**
+top-level resources:
+
+- **EntitySet** at `/odata/<entitySetName>` (collection semantics)
+  - `GET /odata/<entitySetName>` returns `{ "@odata.context": "...", "value": [ ... ] }`
+  - `POST /odata/<entitySetName>` creates a new entity
+  - `GET/PATCH/PUT/DELETE /odata/<entitySetName>(<key>)` address a single entity by key
+- **Singleton** at `/odata/<singleton.name>` (single-entity semantics)
+  - `GET /odata/<singleton.name>` returns a single entity (no `value` array)
+  - `PATCH/PUT /odata/<singleton.name>` update/replace the singleton entity
+  - `DELETE /odata/<singleton.name>` is only allowed when `singleton.nullable: true`
+
+To avoid route and metadata conflicts, **singleton names must not match the entity set name**
+(case-insensitive) unless you enable `singletonOnly` (see below).
+
+Declare a singleton on the model via `@odataModel({ singleton: ... })`:
+
+```ts
+@odataModel({
+  entitySetName: 'Users',
+  singleton: {
+    name: 'Me',
+    resolveId: async ({ request }) => (request as any).user.id,
+  },
+})
+export class User extends Entity {}
+```
+
+Static singleton (fixed key):
+
+```ts
+@odataModel({
+  // Pick distinct names: the entity set is a collection, the singleton is a single entity.
+  entitySetName: 'SettingEntries',
+  singleton: { name: 'Settings', id: '1' },
+})
+export class AppSettings extends Entity {}
+```
+
+#### Interop note (SAP CAP)
+
+Some OData servers (for example SAP CAP) choose to treat singletons as “singleton-only” resources
+that reject `POST` and do not expose a corresponding entity set collection endpoint at the same
+URL. By default, this extension exposes singletons **in addition to** the entity set endpoints, so
+clients must call the singleton URL (`/odata/<singleton.name>`) to get singleton semantics. Use
+`singletonOnly: true` for singleton-only behavior.
+
+#### Singleton-only mode (`singletonOnly: true`)
+
+To prevent accidental use of the entity set endpoints (for example, `POST /odata/Settings`
+creating multiple rows), you can enable singleton-only mode:
+
+```ts
+@odataModel({
+  entitySetName: 'Settings',
+  singletonOnly: true,
+  singleton: { name: 'Settings', id: '1' },
+})
+export class AppSettings extends Entity {}
+```
+
+When `singletonOnly: true`:
+
+- The service document and `$metadata` omit the `EntitySet` entry for the model.
+- Collection/entity set CRUD routes are not registered (no `GET/POST /odata/<EntitySetName>`).
+- The singleton routes remain available under `/odata/<singleton.name>`.
+- `singleton.name` may match `entitySetName` (CAP-style `/odata/Settings`).
+- Bound actions/functions and entity-set navigation routes are not generated in this mode yet.
+
+Endpoints (examples):
+
+- `GET /odata/Me`
+- `PATCH /odata/Me` and `PUT /odata/Me`
+- Navigation reads like `GET /odata/Me/Orders`
+- `$ref` routes like `POST /odata/Me/Orders/$ref`, `PUT /odata/Me/Manager/$ref`,
+  and `DELETE /odata/Me/Orders(<key>)/$ref` (relation-dependent)
+
+The service document (`GET /odata`) and `$metadata` include singleton entries. `DELETE /odata/<Singleton>`
+is only allowed when `singleton.nullable: true`.
+
 ### Errors and error codes
 
 OData endpoints return errors using an OData error payload (for example `{"error":{"code":"BadRequest","message":"..."}}`).

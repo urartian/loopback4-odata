@@ -111,6 +111,8 @@ export class ODataErrorProvider implements Provider<Reject> {
         return ODataErrorCodes.Unauthorized;
       case 403:
         return ODataErrorCodes.Forbidden;
+      case 405:
+        return ODataErrorCodes.MethodNotAllowed;
       case 404:
         return ODataErrorCodes.NotFound;
       case 422:
@@ -137,6 +139,8 @@ export class ODataErrorProvider implements Provider<Reject> {
       case 'VALIDATION_ERROR':
       case 'REQUEST_VALIDATION_FAILED':
         return 400;
+      case ODataErrorCodes.MethodNotAllowed:
+        return 405;
       case ODataErrorCodes.PreferenceNotSupported:
       case ODataErrorCodes.MultiDataSourceChangesetNotSupported:
       case ODataErrorCodes.AtomicityGroupNotSupported:

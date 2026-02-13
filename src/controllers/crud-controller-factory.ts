@@ -11035,28 +11035,17 @@ export function defineODataCrudController(def: EntitySetDef) {
       if (!propertyName) {
         throw new HttpErrors.BadRequest('Property name is required.');
       }
-      if (modelRelations && Object.prototype.hasOwnProperty.call(modelRelations, propertyName)) {
-        throw new HttpErrors.NotFound('Property does not expose a scalar value.');
-      }
-      const definition = modelDefinition?.properties?.[propertyName] as
-        | PropertyDefinition
-        | undefined;
-      if (!definition) {
-        throw new HttpErrors.NotFound('Property not found.');
-      }
-      const primitiveKind = classifyPrimitiveProperty(definition);
-      if (!primitiveKind) {
-        throw new HttpErrors.NotFound('Property does not expose a scalar value.');
-      }
-
-      const baseFilter: Filter<CrudEntity> = {
-        fields: { [propertyName]: true },
-      };
-      this.ensureEtagField(baseFilter);
-
       const entityId = this.coerceParentId(id);
       const op: CrudOperation = 'READ';
       const scope: CrudScope = 'entity';
+      const isRelation =
+        modelRelations && Object.prototype.hasOwnProperty.call(modelRelations, propertyName);
+      const baseFilter: Filter<CrudEntity> = isRelation
+        ? {}
+        : {
+            fields: { [propertyName]: true },
+          };
+      this.ensureEtagField(baseFilter);
       const ctx = this.buildHookContext({
         operation: op,
         scope,
@@ -11064,11 +11053,220 @@ export function defineODataCrudController(def: EntitySetDef) {
         filter: baseFilter as any,
         options: this.repositoryOptions(),
       });
+      if (isRelation) {
+        ctx.relationName = propertyName;
+      }
       await this.enforceTenantLimit(op, scope);
       await this.runBefore(op, scope, ctx);
 
       const execDefault = async () => {
         const options = this.repositoryOptions();
+        if (isRelation) {
+          const relationMeta = (modelRelations as AnyObject)?.[propertyName] as
+            | AnyObject
+            | undefined;
+          if (!relationMeta) {
+            throw new HttpErrors.NotFound('Navigation property not found.');
+          }
+
+          const relationType = relationMeta.type ?? relationMeta.relationType;
+          const targetsMany = Boolean(relationMeta.targetsMany);
+          if (
+            relationType !== 'hasMany' &&
+            relationType !== 'hasOne' &&
+            relationType !== 'belongsTo'
+          ) {
+            throw new HttpErrors.NotImplemented(
+              `Navigation property "${propertyName}" uses unsupported relation type ${relationType ?? 'unknown'}.`,
+            );
+          }
+          if (relationMeta.through) {
+            throw new HttpErrors.NotImplemented(
+              `Navigation property "${propertyName}" is not supported (through/ many-to-many).`,
+            );
+          }
+
+          const repoWithRelations = this.repository as AnyObject;
+          const factory = repoWithRelations[propertyName];
+          if (typeof factory !== 'function') {
+            throw new HttpErrors.BadRequest(
+              `Repository for ${setName} does not expose a relation factory for ${propertyName}.`,
+            );
+          }
+
+          let targetCtor: typeof Entity | undefined;
+          const targetResolver = relationMeta.target as
+            | (() => typeof Entity)
+            | typeof Entity
+            | undefined;
+          if (isEntityCtor(targetResolver as unknown as typeof Entity)) {
+            targetCtor = targetResolver as unknown as typeof Entity;
+          } else if (typeof targetResolver === 'function') {
+            try {
+              targetCtor = (targetResolver as () => typeof Entity)();
+            } catch {
+              targetCtor = undefined;
+            }
+          }
+
+          const targetDefinition = targetCtor
+            ? ((targetCtor as unknown as { definition?: ModelDefinition }).definition as
+                | ModelDefinition
+                | undefined)
+            : undefined;
+          const targetRelations = (targetDefinition?.relations ?? {}) as RelationDefinitionMap;
+
+          let parsed: ReturnType<typeof parseODataQuery>;
+          try {
+            parsed = parseODataQuery(
+              this.request.query as Record<string, string | string[] | undefined>,
+              {
+                relations: targetRelations,
+                strict: Boolean(this.cfg?.strict),
+                maxFilterPatternLength: this.cfg?.maxFilterPatternLength,
+                maxSubstringStart: this.cfg?.maxSubstringStart,
+                maxSubstringLength: this.cfg?.maxSubstringLength,
+                maxFilterFieldNameLength: this.cfg?.maxFilterFieldNameLength,
+                maxLambdaExistsDepth: this.cfg?.lambda?.pushdownMaxExistsDepth,
+                maxInListItems: this.cfg?.filter?.maxInListItems,
+              },
+            );
+            if ((parsed as any).apply != null) {
+              throw new HttpErrors.NotImplemented('$apply is not supported for navigation reads.');
+            }
+            this.enforceExpandDepth((parsed as any).include as InclusionFilter[] | undefined);
+            this.applyFormatPreference(parsed.format);
+          } catch (error) {
+            if (error instanceof HttpErrors.HttpError) throw error;
+            const message = (error as Error).message ?? 'Invalid OData query.';
+            throw new HttpErrors.BadRequest(message);
+          }
+
+          const inlineCountRequested = Boolean((parsed as any).inlineCount);
+          const requestedSkip = (parsed as any).skip as number | undefined;
+          const requestedTop = (parsed as any).top as number | undefined;
+
+          const navFilter: Filter<AnyObject> = {};
+          if ((parsed as any).fields) navFilter.fields = (parsed as any).fields;
+          if ((parsed as any).include) navFilter.include = (parsed as any).include;
+          if ((parsed as any).order) navFilter.order = (parsed as any).order;
+          if (typeof requestedSkip === 'number') navFilter.offset = requestedSkip;
+          if (typeof requestedTop === 'number') navFilter.limit = requestedTop;
+
+          this.applySearch(navFilter as any, (parsed as any).search);
+
+          let postFilterExpr: ParsedExpression | undefined;
+          const coercedWhereExpression = this.coerceFilterExpressionLiterals(
+            (parsed as any).whereExpression,
+          );
+          const splitWhere = this.splitWhereExpression(coercedWhereExpression);
+          if (splitWhere.structuredExpr) {
+            postFilterExpr = splitWhere.structuredExpr;
+          }
+          if (splitWhere.repoExpr) {
+            navFilter.where = splitWhere.repoExpr as AnyObject;
+          }
+          if (postFilterExpr && this.cfg?.strict) {
+            throw this.badRequestWithCode(
+              'Post-filter evaluation is not allowed in strict mode.',
+              ODataErrorCodes.PostfilterRequiresPushdown,
+            );
+          }
+
+          const relationRepo = factory(entityId, options);
+
+          if (targetsMany) {
+            if (typeof relationRepo.find !== 'function') {
+              throw new HttpErrors.BadRequest(
+                `Relation repository for ${setName}.${propertyName} does not support find().`,
+              );
+            }
+
+            if (postFilterExpr) {
+              const maxRows = this.resolveMaxPostFilterScanRows();
+              delete (navFilter as AnyObject).offset;
+              delete (navFilter as AnyObject).limit;
+              (navFilter as AnyObject).offset = 0;
+              (navFilter as AnyObject).limit = maxRows + 1;
+            }
+
+            const entities = await relationRepo.find(navFilter, options);
+            let plain = entities.map((e: AnyObject) => this.toPlainEntity(e) ?? {});
+            if (postFilterExpr) {
+              const maxRows = this.resolveMaxPostFilterScanRows();
+              if (plain.length > maxRows) {
+                throw this.badRequestWithCode(
+                  `Post-filter scan exceeds the server limit of ${maxRows} rows. Refine $filter.`,
+                  ODataErrorCodes.PostfilterScanLimitExceeded,
+                );
+              }
+              plain = this.applyPostFilter(plain, postFilterExpr);
+              const offset = typeof requestedSkip === 'number' ? requestedSkip : 0;
+              const limit = typeof requestedTop === 'number' ? requestedTop : undefined;
+              plain = this.sliceResults(plain, offset, limit);
+            }
+
+            this.ensureODataHeaders();
+            const contextUrl = `${contextBase}/${propertyName}`;
+            const result = {
+              '@odata.context': contextUrl,
+              ...(inlineCountRequested ? { '@odata.count': plain.length } : {}),
+              value: plain,
+            } as AnyObject;
+            ctx.result = result;
+            return result;
+          }
+
+          if (typeof relationRepo.get !== 'function') {
+            throw new HttpErrors.BadRequest(
+              `Relation repository for ${setName}.${propertyName} does not support get().`,
+            );
+          }
+
+          let entity: AnyObject | undefined;
+          try {
+            entity = (await relationRepo.get(navFilter, options)) as AnyObject | undefined;
+          } catch {
+            try {
+              entity = (await relationRepo.get(undefined, options)) as AnyObject | undefined;
+            } catch (error) {
+              if ((error as AnyObject)?.statusCode === 404) {
+                this.ensureODataHeaders();
+                this.response.status(204).end();
+                return undefined;
+              }
+              throw error;
+            }
+          }
+
+          if (!entity) {
+            this.ensureODataHeaders();
+            this.response.status(204).end();
+            return undefined;
+          }
+
+          const plain = this.toPlainEntity(entity) ?? {};
+          this.ensureODataHeaders();
+          const contextUrl = `${contextBase}/${propertyName}/$entity`;
+          const result = {
+            '@odata.context': contextUrl,
+            ...plain,
+          } as AnyObject;
+          ctx.result = result;
+          return result;
+        }
+
+        const definition = modelDefinition?.properties?.[propertyName] as
+          | PropertyDefinition
+          | undefined;
+        if (!definition) {
+          throw new HttpErrors.NotFound('Property not found.');
+        }
+        const primitiveKind = classifyPrimitiveProperty(definition);
+        if (!primitiveKind) {
+          throw new HttpErrors.NotFound('Property does not expose a scalar value.');
+        }
+
         const entity = await this.repository.findById(entityId as any, baseFilter, options);
         const plain = this.toPlainEntity(entity) ?? {};
 
@@ -11089,22 +11287,19 @@ export function defineODataCrudController(def: EntitySetDef) {
           return rawValue;
         }
 
-        // Build OData context URL for the property
         const contextUrl = `${contextBase}/${propertyName}`;
         const responsePayload = {
           '@odata.context': contextUrl,
           value: rawValue,
         };
 
-        // Add etag if available
         const etag = this.computeEtagFromPlain(plain);
         if (etag) {
           this.response.set('ETag', encodeEtagToken(etag));
         }
 
-        this.response.json(responsePayload);
-        ctx.result = rawValue;
-        return rawValue;
+        ctx.result = responsePayload;
+        return responsePayload;
       };
 
       const result = await execDefault();
@@ -11318,6 +11513,123 @@ export function defineODataCrudController(def: EntitySetDef) {
           }
 
           this.response.status(201);
+          this.applyPreference(preference);
+          const result = {
+            '@odata.context': entityContext,
+            ...decorated,
+          } as AnyObject;
+          ctx.result = result;
+          return result;
+        };
+
+        const helpers = this.helpersForEntity(entityContext, op);
+        const onCtx = this.buildOnContext(ctx, helpers);
+        const res = await this.runOn(op, scope, onCtx, execDefault);
+        ctx.result = res;
+        if (!this.response.headersSent) {
+          await this.runAfter(op, scope, ctx);
+        }
+        return ctx.result as AnyObject | undefined;
+      });
+    }
+
+    @put(
+      `/odata/${setName}/{id}`,
+      withODataSpecMetadata(
+        {
+          responses: {
+            '200': {
+              description: `Replace ${setName} entity`,
+              content: { 'application/json': { schema: entityResponseSchema } },
+            },
+            '204': {
+              description: `Replace ${setName} entity (minimal response)`,
+            },
+          },
+        },
+        operationVisibility,
+      ),
+    )
+    async replace(
+      @idParam id: unknown,
+      @requestBody({
+        content: {
+          'application/json': {
+            schema: getModelSchemaRef(modelCtor, { includeRelations: true }),
+          },
+        },
+      })
+      payload: CrudEntity,
+    ) {
+      const preferences = this.parsePreferenceHeader();
+      if (preferences.respondAsync) this.throwPreferenceNotSupported('respond-async');
+      this.ensureAcceptsJson();
+      this.ensureJsonContentType();
+
+      const entityId = this.coerceParentId(id);
+      const op: CrudOperation = 'UPDATE';
+      const scope: CrudScope | undefined = undefined;
+      const prepared = this.coercePayloadToObject(payload as AnyObject);
+      this.stripODataAnnotations(prepared);
+      if (modelRelations) {
+        for (const relationName of Object.keys(modelRelations)) {
+          if (Object.prototype.hasOwnProperty.call(prepared, relationName)) {
+            delete prepared[relationName];
+          }
+        }
+      }
+      this.removeIdProperties(prepared, idProperties);
+
+      return this.withWriteTransaction(async () => {
+        const ctx = this.buildHookContext({
+          operation: op,
+          scope,
+          id: entityId,
+          payload: prepared,
+          options: this.repositoryOptions(),
+        });
+        await this.enforceTenantLimit(op);
+        await this.runBefore(op, scope, ctx);
+
+        const execDefault = async () => {
+          const options = this.repositoryOptions();
+          const preference = preferences.returnPreference;
+          const ifMatch = this.parseIfMatchHeader();
+
+          if (this.etagEnabled() && this.cfg?.strict && !ifMatch) {
+            const error = new HttpErrors.PreconditionRequired(
+              'If-Match header is required when ETags are enabled.',
+            );
+            (error as any).code = ODataErrorCodes.PreconditionRequired;
+            throw error;
+          }
+
+          if (ifMatch && !ifMatch.any && this.etagEnabled()) {
+            const existing = await this.repository.findById(entityId as any, undefined, options);
+            const plainExisting = this.toPlainEntity(existing) ?? {};
+            const etag = this.computeEtagFromPlain(plainExisting);
+            if (!etag || !matchesEtag(etag, ifMatch.values ?? [])) {
+              this.throwPreconditionFailed();
+            }
+          }
+
+          const workingPayload = (ctx.payload ?? prepared) as AnyObject;
+          this.assertWriteDataSource(this.repository, `replace:${setName}`);
+          await this.repository.replaceById(entityId as any, workingPayload as any, options);
+
+          const updated = await this.repository.findById(entityId as any, undefined, options);
+          const plain = this.toPlainEntity(updated) ?? {};
+          const etag = this.computeEtagFromPlain(plain);
+          const decorated = this.decoratePlainEntity(plain, etag);
+          this.ensureODataHeaders();
+          this.setEtagHeaderFromPlain(plain);
+
+          if (preference === 'minimal') {
+            this.applyPreference(preference);
+            this.response.status(204);
+            return undefined;
+          }
+
           this.applyPreference(preference);
           const result = {
             '@odata.context': entityContext,
