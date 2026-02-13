@@ -93,6 +93,7 @@ export class ODataBooter implements Booter {
     singleton: ODataSingletonConfig,
     entitySetName: string,
     modelCtor: typeof Entity,
+    singletonOnly: boolean,
   ): ODataSingletonConfig {
     const name = singleton?.name?.trim?.() ? singleton.name.trim() : '';
     if (!name) {
@@ -101,7 +102,7 @@ export class ODataBooter implements Booter {
     if (!this.identifierPattern.test(name)) {
       throw new Error(`Singleton "${name}" for model ${modelCtor.name} is not a valid identifier.`);
     }
-    if (name.toLowerCase() === entitySetName.toLowerCase()) {
+    if (!singletonOnly && name.toLowerCase() === entitySetName.toLowerCase()) {
       throw new Error(
         `Singleton "${name}" for model ${modelCtor.name} conflicts with its entity set name "${entitySetName}".`,
       );
@@ -322,8 +323,14 @@ export class ODataBooter implements Booter {
         });
       }
       const hasStream = Boolean(modelMeta?.hasStream);
+      const singletonOnly = Boolean(modelMeta?.singletonOnly);
+      if (singletonOnly && !modelMeta?.singleton) {
+        throw new Error(
+          `Model ${modelCtor.name} sets singletonOnly=true but does not configure @odataModel({ singleton: ... }).`,
+        );
+      }
       const singleton = modelMeta?.singleton
-        ? this.validateSingletonConfig(modelMeta.singleton, setName, modelCtor)
+        ? this.validateSingletonConfig(modelMeta.singleton, setName, modelCtor, singletonOnly)
         : undefined;
       const mediaField = modelMeta?.mediaField;
       const mediaContentTypeField = modelMeta?.mediaContentTypeField;
@@ -336,6 +343,7 @@ export class ODataBooter implements Booter {
       const def = this.registry.register({
         name: setName,
         modelCtor,
+        exposeEntitySet: singletonOnly ? false : true,
         repositoryBindingKey: repoBinding.key,
         repositoryCtor: repoBinding.valueConstructor ?? undefined,
         etagProperties,
@@ -379,13 +387,20 @@ export class ODataBooter implements Booter {
 
       const CrudController = defineODataCrudController(def);
       def.controllerCtor = CrudController;
-      this.app.controller(CrudController);
-      this.registerOperations(def, ctor);
-      this.registerNavigationRefRoutes(def, modelDefinition, CrudController);
+      if (!singletonOnly) {
+        this.app.controller(CrudController);
+        this.registerOperations(def, ctor);
+        this.registerNavigationRefRoutes(def, modelDefinition, CrudController);
+      }
       if (singleton) {
         const SingletonController = defineODataSingletonController(def, CrudController, singleton);
         this.app.controller(SingletonController);
-        this.registerSingletonNavigationRefRoutes(def, modelDefinition, CrudController, singleton);
+        this.registerSingletonNavigationRefRoutes(
+          def,
+          modelDefinition,
+          SingletonController,
+          singleton,
+        );
       }
     }
 

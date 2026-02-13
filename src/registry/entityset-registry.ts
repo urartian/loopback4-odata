@@ -21,6 +21,12 @@ export interface EntitySqlMetadata {
 export interface EntitySetDef<T extends Entity = Entity> {
   name: string; // e.g. "Products"
   modelCtor: typeof Entity & { prototype: T }; // LB4 model constructor
+  /**
+   * When false, this model is not exposed as an entity set (collection).
+   *
+   * Used by singleton-only models to omit `/odata/<EntitySet>` endpoints and metadata entries.
+   */
+  exposeEntitySet?: boolean;
   controllerCtor?: Function; // generated controller
   repositoryBindingKey?: string; // app.binding key for the repository
   repositoryCtor?: Function; // repository class constructor

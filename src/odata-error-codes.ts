@@ -5,6 +5,7 @@ export const ODataErrorCodes = {
   Forbidden: 'Forbidden',
   NotFound: 'NotFound',
   Conflict: 'Conflict',
+  MethodNotAllowed: 'MethodNotAllowed',
   PreconditionFailed: 'PreconditionFailed',
   PreconditionRequired: 'PreconditionRequired',
   PayloadTooLarge: 'PayloadTooLarge',

@@ -184,6 +184,23 @@ export class AssetLibrary extends Entity {
 }
 
 @odataModel({
+  entitySetName: 'Settings',
+  singletonOnly: true,
+  singleton: {
+    name: 'Settings',
+    id: '1',
+  },
+})
+@model()
+export class AppSettings extends Entity {
+  @property({ type: 'string', id: true })
+  id!: string;
+
+  @property({ type: 'string' })
+  name?: string;
+}
+
+@odataModel({
   hasStream: true,
   mediaField: 'data',
   mediaContentTypeField: 'contentType',
@@ -425,6 +442,15 @@ export class DecisionRuleRepository extends DefaultCrudRepository<
   }
 }
 
+export class AppSettingsRepository extends DefaultCrudRepository<
+  AppSettings,
+  typeof AppSettings.prototype.id
+> {
+  constructor(@inject('datasources.db') dataSource: juggler.DataSource) {
+    super(AppSettings, dataSource);
+  }
+}
+
 @odataController(DecisionRule)
 class DecisionRuleODataController {}
 
@@ -533,6 +559,9 @@ class AssetLibraryODataController {}
 @odataController(BigIntAsset)
 class BigIntAssetODataController {}
 
+@odataController(AppSettings)
+class AppSettingsODataController {}
+
 @odataModel({ entitySetName: 'OdataOnlyIncidents' })
 export class OdataOnlyIncident extends Entity {
   @property({ type: 'string', id: true, defaultFn: 'uuid' })
@@ -626,6 +655,7 @@ export async function givenODataApplication(
   app.repository(MediaAssetRepository);
   app.repository(AssetLibraryRepository);
   app.repository(BigIntAssetRepository);
+  app.repository(AppSettingsRepository);
   app.repository(DecisionRuleRepository);
   app.component(ODataComponent);
   const currentConfig = app.getSync(ODATA_BINDINGS.CONFIG) as ODataConfig;
@@ -641,6 +671,7 @@ export async function givenODataApplication(
   app.controller(MediaAssetODataController);
   app.controller(AssetLibraryODataController);
   app.controller(BigIntAssetODataController);
+  app.controller(AppSettingsODataController);
   return app;
 }
 
@@ -651,6 +682,7 @@ export async function seedExampleData(app: TestApplication) {
   const mediaAssetRepo = await app.getRepository(MediaAssetRepository);
   const assetLibraryRepo = await app.getRepository(AssetLibraryRepository);
   const bigIntAssetRepo = await app.getRepository(BigIntAssetRepository);
+  const appSettingsRepo = await app.getRepository(AppSettingsRepository);
   const decisionRuleRepo = await app.getRepository(DecisionRuleRepository);
 
   const existingProducts = await productRepo.count();
@@ -724,4 +756,8 @@ export async function seedExampleData(app: TestApplication) {
     id: 1,
     decisionSchema: { version: 1, rules: [{ when: { countryCode: 'US' }, then: { rate: 0.05 } }] },
   });
+
+  await appSettingsRepo
+    .findById('1')
+    .catch(async () => appSettingsRepo.create({ id: '1', name: 'Default Settings' }));
 }

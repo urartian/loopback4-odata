@@ -7,6 +7,7 @@ import {
   OperationObject,
   param,
   patch,
+  post,
   put,
   requestBody,
   Request,
@@ -262,6 +263,23 @@ export function defineODataSingletonController(
       return this.rewriteSingletonContext(result);
     }
 
+    @post(
+      `/odata/${singletonName}`,
+      withODataSpecMetadata(
+        {
+          responses: {
+            '405': { description: 'Method not allowed.' },
+          },
+        },
+        operationVisibility,
+      ),
+    )
+    async create() {
+      throw new HttpErrors.MethodNotAllowed(
+        'Method POST is not allowed for singletons and individual entities.',
+      );
+    }
+
     @patch(
       `/odata/${singletonName}`,
       withODataSpecMetadata(
@@ -476,12 +494,12 @@ export function defineODataSingletonController(
 
     // NOTE: singleton $ref routes are registered via custom ControllerRoute instances
     // to preserve correct verbs for hasOne/hasMany and reuse generated security metadata.
-    async linkNavigationRef() {
-      throw new HttpErrors.NotImplemented();
+    async linkNavigationRef(relationName: string, parentIdRaw: unknown, targetUri?: string) {
+      return this.inner.linkNavigationRef(relationName, parentIdRaw, targetUri);
     }
 
-    async unlinkNavigationRef() {
-      throw new HttpErrors.NotImplemented();
+    async unlinkNavigationRef(relationName: string, parentIdRaw: unknown, targetKeyRaw?: string) {
+      return this.inner.unlinkNavigationRef(relationName, parentIdRaw, targetKeyRaw);
     }
   }
 

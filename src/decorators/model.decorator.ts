@@ -19,6 +19,17 @@ export interface ODataModelOptions {
    * backed by the same repository as the entity set.
    */
   singleton?: ODataSingletonConfig;
+  /**
+   * When true, the model is exposed as a singleton **only** (no collection/entity set CRUD routes).
+   *
+   * This is useful for “configuration-like” resources (for example `/odata/Settings` or `/odata/Me`)
+   * where exposing `POST /odata/<EntitySet>` would be a footgun.
+   *
+   * Notes:
+   * - `singletonOnly: true` requires `singleton` to be configured.
+   * - When enabled, the service document and `$metadata` omit the `EntitySet` entry for this model.
+   */
+  singletonOnly?: boolean;
   deepInsert?: boolean;
   deepUpdate?: boolean;
   applyPushdown?: boolean;

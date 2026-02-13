@@ -204,6 +204,33 @@ describe('OData component acceptance', () => {
     expect(spec.body.paths?.['/odata/PrimaryLibrary/assets/{targetKey}/$ref']).to.be.Object();
   });
 
+  it('supports singletonOnly models by omitting the entity set and rejecting POST', async () => {
+    const doc = await client.get('/odata').expect(200);
+    const entitySetEntry = doc.body.value.find(
+      (item: { name: string; kind: string }) =>
+        item.name === 'Settings' && item.kind === 'EntitySet',
+    );
+    expect(entitySetEntry).to.equal(undefined);
+    const singletonEntry = doc.body.value.find(
+      (item: { name: string; kind: string }) =>
+        item.name === 'Settings' && item.kind === 'Singleton',
+    );
+    expect(singletonEntry).to.be.Object();
+
+    const res = await client.get('/odata/Settings').expect(200);
+    expect(res.body['@odata.context']).to.equal('/odata/$metadata#Settings');
+    expect(res.body.value).to.equal(undefined);
+    expect(res.body.id).to.equal('1');
+
+    const post = await client.post('/odata/Settings').send({ name: 'nope' }).expect(405);
+    expect(post.body.error).to.be.Object();
+    expect(post.body.error.code).to.equal('MethodNotAllowed');
+
+    const meta = await client.get('/odata/$metadata').expect(200);
+    expect(meta.text.includes('<Singleton Name="Settings"')).to.be.true();
+    expect(meta.text.includes('<EntitySet Name="Settings"')).to.be.false();
+  });
+
   it('serves product collections with OData metadata', async () => {
     const res = await client.get('/odata/Products').expect(200);
     expect(res.body['@odata.context']).to.match(/Products$/);

@@ -82,11 +82,14 @@ export class ODataServiceDocumentController {
 
     const serviceRoot = normalizeBasePath(this.config.basePath);
     const contextUrl = serviceRoot === '/' ? '/$metadata' : `${serviceRoot}/$metadata`;
-    const entitySets = this.registry.list().map((def) => ({
-      name: def.name,
-      kind: 'EntitySet' as const,
-      url: def.name,
-    }));
+    const entitySets = this.registry
+      .list()
+      .filter((def) => def.exposeEntitySet !== false)
+      .map((def) => ({
+        name: def.name,
+        kind: 'EntitySet' as const,
+        url: def.name,
+      }));
     const singletons = this.registry
       .list()
       .map((def) => def.singleton)
