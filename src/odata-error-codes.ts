@@ -14,6 +14,9 @@ export const ODataErrorCodes = {
   NotAcceptable: 'NotAcceptable',
   UnsupportedMediaType: 'UnsupportedMediaType',
   UnprocessableEntity: 'UnprocessableEntity',
+  Gone: 'Gone',
+  TooManyRequests: 'TooManyRequests',
+  ServiceUnavailable: 'ServiceUnavailable',
 
   // Batch (JSON/multipart)
   InvalidUrl: 'InvalidUrl',

@@ -197,4 +197,111 @@ describe('ODataErrorProvider', () => {
     assert.equal(statusCode, 500);
     assert.equal(payload?.error?.code, ODataErrorCodes.TransactionCommitFailed);
   });
+
+  it('maps additional HTTP statuses to stable OData codes', () => {
+    const provider = new ODataErrorProvider({ debug: false }, {
+      tokenSecret: 'test-secret',
+      basePath: '/odata',
+    } as any);
+    const reject = provider.value();
+
+    const responseFactory = () => {
+      let statusCode: number | undefined;
+      let payload: any;
+      const response = {
+        status(code: number) {
+          statusCode = code;
+          return this;
+        },
+        getHeader() {
+          return undefined;
+        },
+        set() {
+          return this;
+        },
+        contentType() {
+          return this;
+        },
+        send(body: unknown) {
+          payload = body;
+          return this;
+        },
+      } as any;
+      return { response, statusCode: () => statusCode, payload: () => payload };
+    };
+
+    {
+      const { response, statusCode, payload } = responseFactory();
+      reject(
+        { request: { url: '/odata/Products', method: 'GET' }, response } as any,
+        new HttpErrors.Gone('expired'),
+      );
+      assert.equal(statusCode(), 410);
+      assert.equal(payload()?.error?.code, ODataErrorCodes.Gone);
+    }
+
+    {
+      const { response, statusCode, payload } = responseFactory();
+      reject(
+        { request: { url: '/odata/Products', method: 'GET' }, response } as any,
+        new HttpErrors.TooManyRequests('rate exceeded'),
+      );
+      assert.equal(statusCode(), 429);
+      assert.equal(payload()?.error?.code, ODataErrorCodes.TooManyRequests);
+    }
+
+    {
+      const { response, statusCode, payload } = responseFactory();
+      reject(
+        { request: { url: '/odata/Products', method: 'GET' }, response } as any,
+        new HttpErrors.ServiceUnavailable('temporarily saturated'),
+      );
+      assert.equal(statusCode(), 503);
+      assert.equal(payload()?.error?.code, ODataErrorCodes.ServiceUnavailable);
+    }
+  });
+
+  it('preserves target, details, and explicit innerError metadata', () => {
+    const provider = new ODataErrorProvider({ debug: false }, {
+      tokenSecret: 'test-secret',
+      basePath: '/odata',
+    } as any);
+    const reject = provider.value();
+
+    let payload: any;
+    const response = {
+      status() {
+        return this;
+      },
+      getHeader() {
+        return undefined;
+      },
+      set() {
+        return this;
+      },
+      contentType() {
+        return this;
+      },
+      send(body: unknown) {
+        payload = body;
+        return this;
+      },
+    } as any;
+
+    const err = new HttpErrors.BadRequest('invalid filter');
+    (err as any).code = ODataErrorCodes.BadRequest;
+    (err as any).target = '$filter';
+    (err as any).details = [{ code: 'type', target: 'price' }];
+    (err as any).innerError = { traceId: 'abc123' };
+
+    reject({ request: { url: '/odata/Products', method: 'GET' }, response } as any, err);
+
+    assert.deepStrictEqual(payload?.error, {
+      code: ODataErrorCodes.BadRequest,
+      message: 'invalid filter',
+      target: '$filter',
+      details: [{ code: 'type', target: 'price' }],
+      innererror: { traceId: 'abc123' },
+    });
+  });
 });

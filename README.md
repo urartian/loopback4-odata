@@ -226,6 +226,23 @@ OData endpoints return errors using an OData error payload (for example `{"error
 
 The authoritative list of stable codes lives in `src/odata-error-codes.ts` (exported as `ODataErrorCodes` from `@loopback/odata`).
 
+Stable codes are grouped as follows:
+
+- Core HTTP-derived codes: `BadRequest`, `Unauthorized`, `Forbidden`, `NotFound`, `Conflict`, `MethodNotAllowed`, `PreconditionFailed`, `PreconditionRequired`, `PayloadTooLarge`, `NotImplemented`, `InternalServerError`, `NotAcceptable`, `UnsupportedMediaType`, `UnprocessableEntity`, `Gone`, `TooManyRequests`, `ServiceUnavailable`.
+  These are the default response codes emitted when no more specific OData code is attached to the error.
+- Batch and transport codes: `InvalidUrl`, `InvalidMethod`, `ResponseTooLarge`, `TooManyRedirects`, `BatchExecutionError`, `BatchSubRequestTimeout`, `batch-operation-limit-exceeded`, `changeset-operation-limit-exceeded`, `batch-payload-size-limit-exceeded`, `batch-part-size-limit-exceeded`, `batch-depth-limit-exceeded`.
+  These identify malformed batch requests, batch guardrail violations, redirect problems, timeouts, and oversized responses.
+- Preferences, tenancy, and transaction codes: `PreferenceNotSupported`, `TenantResolutionFailed`, `TransactionCommitFailed`, `TransactionsNotSupported`, `MultiDataSourceChangesetNotSupported`, `AtomicityGroupNotSupported`.
+  These cover unsupported client preferences, tenant resolution failures, and transactional guarantees that cannot be honored.
+- Content-ID resolution code: `content-id-reference-invalid`.
+  This is returned when a `$batch` request references an unknown or invalid `Content-ID`.
+- Query, lambda, pushdown, and guardrail codes: `lambda-or-unsupported`, `nested-lambda-depth-exceeded`, `lambda-alias-prefix-required`, `pushdown-join-count-exceeded`, `through-relation-unsupported`, `navigation-filter-requires-pushdown`, `postfilter-requires-pushdown`, `postfilter-top-required`, `postfilter-scan-limit-exceeded`, `lambda-pushdown-not-eligible`, `lambda-scan-limit-exceeded`.
+  These describe unsupported query shapes, lambda validation failures, and cases where bounded in-memory fallback or SQL pushdown constraints were exceeded.
+- Typed literal validation codes: `invalid-guid-literal`, `invalid-date-literal`, `invalid-datetimeoffset-literal`, `invalid-int64-literal`, `invalid-decimal-literal`, `in-list-too-large`, `in-operator-requires-list`, `in-operator-requires-literal-list-items`, `in-operator-requires-non-empty-list`.
+  These are used when OData literals cannot be parsed safely or when `in (...)` operands violate validation rules.
+
+For client code, prefer importing `ODataErrorCodes` and comparing against the exported constants instead of hard-coding string literals.
+
 ### Authentication & Authorization
 
 The component mirrors LoopBack’s authentication and authorization metadata from your controller onto every generated CRUD endpoint. Decorate your OData controller exactly as you would a regular REST controller and the extension takes care of the rest:

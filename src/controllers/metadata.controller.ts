@@ -1,4 +1,4 @@
-import { get, Response, RestBindings } from '@loopback/rest';
+import { get, Response, RestBindings, HttpErrors } from '@loopback/rest';
 import { inject } from '@loopback/core';
 import { ODATA_BINDINGS } from '../keys';
 import { CsdlGenerator } from '../metadata/csdl-generator';
@@ -6,6 +6,7 @@ import { ODataConfig } from '../types';
 import { markUndocumentedOperation } from '../util/openapi';
 import { acceptsAnyMediaType } from '../util/accept';
 import { ODataErrorCodes } from '../odata-error-codes';
+import { createODataHttpError } from '../util/odata-http-error';
 
 const METADATA_OPERATION_SPEC = markUndocumentedOperation({
   responses: {
@@ -36,10 +37,11 @@ export class ODataMetadataController {
         const desired =
           (this.cfg?.csdlFormat ?? 'xml') === 'json' ? 'application/json' : 'application/xml';
         if (!acceptsAnyMediaType(accept, [desired])) {
-          const err = new Error('NotAcceptable');
-          (err as any).statusCode = 406;
-          (err as any).code = ODataErrorCodes.NotAcceptable;
-          throw err;
+          throw createODataHttpError(
+            HttpErrors.NotAcceptable,
+            ODataErrorCodes.NotAcceptable,
+            `Accept header must allow ${desired}.`,
+          );
         }
       }
     }

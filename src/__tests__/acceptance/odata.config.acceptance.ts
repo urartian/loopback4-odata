@@ -343,7 +343,8 @@ describe('OData config plumbing acceptance', () => {
     });
 
     await client.get('/api/odata/Products').set('x-tenant-id', 'alpha').expect(200);
-    await client.get('/api/odata/Products').set('x-tenant-id', 'alpha').expect(429);
+    const limited = await client.get('/api/odata/Products').set('x-tenant-id', 'alpha').expect(429);
+    expect(limited.body?.error?.code).to.equal('TooManyRequests');
     await client.get('/api/odata/Products').set('x-tenant-id', 'beta').expect(200);
   });
 
@@ -366,7 +367,8 @@ describe('OData config plumbing acceptance', () => {
     });
 
     await client.get('/api/odata/Products').expect(200);
-    await client.get('/api/odata/Products').expect(429);
+    const limited = await client.get('/api/odata/Products').expect(429);
+    expect(limited.body?.error?.code).to.equal('TooManyRequests');
   });
 
   it('enforces tenant quotas on entity write operations', async function (this: any) {

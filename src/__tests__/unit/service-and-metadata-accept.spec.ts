@@ -1,9 +1,26 @@
 import 'reflect-metadata';
 import { expect } from '@loopback/testlab';
+import { HttpErrors } from '@loopback/rest';
 import { ODataServiceDocumentController } from '../../controllers/service-document.controller';
 import { ODataMetadataController } from '../../controllers/metadata.controller';
+import { ODataErrorCodes } from '../../odata-error-codes';
 
 describe('Accept negotiation for metadata endpoints', () => {
+  const expectNotAcceptable = (
+    action: () => unknown,
+    message: string,
+    code = ODataErrorCodes.NotAcceptable,
+  ) => {
+    try {
+      action();
+      throw new Error('Expected request to be rejected with NotAcceptable.');
+    } catch (error) {
+      expect(error).to.be.instanceOf(HttpErrors.NotAcceptable);
+      expect((error as { message?: string }).message).to.equal(message);
+      expect((error as { code?: string }).code).to.equal(code);
+    }
+  };
+
   const createRequest = (accept?: string) =>
     ({
       get(header: string) {
@@ -37,7 +54,10 @@ describe('Accept negotiation for metadata endpoints', () => {
     );
     const request = createRequest('application/json;q=0, */*;q=0');
     const response = createResponse();
-    expect(() => controller.getServiceDocument(response, request)).to.throw('NotAcceptable');
+    expectNotAcceptable(
+      () => controller.getServiceDocument(response, request),
+      'Accept header must allow application/json.',
+    );
   });
 
   it('rejects service document requests when acceptable types precede q=0 for JSON', () => {
@@ -47,7 +67,10 @@ describe('Accept negotiation for metadata endpoints', () => {
     );
     const request = createRequest('text/plain;q=1, application/json;q=0');
     const response = createResponse();
-    expect(() => controller.getServiceDocument(response, request)).to.throw('NotAcceptable');
+    expectNotAcceptable(
+      () => controller.getServiceDocument(response, request),
+      'Accept header must allow application/json.',
+    );
   });
 
   it('rejects metadata requests when desired type has q=0', () => {
@@ -60,7 +83,10 @@ describe('Accept negotiation for metadata endpoints', () => {
     );
     const request = createRequest('application/xml;q=0');
     const response = createResponse();
-    expect(() => controller.getMetadata(response, request)).to.throw('NotAcceptable');
+    expectNotAcceptable(
+      () => controller.getMetadata(response, request),
+      'Accept header must allow application/xml.',
+    );
   });
 
   it('rejects metadata requests with uppercase q parameter for desired type', () => {
@@ -73,6 +99,9 @@ describe('Accept negotiation for metadata endpoints', () => {
     );
     const request = createRequest('text/plain;q=1, APPLICATION/XML;Q=0');
     const response = createResponse();
-    expect(() => controller.getMetadata(response, request)).to.throw('NotAcceptable');
+    expectNotAcceptable(
+      () => controller.getMetadata(response, request),
+      'Accept header must allow application/xml.',
+    );
   });
 });
