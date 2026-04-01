@@ -1333,9 +1333,9 @@ this.bind(ODATA_BINDINGS.CONFIG).to({
 For mixed datasources (or per-entity differences), prefer per-entity-set overrides:
 
 ```ts
-import { FILTER_FUNCTIONS_POSTGRES, type EntitySetDef } from '@loopback/odata';
+import { FILTER_FUNCTIONS_POSTGRES, type ODataEntitySetConfig } from '@loopback/odata';
 
-export const PurchasesSet: EntitySetDef = {
+export const PurchasesSet: ODataEntitySetConfig = {
   name: 'Purchases',
   modelCtor: Purchase,
   capabilities: { filterFunctions: FILTER_FUNCTIONS_POSTGRES },
@@ -1362,10 +1362,12 @@ this.bind(ODATA_BINDINGS.CONFIG).to({
 
 Spreading the current config ensures sensitive settings such as `tokenSecret` remain intact unless you explicitly replace them.
 
-Per-entity guardrails can be applied through the registry definition. Entity-level limits override the global pagination block, allowing you to relax or tighten caps on a per-feed basis:
+Per-entity guardrails can be applied through the entity-set config you register with the registry binding. Entity-level limits override the global pagination block, allowing you to relax or tighten caps on a per-feed basis:
 
 ```ts
-const ProductsSet: EntitySetDef<Product> = {
+import { type ODataEntitySetConfig } from '@loopback/odata';
+
+const ProductsSet: ODataEntitySetConfig<Product> = {
   name: 'Products',
   modelCtor: Product,
   repositoryBindingKey: 'repositories.ProductRepository',
@@ -1472,7 +1474,7 @@ Any custom store only needs to implement the `TenantThrottleStore` interface (al
 - `logApplyTelemetry`: When `true`, emits a concise debug line for every `$apply` stage showing whether it was pushed down or processed in-memory (default: `false`).
 - `onApplyTelemetry(event)`: Structured hook invoked after each stage with `{entitySet, stageIndex, stageCount, mode, rows, durationMs, joinCount, reason}` so you can stream analytics into your own logging or monitoring pipeline.
 - `maxApplyNavigationFanout`: Maximum number of navigation combinations the in-memory fallback will materialize per stage before returning `400 Bad Request` (default: `1000`).
-- `enableApplyPushdown`: Opt-in switch that negotiates `$apply` pushdown with each datasource. When enabled, supported connectors (currently PostgreSQL and MySQL/MariaDB) execute `groupby()/aggregate()` pipelines in the database. Combine with `@odataModel({applyPushdown: true})` or `EntitySetRegistry.register({applyPushdown: true})` for per-entity control.
+- `enableApplyPushdown`: Opt-in switch that negotiates `$apply` pushdown with each datasource. When enabled, supported connectors (currently PostgreSQL and MySQL/MariaDB) execute `groupby()/aggregate()` pipelines in the database. Combine with `@odataModel({applyPushdown: true})` or an `ODataEntitySetConfig` registered through `ODATA_BINDINGS.ENTITY_SET_REGISTRY` for per-entity control.
 - `maxExpandDepth`: Maximum allowed `$expand` nesting depth; requests that exceed it return `400 Bad Request`.
 - `maxFilterPatternLength`: Caps underscore patterns generated when translating supported `$filter` functions like `length()` and `substring()` (including inside `$apply=filter(...)`) into LoopBack `like` clauses (default: `10000`). Requests that exceed it return `400 Bad Request`.
 - `maxSubstringStart`: Maximum allowed `substring(field, start, ...)` start index when translating to patterns (default: `10000`). Requests that exceed it return `400 Bad Request`.
@@ -1486,9 +1488,9 @@ Any custom store only needs to implement the `TenantThrottleStore` interface (al
 - `namespace`: Overrides the CSDL schema namespace (`Default` by default). All generated types live under this namespace.
 - `entityContainerName`: Controls the `<EntityContainer>` / JSON entity container name (`DefaultContainer` by default).
 - `namespaceAlias`: Adds the optional `Alias` attribute to the CSDL schema so clients can refer to types using a short prefix.
-- `capabilities`: Sets default service-level annotations such as supported filter functions, countability, permissions, stream support, and now OData capability records for inserts/updates/deletes/search via the `insertRestrictions`, `updateRestrictions`, `deleteRestrictions`, and `searchRestrictions` options. Values can be overridden per entity set via `EntitySetDef.capabilities`.
+- `capabilities`: Sets default service-level annotations such as supported filter functions, countability, permissions, stream support, and now OData capability records for inserts/updates/deletes/search via the `insertRestrictions`, `updateRestrictions`, `deleteRestrictions`, and `searchRestrictions` options. Values can be overridden per entity set via `ODataEntitySetConfig.capabilities`.
 - `enableDeepInsert`: Opt-in global switch for accepting nested payloads (deep insert). When `true`, every entity set defaults to deep insert unless overridden per model. When `false` (default), only entity sets with `@odataModel({deepInsert: true})` participate.
-- `enableDeepUpdate`: Opt-in global switch for deep updates (PATCH payloads containing related entities). Entity sets can override with `@odataModel({deepUpdate: true})` or `EntitySetRegistry.register({deepUpdate: true})`.
+- `enableDeepUpdate`: Opt-in global switch for deep updates (PATCH payloads containing related entities). Entity sets can override with `@odataModel({deepUpdate: true})` or an `ODataEntitySetConfig` registered through `ODATA_BINDINGS.ENTITY_SET_REGISTRY`.
 - `maxDeepInsertDepth`: Maximum recursion depth for deep insert traversal (default: `10`). Requests exceeding the limit are rejected with `400 Bad Request` to prevent runaway graphs.
 - `maxDeepUpdateDepth`: Maximum recursion depth for deep update traversal (defaults to `maxDeepInsertDepth` when not set).
 - `enableNavigationRefEndpoints`: Set to `false` to skip registration of navigation `$ref` routes if you prefer to manage linking manually (default: `true`).
@@ -1543,7 +1545,7 @@ app.bind(ODATA_BINDINGS.CONFIG).to({
 });
 ```
 
-Entity-set specific overrides are available via `EntitySetRegistry.register`:
+Entity-set specific overrides are available via the registry binding (`ODATA_BINDINGS.ENTITY_SET_REGISTRY`) using `ODataEntitySetConfig`:
 
 - `capabilities`: refine or override filter functions, countability, navigation restrictions, permissions, or stream support for a single entity set.
 - `hasStream`: mark the backing entity type as streaming (`Org.OData.Core.V1.HasStream`).
@@ -1611,7 +1613,7 @@ When `hasStream` is enabled the booter inspects the repository binding and regis
 
 - If the repository prototype implements `getMedia(id, options)` / `setMedia(id, stream, metadata, options)` (and optionally `deleteMedia`), the booter wires a `RepositoryMediaHandlerAdapter` that forwards reads/writes into those hooks.
 - Otherwise, if `mediaField` is configured, a request-scoped `PropertyBackedMediaHandler` is bound which reads/writes the binary column directly.
-- You can always bind your own handler to `def.mediaHandlerBindingKey` to integrate object storage, CDNs, etc. Custom handlers must implement the `ODataMediaHandler` interface exported from `src/services/odata-media-handler.ts`.
+- You can always bind your own handler to the configured `mediaHandlerBindingKey` to integrate object storage, CDNs, etc. Custom handlers must implement the `ODataMediaHandler` interface exported from `@loopback/odata`.
 
 Example: property-backed storage that tracks MIME type/length/ETag on the entity:
 
@@ -1743,7 +1745,7 @@ If you need a different page size, override `pageSize` at startup or per test us
 
 ### Delta Links
 
-When `enableDelta` is `true`, the first page of a collection includes an `@odata.deltaLink`. Clients can store that URL and call it later to retrieve only the entities that changed since the last sync. The implementation relies on each entity set having a stable change stamp (the first configured ETag property, or the field supplied via `@odataModel({delta: {field: ...}})` / `EntitySetDef.deltaField`). Delta links are signed with the same `tokenSecret`; tampering or using an expired token (see `deltaTokenTtl`) returns `400 Invalid $deltatoken`.
+When `enableDelta` is `true`, the first page of a collection includes an `@odata.deltaLink`. Clients can store that URL and call it later to retrieve only the entities that changed since the last sync. The implementation relies on each entity set having a stable change stamp (the first configured ETag property, or the field supplied via `@odataModel({delta: {field: ...}})` / `ODataEntitySetConfig.deltaField`). Delta links are signed with the same `tokenSecret`; tampering or using an expired token (see `deltaTokenTtl`) returns `400 Invalid $deltatoken`.
 
 ```http
 GET /odata/Products
@@ -1827,7 +1829,7 @@ curl "http://127.0.0.1:3001/odata/OrderItems?\$apply=groupby((order/customer/cou
 ### `$apply` Pushdown (PostgreSQL & MySQL)
 
 - Pushdown is **opt-in**. Out of the box, `$apply` executes in memory. This is functionally correct but resource intensive; enable pushdown for production workloads. Once enabled, the SQL executors keep entire pipelines (multiple `groupby`/`aggregate` stages plus `filter`, `orderby`, `skip`, `top`) inside the database, emitting native `HAVING`, `ORDER BY`, `LIMIT`, and `OFFSET`.
-- Set `enableApplyPushdown: true` on `ODataConfig` to negotiate pushdown across datasources, or opt in per model with `@odataModel({applyPushdown: true})` / per entity set via `EntitySetRegistry.register({applyPushdown: true})`.
+- Set `enableApplyPushdown: true` on `ODataConfig` to negotiate pushdown across datasources, or opt in per model with `@odataModel({applyPushdown: true})` / per entity set via an `ODataEntitySetConfig` registered through `ODATA_BINDINGS.ENTITY_SET_REGISTRY`.
 - PostgreSQL **and** MySQL/MariaDB are supported natively today. The extension inspects each repository datasource and, when it detects a compatible connector, routes aggregation pipelines through a SQL executor built on `dataSource.execute(...)`.
 - Navigation aggregates are compiled into `LEFT JOIN` chains, so queries like `groupby((order/customer/country), aggregate(order/total with sum as TotalSpend))` continue to run server-side even when later stages reference aliases or regroup the intermediate result set. On MySQL the executor uses backticked identifiers and `?` placeholders, while PostgreSQL uses quoted identifiers and `$n` parameters.
 - Stage-level pagination and filters stay in SQL. Post-aggregate `filter(...)` segments translate to `HAVING` clauses, and `skip`/`top` stages map to `OFFSET`/`LIMIT` inside each stage rather than being re-applied in memory.
@@ -1994,7 +1996,7 @@ Configuration:
 
 > **Composition TL;DR**
 >
-> - Composition is **explicitly configured** (not inferred from required FKs): a relation is “composition” when it appears under `composition.*.relations` (global config, `@odataModel` decorator, or `EntitySetDef.composition`) after config resolution.
+> - Composition is **explicitly configured** (not inferred from required FKs): a relation is “composition” when it appears under `composition.*.relations` (global config, `@odataModel` decorator, or `ODataEntitySetConfig.composition`) after config resolution.
 > - It affects **delete semantics** (database-enforced via `ON DELETE ...` FKs, or application-enforced via configured delete policies).
 > - It also affects **write semantics** (regardless of enforcement mode): `$ref` link/unlink is rejected, and changing the child’s parent FK is rejected (direct `PATCH` and parent `PATCH` deep updates).
 >
@@ -2124,7 +2126,7 @@ If you can’t rely on DB-enforced referential actions (or you want explicit dep
   - `restrict` (default): reject parent deletes when composed children exist (`409 Conflict`)
   - `cascade`: delete composed children depth-first (and nested composed children) before deleting the parent
 
-Configuration is layered and merged per entity set with the following precedence (highest wins): registry (`EntitySetDef.composition`) → decorator (`@odataModel({composition})`) → global per-set (`ODataConfig.composition.entitySets`) → global default (`ODataConfig.composition.defaultDeletePolicy`).
+Configuration is layered and merged per entity set with the following precedence (highest wins): registry (`ODataEntitySetConfig.composition`) → decorator (`@odataModel({composition})`) → global per-set (`ODataConfig.composition.entitySets`) → global default (`ODataConfig.composition.defaultDeletePolicy`).
 
 Example (global config):
 
@@ -2201,7 +2203,7 @@ For `hasOne`, use `PUT /EntitySet(key)/Relation/$ref` to link and `DELETE /Entit
 
 Composition relations:
 
-- A relation is treated as composition when configured under `composition.*.relations` (global config, `@odataModel` decorator, or `EntitySetDef.composition`), i.e. when it appears in the resolved composition config.
+- A relation is treated as composition when configured under `composition.*.relations` (global config, `@odataModel` decorator, or `ODataEntitySetConfig.composition`), i.e. when it appears in the resolved composition config.
 - `$ref` link/unlink is rejected with `409 Conflict`; create the child under the parent (or set the parent FK on `POST /ChildSet`) and delete children via `DELETE /ChildSet(key)`.
 - Re-parenting by `PATCH`ing the child’s parent FK is rejected with `409 Conflict`.
 

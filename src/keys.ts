@@ -1,7 +1,7 @@
 import { BindingKey } from '@loopback/core';
+import { ODataEntitySetRegistry } from './entity-set-config';
 import { ODataConfig, ODataLogEntry, ODataRequestState, ODataTenantThrottleContext } from './types';
 import { CsdlGenerator } from './metadata/csdl-generator';
-import { EntitySetRegistry } from './registry/entityset-registry';
 import { ODataApplyExecutorRegistry } from './services/odata-apply-executor.registry';
 import { TenantThrottleStore } from './services/tenant-throttle-store';
 import { ODataMediaHandler } from './services/odata-media-handler';
@@ -9,7 +9,7 @@ import { ODataMediaHandler } from './services/odata-media-handler';
 export const ODATA_BINDINGS = {
   CONFIG: BindingKey.create<ODataConfig>('odata.config'),
   CSDL_GEN: BindingKey.create<CsdlGenerator>('odata.csdl'),
-  ENTITY_SET_REGISTRY: BindingKey.create<EntitySetRegistry>('odata.registry.entitysets'),
+  ENTITY_SET_REGISTRY: BindingKey.create<ODataEntitySetRegistry>('odata.registry.entitysets'),
   APPLY_EXECUTOR_REGISTRY: BindingKey.create<ODataApplyExecutorRegistry>('odata.apply.executors'),
   LOGGER: BindingKey.create<ODataLogger>('odata.logger'),
   THROTTLER: BindingKey.create<ODataTenantThrottler>('odata.tenantThrottler'),
