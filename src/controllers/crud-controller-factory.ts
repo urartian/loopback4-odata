@@ -13032,7 +13032,7 @@ export function defineODataCrudController(def: EntitySetDef) {
                 return acc;
               }, {});
               let offset = 0;
-              while (true) {
+              for (;;) {
                 if (state.entitiesPlanned >= state.maxEntities) {
                   this.throwCompositionGuardrail(
                     'maxEntities',

@@ -128,7 +128,7 @@ function deriveDefaultMethodAliases(
 
 export function defineODataSingletonController(
   def: EntitySetDef,
-  CrudControllerCtor: new (...args: any[]) => any,
+  crudControllerCtor: new (...args: any[]) => any,
   singleton: ODataSingletonConfig,
 ): new (...args: any[]) => object {
   const repoBindingKey = def.repositoryBindingKey;
@@ -181,7 +181,7 @@ export function defineODataSingletonController(
       @inject(ODATA_BINDINGS.THROTTLER)
       public readonly throttler: ODataTenantThrottler,
     ) {
-      this.inner = new CrudControllerCtor(
+      this.inner = new crudControllerCtor(
         repository,
         request,
         response,
