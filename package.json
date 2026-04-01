@@ -8,6 +8,13 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
+    "bench": "ts-node --project tsconfig.bench.json benchmarks/run-bench.ts",
+    "bench:large": "ts-node --project tsconfig.bench.json benchmarks/run-bench.ts --scenario=crud,apply-executor,batch,media,media-write --iterations=10 --warmup=2 --dataset-scale=10000",
+    "bench:smoke": "ts-node --project tsconfig.bench.json benchmarks/run-bench.ts --scenario=tokens --iterations=3 --warmup=1 --token-ops=1000",
+    "bench:smoke:server": "ts-node --project tsconfig.bench.json benchmarks/run-bench.ts --scenario=crud,apply,apply-executor,batch,media,media-write --iterations=3 --warmup=1 --dataset-scale=50",
+    "bench:soak": "ts-node --project tsconfig.bench.json benchmarks/run-soak.ts --scenario=crud,apply,batch,media,media-write --iterations=100 --sample-every=10 --dataset-scale=1000",
+    "bench:soak:gc": "node --expose-gc ./node_modules/ts-node/dist/bin.js --project tsconfig.bench.json benchmarks/run-soak.ts --scenario=crud,apply,batch,media,media-write --iterations=100 --sample-every=10 --dataset-scale=1000",
+    "bench:tokens": "ts-node --project tsconfig.bench.json benchmarks/run-bench.ts --scenario=tokens",
     "clean": "rimraf dist || true",
     "dev": "ts-node-dev --respawn --project tsconfig.dev.json examples/basic-app/index.ts",
     "test": "rimraf dist-tests || true && tsc -p tsconfig.test.json && mocha --exit \"dist-tests/src/__tests__/**/*.spec.js\" \"dist-tests/src/__tests__/**/*.acceptance.js\"",

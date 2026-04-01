@@ -2,5 +2,6 @@
   "extends": "./tsconfig.dev.json",
   "compilerOptions": {
     "outDir": "dist-tests"
-  }
+  },
+  "include": ["src", "examples", "benchmarks"]
 }

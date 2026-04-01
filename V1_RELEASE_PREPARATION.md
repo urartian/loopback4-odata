@@ -32,11 +32,11 @@ Moving to v1.0.0 represents a commitment to API stability and production readine
 - [x] Standardize error messages for better developer experience
 
 ### 1.3 Performance & Memory Management
-- [ ] Benchmark critical paths: CRUD operations, `$apply` queries, batch processing
-- [ ] Memory leak testing for long-running scenarios
-- [ ] Validate streaming operations don't cause memory buildup
+- [x] Benchmark critical paths: CRUD operations, `$apply` queries, batch processing
+- [x] Memory leak testing for long-running scenarios
+- [x] Validate streaming operations don't cause memory buildup
 - [ ] Test with large datasets (>10k records, >100MB payloads)
-- [ ] Profile `$apply` pushdown performance vs in-memory fallbacks
+- [x] Profile `$apply` pushdown performance vs in-memory fallbacks
 - [ ] Optimize token signing/validation performance
 
 ### 1.4 Security Review
