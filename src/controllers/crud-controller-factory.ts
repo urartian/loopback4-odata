@@ -8024,7 +8024,14 @@ export function defineODataCrudController(def: EntitySetDef) {
       if (!resolver) return 'default';
       try {
         const resolved = resolver(this.request);
-        return resolved ?? 'default';
+        if (typeof resolved === 'string' && resolved.trim().length > 0) {
+          return resolved;
+        }
+        throw createODataHttpError(
+          HttpErrors.BadRequest,
+          ODataErrorCodes.TenantResolutionFailed,
+          'Unable to resolve tenant identifier from request.',
+        );
       } catch (error) {
         if (error instanceof HttpErrors.HttpError) {
           throw error;

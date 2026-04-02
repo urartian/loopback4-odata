@@ -360,15 +360,24 @@ describe('OData config plumbing acceptance', () => {
     expect(res.body?.error?.code).to.equal('TenantResolutionFailed');
   });
 
-  it('falls back to the default tenant when resolver returns undefined', async function (this: any) {
+  it('rejects requests when tenantResolver returns undefined', async function (this: any) {
     await replaceApp(this, {
       tenantResolver: (req) => req.get('x-tenant-id') || undefined,
       tenantQuotas: { maxRequestsPerMinute: 1 },
     });
 
-    await client.get('/api/odata/Products').expect(200);
-    const limited = await client.get('/api/odata/Products').expect(429);
-    expect(limited.body?.error?.code).to.equal('TooManyRequests');
+    const res = await client.get('/api/odata/Products').expect(400);
+    expect(res.body?.error?.code).to.equal('TenantResolutionFailed');
+  });
+
+  it('rejects requests when tenantResolver returns only whitespace', async function (this: any) {
+    await replaceApp(this, {
+      tenantResolver: () => '   ',
+      tenantQuotas: { maxRequestsPerMinute: 1 },
+    });
+
+    const res = await client.get('/api/odata/Products').expect(400);
+    expect(res.body?.error?.code).to.equal('TenantResolutionFailed');
   });
 
   it('enforces tenant quotas on entity write operations', async function (this: any) {

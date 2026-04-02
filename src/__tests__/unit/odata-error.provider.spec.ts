@@ -304,4 +304,81 @@ describe('ODataErrorProvider', () => {
       innererror: { traceId: 'abc123' },
     });
   });
+
+  it('redacts auto-derived database constraint details unless debug is enabled', () => {
+    const responseFactory = () => {
+      let statusCode: number | undefined;
+      let payload: any;
+      const response = {
+        status(code: number) {
+          statusCode = code;
+          return this;
+        },
+        getHeader() {
+          return undefined;
+        },
+        set() {
+          return this;
+        },
+        contentType() {
+          return this;
+        },
+        send(body: unknown) {
+          payload = body;
+          return this;
+        },
+      } as any;
+      return { response, statusCode: () => statusCode, payload: () => payload };
+    };
+
+    {
+      const provider = new ODataErrorProvider({ debug: false }, {
+        tokenSecret: 'test-secret',
+        basePath: '/odata',
+      } as any);
+      const reject = provider.value();
+      const { response, statusCode, payload } = responseFactory();
+
+      const err = Object.assign(new Error('violates foreign key'), {
+        code: '23503',
+        constraint: 'orders_product_id_fkey',
+        table: 'orders',
+        detail: 'Key (product_id)=(1) is still referenced.',
+      });
+
+      reject({ request: { url: '/odata/Products(1)', method: 'DELETE' }, response } as any, err);
+
+      assert.equal(statusCode(), 409);
+      assert.equal(payload()?.error?.code, ODataErrorCodes.Conflict);
+      assert.deepStrictEqual(payload()?.error?.innererror, { dbCode: '23503' });
+    }
+
+    {
+      const provider = new ODataErrorProvider({ debug: true }, {
+        tokenSecret: 'test-secret',
+        basePath: '/odata',
+      } as any);
+      const reject = provider.value();
+      const { response, statusCode, payload } = responseFactory();
+
+      const err = Object.assign(new Error('violates foreign key'), {
+        code: '23503',
+        constraint: 'orders_product_id_fkey',
+        table: 'orders',
+        detail: 'Key (product_id)=(1) is still referenced.',
+      });
+
+      reject({ request: { url: '/odata/Products(1)', method: 'DELETE' }, response } as any, err);
+
+      assert.equal(statusCode(), 409);
+      assert.equal(payload()?.error?.code, ODataErrorCodes.Conflict);
+      assert.equal(payload()?.error?.innererror?.dbCode, '23503');
+      assert.equal(payload()?.error?.innererror?.constraint, 'orders_product_id_fkey');
+      assert.equal(payload()?.error?.innererror?.table, 'orders');
+      assert.equal(
+        payload()?.error?.innererror?.detail,
+        'Key (product_id)=(1) is still referenced.',
+      );
+    }
+  });
 });

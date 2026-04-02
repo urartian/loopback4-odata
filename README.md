@@ -1452,7 +1452,7 @@ app.bind(ODATA_BINDINGS.CONFIG).to({
 
 With the snippet above every OData controller automatically throttles requests per tenant:
 
-- If a header is missing, traffic goes through the default bucket (`'default'`).
+- If `tenantResolver` returns an empty/undefined value, the request fails with `400 TenantResolutionFailed` instead of falling back to a shared bucket.
 - Premium tenants inherit the global limits unless an override is specified.
 - Configure `tenantQuotas.maxLeaseRefreshers` (default `1000`) to guard against unbounded lease refresh timers. When the cap is reached, additional tenants are rejected until current requests finish.
 - All operations (reads, writes, deletes, `$ref`) participate, and concurrency slots are released when the response finishes.
@@ -2363,6 +2363,18 @@ this.bind(ODATA_BINDINGS.CONFIG).to({
 - The correlation block captures request IDs from headers (default `x-correlation-id`), optionally echoes them back on responses, and makes them available to repositories and telemetry emitters so your existing log aggregation or tracing tools can stitch events together.
 
 Use `ODATA_BINDINGS.LOGGER` to plug in your preferred logger (e.g., Pino, Winston) and enrich telemetry events with tenant IDs or custom tags before forwarding them to your observability stack.
+
+### LB4 Transport Security Responsibilities
+
+This component secures OData-specific behavior such as query guardrails, signed paging/delta tokens, payload limits, and normalized error envelopes. In a LoopBack 4 application, transport-wide HTTP policy still belongs to the host `RestApplication` (or your ingress / reverse proxy), not the OData component itself.
+
+For production LB4 deployments, configure these at the application layer:
+
+- CORS policy with the origins, methods, and headers your app actually allows.
+- Security headers such as `X-Content-Type-Options`, `X-Frame-Options`, `Content-Security-Policy`, and `Strict-Transport-Security`.
+- TLS termination and proxy/header trust policy.
+
+The OData component intentionally does not set these headers globally because doing so inside a reusable LB4 component would silently override host-application security policy.
 
 ### Configuration reference
 

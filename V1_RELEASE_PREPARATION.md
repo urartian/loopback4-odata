@@ -42,12 +42,12 @@ Moving to v1.0.0 represents a commitment to API stability and production readine
 Note: the default property-backed media handler intentionally keeps a bounded in-memory upload limit. `>100MB` media support should be treated as a custom streaming-handler scenario, not a default-path v1 guarantee.
 
 ### 1.4 Security Review
-- [ ] Audit input validation for all OData query parameters
-- [ ] Review token secret generation and handling
-- [ ] Validate SQL injection prevention in query builders
-- [ ] Check for XSS vulnerabilities in error responses
-- [ ] Review CORS and security headers handling
-- [ ] Audit tenant isolation in multi-tenant scenarios
+- [x] Audit input validation for all OData query parameters
+- [x] Review token secret generation and handling
+- [x] Validate SQL injection prevention in query builders
+- [x] Check for XSS vulnerabilities in error responses
+- [x] Review CORS and security headers handling
+- [x] Audit tenant isolation in multi-tenant scenarios
 
 **Acceptance Criteria**: All tests pass, no critical security vulnerabilities, performance benchmarks established
 

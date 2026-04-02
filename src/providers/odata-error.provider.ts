@@ -87,12 +87,17 @@ export class ODataErrorProvider implements Provider<Reject> {
       const conflict = new HttpErrors.Conflict(
         'Delete restricted by referential integrity constraints.',
       );
-      (conflict as AnyObject).innerError = {
-        ...(anyErr?.constraint ? { constraint: anyErr.constraint } : {}),
-        ...(anyErr?.table ? { table: anyErr.table } : {}),
-        ...(anyErr?.detail ? { detail: anyErr.detail } : {}),
+      const innerError: AnyObject = {
         dbCode: anyErr.code,
       };
+      if (this.options.debug) {
+        Object.assign(innerError, {
+          ...(anyErr?.constraint ? { constraint: anyErr.constraint } : {}),
+          ...(anyErr?.table ? { table: anyErr.table } : {}),
+          ...(anyErr?.detail ? { detail: anyErr.detail } : {}),
+        });
+      }
+      (conflict as AnyObject).innerError = innerError;
       return conflict;
     }
 
