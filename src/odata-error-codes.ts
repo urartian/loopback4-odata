@@ -1,3 +1,10 @@
+/**
+ * Stable OData error codes emitted by the component.
+ *
+ * Applications can rely on these values when asserting API behavior,
+ * building client-side handling, or mapping server failures into
+ * observability dashboards.
+ */
 export const ODataErrorCodes = {
   // Default/fallback OData codes (derived from HTTP status when no explicit code is set)
   BadRequest: 'BadRequest',
@@ -67,4 +74,5 @@ export const ODataErrorCodes = {
   InOperatorRequiresNonEmptyList: 'in-operator-requires-non-empty-list',
 } as const;
 
+/** Union of every stable OData error code emitted by the component. */
 export type ODataErrorCode = (typeof ODataErrorCodes)[keyof typeof ODataErrorCodes];

@@ -4,6 +4,7 @@ import { EntitySetDef } from '../registry/entityset-registry';
 import { ApplyExecutionPlan } from './odata-apply-planner.service';
 import { AggregationSpec, ApplyPipeline } from './odata-query-parser.service';
 
+/** Telemetry payload emitted by datastore-backed `$apply` executors. */
 export interface ApplyExecutorTelemetryPayload {
   durationMs?: number;
   rows?: number;
@@ -12,11 +13,13 @@ export interface ApplyExecutorTelemetryPayload {
   reason?: string;
 }
 
+/** Sort descriptor used when executors need to preserve pipeline ordering. */
 export interface ApplyOrderDescriptor {
   field: string;
   direction: 'ASC' | 'DESC';
 }
 
+/** Paging information supplied to executors for stage and external pagination. */
 export interface ApplyPagingOptions {
   order: ApplyOrderDescriptor[];
   skipTokenValues?: string[];
@@ -25,11 +28,16 @@ export interface ApplyPagingOptions {
   stageSkip?: number;
 }
 
+/** Full execution context passed to a registered `$apply` pushdown executor. */
 export interface ODataApplyExecutorContext {
+  /** @internal Internal resolved entity-set definition for the current request. */
   entitySet: EntitySetDef;
   repository: DefaultCrudRepository<any, unknown>;
+  /** @internal Internal planner output describing the current `$apply` stage. */
   plan: ApplyExecutionPlan;
+  /** @internal Parsed `$apply` pipeline syntax tree. */
   pipeline: ApplyPipeline;
+  /** @internal Aggregation metadata derived from the parsed pipeline. */
   aggregation: AggregationSpec;
   baseFilter: Filter<AnyObject>;
   fetchFilter: Filter<AnyObject>;
@@ -42,6 +50,7 @@ export interface ODataApplyExecutorContext {
   paging?: ApplyPagingOptions;
 }
 
+/** Result returned by an executor after pushdown succeeds. */
 export interface ODataApplyExecutorResult {
   rows: AnyObject[];
   appliedOrder?: boolean;
@@ -56,6 +65,12 @@ export interface ODataApplyExecutorDecline {
   declineReason: string;
 }
 
+/**
+ * Advanced extension point for datastore-backed `$apply` execution.
+ *
+ * Implement this interface when a datasource can translate OData aggregation
+ * pipelines into native query operations more efficiently than in-memory fallback.
+ */
 export interface ODataApplyExecutor {
   readonly id: string;
   readonly capabilities?: {
@@ -77,6 +92,7 @@ export interface ODataApplyExecutor {
   ): Promise<ODataApplyExecutorResult | ODataApplyExecutorDecline | undefined>;
 }
 
+/** Registry of available `$apply` executors keyed by executor id. */
 @injectable({ scope: BindingScope.SINGLETON })
 export class ODataApplyExecutorRegistry {
   private readonly executors: Map<string, ODataApplyExecutor> = new Map();
@@ -98,7 +114,7 @@ export class ODataApplyExecutorRegistry {
   }
 
   /**
-   * Attempt to match a datasource to a registered executor.
+   * Attempts to match a datasource to the first registered executor that claims support.
    */
   async findForDataSource(datasource: juggler.DataSource): Promise<ODataApplyExecutor | undefined> {
     for (const executor of this.ordered) {

@@ -1562,6 +1562,25 @@ app.bind(ODATA_BINDINGS.CONFIG).to({
 });
 ```
 
+Example: `$filter` guardrails
+
+```ts
+app.bind(ODATA_BINDINGS.CONFIG).to({
+  ...current,
+  filter: {
+    maxInListItems: 200,
+    pushdownMaxJoinCount: 6,
+    maxPostFilterScanRows: 5000,
+    requireTopWhenPostFilter: true,
+  },
+});
+```
+
+- `maxInListItems` limits the number of literal values accepted by the OData `in (...)` operator.
+- `pushdownMaxJoinCount` caps join-heavy navigation filter pushdown before the runtime declines back to fallback logic.
+- `maxPostFilterScanRows` bounds in-memory post-filter evaluation so unsupported filters cannot trigger unbounded scans.
+- `requireTopWhenPostFilter` forces clients to provide `$top` when a request needs post-filter evaluation, helping keep fallback work predictable.
+
 Entity-set specific overrides are available via the registry binding (`ODATA_BINDINGS.ENTITY_SET_REGISTRY`) using `ODataEntitySetConfig`:
 
 - `capabilities`: refine or override filter functions, countability, navigation restrictions, permissions, or stream support for a single entity set.

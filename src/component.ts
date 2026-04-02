@@ -54,7 +54,15 @@ function resolveTokenSecretOrThrow(): string {
   return generated;
 }
 
+/**
+ * LoopBack component that wires OData controllers, middleware, defaults, and
+ * extension registries into a host `RestApplication`.
+ *
+ * Add this component to an LB4 app to expose OData routes, generated metadata,
+ * batching, telemetry, media handling, and datastore-specific `$apply` pushdown.
+ */
 export class ODataComponent implements Component {
+  /** @internal Internal binding list assembled by the component during boot. */
   bindings = [
     Binding.bind(ODATA_BINDINGS.CONFIG).to({
       basePath: '/odata',
@@ -174,6 +182,8 @@ export class ODataComponent implements Component {
     createBindingFromClass(ODataConfigValidatorObserver),
   ];
 
+  /** @internal Internal controllers registered by the component. */
   controllers = [ODataMetadataController, ODataBatchController, ODataServiceDocumentController];
+  /** @internal Internal booters registered by the component. */
   booters = [ODataBooter];
 }

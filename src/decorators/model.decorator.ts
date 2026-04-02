@@ -10,7 +10,9 @@ export interface ODataModelOptions {
    * Passed through to LoopBack's `@model(definition)` decorator.
    */
   lbModel?: NonNullable<Parameters<typeof applyModel>[0]>;
+  /** Overrides the exposed OData entity-set name for this model. */
   entitySetName?: string;
+  /** Property or properties used to compute OData ETags for optimistic concurrency. */
   etag?: string | string[];
   /**
    * Declares a singleton entity for this model.
@@ -30,24 +32,56 @@ export interface ODataModelOptions {
    * - When enabled, the service document and `$metadata` omit the `EntitySet` entry for this model.
    */
   singletonOnly?: boolean;
+  /** Enables deep insert for this model regardless of the global default. */
   deepInsert?: boolean;
+  /** Enables deep update for this model regardless of the global default. */
   deepUpdate?: boolean;
+  /** Enables datastore-backed `$apply` pushdown for this model. */
   applyPushdown?: boolean;
+  /** Overrides whether generated routes appear in the published OpenAPI document. */
   documentInOpenApi?: boolean;
+  /** Per-model composition overrides for configured relations. */
   composition?: ODataCompositionEntitySetConfig;
+  /** Marks the model as media-enabled and exposes `$value` endpoints. */
   hasStream?: boolean;
+  /** Property name storing binary content for property-backed media handling. */
   mediaField?: string;
+  /** Property name storing the media content type. */
   mediaContentTypeField?: string;
+  /** Property name storing the media ETag/version. */
   mediaEtagField?: string;
+  /** Property name storing the media content length. */
   mediaLengthField?: string;
+  /** Custom IoC binding key used to resolve the media handler for this model. */
   mediaHandlerBindingKey?: string;
+  /** Maximum accepted media upload payload for this model's handler. */
   mediaMaxPayloadBytes?: number;
+  /** Delta link settings for this model. */
   delta?: {
+    /** Enables delta links for this model. */
     enabled?: boolean;
+    /** Property used as the change-tracking anchor for delta tokens. */
     field?: string;
   };
 }
 
+/**
+ * Declares a LoopBack model as OData-enabled and stores the metadata needed to
+ * generate routes, CSDL, OpenAPI visibility, media handling, and delta support.
+ *
+ * If the class does not already have LoopBack `@model()` metadata, this decorator
+ * applies it automatically using `opts.lbModel` when provided.
+ *
+ * @example
+ * ```ts
+ * @odataModel({
+ *   entitySetName: 'Products',
+ *   etag: 'updatedAt',
+ *   hasStream: true,
+ * })
+ * export class Product extends Entity {}
+ * ```
+ */
 export function odataModel(opts: ODataModelOptions = {}) {
   return (target: Function) => {
     const hasLoopbackModel = MetadataInspector.getClassMetadata(MODEL_KEY, target) != null;
@@ -69,6 +103,7 @@ export function odataModel(opts: ODataModelOptions = {}) {
   };
 }
 
+/** @internal Reads raw metadata emitted by `@odataModel()` during boot/runtime wiring. */
 export function getODataModelMeta(target: Function): ODataModelOptions | undefined {
   return Reflect.getMetadata(ODATA_MODEL_KEY, target) as ODataModelOptions | undefined;
 }

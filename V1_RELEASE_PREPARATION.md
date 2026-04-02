@@ -56,11 +56,11 @@ Note: the default property-backed media handler intentionally keeps a bounded in
 ## 2. Documentation & Developer Experience ⏳
 
 ### 2.1 API Documentation
-- [ ] Complete JSDoc for all public interfaces and classes
-- [ ] Document all configuration options with examples
-- [ ] API reference documentation generation (TypeDoc)
-- [ ] Document all decorators with usage examples
-- [ ] Complete interface documentation for extensibility points
+- [x] Complete JSDoc for all public interfaces and classes
+- [x] Document all configuration options with examples
+- [x] API reference documentation generation (TypeDoc)
+- [x] Document all decorators with usage examples
+- [x] Complete interface documentation for extensibility points
 
 ### 2.2 User Guides & Tutorials
 - [ ] Getting Started guide (15-minute setup)

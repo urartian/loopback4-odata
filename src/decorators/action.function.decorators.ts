@@ -4,8 +4,10 @@ import { isModelCtor } from '../util/model-helpers';
 
 export type ODataBindingScope = 'collection' | 'entity' | 'unbound';
 
+/** Type reference accepted by OData action/function metadata. */
 export type ODataTypeRef = string | typeof Model | (() => string | typeof Model);
 
+/** Return type descriptor used for OData actions and functions. */
 export type ODataReturnType =
   | ODataTypeRef
   | {
@@ -13,28 +15,47 @@ export type ODataReturnType =
       type: ODataTypeRef;
     };
 
+/**
+ * Marks an action/function return type as a collection of the referenced type.
+ *
+ * @example
+ * ```ts
+ * @odataFunction({binding: 'collection', returnType: collectionOf(Product)})
+ * listFeatured() {
+ *   return [];
+ * }
+ * ```
+ */
 export function collectionOf(type: ODataTypeRef): ODataReturnType {
   return { collection: true, type };
 }
 
+/** Shared options for OData actions and functions. */
 export interface ODataOperationOptions {
+  /** Public OData operation name. Defaults to the method name. */
   name?: string;
+  /** Binding scope for the operation. Defaults to `'entity'`. */
   binding?: ODataBindingScope;
+  /** Optional OData return type metadata. */
   returnType?: ODataReturnType;
+  /** When true, the controller method is responsible for writing the raw HTTP response. */
   rawResponse?: boolean;
 }
 
 const ACTION_METADATA_KEY = 'odata:controller:actions';
 const FUNCTION_METADATA_KEY = 'odata:controller:functions';
 
+/** Normalized metadata stored for each declared OData action/function. */
 export interface OperationMeta extends Required<Omit<ODataOperationOptions, 'returnType'>> {
   parameters?: OperationParameter[];
   returnType?: ODataReturnType;
   methodName: string;
 }
 
+/** Type reference accepted for action/function parameters. */
 export type OperationParameterType = string | typeof Model | (() => string | typeof Model);
 
+/** Declares one input parameter for an OData action or function. */
 export interface OperationParameter {
   name: string;
   type?: OperationParameterType;
@@ -46,6 +67,23 @@ function pushMetadata(target: any, key: string, entry: OperationMeta) {
   Reflect.defineMetadata(key, [...existing, entry], target);
 }
 
+/**
+ * Declares an OData action on an `@odataController()` class method.
+ *
+ * Actions may be bound to a single entity, a collection, or be unbound. They
+ * may also declare typed parameters and raw-response handling.
+ *
+ * @example
+ * ```ts
+ * @odataAction({
+ *   binding: 'entity',
+ *   params: [{name: 'percent', type: 'Edm.Int32'}],
+ * })
+ * discount(percent: number) {
+ *   return {applied: percent};
+ * }
+ * ```
+ */
 export function odataAction(
   options: ODataOperationOptions & { params?: OperationParameter[] } = {},
 ) {
@@ -61,6 +99,23 @@ export function odataAction(
   };
 }
 
+/**
+ * Declares an OData function on an `@odataController()` class method.
+ *
+ * Functions are side-effect-free operations that can be invoked on an entity,
+ * collection, or as unbound operations.
+ *
+ * @example
+ * ```ts
+ * @odataFunction({
+ *   binding: 'collection',
+ *   returnType: collectionOf(Product),
+ * })
+ * featured() {
+ *   return [];
+ * }
+ * ```
+ */
 export function odataFunction(
   options: ODataOperationOptions & { params?: OperationParameter[] } = {},
 ) {
@@ -76,6 +131,7 @@ export function odataFunction(
   };
 }
 
+/** @internal Reads raw action metadata during controller bootstrapping. */
 export function getODataActions(target: Function): OperationMeta[] {
   return (
     (Reflect.getMetadata(ACTION_METADATA_KEY, target.prototype) as OperationMeta[] | undefined) ??
@@ -83,6 +139,7 @@ export function getODataActions(target: Function): OperationMeta[] {
   );
 }
 
+/** @internal Reads raw function metadata during controller bootstrapping. */
 export function getODataFunctions(target: Function): OperationMeta[] {
   return (
     (Reflect.getMetadata(FUNCTION_METADATA_KEY, target.prototype) as OperationMeta[] | undefined) ??
