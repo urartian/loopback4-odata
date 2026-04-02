@@ -1605,7 +1605,7 @@ Inspect the processed spec via `await app.restServer.getApiSpec()` or by request
 
 LoopBack OData services can expose [$value media streams](https://www.odata.org/documentation/odata-version-3-0/media-entities/) by decorating a model with `@odataModel({ hasStream: true })`. A few optional metadata properties help the runtime locate content and track metadata:
 
-- `mediaField`: Property name that stores the binary payload (Buffer/Uint8Array/Readable). When provided, the booter auto-registers a `PropertyBackedMediaHandler` that persists streams inside the entity itself.
+- `mediaField`: Property name that stores the binary payload (Buffer/Uint8Array/Readable). When provided, the booter auto-registers a `PropertyBackedMediaHandler` that persists streams inside the entity itself. This default path is meant for bounded payload sizes, not very large file ingestion.
 - `mediaContentTypeField`: String property containing the MIME type returned by `$value` (e.g., `image/png`).
 - `mediaEtagField`: Property holding the stream-specific ETag; enables conditional headers (`If-None-Match`, `If-Match`) for media operations.
 - `mediaLengthField`: Numeric property storing the byte length; when set the controller emits `Content-Length` without fully buffering the stream.
@@ -1616,7 +1616,7 @@ When `mediaEtagField` is configured the generated `$metadata` advertises `@Org.O
 
 When handling uploads the controller prefers metadata reported by the `ODataMediaHandler` over the incoming HTTP headers. Handlers can return `contentType`, `length`, and `etag` from their `write()` result to override the stored values. This enables sniffing binary payloads server-side, emitting custom weak ETags, or correcting bogus `Content-Type`/`Content-Length` headers before persisting the entity’s metadata and `@odata.mediaContentType`.
 
-When `mediaField` is configured the handler writes the uploaded stream directly into that property while enforcing `mediaMaxPayloadBytes` to guard against unbounded buffering. Make sure the backing column is a binary type in your datasource (e.g., PostgreSQL `bytea`, MySQL `LONGBLOB`, MSSQL `VARBINARY`). Use the connector-specific metadata to request the correct type:
+When `mediaField` is configured the default property-backed handler buffers the upload into memory and then writes the resulting `Buffer` into that property while enforcing `mediaMaxPayloadBytes` to guard against unbounded buffering. Make sure the backing column is a binary type in your datasource (e.g., PostgreSQL `bytea`, MySQL `LONGBLOB`, MSSQL `VARBINARY`). Use the connector-specific metadata to request the correct type:
 
 ```ts
 @property({
@@ -1631,6 +1631,8 @@ When `hasStream` is enabled the booter inspects the repository binding and regis
 - If the repository prototype implements `getMedia(id, options)` / `setMedia(id, stream, metadata, options)` (and optionally `deleteMedia`), the booter wires a `RepositoryMediaHandlerAdapter` that forwards reads/writes into those hooks.
 - Otherwise, if `mediaField` is configured, a request-scoped `PropertyBackedMediaHandler` is bound which reads/writes the binary column directly.
 - You can always bind your own handler to the configured `mediaHandlerBindingKey` to integrate object storage, CDNs, etc. Custom handlers must implement the `ODataMediaHandler` interface exported from `@loopback/odata`.
+
+For large-file scenarios, prefer a custom streaming handler over the default property-backed path. The default handler intentionally prioritizes safe bounded buffering with a conservative `10 MiB` limit. If your production requirements include uploads well above that range, route the stream into external storage or another sink inside a custom `ODataMediaHandler` instead of raising the in-memory limit indefinitely.
 
 Example: property-backed storage that tracks MIME type/length/ETag on the entity:
 

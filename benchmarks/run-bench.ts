@@ -1,7 +1,9 @@
 import { applyScenario } from './scenarios/apply';
+import { applyPostgresScenario } from './scenarios/apply-postgres';
 import { applyExecutorScenario } from './scenarios/apply-executor';
 import { batchScenario } from './scenarios/batch';
 import { crudScenario } from './scenarios/crud';
+import { mediaLargeScenario } from './scenarios/media-large';
 import { mediaScenario } from './scenarios/media';
 import { mediaWriteScenario } from './scenarios/media-write';
 import { tokensScenario } from './scenarios/tokens';
@@ -19,9 +21,11 @@ import { BenchOptions, BenchScenario, ScenarioSummary } from './types';
 const SCENARIOS: Record<string, BenchScenario> = {
   crud: crudScenario,
   apply: applyScenario,
+  'apply-postgres': applyPostgresScenario,
   'apply-executor': applyExecutorScenario,
   batch: batchScenario,
   media: mediaScenario,
+  'media-large': mediaLargeScenario,
   'media-write': mediaWriteScenario,
   tokens: tokensScenario,
 };
@@ -32,6 +36,8 @@ const DEFAULT_OPTIONS: BenchOptions = {
   concurrency: 1,
   datasetScale: 500,
   tokenOpsPerIteration: 5000,
+  database: 'memory',
+  payloadBytes: 110 * 1024 * 1024,
 };
 
 async function main() {
@@ -39,7 +45,7 @@ async function main() {
 
   console.log('Section 1.3 benchmark harness');
   console.log(
-    `scenarios=${scenarioNames.join(', ')} iterations=${options.iterations} warmup=${options.warmup} concurrency=${options.concurrency} datasetScale=${options.datasetScale} tokenOps=${options.tokenOpsPerIteration}`,
+    `scenarios=${scenarioNames.join(', ')} iterations=${options.iterations} warmup=${options.warmup} concurrency=${options.concurrency} datasetScale=${options.datasetScale} tokenOps=${options.tokenOpsPerIteration} database=${options.database} payloadBytes=${options.payloadBytes}`,
   );
 
   const summaries: ScenarioSummary[] = [];
@@ -183,6 +189,12 @@ function parseCliArgs(argv: string[]): { scenarioNames: string[]; options: Bench
       DEFAULT_OPTIONS.tokenOpsPerIteration,
       'token-ops',
     ),
+    database: parseDatabase(values.get('database'), DEFAULT_OPTIONS.database),
+    payloadBytes: parsePositiveInt(
+      values.get('payload-bytes'),
+      DEFAULT_OPTIONS.payloadBytes,
+      'payload-bytes',
+    ),
   };
 
   return { scenarioNames, options };
@@ -204,6 +216,15 @@ function parseNonNegativeInt(raw: string | undefined, fallback: number, label: s
     throw new Error(`Expected ${label} to be a non-negative integer, got "${raw}".`);
   }
   return parsed;
+}
+
+function parseDatabase(
+  raw: string | undefined,
+  fallback: BenchOptions['database'],
+): BenchOptions['database'] {
+  if (raw === undefined) return fallback;
+  if (raw === 'memory' || raw === 'postgres') return raw;
+  throw new Error(`Expected database to be "memory" or "postgres", got "${raw}".`);
 }
 
 main().catch((error) => {

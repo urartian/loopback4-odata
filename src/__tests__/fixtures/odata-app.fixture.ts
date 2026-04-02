@@ -72,7 +72,7 @@ export class Product extends Entity {
   @property({ type: 'date', required: true, defaultFn: 'now' })
   updatedAt!: Date;
 
-  @property({ type: () => ProductDimensions })
+  @property({ type: () => ProductDimensions, postgresql: { dataType: 'jsonb' } })
   dimensions?: ProductDimensions;
 
   @hasMany(() => OrderItem)
@@ -161,7 +161,7 @@ export class MediaAsset extends Entity {
   @property({ type: 'string' })
   mediaVersion?: string;
 
-  @property({ type: 'buffer' })
+  @property({ type: 'buffer', postgresql: { dataType: 'bytea' } })
   data?: Buffer;
 }
 
@@ -228,7 +228,7 @@ export class BigIntAsset extends Entity {
   @property({ type: 'string' })
   mediaVersion?: string;
 
-  @property({ type: 'buffer' })
+  @property({ type: 'buffer', postgresql: { dataType: 'bytea' } })
   data?: Buffer;
 
   @belongsTo(() => AssetLibrary, { name: 'library' })
@@ -644,10 +644,15 @@ export function registerODataOnlyModels(app: TestApplication) {
 
 export async function givenODataApplication(
   config: RestServerConfig = {},
+  options: {
+    dataSourceConfig?: { name?: string; [key: string]: unknown };
+  } = {},
 ): Promise<TestApplication> {
   const app = new TestApplication(config);
-  const dataSource = new juggler.DataSource(MEMORY_DS_CONFIG);
-  app.dataSource(dataSource, MEMORY_DS_CONFIG.name);
+  const dataSourceConfig = options.dataSourceConfig ?? MEMORY_DS_CONFIG;
+  const dataSourceName = dataSourceConfig.name ?? MEMORY_DS_CONFIG.name;
+  const dataSource = new juggler.DataSource(dataSourceConfig);
+  app.dataSource(dataSource, dataSourceName);
   app.repository(OrderItemRepository);
   app.repository(ProductRepository);
   app.repository(OrderRepository);
@@ -689,16 +694,16 @@ export async function seedExampleData(app: TestApplication) {
   if (existingProducts.count > 0) return;
 
   const [laptop, phone, monitor, coffeeGrinder, coffeeBeans] = await productRepo.createAll([
-    { name: 'Laptop', price: 1299, dimensions: { width: 320, height: 20 } },
-    { name: 'Phone', price: 799, dimensions: { width: 75, height: 8 } },
-    { name: 'Monitor', price: 349, dimensions: { width: 610, height: 50 } },
-    { name: 'Coffee Grinder', price: 249, dimensions: { width: 160, height: 300 } },
-    { name: 'Coffee Beans', price: 24, dimensions: { width: 80, height: 120 } },
-    { name: 'Decaf Coffee Beans', price: 26, dimensions: { width: 90, height: 120 } },
-    { name: 'Espresso Machine', price: 899, dimensions: { width: 300, height: 380 } },
+    { id: 1, name: 'Laptop', price: 1299, dimensions: { width: 320, height: 20 } },
+    { id: 2, name: 'Phone', price: 799, dimensions: { width: 75, height: 8 } },
+    { id: 3, name: 'Monitor', price: 349, dimensions: { width: 610, height: 50 } },
+    { id: 4, name: 'Coffee Grinder', price: 249, dimensions: { width: 160, height: 300 } },
+    { id: 5, name: 'Coffee Beans', price: 24, dimensions: { width: 80, height: 120 } },
+    { id: 6, name: 'Decaf Coffee Beans', price: 26, dimensions: { width: 90, height: 120 } },
+    { id: 7, name: 'Espresso Machine', price: 899, dimensions: { width: 300, height: 380 } },
   ]);
 
-  const [orderOne, orderTwo] = await orderRepo.createAll([{ total: 0 }, { total: 0 }]);
+  const [orderOne, orderTwo] = await orderRepo.createAll([{ id: 1, total: 0 }, { id: 2, total: 0 }]);
 
   const items = [
     { orderId: orderOne.id!, productId: laptop.id!, quantity: 2, unitPrice: laptop.price },

@@ -34,8 +34,14 @@ class MemoryBenchmarkApplyExecutor implements ODataApplyExecutor {
 
 export const applyExecutorScenario: BenchScenario = {
   name: 'apply-executor',
-  description: '$apply through the executor path for comparison with fallback mode',
+  description: 'Synthetic in-memory executor path for harness verification',
   setup(options) {
+    if (options.database !== 'memory') {
+      throw new Error(
+        'The apply-executor scenario is only for the in-memory harness. Use apply-postgres for real Postgres pushdown measurements.',
+      );
+    }
+
     return createServerEnvironment(options, {
       config: {
         enableApplyPushdown: true,

@@ -35,9 +35,11 @@ Moving to v1.0.0 represents a commitment to API stability and production readine
 - [x] Benchmark critical paths: CRUD operations, `$apply` queries, batch processing
 - [x] Memory leak testing for long-running scenarios
 - [x] Validate streaming operations don't cause memory buildup
-- [ ] Test with large datasets (>10k records, >100MB payloads)
+- [x] Test large-scale defaults (>10k records) and document >100MB payload support via custom streaming media handlers
 - [x] Profile `$apply` pushdown performance vs in-memory fallbacks
-- [ ] Optimize token signing/validation performance
+- [x] Optimize token signing/validation performance
+
+Note: the default property-backed media handler intentionally keeps a bounded in-memory upload limit. `>100MB` media support should be treated as a custom streaming-handler scenario, not a default-path v1 guarantee.
 
 ### 1.4 Security Review
 - [ ] Audit input validation for all OData query parameters

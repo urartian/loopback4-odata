@@ -7,6 +7,8 @@ export interface BenchOptions {
   concurrency: number;
   datasetScale: number;
   tokenOpsPerIteration: number;
+  database: 'memory' | 'postgres';
+  payloadBytes: number;
 }
 
 export interface BenchmarkEnvironment {

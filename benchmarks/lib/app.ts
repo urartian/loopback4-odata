@@ -1,7 +1,16 @@
 import { BindingScope } from '@loopback/core';
 import { RestBindings } from '@loopback/rest';
 import { createClientForHandler } from '@loopback/testlab';
+import { juggler } from '@loopback/repository';
 import {
+  AppSettingsRepository,
+  AssetLibraryRepository,
+  BigIntAssetRepository,
+  DecisionRuleRepository,
+  MediaAssetRepository,
+  OrderItemNoteRepository,
+  OrderItemRepository,
+  OrderRepository,
   ProductRepository,
   TestApplication,
   givenODataApplication,
@@ -15,6 +24,7 @@ const DEFAULT_HOST = '127.0.0.1';
 const DEFAULT_PORT = 0;
 const DEFAULT_SERVER_URL = `http://${DEFAULT_HOST}`;
 const PRODUCT_INSERT_BATCH_SIZE = 200;
+const DEFAULT_BENCHMARK_DATABASE = 'memory';
 
 export interface ServerEnvironmentOverrides {
   config?: Partial<ODataConfig>;
@@ -25,7 +35,10 @@ export async function createServerEnvironment(
   options: BenchOptions,
   overrides: ServerEnvironmentOverrides = {},
 ): Promise<BenchmarkEnvironment> {
-  const app = await givenODataApplication({ host: DEFAULT_HOST, port: DEFAULT_PORT });
+  const app = await givenODataApplication(
+    { host: DEFAULT_HOST, port: DEFAULT_PORT },
+    { dataSourceConfig: resolveBenchmarkDataSourceConfig(options) },
+  );
   app.bind(RestBindings.URL).to(DEFAULT_SERVER_URL);
   if (overrides.config) {
     const current = app.getSync(ODATA_BINDINGS.CONFIG) as ODataConfig;
@@ -42,6 +55,7 @@ export async function createServerEnvironment(
     await overrides.configureApp(app);
   }
   await app.boot();
+  await prepareBenchmarkSchema(app, options);
   await seedExampleData(app);
   await inflateProducts(app, options.datasetScale);
 
@@ -56,6 +70,64 @@ export async function stopServerEnvironment(env: BenchmarkEnvironment): Promise<
   if (env.app?.state === 'started') {
     await env.app.stop();
   }
+}
+
+function resolveBenchmarkDataSourceConfig(
+  options: BenchOptions,
+): { name: string; [key: string]: unknown } {
+  if (options.database === 'postgres') {
+    return resolvePostgresBenchmarkDataSourceConfig();
+  }
+  return {
+    name: 'db',
+    connector: DEFAULT_BENCHMARK_DATABASE,
+  };
+}
+
+function resolvePostgresBenchmarkDataSourceConfig(): { name: string; [key: string]: unknown } {
+  const database = process.env.ODATA_BENCH_PG_DATABASE?.trim();
+  if (!database) {
+    throw new Error(
+      'Postgres benchmarks require ODATA_BENCH_PG_DATABASE to point to a dedicated disposable database. The benchmark harness runs automigrate and will replace its schema.',
+    );
+  }
+
+  return {
+    name: 'db',
+    connector: 'postgresql',
+    host: readTrimmedEnv('ODATA_BENCH_PG_HOST') ?? '127.0.0.1',
+    port: Number(process.env.ODATA_BENCH_PG_PORT ?? 5432),
+    user: readTrimmedEnv('ODATA_BENCH_PG_USER') ?? 'postgres',
+    password: process.env.ODATA_BENCH_PG_PASSWORD ?? 'pass',
+    database,
+    ssl: process.env.ODATA_BENCH_PG_SSL === 'true',
+  };
+}
+
+function readTrimmedEnv(name: string): string | undefined {
+  const value = process.env[name];
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  return trimmed || undefined;
+}
+
+async function prepareBenchmarkSchema(app: TestApplication, options: BenchOptions): Promise<void> {
+  if (options.database !== 'postgres') return;
+
+  await Promise.all([
+    app.getRepository(ProductRepository),
+    app.getRepository(OrderRepository),
+    app.getRepository(OrderItemRepository),
+    app.getRepository(OrderItemNoteRepository),
+    app.getRepository(MediaAssetRepository),
+    app.getRepository(AssetLibraryRepository),
+    app.getRepository(BigIntAssetRepository),
+    app.getRepository(AppSettingsRepository),
+    app.getRepository(DecisionRuleRepository),
+  ]);
+
+  const dataSource = (await app.get('datasources.db')) as juggler.DataSource;
+  await dataSource.automigrate();
 }
 
 export function bindSingleton<T>(
@@ -81,6 +153,7 @@ async function inflateProducts(app: TestApplication, targetCount: number): Promi
     const products = Array.from({ length: batchSize }, (_, offset) => {
       const serial = nextIndex + offset + 1;
       return {
+        id: serial,
         name: `Benchmark Product ${serial}`,
         price: 50 + (serial % 20) * 25,
         dimensions: {

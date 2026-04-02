@@ -11,11 +11,13 @@ It is intentionally lightweight:
 ## Scenarios
 
 - `crud`: collection reads with filtering, ordering, and paging
-- `apply`: `$apply` aggregation flow
-- `apply-executor`: `$apply` through the executor path for comparison with fallback mode
+- `apply`: `$apply` aggregation flow on the selected datasource
+- `apply-postgres`: real Postgres `$apply` pushdown for comparison with the fallback path
+- `apply-executor`: synthetic in-memory executor path for harness verification
 - `batch`: JSON `$batch` execution with multiple read-only sub-requests
 - `media`: `$value` media stream reads
 - `media-write`: `$value` media stream writes
+- `media-large`: one-shot large media upload and download pass
 - `tokens`: skip/delta token signing and verification
 
 ## Run
@@ -68,13 +70,53 @@ Tune the harness:
 npm run bench -- --scenario=crud,apply --iterations=20 --warmup=5 --concurrency=4 --dataset-scale=1000
 ```
 
-Compare `$apply` fallback and executor-path timings:
+Compare `$apply` fallback and the synthetic executor-path timings:
 
 ```bash
 npm run bench -- --scenario=apply,apply-executor --iterations=20 --warmup=5 --dataset-scale=1000
 ```
 
-Use the plain `apply` scenario for bounded fallback measurements. Use `apply-executor` for larger datasets when you want to simulate the production path for high-volume analytics queries.
+Use the plain `apply` scenario for bounded fallback measurements. Use `apply-executor` only to confirm the benchmark harness still exercises the executor branch in memory mode.
+
+## Postgres
+
+Use a dedicated disposable Postgres database for real pushdown checks. The benchmark harness runs `automigrate()` before seeding data, so it will replace the schema in the configured benchmark database.
+
+Required environment:
+
+```bash
+export ODATA_BENCH_PG_DATABASE=odata_bench
+export ODATA_BENCH_PG_HOST=127.0.0.1
+export ODATA_BENCH_PG_PORT=5432
+export ODATA_BENCH_PG_USER=postgres
+export ODATA_BENCH_PG_PASSWORD=pass
+```
+
+Compare fallback vs real Postgres pushdown:
+
+```bash
+npm run bench:postgres:apply
+```
+
+Run the larger Postgres dataset pass:
+
+```bash
+npm run bench:postgres:large
+```
+
+Run the `>100 MiB` payload pass:
+
+```bash
+npm run bench:postgres:payload
+```
+
+`bench:postgres:payload` uses a separate server process and a separate streaming client process so the upload/download validation does not collapse under a single shared Node heap.
+
+`media-large` installs a benchmark-only `MediaAssets` handler override with a larger payload limit so the test can probe `>100 MiB` behavior without changing the library's default `10 MiB` media safety limit.
+
+At the moment this benchmark is primarily a diagnostic for large-payload support. The default property-backed media path still buffers uploads before persistence, so a failing `bench:postgres:payload` run is expected evidence that `>100 MiB` uploads should use a custom streaming media handler instead of the default in-entity storage path.
+
+`apply-postgres` is the production-style benchmark for Section 1.3. `apply-executor` is intentionally kept separate as a synthetic harness check and should not be used as evidence for real SQL pushdown performance.
 
 ## Output
 
@@ -91,6 +133,6 @@ Scenario counts are workload-specific. For example, the `tokens` scenario report
 
 If you run Node with `--expose-gc`, the harness forces GC before and after each scenario to reduce noise in memory deltas.
 
-Server-backed scenarios (`crud`, `apply`, `batch`) use the real OData request handler and require an environment that permits ephemeral HTTP listeners. In restricted sandboxes, use `tokens` or run the full harness locally.
+Server-backed scenarios (`crud`, `apply`, `apply-postgres`, `batch`, `media`, `media-write`, `media-large`) use the real OData request handler and require an environment that permits ephemeral HTTP listeners. In restricted sandboxes, use `tokens` or run the full harness locally.
 
 The soak runner samples memory over time for long-running request loops and is intended to support the remaining `Section 1.3` checklist items around leak detection and stream stability. Use `npm run bench:soak:gc` when you want more trustworthy leak signals from forced garbage-collection checkpoints.

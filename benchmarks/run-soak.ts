@@ -1,4 +1,5 @@
 import { applyScenario } from './scenarios/apply';
+import { applyPostgresScenario } from './scenarios/apply-postgres';
 import { applyExecutorScenario } from './scenarios/apply-executor';
 import { batchScenario } from './scenarios/batch';
 import { crudScenario } from './scenarios/crud';
@@ -15,6 +16,7 @@ import { BenchOptions, BenchScenario } from './types';
 const SCENARIOS: Record<string, BenchScenario> = {
   crud: crudScenario,
   apply: applyScenario,
+  'apply-postgres': applyPostgresScenario,
   'apply-executor': applyExecutorScenario,
   batch: batchScenario,
   media: mediaScenario,
@@ -27,6 +29,8 @@ const DEFAULT_OPTIONS: BenchOptions = {
   concurrency: 1,
   datasetScale: 1000,
   tokenOpsPerIteration: 5000,
+  database: 'memory',
+  payloadBytes: 110 * 1024 * 1024,
 };
 
 async function main() {
@@ -34,7 +38,7 @@ async function main() {
 
   console.log('Section 1.3 soak harness');
   console.log(
-    `scenarios=${scenarioNames.join(', ')} iterations=${options.iterations} sampleEvery=${sampleEvery} concurrency=${options.concurrency} datasetScale=${options.datasetScale}`,
+    `scenarios=${scenarioNames.join(', ')} iterations=${options.iterations} sampleEvery=${sampleEvery} concurrency=${options.concurrency} datasetScale=${options.datasetScale} database=${options.database}`,
   );
 
   for (const scenarioName of scenarioNames) {
@@ -170,6 +174,12 @@ function parseCliArgs(argv: string[]): {
       'dataset-scale',
     ),
     tokenOpsPerIteration: DEFAULT_OPTIONS.tokenOpsPerIteration,
+    database: parseDatabase(values.get('database'), DEFAULT_OPTIONS.database),
+    payloadBytes: parsePositiveInt(
+      values.get('payload-bytes'),
+      DEFAULT_OPTIONS.payloadBytes,
+      'payload-bytes',
+    ),
   };
 
   const sampleEvery = parsePositiveInt(values.get('sample-every'), 10, 'sample-every');
@@ -184,6 +194,15 @@ function parsePositiveInt(raw: string | undefined, fallback: number, label: stri
     throw new Error(`Expected ${label} to be a positive integer, got "${raw}".`);
   }
   return parsed;
+}
+
+function parseDatabase(
+  raw: string | undefined,
+  fallback: BenchOptions['database'],
+): BenchOptions['database'] {
+  if (raw === undefined) return fallback;
+  if (raw === 'memory' || raw === 'postgres') return raw;
+  throw new Error(`Expected database to be "memory" or "postgres", got "${raw}".`);
 }
 
 main().catch((error) => {
