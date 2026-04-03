@@ -4,6 +4,69 @@ import { ODataErrorProvider } from '../../providers/odata-error.provider';
 import { ODataErrorCodes } from '../../odata-error-codes';
 
 describe('ODataErrorProvider', () => {
+  const responseFactory = () => {
+    let statusCode: number | undefined;
+    let payload: any;
+    let contentType: string | undefined;
+    const headers = new Map<string, string>();
+    const response = {
+      status(code: number) {
+        statusCode = code;
+        return this;
+      },
+      getHeader(name: string) {
+        return headers.get(name.toLowerCase());
+      },
+      setHeader(name: string, value: string) {
+        headers.set(name.toLowerCase(), value);
+        return this;
+      },
+      set(name: string, value: string) {
+        headers.set(name.toLowerCase(), value);
+        return this;
+      },
+      contentType(value: string) {
+        contentType = value;
+        return this;
+      },
+      send(body: unknown) {
+        payload = body;
+        return this;
+      },
+      end(body?: unknown) {
+        if (body !== undefined) {
+          if (typeof body === 'string') {
+            try {
+              payload = JSON.parse(body);
+            } catch {
+              payload = body;
+            }
+          } else {
+            payload = body;
+          }
+        }
+        return this;
+      },
+    } as any;
+    Object.defineProperty(response, 'statusCode', {
+      get() {
+        return statusCode;
+      },
+      set(value: number) {
+        statusCode = value;
+      },
+      enumerable: true,
+      configurable: true,
+    });
+    return {
+      response,
+      statusCode: () => statusCode,
+      payload: () => payload,
+      contentType: () => contentType,
+      headers,
+    };
+  };
+
   it('preserves MultiDataSourceChangesetNotSupported error codes', () => {
     const provider = new ODataErrorProvider({ debug: false }, {
       tokenSecret: 'test-secret',
@@ -88,31 +151,6 @@ describe('ODataErrorProvider', () => {
       basePath: '/odata',
     } as any);
     const reject = provider.value();
-
-    const responseFactory = () => {
-      let statusCode: number | undefined;
-      let payload: any;
-      const response = {
-        status(code: number) {
-          statusCode = code;
-          return this;
-        },
-        getHeader() {
-          return undefined;
-        },
-        set() {
-          return this;
-        },
-        contentType() {
-          return this;
-        },
-        send(body: unknown) {
-          payload = body;
-          return this;
-        },
-      } as any;
-      return { response, statusCode: () => statusCode, payload: () => payload };
-    };
 
     {
       const { response, statusCode, payload } = responseFactory();
@@ -205,31 +243,6 @@ describe('ODataErrorProvider', () => {
     } as any);
     const reject = provider.value();
 
-    const responseFactory = () => {
-      let statusCode: number | undefined;
-      let payload: any;
-      const response = {
-        status(code: number) {
-          statusCode = code;
-          return this;
-        },
-        getHeader() {
-          return undefined;
-        },
-        set() {
-          return this;
-        },
-        contentType() {
-          return this;
-        },
-        send(body: unknown) {
-          payload = body;
-          return this;
-        },
-      } as any;
-      return { response, statusCode: () => statusCode, payload: () => payload };
-    };
-
     {
       const { response, statusCode, payload } = responseFactory();
       reject(
@@ -306,31 +319,6 @@ describe('ODataErrorProvider', () => {
   });
 
   it('redacts auto-derived database constraint details unless debug is enabled', () => {
-    const responseFactory = () => {
-      let statusCode: number | undefined;
-      let payload: any;
-      const response = {
-        status(code: number) {
-          statusCode = code;
-          return this;
-        },
-        getHeader() {
-          return undefined;
-        },
-        set() {
-          return this;
-        },
-        contentType() {
-          return this;
-        },
-        send(body: unknown) {
-          payload = body;
-          return this;
-        },
-      } as any;
-      return { response, statusCode: () => statusCode, payload: () => payload };
-    };
-
     {
       const provider = new ODataErrorProvider({ debug: false }, {
         tokenSecret: 'test-secret',
@@ -380,5 +368,46 @@ describe('ODataErrorProvider', () => {
         'Key (product_id)=(1) is still referenced.',
       );
     }
+  });
+
+  it('falls back to the strong-error-handler for non-OData requests', () => {
+    const provider = new ODataErrorProvider({ debug: false }, {
+      tokenSecret: 'test-secret',
+      basePath: '/api/odata',
+    } as any);
+    const reject = provider.value();
+    const { response, statusCode, payload } = responseFactory();
+    const err = new HttpErrors.BadRequest('plain rest');
+
+    reject(
+      {
+        request: { url: '/openapi.json', method: 'GET', headers: { accept: 'application/json' } },
+        response,
+      } as any,
+      err,
+    );
+
+    assert.equal(statusCode(), 400);
+    assert.equal(payload()?.error?.message, 'plain rest');
+    assert.equal(payload()?.error?.statusCode, 400);
+  });
+
+  it('reuses an existing OData-Version header and emits json content type', () => {
+    const provider = new ODataErrorProvider({ debug: false }, {
+      tokenSecret: 'test-secret',
+      basePath: '/odata',
+    } as any);
+    const reject = provider.value();
+    const { response, headers, contentType, payload } = responseFactory();
+    headers.set('odata-version', '4.0');
+
+    reject(
+      { request: { url: '/odata/Products', method: 'GET' }, response } as any,
+      new HttpErrors.BadRequest('bad request'),
+    );
+
+    assert.equal(headers.get('odata-version'), '4.0');
+    assert.equal(contentType(), 'application/json; charset=utf-8');
+    assert.equal(payload()?.error?.code, ODataErrorCodes.BadRequest);
   });
 });

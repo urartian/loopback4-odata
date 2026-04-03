@@ -15,6 +15,114 @@ import { PostgresApplyExecutor } from '../../services/postgres-apply-executor';
 import { EntitySetDef } from '../../registry/entityset-registry';
 
 describe('PostgresApplyExecutor (multi-stage)', () => {
+  it('recognizes supported Postgres datasources from connector settings', () => {
+    const executor = new PostgresApplyExecutor();
+
+    expect(
+      executor.supports({
+        connector: {settings: {name: 'postgresql'}},
+        execute: async () => [],
+      } as unknown as juggler.DataSource),
+    ).to.be.true();
+
+    expect(
+      executor.supports({
+        connector: {name: 'postgresql'},
+      } as unknown as juggler.DataSource),
+    ).to.be.false();
+  });
+
+  it('returns undefined for unsupported include and pre-aggregation inputs', async () => {
+    class Order extends Entity {
+      id!: number;
+      total!: number;
+    }
+    (Order as AnyObject).definition = {
+      name: 'Order',
+      properties: {
+        id: {type: 'number', id: true},
+        total: {type: 'number'},
+      },
+    } as unknown as ModelDefinition;
+
+    const executor = new PostgresApplyExecutor();
+    const dataSource = {
+      connector: {name: 'postgresql'},
+      execute: async () => [{Total: 10}],
+    } as unknown as juggler.DataSource;
+    const repository = {dataSource} as AnyObject;
+    const stage: ApplyAggregationStage = {
+      spec: {
+        groupBy: [],
+        aggregates: [{field: 'total', operator: 'sum', alias: 'Total'}],
+      },
+      postAggregationFilters: [],
+      navigationPaths: [],
+    };
+    const entitySet: EntitySetDef = {
+      name: 'Orders',
+      modelCtor: Order,
+      applyPushdown: true,
+      applyExecutorId: 'postgresql',
+      sqlMetadata: {tableName: 'orders', columnMap: {id: 'id', total: 'total'}},
+    };
+
+    const includeArray = await executor.execute({
+      entitySet,
+      repository: repository as any,
+      plan: {pushdownWhere: undefined, preAggregationFilters: [], stages: [stage]},
+      pipeline: {transformations: []},
+      aggregation: stage.spec,
+      baseFilter: {include: ['items']},
+      fetchFilter: {include: ['items']},
+      options: undefined,
+      requestedLimit: undefined,
+      requestedOffset: undefined,
+      stageIndex: 0,
+      stageCount: 1,
+      telemetry: () => {},
+    });
+    expect(includeArray).to.equal(undefined);
+
+    const includeObject = await executor.execute({
+      entitySet,
+      repository: repository as any,
+      plan: {pushdownWhere: undefined, preAggregationFilters: [], stages: [stage]},
+      pipeline: {transformations: []},
+      aggregation: stage.spec,
+      baseFilter: {include: {relation: 'items'}} as any,
+      fetchFilter: {include: {relation: 'items'}} as any,
+      options: undefined,
+      requestedLimit: undefined,
+      requestedOffset: undefined,
+      stageIndex: 0,
+      stageCount: 1,
+      telemetry: () => {},
+    });
+    expect(includeObject).to.equal(undefined);
+
+    const preAggregation = await executor.execute({
+      entitySet,
+      repository: repository as any,
+      plan: {
+        pushdownWhere: undefined,
+        preAggregationFilters: [{operator: 'comparison', field: 'total', comparator: 'gt', value: 0}],
+        stages: [stage],
+      },
+      pipeline: {transformations: []},
+      aggregation: stage.spec,
+      baseFilter: {},
+      fetchFilter: {},
+      options: undefined,
+      requestedLimit: undefined,
+      requestedOffset: undefined,
+      stageIndex: 0,
+      stageCount: 1,
+      telemetry: () => {},
+    });
+    expect(preAggregation).to.equal(undefined);
+  });
+
   it('pushes down chained stages with filters, ordering, and pagination', async () => {
     class Order extends Entity {
       id!: number;
@@ -325,5 +433,157 @@ describe('PostgresApplyExecutor (multi-stage)', () => {
 
     const execOutcome = await executor.execute(context);
     expect(execOutcome).to.have.property('declineReason', 'structured-path-unsupported');
+  });
+
+  it('builds a single-stage plan from aggregation and applies external paging', async () => {
+    class Order extends Entity {
+      id!: number;
+      total!: number;
+    }
+    (Order as AnyObject).definition = {
+      name: 'Order',
+      properties: {
+        id: {type: 'number', id: true},
+        total: {type: 'number'},
+      },
+    } as unknown as ModelDefinition;
+
+    const executor = new PostgresApplyExecutor();
+    let executedSql = '';
+    let executedParams: unknown[] = [];
+    const telemetryPayloads: AnyObject[] = [];
+    const dataSource = {
+      connector: {name: 'postgresql'},
+      execute: async (sql: string, params: unknown[]) => {
+        executedSql = sql;
+        executedParams = params;
+        return [{Total: 30}, {Total: 20}, {Total: 10}];
+      },
+    } as unknown as juggler.DataSource;
+
+    const result = await executor.execute({
+      entitySet: {
+        name: 'Orders',
+        modelCtor: Order,
+        applyPushdown: true,
+        applyExecutorId: 'postgresql',
+        sqlMetadata: {tableName: 'orders', columnMap: {id: 'id', total: 'total'}},
+      },
+      repository: {dataSource} as any,
+      plan: undefined as unknown as ApplyExecutionPlan,
+      pipeline: {transformations: []},
+      aggregation: {
+        groupBy: [],
+        aggregates: [{field: 'total', operator: 'sum', alias: 'Total'}],
+      },
+      baseFilter: {},
+      fetchFilter: {},
+      options: undefined,
+      requestedLimit: undefined,
+      requestedOffset: undefined,
+      stageIndex: 0,
+      stageCount: 1,
+      paging: {
+        order: [{field: 'Total', direction: 'DESC'}],
+        skipTokenValues: ['25'],
+        pageSize: 2,
+        stageTop: 2,
+      },
+      telemetry: (payload) => telemetryPayloads.push(payload),
+    });
+
+    expect(result).to.not.have.property('declineReason');
+    const success = result as ODataApplyExecutorResult;
+    expect(success).to.have.properties({
+      appliedOrder: true,
+      appliedExternalPagination: true,
+    });
+    expect(success.rows).to.deepEqual([{Total: 30}, {Total: 20}]);
+    expect(success.nextSkipTokenValues).to.deepEqual(['20']);
+    expect(executedSql.includes('LIMIT 2')).to.be.true();
+    expect(/"Total"\s*<\s*\$\d+/.test(executedSql)).to.be.true();
+    expect(executedParams).to.deepEqual(['25']);
+    expect(telemetryPayloads).to.have.length(1);
+    expect(telemetryPayloads[0]).to.containDeep({
+      rows: 3,
+      executorId: 'postgresql',
+    });
+  });
+
+  it('rejects invalid external paging inputs before executing SQL', async () => {
+    class Order extends Entity {
+      id!: number;
+      total!: number;
+    }
+    (Order as AnyObject).definition = {
+      name: 'Order',
+      properties: {
+        id: {type: 'number', id: true},
+        total: {type: 'number'},
+      },
+    } as unknown as ModelDefinition;
+
+    const executor = new PostgresApplyExecutor();
+    const dataSource = {
+      connector: {name: 'postgresql'},
+      execute: async () => [{Total: 1}],
+    } as unknown as juggler.DataSource;
+    const entitySet: EntitySetDef = {
+      name: 'Orders',
+      modelCtor: Order,
+      applyPushdown: true,
+      applyExecutorId: 'postgresql',
+      sqlMetadata: {tableName: 'orders', columnMap: {id: 'id', total: 'total'}},
+    };
+    const stage: ApplyAggregationStage = {
+      spec: {
+        groupBy: [],
+        aggregates: [{field: 'total', operator: 'sum', alias: 'Total'}],
+      },
+      postAggregationFilters: [],
+      navigationPaths: [],
+    };
+
+    const pageSizeWithoutOrder = await executor.execute({
+      entitySet,
+      repository: {dataSource} as any,
+      plan: {pushdownWhere: undefined, preAggregationFilters: [], stages: [stage]},
+      pipeline: {transformations: []},
+      aggregation: stage.spec,
+      baseFilter: {},
+      fetchFilter: {},
+      options: undefined,
+      requestedLimit: undefined,
+      requestedOffset: undefined,
+      stageIndex: 0,
+      stageCount: 1,
+      paging: {order: [], pageSize: 2},
+      telemetry: () => {},
+    });
+    expect(pageSizeWithoutOrder).to.equal(undefined);
+
+    const mismatchedSkipToken = await executor.execute({
+      entitySet,
+      repository: {dataSource} as any,
+      plan: {pushdownWhere: undefined, preAggregationFilters: [], stages: [stage]},
+      pipeline: {transformations: []},
+      aggregation: stage.spec,
+      baseFilter: {},
+      fetchFilter: {},
+      options: undefined,
+      requestedLimit: undefined,
+      requestedOffset: undefined,
+      stageIndex: 0,
+      stageCount: 1,
+      paging: {
+        order: [
+          {field: 'Total', direction: 'DESC'},
+          {field: 'Other', direction: 'ASC'},
+        ],
+        skipTokenValues: ['20'],
+      },
+      telemetry: () => {},
+    });
+    expect(mismatchedSkipToken).to.equal(undefined);
   });
 });

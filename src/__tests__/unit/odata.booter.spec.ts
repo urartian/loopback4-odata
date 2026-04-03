@@ -60,6 +60,90 @@ describe('ODataBooter entity set naming', () => {
   });
 });
 
+describe('ODataBooter singleton validation', () => {
+  const createBooter = () => {
+    const app = new Application();
+    const registry = new EntitySetRegistry();
+    const booter = new ODataBooter(
+      app,
+      registry,
+      {} as any,
+      new ODataApplyExecutorRegistry(),
+      noopLogger,
+    );
+    return {booter, registry};
+  };
+
+  @model()
+  class SingletonProbe extends Entity {
+    @property({id: true})
+    id!: number;
+  }
+
+  it('accepts singleton names that match the entity set only in singletonOnly mode', () => {
+    const {booter} = createBooter();
+    const singleton = (booter as any).validateSingletonConfig(
+      {name: 'Settings', id: 1},
+      'Settings',
+      SingletonProbe,
+      true,
+    );
+    expect(singleton.name).to.equal('Settings');
+  });
+
+  it('rejects invalid singleton configurations', () => {
+    const {booter, registry} = createBooter();
+
+    expect(() =>
+      (booter as any).validateSingletonConfig({name: '   ', id: 1}, 'Settings', SingletonProbe, false),
+    ).to.throw(/Singleton name is required/);
+
+    expect(() =>
+      (booter as any).validateSingletonConfig(
+        {name: '123bad', id: 1},
+        'Settings',
+        SingletonProbe,
+        false,
+      ),
+    ).to.throw(/not a valid identifier/);
+
+    expect(() =>
+      (booter as any).validateSingletonConfig(
+        {name: 'Settings', id: 1},
+        'Settings',
+        SingletonProbe,
+        false,
+      ),
+    ).to.throw(/conflicts with its entity set name/);
+
+    expect(() =>
+      (booter as any).validateSingletonConfig(
+        {name: 'Primary', id: 1, resolveId: async () => 1},
+        'Settings',
+        SingletonProbe,
+        false,
+      ),
+    ).to.throw(/must specify exactly one of "id" or "resolveId"/);
+
+    expect(() =>
+      (booter as any).validateSingletonConfig({name: 'Primary'}, 'Settings', SingletonProbe, false),
+    ).to.throw(/must specify exactly one of "id" or "resolveId"/);
+
+    registry.register({
+      name: 'ExistingSet',
+      modelCtor: SingletonProbe,
+    });
+    expect(() =>
+      (booter as any).validateSingletonConfig(
+        {name: 'ExistingSet', id: 1},
+        'Settings',
+        SingletonProbe,
+        false,
+      ),
+    ).to.throw(/conflicts with existing entity set/);
+  });
+});
+
 describe('ODataBooter composition detection', () => {
   it('enables deep insert/update when related models only match structurally', async () => {
     const RepoRestApp = RepositoryMixin(RestApplication);

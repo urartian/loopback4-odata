@@ -2,3 +2,4 @@ dist
 dist-tests
 .eslintrc.js
 docs/api
+coverage

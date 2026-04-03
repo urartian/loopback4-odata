@@ -1,7 +1,9 @@
 {
   "extends": "./tsconfig.dev.json",
   "compilerOptions": {
-    "outDir": "dist-tests"
+    "outDir": "dist-tests",
+    "sourceMap": true,
+    "inlineSources": true
   },
   "include": ["src", "examples", "benchmarks"]
 }
