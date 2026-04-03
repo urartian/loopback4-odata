@@ -98,7 +98,7 @@ Note: the default property-backed media handler intentionally keeps a bounded in
 
 ### 3.2 Compatibility Testing
 - [ ] Test with LoopBack 4.x versions (minimum supported to latest)
-- [ ] Node.js version compatibility (18.x, 20.x)
+- [ ] Node.js version compatibility (22.x)
 - [ ] Database connector compatibility testing
 - [ ] Third-party library version compatibility
 - [ ] TypeScript version compatibility

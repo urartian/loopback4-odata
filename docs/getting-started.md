@@ -15,7 +15,7 @@ The main path in this guide uses the in-memory connector so you can be running i
 
 ## Prerequisites
 
-- Node.js 18.x or 20.x
+- Node.js 22.x
 - A LoopBack 4 application
 - Compatible versions of:
   - `@loopback/boot`

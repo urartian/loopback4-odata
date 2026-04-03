@@ -10,7 +10,7 @@ This project adheres to a [Code of Conduct](CODE_OF_CONDUCT.md). By participatin
 
 ### Prerequisites
 
-- Node.js 18.x or 20.x
+- Node.js 22.x
 - npm 8+
 - Git
 

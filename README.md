@@ -23,7 +23,7 @@ npm install @loopback/odata
 npm install @loopback/core@^7 @loopback/repository@^8 @loopback/rest@^15 @loopback/boot@^8
 ```
 
-> Requires Node.js 18.x or 20.x and the host application must supply compatible versions of `@loopback/boot`, `@loopback/core`, `@loopback/repository`, and `@loopback/rest` (the extension lists them as peer dependencies to avoid duplicate copies).
+> Requires Node.js 22.x and the host application must supply compatible versions of `@loopback/boot`, `@loopback/core`, `@loopback/repository`, and `@loopback/rest` (the extension lists them as peer dependencies to avoid duplicate copies).
 
 ## Getting Started
 

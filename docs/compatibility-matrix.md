@@ -6,7 +6,7 @@ This document defines the supported runtime and framework baseline for v1.
 
 | Area | Supported for v1 | Source |
 | --- | --- | --- |
-| Node.js | `18.x`, `20.x` | [package.json](/workspace/package.json) `engines.node = >=18 <21` |
+| Node.js | `22.x` | [package.json](/workspace/package.json) `engines.node = >=22 <23` |
 | LoopBack Boot | `^8.0.5` | [package.json](/workspace/package.json) `peerDependencies` |
 | LoopBack Core | `^7.0.4` | [package.json](/workspace/package.json) `peerDependencies` |
 | LoopBack Repository | `^8.0.4` | [package.json](/workspace/package.json) `peerDependencies` |
@@ -56,7 +56,7 @@ The example app is a reference app, not a promise that every internal code path 
 
 Before adopting v1, confirm:
 
-- your app runs on Node 18 or 20
+- your app runs on Node 22
 - your LB4 packages are within the supported peer ranges
 - your production datasource path is PostgreSQL
 - you provide `ODATA_TOKEN_SECRET` in production

@@ -33,7 +33,7 @@
     "prepare": "npm run build"
   },
   "engines": {
-    "node": ">=18 <21"
+    "node": ">=22 <23"
   },
   "keywords": [],
   "author": "Artiom Sargesjan",
