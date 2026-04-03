@@ -11,6 +11,7 @@ This document defines the supported runtime and framework baseline for v1.
 | LoopBack Core | `^7.0.4` | [package.json](/workspace/package.json) `peerDependencies` |
 | LoopBack Repository | `^8.0.4` | [package.json](/workspace/package.json) `peerDependencies` |
 | LoopBack REST | `^15.0.5` | [package.json](/workspace/package.json) `peerDependencies` |
+| TypeScript compiler | `5.9.x` baseline | [package.json](/workspace/package.json) `devDependencies.typescript = ^5.9.2` |
 | SQL path | PostgreSQL | documented v1 support policy |
 
 ## Application assumptions
@@ -42,6 +43,18 @@ Not part of the documented v1 surface:
 
 Some connector-specific code paths may still exist in the codebase, but they are not part of the documented support contract for v1.
 
+The PostgreSQL support path is also the one exercised by the dedicated Postgres benchmarks and pushdown-focused test suite in this repository.
+
+## TypeScript baseline
+
+For v1, the documented compiler baseline is TypeScript `5.9.x`.
+
+That means:
+
+- the package is developed and built against the `5.9.x` compiler line
+- the generated types and TypeDoc output are expected to work against that baseline
+- broader multi-version TypeScript compatibility is not part of the v1 support contract yet
+
 ## Documentation and example scope
 
 The repository includes:
@@ -59,6 +72,7 @@ Before adopting v1, confirm:
 - your app runs on Node 22
 - your LB4 packages are within the supported peer ranges
 - your production datasource path is PostgreSQL
+- your TypeScript compiler baseline is compatible with `5.9.x`
 - you provide `ODATA_TOKEN_SECRET` in production
 - your app owns CORS, auth, security headers, and deployment topology outside the OData component
 

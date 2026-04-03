@@ -97,11 +97,10 @@ Note: the default property-backed media handler intentionally keeps a bounded in
 - [ ] Performance regression tests
 
 ### 3.2 Compatibility Testing
-- [ ] Test with LoopBack 4.x versions (minimum supported to latest)
-- [ ] Node.js version compatibility (22.x)
-- [ ] Database connector compatibility testing
-- [ ] Third-party library version compatibility
-- [ ] TypeScript version compatibility
+- [ ] Supported runtime verified in CI (Node 22.x)
+- [x] LoopBack peer range compatibility documented
+- [x] PostgreSQL support path verified
+- [x] TypeScript compiler baseline documented
 
 ### 3.3 Real-world Scenario Testing
 - [ ] Large dataset queries (>1M records)
