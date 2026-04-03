@@ -76,11 +76,11 @@ Note: the default property-backed media handler intentionally keeps a bounded in
 - [x] Version compatibility matrix with LoopBack 4
 
 ### 2.4 Troubleshooting & FAQ
-- [ ] Common configuration errors and solutions
-- [ ] Performance troubleshooting guide
-- [ ] Database connector specific issues
-- [ ] Query optimization tips
-- [ ] Monitoring and debugging guide
+- [x] Common configuration errors and solutions
+- [x] Performance troubleshooting guide
+- [x] Database connector specific issues
+- [x] Query optimization tips
+- [x] Monitoring and debugging guide
 
 **Acceptance Criteria**: Complete documentation coverage, community feedback incorporated, examples tested
 
