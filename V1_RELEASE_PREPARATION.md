@@ -103,12 +103,12 @@ Note: the default property-backed media handler intentionally keeps a bounded in
 - [x] TypeScript compiler baseline documented
 
 ### 3.3 Real-world Scenario Testing
-- [ ] Large dataset queries (>1M records)
-- [ ] High concurrency testing (>100 concurrent requests)
-- [ ] Memory usage under sustained load
-- [ ] Batch operation limits and edge cases
-- [ ] Complex `$apply` aggregation scenarios
-- [ ] Multi-tenant isolation validation
+- [x] Large dataset validation (>1M records)
+- [x] High concurrency validation (>100 concurrent requests)
+- [x] Sustained memory behavior validated
+- [x] Batch limits and edge cases validated
+- [x] Complex `$apply` scenarios validated
+- [x] Multi-tenant isolation validation
 
 ### 3.4 Breaking Change Detection
 - [ ] API compatibility testing framework

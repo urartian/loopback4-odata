@@ -110,6 +110,18 @@ Run the `>100 MiB` payload pass:
 npm run bench:postgres:payload
 ```
 
+Run the release-scale `>1M records` validation pass:
+
+```bash
+npm run bench:postgres:million
+```
+
+Run the release-scale `>100 concurrent requests` validation pass:
+
+```bash
+npm run bench:postgres:concurrency
+```
+
 `bench:postgres:payload` uses a separate server process and a separate streaming client process so the upload/download validation does not collapse under a single shared Node heap.
 
 `media-large` installs a benchmark-only `MediaAssets` handler override with a larger payload limit so the test can probe `>100 MiB` behavior without changing the library's default `10 MiB` media safety limit.
@@ -117,6 +129,12 @@ npm run bench:postgres:payload
 At the moment this benchmark is primarily a diagnostic for large-payload support. The default property-backed media path still buffers uploads before persistence, so a failing `bench:postgres:payload` run is expected evidence that `>100 MiB` uploads should use a custom streaming media handler instead of the default in-entity storage path.
 
 `apply-postgres` is the production-style benchmark for Section 1.3. `apply-executor` is intentionally kept separate as a synthetic harness check and should not be used as evidence for real SQL pushdown performance.
+
+`bench:postgres:million` and `bench:postgres:concurrency` are manual release-validation commands for Section 3.3. They are intentionally not part of the default CI path because they require a dedicated Postgres database and can be expensive on shared runners.
+
+When seeding very large datasets, the harness automatically increases the product insert batch size and logs progress every `100,000` records. Override the batch size with `ODATA_BENCH_INSERT_BATCH_SIZE` if your local Postgres setup prefers a different insert size.
+
+`bench:postgres:concurrency` uses a dedicated started server plus real `fetch` requests so the concurrency validation exercises the runtime more like a real deployment instead of relying on the in-process test client path.
 
 ## Output
 

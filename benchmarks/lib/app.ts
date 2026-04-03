@@ -23,7 +23,10 @@ import { BenchmarkEnvironment, BenchOptions } from '../types';
 const DEFAULT_HOST = '127.0.0.1';
 const DEFAULT_PORT = 0;
 const DEFAULT_SERVER_URL = `http://${DEFAULT_HOST}`;
-const PRODUCT_INSERT_BATCH_SIZE = 200;
+const DEFAULT_PRODUCT_INSERT_BATCH_SIZE = 200;
+const LARGE_DATASET_PRODUCT_INSERT_BATCH_SIZE = 2000;
+const LARGE_DATASET_THRESHOLD = 100_000;
+const LARGE_DATASET_PROGRESS_INTERVAL = 100_000;
 const DEFAULT_BENCHMARK_DATABASE = 'memory';
 
 export interface ServerEnvironmentOverrides {
@@ -146,10 +149,15 @@ async function inflateProducts(app: TestApplication, targetCount: number): Promi
   const existingCount = (await productRepo.count()).count;
   if (existingCount >= targetCount) return;
 
+  const insertBatchSize = resolveProductInsertBatchSize(targetCount);
+  const shouldLogProgress = targetCount >= LARGE_DATASET_THRESHOLD;
+  let nextProgressLog = Math.ceil((existingCount + 1) / LARGE_DATASET_PROGRESS_INTERVAL) *
+    LARGE_DATASET_PROGRESS_INTERVAL;
+
   let nextIndex = existingCount;
   while (nextIndex < targetCount) {
     const remaining = targetCount - nextIndex;
-    const batchSize = Math.min(PRODUCT_INSERT_BATCH_SIZE, remaining);
+    const batchSize = Math.min(insertBatchSize, remaining);
     const products = Array.from({ length: batchSize }, (_, offset) => {
       const serial = nextIndex + offset + 1;
       return {
@@ -164,5 +172,28 @@ async function inflateProducts(app: TestApplication, targetCount: number): Promi
     });
     await productRepo.createAll(products);
     nextIndex += batchSize;
+
+    if (shouldLogProgress && nextIndex >= nextProgressLog) {
+      console.log(
+        `Benchmark dataset seed progress: ${nextIndex.toLocaleString()} / ${targetCount.toLocaleString()} products`,
+      );
+      nextProgressLog += LARGE_DATASET_PROGRESS_INTERVAL;
+    }
   }
+}
+
+function resolveProductInsertBatchSize(targetCount: number): number {
+  const fromEnv = process.env.ODATA_BENCH_INSERT_BATCH_SIZE;
+  if (fromEnv) {
+    const parsed = Number(fromEnv);
+    if (Number.isInteger(parsed) && parsed > 0) {
+      return parsed;
+    }
+  }
+
+  if (targetCount >= LARGE_DATASET_THRESHOLD) {
+    return LARGE_DATASET_PRODUCT_INSERT_BATCH_SIZE;
+  }
+
+  return DEFAULT_PRODUCT_INSERT_BATCH_SIZE;
 }
