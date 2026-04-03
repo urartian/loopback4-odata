@@ -178,6 +178,14 @@ Brief description of changes
 4. **Feedback**: Address review comments promptly
 5. **Approval**: At least one maintainer approval required
 
+### Release Contract Review
+
+Before cutting a release candidate, review the public contract explicitly:
+
+1. **Public API Surface**: Recheck exported symbols in `src/index.ts` and confirm any additions or removals are intentional.
+2. **API Reference**: Run `npm run docs:api` and review the generated TypeDoc output for unexpected surface changes.
+3. **Contract Notes**: Update `docs/pre-v1-notes.md` or the release notes when the supported contract changes.
+
 ## Issue Reporting
 
 ### Bug Reports

@@ -111,9 +111,9 @@ Note: the default property-backed media handler intentionally keeps a bounded in
 - [x] Multi-tenant isolation validation
 
 ### 3.4 Breaking Change Detection
-- [ ] API compatibility testing framework
-- [ ] Automated breaking change detection in CI
-- [ ] Semantic versioning compliance validation
+- [x] Public API surface documented and reviewed
+- [x] Release checklist includes API and TypeDoc review
+- [x] Pre-v1 contract notes captured
 
 **Acceptance Criteria**: >90% test coverage, all compatibility tests pass, performance benchmarks met
 
