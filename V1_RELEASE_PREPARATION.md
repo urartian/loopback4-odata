@@ -71,11 +71,9 @@ Note: the default property-backed media handler intentionally keeps a bounded in
 - [x] Client integration example (generic HTTP/OData consumer)
 - [x] Deployment and service-boundary guidance for LB4 apps
 
-### 2.3 Migration & Upgrade Guides
-- [ ] Breaking changes documentation from 0.x to 1.x
-- [ ] Configuration migration guide
-- [ ] Deprecated feature replacement guide
-- [ ] Version compatibility matrix with LoopBack 4
+### 2.3 Release & Compatibility Notes
+- [x] Pre-v1 release notes / contract notes
+- [x] Version compatibility matrix with LoopBack 4
 
 ### 2.4 Troubleshooting & FAQ
 - [ ] Common configuration errors and solutions
