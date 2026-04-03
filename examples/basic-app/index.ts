@@ -46,6 +46,7 @@ const POSTGRES_DS_CONFIG = {
   ssl: process.env.PG_SSL === 'true',
 };
 
+// Kept for internal experimentation only. The documented and supported v1 path is PostgreSQL.
 const MYSQL_DS_CONFIG = {
   name: 'db',
   connector: 'mysql',

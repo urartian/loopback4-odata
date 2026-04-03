@@ -63,13 +63,13 @@ Note: the default property-backed media handler intentionally keeps a bounded in
 - [x] Complete interface documentation for extensibility points
 
 ### 2.2 User Guides & Tutorials
-- [ ] Getting Started guide (15-minute setup)
-- [ ] Advanced Configuration guide
-- [ ] Performance Optimization guide
-- [ ] Database-specific setup guides (PostgreSQL, MySQL, SQL Server)
-- [ ] BI Integration tutorials (Power BI, Tableau, Excel)
-- [ ] Mobile app integration examples
-- [ ] Microservices architecture patterns
+- [x] Getting Started guide (15-minute setup)
+- [x] Advanced Configuration guide
+- [x] Performance Optimization guide
+- [x] Database-specific setup guide (PostgreSQL)
+- [x] BI interoperability notes for metadata-driven clients
+- [x] Client integration example (generic HTTP/OData consumer)
+- [x] Deployment and service-boundary guidance for LB4 apps
 
 ### 2.3 Migration & Upgrade Guides
 - [ ] Breaking changes documentation from 0.x to 1.x

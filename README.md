@@ -9,6 +9,8 @@ An extension for [LoopBack 4](https://loopback.io/doc/en/lb4/) that adds **OData
 - Advanced `$apply` support including chained transformations, navigation-path aggregates, and safe in-memory fallbacks when connector pushdown is unavailable.
 - Streams `$batch` multipart payloads end-to-end, preserving binary sub-responses (PDFs, CSV exports, etc.) without re-encoding them (JSON batches base64-encode binary bodies and include their `Content-Type`).
 
+For v1, the officially documented and supported SQL path is PostgreSQL. Other connector-specific paths that may still exist in the codebase are not part of the supported surface yet.
+
 Currently in **phase 4** — CRUD endpoints are stable and advanced features like `$expand`, `$count`, `$batch`, Actions/Functions, server-driven paging (`$skiptoken`), and delta links (`$deltatoken`) are available. Focus is now on rounding out the filter grammar, improving configurability, enriching the CSDL, and hardening path rewriting.
 
 ---
@@ -1132,7 +1134,7 @@ Run `npm test` to compile the TypeScript specs and execute the unit suite. Accep
 - [x] Relational expansion via `$expand`
 - [x] Inline and standalone `$count`
 - [x] `$batch` endpoint (JSON and multipart/mixed)
-- Transactions are attempted for changesets (`atomicityGroup`). The component now caches whether each entity set's datasource can open LoopBack transactions: connectors such as PostgreSQL/MySQL succeed, while the in-memory connector is marked as non-transactional the first time a client attempts an atomicity group. Once a datasource is confirmed non-transactional the controller refuses future atomicity groups touching that entity set without instantiating its repository. When a datasource lacks transactions the affected changeset is rejected up front with `501 Not Implemented` and a `BatchExecutionError`; omit `atomicityGroup` to accept best-effort processing or switch to a transactional connector for true atomicity. `$metadata` surfaces the service-wide capability via the EntityContainer annotation `Org.OData.Capabilities.V1.BatchSupported/ChangeSetsSupported` (set to `true` only when every registered entity set is backed by a transactional datasource) and per-entity-set hints via `LoopBack.V1.BatchCapabilities.ChangeSetsSupported`, so clients can decide whether to emit change sets globally or only for specific entity sets.
+- Transactions are attempted for changesets (`atomicityGroup`). The component now caches whether each entity set's datasource can open LoopBack transactions: transactional connectors such as PostgreSQL succeed, while the in-memory connector is marked as non-transactional the first time a client attempts an atomicity group. Once a datasource is confirmed non-transactional the controller refuses future atomicity groups touching that entity set without instantiating its repository. When a datasource lacks transactions the affected changeset is rejected up front with `501 Not Implemented` and a `BatchExecutionError`; omit `atomicityGroup` to accept best-effort processing or switch to a transactional connector for true atomicity. `$metadata` surfaces the service-wide capability via the EntityContainer annotation `Org.OData.Capabilities.V1.BatchSupported/ChangeSetsSupported` (set to `true` only when every registered entity set is backed by a transactional datasource) and per-entity-set hints via `LoopBack.V1.BatchCapabilities.ChangeSetsSupported`, so clients can decide whether to emit change sets globally or only for specific entity sets.
 - [x] Honors `Prefer: return=minimal|representation` for write operations and emits `OData-Version`/`Preference-Applied` headers by default
 - [x] OData-compliant error payloads (`odata.error`) with 501 `PreferenceNotSupported` for unsupported preferences like `respond-async`
 - [x] Actions & Functions decorators with auto CSDL generation
@@ -1419,7 +1421,7 @@ const ProductsSet: ODataEntitySetConfig<Product> = {
 - Sub-responses that exceed `maxResponseBodyBytes` are aborted in-process and return `413 ResponseTooLarge` so a single oversized entry cannot exhaust server memory even when the handler streams a large binary payload.
 - When the combined buffered responses and the serialized JSON/multipart payload would exceed `maxResponsePayloadBytes`, the controller rejects the entire batch with `413 Payload Too Large` before serialization begins, preventing attackers from flooding the process with many near-limit responses in a single request.
 - `$batch` limits are enforced while parsing the stream: once the cumulative payload or a single part exceeds the configured budget the server aborts immediately with `413 Payload Too Large`.
-- `$batch` atomicity detection is connector-aware: entity sets backed by datasources that expose `beginTransaction` (for example PostgreSQL or MySQL) are marked as transactional after the first successful changeset, while datasources without transactions (such as the in-memory connector) are marked as non-transactional and future atomicity groups targeting them are rejected immediately with `501 Not Implemented`. The generated CSDL advertises the service-wide capability (per spec) on the EntityContainer via `Org.OData.Capabilities.V1.BatchSupported/ChangeSetsSupported`, which flips to `true` only when every registered entity set is backed by a transactional datasource, and emits per-entity-set annotations under `LoopBack.V1.BatchCapabilities.ChangeSetsSupported` so tools can decide which entity sets allow change sets.
+- `$batch` atomicity detection is connector-aware: entity sets backed by datasources that expose `beginTransaction` (for example PostgreSQL) are marked as transactional after the first successful changeset, while datasources without transactions (such as the in-memory connector) are marked as non-transactional and future atomicity groups targeting them are rejected immediately with `501 Not Implemented`. The generated CSDL advertises the service-wide capability (per spec) on the EntityContainer via `Org.OData.Capabilities.V1.BatchSupported/ChangeSetsSupported`, which flips to `true` only when every registered entity set is backed by a transactional datasource, and emits per-entity-set annotations under `LoopBack.V1.BatchCapabilities.ChangeSetsSupported` so tools can decide which entity sets allow change sets.
 - `writeTransactions`: When enabled, non-`$batch` write requests (create/update/delete, deep insert/update, `$ref` link/unlink, `$value` media metadata updates) run inside a datasource transaction when the connector supports `beginTransaction` (recommended for PostgreSQL). Writes spanning multiple datasources are rejected by default (`rejectMultiDataSource: true`). External media stores (e.g., S3) remain best-effort side effects; the database transaction only covers repository writes.
 - `onDeltaTokenInvalid(event)`: Optional callback fired whenever a client supplies an expired, tampered, or mismatched `$deltatoken`. Useful for alerting/telemetry when secrets rotate.
 - `tenantResolver(request)`: Function that extracts a tenant/customer identifier from an incoming request (for example `req.user?.tenantId` or `req.get('x-tenant-id')`). When combined with `tenantQuotas`, the server enforces per-tenant throttling. If the resolver throws, the request now fails fast with `400 TenantResolutionFailed` so malformed or malicious headers cannot fall back to the unrestricted default bucket.
@@ -1491,7 +1493,7 @@ Any custom store only needs to implement the `TenantThrottleStore` interface (al
 - `logApplyTelemetry`: When `true`, emits a concise debug line for every `$apply` stage showing whether it was pushed down or processed in-memory (default: `false`).
 - `onApplyTelemetry(event)`: Structured hook invoked after each stage with `{entitySet, stageIndex, stageCount, mode, rows, durationMs, joinCount, reason}` so you can stream analytics into your own logging or monitoring pipeline.
 - `maxApplyNavigationFanout`: Maximum number of navigation combinations the in-memory fallback will materialize per stage before returning `400 Bad Request` (default: `1000`).
-- `enableApplyPushdown`: Opt-in switch that negotiates `$apply` pushdown with each datasource. When enabled, supported connectors (currently PostgreSQL and MySQL/MariaDB) execute `groupby()/aggregate()` pipelines in the database. Combine with `@odataModel({applyPushdown: true})` or an `ODataEntitySetConfig` registered through `ODATA_BINDINGS.ENTITY_SET_REGISTRY` for per-entity control.
+- `enableApplyPushdown`: Opt-in switch that negotiates `$apply` pushdown with each datasource. When enabled, the supported v1 connector path is PostgreSQL, which executes `groupby()/aggregate()` pipelines in the database. Combine with `@odataModel({applyPushdown: true})` or an `ODataEntitySetConfig` registered through `ODATA_BINDINGS.ENTITY_SET_REGISTRY` for per-entity control.
 - `maxExpandDepth`: Maximum allowed `$expand` nesting depth; requests that exceed it return `400 Bad Request`.
 - `maxFilterPatternLength`: Caps underscore patterns generated when translating supported `$filter` functions like `length()` and `substring()` (including inside `$apply=filter(...)`) into LoopBack `like` clauses (default: `10000`). Requests that exceed it return `400 Bad Request`.
 - `maxSubstringStart`: Maximum allowed `substring(field, start, ...)` start index when translating to patterns (default: `10000`). Requests that exceed it return `400 Bad Request`.
@@ -1635,7 +1637,7 @@ When `mediaEtagField` is configured the generated `$metadata` advertises `@Org.O
 
 When handling uploads the controller prefers metadata reported by the `ODataMediaHandler` over the incoming HTTP headers. Handlers can return `contentType`, `length`, and `etag` from their `write()` result to override the stored values. This enables sniffing binary payloads server-side, emitting custom weak ETags, or correcting bogus `Content-Type`/`Content-Length` headers before persisting the entity’s metadata and `@odata.mediaContentType`.
 
-When `mediaField` is configured the default property-backed handler buffers the upload into memory and then writes the resulting `Buffer` into that property while enforcing `mediaMaxPayloadBytes` to guard against unbounded buffering. Make sure the backing column is a binary type in your datasource (e.g., PostgreSQL `bytea`, MySQL `LONGBLOB`, MSSQL `VARBINARY`). Use the connector-specific metadata to request the correct type:
+When `mediaField` is configured the default property-backed handler buffers the upload into memory and then writes the resulting `Buffer` into that property while enforcing `mediaMaxPayloadBytes` to guard against unbounded buffering. For the supported v1 PostgreSQL path, make sure the backing column is `bytea`. Use connector metadata like this:
 
 ```ts
 @property({
@@ -1864,27 +1866,20 @@ Multi-stage pipeline with navigation joins and chained groupings (runs entirely 
 curl "http://127.0.0.1:3001/odata/OrderItems?\$apply=groupby((order/customer/country),aggregate(order/total%20with%20sum%20as%20TotalSpend))/filter(TotalSpend%20gt%202000)/groupby((order/customer/country),aggregate(TotalSpend%20with%20max%20as%20PeakSpend))/orderby(PeakSpend%20desc)"
 ```
 
-### `$apply` Pushdown (PostgreSQL & MySQL)
+### `$apply` Pushdown (PostgreSQL)
 
 - Pushdown is **opt-in**. Out of the box, `$apply` executes in memory. This is functionally correct but resource intensive; enable pushdown for production workloads. Once enabled, the SQL executors keep entire pipelines (multiple `groupby`/`aggregate` stages plus `filter`, `orderby`, `skip`, `top`) inside the database, emitting native `HAVING`, `ORDER BY`, `LIMIT`, and `OFFSET`.
 - Set `enableApplyPushdown: true` on `ODataConfig` to negotiate pushdown across datasources, or opt in per model with `@odataModel({applyPushdown: true})` / per entity set via an `ODataEntitySetConfig` registered through `ODATA_BINDINGS.ENTITY_SET_REGISTRY`.
-- PostgreSQL **and** MySQL/MariaDB are supported natively today. The extension inspects each repository datasource and, when it detects a compatible connector, routes aggregation pipelines through a SQL executor built on `dataSource.execute(...)`.
-- Navigation aggregates are compiled into `LEFT JOIN` chains, so queries like `groupby((order/customer/country), aggregate(order/total with sum as TotalSpend))` continue to run server-side even when later stages reference aliases or regroup the intermediate result set. On MySQL the executor uses backticked identifiers and `?` placeholders, while PostgreSQL uses quoted identifiers and `$n` parameters.
+- PostgreSQL is the supported native pushdown path for v1. The extension inspects each repository datasource and, when it detects a compatible PostgreSQL connector, routes aggregation pipelines through a SQL executor built on `dataSource.execute(...)`.
+- Navigation aggregates are compiled into `LEFT JOIN` chains, so queries like `groupby((order/customer/country), aggregate(order/total with sum as TotalSpend))` continue to run server-side even when later stages reference aliases or regroup the intermediate result set. The PostgreSQL executor uses quoted identifiers and `$n` parameters.
 - Stage-level pagination and filters stay in SQL. Post-aggregate `filter(...)` segments translate to `HAVING` clauses, and `skip`/`top` stages map to `OFFSET`/`LIMIT` inside each stage rather than being re-applied in memory.
 - Telemetry hooks (`logApplyTelemetry: true` or a custom `onApplyFallback`) now capture per-stage execution mode, duration, row counts, and join counts so you can audit when a pipeline leaves the database.
 - Table and column names are inferred automatically from the connector metadata (including the default lowercase conversion), so the usual LoopBack naming conventions work without additional annotations. Override the metadata only when you map models to non-standard table names.
-- Unsupported scenarios automatically fall back to the in-memory executor. When `logApplyFallbacks` is enabled (or `onApplyFallback` is provided), additional events (`executor-declined`, `executor-error`, `missing-stage-filters`, `missing-stage-pagination`) surface whenever the pushdown path declines a request. Use these signals to monitor unexpected CPU/memory usage across both dialects.
+- Unsupported scenarios automatically fall back to the in-memory executor. When `logApplyFallbacks` is enabled (or `onApplyFallback` is provided), additional events (`executor-declined`, `executor-error`, `missing-stage-filters`, `missing-stage-pagination`) surface whenever the pushdown path declines a request. Use these signals to monitor unexpected CPU/memory usage.
 - Capability metadata reflects reality: entity sets only emit `Org.OData.Capabilities.V1.ApplySupported` when pushdown is active, so BI clients can rely on the annotation.
 - Custom connectors can participate by registering their own executor with `ODataApplyExecutorRegistry`. Executors decide at runtime whether they can satisfy a pipeline and can signal unsupported combinations by returning `undefined`, preserving the existing fallback behavior.
 
-To try pushdown with the example app (requires PostgreSQL or MySQL running locally):
-
-```bash
-USE_MYSQL=true MYSQL_HOST=127.0.0.1 MYSQL_USER=root MYSQL_PASSWORD=pass MYSQL_DATABASE=odata_dev \
-ENABLE_APPLY_PUSHDOWN=true LOG_APPLY_TELEMETRY=true npm run dev
-```
-
-Or, for PostgreSQL:
+To try pushdown with the example app (requires PostgreSQL running locally):
 
 ```bash
 USE_POSTGRES=true PG_HOST=127.0.0.1 PG_USER=postgres PG_PASSWORD=pass PG_DATABASE=odata_dev \
