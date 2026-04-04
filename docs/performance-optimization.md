@@ -28,7 +28,7 @@ Before tuning anything:
 - capture a baseline
 - make one change
 - rerun the relevant scenario
-- compare the result to the current baseline in [benchmarks/results.md](/workspace/benchmarks/results.md)
+- compare the result to the current baseline in [benchmarks/results.md](../benchmarks/results.md)
 
 ## What to optimize first
 
@@ -81,7 +81,7 @@ Why this matters:
 - fallback executes in memory and is intentionally bounded
 - logs and telemetry help you detect when a request unexpectedly leaves the database
 
-From the current benchmark baseline in [benchmarks/results.md](/workspace/benchmarks/results.md):
+From the current benchmark baseline in [benchmarks/results.md](../benchmarks/results.md):
 
 - `$apply` fallback: `67.19 ops/s`, `p95 20.1 ms`
 - PostgreSQL pushdown: `268.57 ops/s`, `p95 4.7 ms`
@@ -230,7 +230,7 @@ This is especially important because the default handler buffers uploads before 
 
 ## Use the benchmark results as your baseline
 
-The current baseline is captured in [benchmarks/results.md](/workspace/benchmarks/results.md).
+The current baseline is captured in [benchmarks/results.md](../benchmarks/results.md).
 
 Highlights:
 
@@ -290,7 +290,7 @@ this.bind(ODATA_BINDINGS.CONFIG).to({
 
 ## Related docs
 
-- [docs/getting-started.md](/workspace/docs/getting-started.md)
-- [docs/advanced-configuration.md](/workspace/docs/advanced-configuration.md)
-- [benchmarks/README.md](/workspace/benchmarks/README.md)
-- [benchmarks/results.md](/workspace/benchmarks/results.md)
+- [docs/getting-started.md](getting-started.md)
+- [docs/advanced-configuration.md](advanced-configuration.md)
+- [benchmarks/README.md](../benchmarks/README.md)
+- [benchmarks/results.md](../benchmarks/results.md)

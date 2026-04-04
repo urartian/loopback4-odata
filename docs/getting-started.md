@@ -136,7 +136,7 @@ Example:
 npm start
 ```
 
-If you want a working reference app from this repository, see [examples/basic-app/index.ts](/workspace/examples/basic-app/index.ts).
+If you want a working reference app from this repository, see [examples/basic-app/index.ts](../examples/basic-app/index.ts).
 
 ## 7. Verify the generated endpoints
 
@@ -170,12 +170,12 @@ At a minimum you will need:
 - model metadata for any connector-specific column types you use
 - `ENABLE_APPLY_PUSHDOWN=true` if you want database-backed `$apply` execution
 
-The repository example app in this repo already includes a PostgreSQL path in [examples/basic-app/index.ts](/workspace/examples/basic-app/index.ts).
+The repository example app in this repo already includes a PostgreSQL path in [examples/basic-app/index.ts](../examples/basic-app/index.ts).
 
 ## Next steps
 
 After the basic setup is working, continue with:
 
-- advanced configuration in [README.md](/workspace/README.md)
-- performance guidance in [benchmarks/README.md](/workspace/benchmarks/README.md)
-- generated API reference in [docs/api/index.html](/workspace/docs/api/index.html)
+- advanced configuration in [README.md](../README.md)
+- performance guidance in [benchmarks/README.md](../benchmarks/README.md)
+- generated API reference in [docs/api/index.html](api/index.html)

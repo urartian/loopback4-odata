@@ -153,7 +153,7 @@ Before shipping a cloud deployment, confirm:
 
 ## Related docs
 
-- [docs/deployment-boundaries.md](/workspace/docs/deployment-boundaries.md)
-- [docs/database-postgresql.md](/workspace/docs/database-postgresql.md)
-- [docs/observability-monitoring.md](/workspace/docs/observability-monitoring.md)
-- [docs/performance-optimization.md](/workspace/docs/performance-optimization.md)
+- [docs/deployment-boundaries.md](deployment-boundaries.md)
+- [docs/database-postgresql.md](database-postgresql.md)
+- [docs/observability-monitoring.md](observability-monitoring.md)
+- [docs/performance-optimization.md](performance-optimization.md)

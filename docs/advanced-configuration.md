@@ -315,7 +315,7 @@ this.bind(ODATA_BINDINGS.CONFIG).to({
 
 ## Related docs
 
-- [docs/getting-started.md](/workspace/docs/getting-started.md)
-- [README.md](/workspace/README.md)
-- [benchmarks/README.md](/workspace/benchmarks/README.md)
-- [docs/api/index.html](/workspace/docs/api/index.html)
+- [docs/getting-started.md](getting-started.md)
+- [README.md](../README.md)
+- [benchmarks/README.md](../benchmarks/README.md)
+- [docs/api/index.html](api/index.html)

@@ -14,7 +14,7 @@ For v1, the officially documented and supported SQL path is PostgreSQL. Other co
 
 Currently in **phase 4** — CRUD endpoints are stable and advanced features like `$expand`, `$count`, `$batch`, Actions/Functions, server-driven paging (`$skiptoken`), and delta links (`$deltatoken`) are available. Focus is now on rounding out the filter grammar, improving configurability, enriching the CSDL, and hardening path rewriting.
 
-Community and support guidance lives in [docs/community.md](/workspace/docs/community.md).
+Community and support guidance lives in [docs/community.md](docs/community.md).
 
 ---
 

@@ -221,8 +221,8 @@ Use telemetry in production to watch:
 
 Use the benchmark harness in this repo to establish and compare baselines:
 
-- [benchmarks/results.md](/workspace/benchmarks/results.md)
-- [docs/performance-optimization.md](/workspace/docs/performance-optimization.md)
+- [benchmarks/results.md](../benchmarks/results.md)
+- [docs/performance-optimization.md](performance-optimization.md)
 
 Recommended production workflow:
 
@@ -245,7 +245,7 @@ Because repository calls can receive propagated correlation context, downstream 
 
 ## Related docs
 
-- [README.md](/workspace/README.md)
-- [docs/performance-optimization.md](/workspace/docs/performance-optimization.md)
-- [docs/troubleshooting.md](/workspace/docs/troubleshooting.md)
-- [docs/deployment-boundaries.md](/workspace/docs/deployment-boundaries.md)
+- [README.md](../README.md)
+- [docs/performance-optimization.md](performance-optimization.md)
+- [docs/troubleshooting.md](troubleshooting.md)
+- [docs/deployment-boundaries.md](deployment-boundaries.md)

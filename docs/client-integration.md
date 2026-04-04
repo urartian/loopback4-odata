@@ -242,7 +242,7 @@ For robust integrations:
 
 ## Related docs
 
-- [docs/getting-started.md](/workspace/docs/getting-started.md)
-- [docs/bi-interoperability.md](/workspace/docs/bi-interoperability.md)
-- [docs/database-postgresql.md](/workspace/docs/database-postgresql.md)
-- [README.md](/workspace/README.md)
+- [docs/getting-started.md](getting-started.md)
+- [docs/bi-interoperability.md](bi-interoperability.md)
+- [docs/database-postgresql.md](database-postgresql.md)
+- [README.md](../README.md)

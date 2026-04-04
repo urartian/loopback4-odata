@@ -62,7 +62,7 @@ const POSTGRES_DS_CONFIG = {
 this.dataSource(new juggler.DataSource(POSTGRES_DS_CONFIG), POSTGRES_DS_CONFIG.name);
 ```
 
-The repository example app already includes this path in [examples/basic-app/index.ts](/workspace/examples/basic-app/index.ts).
+The repository example app already includes this path in [examples/basic-app/index.ts](../examples/basic-app/index.ts).
 
 ## Recommended OData config for PostgreSQL
 
@@ -140,7 +140,7 @@ If you store structured JSON in PostgreSQL, prefer `jsonb`:
 decisionSchema!: object;
 ```
 
-This pairs well with the OData JSON stream-property pattern documented in [README.md](/workspace/README.md).
+This pairs well with the OData JSON stream-property pattern documented in [README.md](../README.md).
 
 ## PostgreSQL `$apply` pushdown
 
@@ -166,7 +166,7 @@ export class Order extends Entity {}
 
 For v1, PostgreSQL is the supported native pushdown path.
 
-Current benchmark evidence in [benchmarks/results.md](/workspace/benchmarks/results.md):
+Current benchmark evidence in [benchmarks/results.md](../benchmarks/results.md):
 
 - `$apply` fallback: `67.19 ops/s`, `p95 20.1 ms`
 - PostgreSQL pushdown: `268.57 ops/s`, `p95 4.7 ms`
@@ -276,8 +276,8 @@ curl "http://127.0.0.1:3001/odata/OrderItems?\$apply=groupby((order/customer/cou
 
 ## Related docs
 
-- [docs/getting-started.md](/workspace/docs/getting-started.md)
-- [docs/advanced-configuration.md](/workspace/docs/advanced-configuration.md)
-- [docs/performance-optimization.md](/workspace/docs/performance-optimization.md)
-- [README.md](/workspace/README.md)
-- [benchmarks/results.md](/workspace/benchmarks/results.md)
+- [docs/getting-started.md](getting-started.md)
+- [docs/advanced-configuration.md](advanced-configuration.md)
+- [docs/performance-optimization.md](performance-optimization.md)
+- [README.md](../README.md)
+- [benchmarks/results.md](../benchmarks/results.md)

@@ -37,7 +37,7 @@ sections such as:
 When a release contains a breaking or contract-affecting change:
 
 - document it clearly in release notes
-- update [docs/pre-v1-notes.md](/workspace/docs/pre-v1-notes.md) when the
+- update [docs/pre-v1-notes.md](pre-v1-notes.md) when the
   supported contract changes
 - update narrative docs and TypeDoc when public behavior changes
 

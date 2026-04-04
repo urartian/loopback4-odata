@@ -411,7 +411,7 @@ For a production LB4 deployment:
 
 ## Related docs
 
-- [docs/advanced-configuration.md](/workspace/docs/advanced-configuration.md)
-- [docs/database-postgresql.md](/workspace/docs/database-postgresql.md)
-- [docs/performance-optimization.md](/workspace/docs/performance-optimization.md)
-- [README.md](/workspace/README.md)
+- [docs/advanced-configuration.md](advanced-configuration.md)
+- [docs/database-postgresql.md](database-postgresql.md)
+- [docs/performance-optimization.md](performance-optimization.md)
+- [README.md](../README.md)

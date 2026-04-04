@@ -20,9 +20,9 @@ Other connector-specific code paths may still exist in the codebase, but they ar
 
 The v1 documentation surface now includes:
 
-- narrative guides under [docs](/workspace/docs)
-- generated API reference under [docs/api/index.html](/workspace/docs/api/index.html)
-- configuration and protocol details in [README.md](/workspace/README.md)
+- narrative guides under [docs](.)
+- generated API reference under [docs/api/index.html](api/index.html)
+- configuration and protocol details in [README.md](../README.md)
 
 Future changes should treat these docs as part of the public contract, not just internal notes.
 
@@ -117,6 +117,6 @@ That means:
 
 ## Related docs
 
-- [docs/compatibility-matrix.md](/workspace/docs/compatibility-matrix.md)
-- [README.md](/workspace/README.md)
-- [docs/database-postgresql.md](/workspace/docs/database-postgresql.md)
+- [docs/compatibility-matrix.md](compatibility-matrix.md)
+- [README.md](../README.md)
+- [docs/database-postgresql.md](database-postgresql.md)

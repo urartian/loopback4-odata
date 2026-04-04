@@ -199,6 +199,6 @@ curl "http://127.0.0.1:3000/odata/OrderItems?\$apply=groupby((order/customer/cou
 
 ## Related docs
 
-- [docs/database-postgresql.md](/workspace/docs/database-postgresql.md)
-- [docs/performance-optimization.md](/workspace/docs/performance-optimization.md)
-- [README.md](/workspace/README.md)
+- [docs/database-postgresql.md](database-postgresql.md)
+- [docs/performance-optimization.md](performance-optimization.md)
+- [README.md](../README.md)

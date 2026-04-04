@@ -6,12 +6,12 @@ This document defines the supported runtime and framework baseline for v1.
 
 | Area | Supported for v1 | Source |
 | --- | --- | --- |
-| Node.js | `22.x` | [package.json](/workspace/package.json) `engines.node = >=22 <23` |
-| LoopBack Boot | `^8.0.5` | [package.json](/workspace/package.json) `peerDependencies` |
-| LoopBack Core | `^7.0.4` | [package.json](/workspace/package.json) `peerDependencies` |
-| LoopBack Repository | `^8.0.4` | [package.json](/workspace/package.json) `peerDependencies` |
-| LoopBack REST | `^15.0.5` | [package.json](/workspace/package.json) `peerDependencies` |
-| TypeScript compiler | `5.9.x` baseline | [package.json](/workspace/package.json) `devDependencies.typescript = ^5.9.2` |
+| Node.js | `22.x` | [package.json](../package.json) `engines.node = >=22 <23` |
+| LoopBack Boot | `^8.0.5` | [package.json](../package.json) `peerDependencies` |
+| LoopBack Core | `^7.0.4` | [package.json](../package.json) `peerDependencies` |
+| LoopBack Repository | `^8.0.4` | [package.json](../package.json) `peerDependencies` |
+| LoopBack REST | `^15.0.5` | [package.json](../package.json) `peerDependencies` |
+| TypeScript compiler | `5.9.x` baseline | [package.json](../package.json) `devDependencies.typescript = ^5.9.2` |
 | SQL path | PostgreSQL | documented v1 support policy |
 
 ## Application assumptions
@@ -59,9 +59,9 @@ That means:
 
 The repository includes:
 
-- API reference docs generated with TypeDoc under [docs/api/index.html](/workspace/docs/api/index.html)
-- user guides under [docs](/workspace/docs)
-- one runnable example app under [examples/basic-app/index.ts](/workspace/examples/basic-app/index.ts)
+- API reference docs generated with TypeDoc under [docs/api/index.html](api/index.html)
+- user guides under [docs](.)
+- one runnable example app under [examples/basic-app/index.ts](../examples/basic-app/index.ts)
 
 The example app is a reference app, not a promise that every internal code path or environment switch shown there is part of the supported v1 contract.
 
@@ -78,6 +78,6 @@ Before adopting v1, confirm:
 
 ## Related docs
 
-- [README.md](/workspace/README.md)
-- [docs/database-postgresql.md](/workspace/docs/database-postgresql.md)
-- [docs/deployment-boundaries.md](/workspace/docs/deployment-boundaries.md)
+- [README.md](../README.md)
+- [docs/database-postgresql.md](database-postgresql.md)
+- [docs/deployment-boundaries.md](deployment-boundaries.md)
