@@ -97,7 +97,7 @@ Note: the default property-backed media handler intentionally keeps a bounded in
 - [ ] Performance regression tests
 
 ### 3.2 Compatibility Testing
-- [ ] Supported runtime verified in CI (Node 22.x)
+- [x] Supported runtime verified in CI (Node 22.x)
 - [x] LoopBack peer range compatibility documented
 - [x] PostgreSQL support path verified
 - [x] TypeScript compiler baseline documented
@@ -200,7 +200,7 @@ Note: the default property-backed media handler intentionally keeps a bounded in
 ## 7. Release Engineering ⏳
 
 ### 7.1 Automated Release Process
-- [ ] CI workflow for automated verification
+- [x] CI workflow for automated verification
 - [x] Manual npm package publishing process
 - [x] Manual changelog and release notes process
 - [x] Manual version bump process
