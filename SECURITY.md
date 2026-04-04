@@ -2,7 +2,7 @@
 
 ## Reporting a vulnerability
 
-If you believe you have found a security issue in `@loopback/odata`, please do
+If you believe you have found a security issue in `@urartian/loopback4-odata`, please do
 not open a public GitHub issue with exploit details first.
 
 Instead:

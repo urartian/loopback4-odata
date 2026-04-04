@@ -1,6 +1,6 @@
 # Deployment and Service-Boundary Guidance for LB4 Apps
 
-This guide explains how to deploy `@loopback/odata` cleanly inside a LoopBack 4 application.
+This guide explains how to deploy `@urartian/loopback4-odata` cleanly inside a LoopBack 4 application.
 
 The main question it answers is:
 
@@ -10,7 +10,7 @@ That separation matters for maintainability, security, and predictable behavior 
 
 ## Mental model
 
-Treat `@loopback/odata` as a focused protocol component inside your LB4 app.
+Treat `@urartian/loopback4-odata` as a focused protocol component inside your LB4 app.
 
 It should own:
 
@@ -308,7 +308,7 @@ The default throttle store is process-local. For multi-instance deployments, bin
 ```ts
 import Redis from 'ioredis';
 import {BindingScope} from '@loopback/core';
-import {ODATA_BINDINGS, RedisTenantThrottleStore} from '@loopback/odata';
+import {ODATA_BINDINGS, RedisTenantThrottleStore} from '@urartian/loopback4-odata';
 
 app
   .bind(ODATA_BINDINGS.THROTTLE_STORE)
@@ -373,7 +373,7 @@ Recommended posture:
 
 ## Privacy and data-handling boundaries
 
-`@loopback/odata` is a library package, not a hosted service.
+`@urartian/loopback4-odata` is a library package, not a hosted service.
 
 That means privacy and regulated-data obligations belong primarily to the host
 LB4 app and its operators.

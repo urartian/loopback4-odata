@@ -1,6 +1,6 @@
-# Contributing to @loopback/odata
+# Contributing to @urartian/loopback4-odata
 
-Thank you for your interest in contributing to @loopback/odata! This document provides guidelines and information for contributors.
+Thank you for your interest in contributing to @urartian/loopback4-odata! This document provides guidelines and information for contributors.
 
 ## Code of Conduct
 
@@ -302,7 +302,7 @@ Contributors are recognized in:
 - **Release Notes**: Significant contributions mentioned in releases
 - **Documentation**: Contributors credited in relevant sections
 
-Thank you for contributing to @loopback/odata! 🎉
+Thank you for contributing to @urartian/loopback4-odata! 🎉
 
 ---
 

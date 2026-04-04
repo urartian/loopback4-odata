@@ -1,4 +1,4 @@
-# @loopback/odata
+# @urartian/loopback4-odata
 
 An extension for [LoopBack 4](https://loopback.io/doc/en/lb4/) that adds **OData protocol support**.
 This package implements **OData v4.0** for LoopBack 4 applications.
@@ -21,7 +21,7 @@ Community and support guidance lives in [docs/community.md](/workspace/docs/comm
 ## Installation
 
 ```bash
-npm install @loopback/odata
+npm install @urartian/loopback4-odata
 # if your application does not yet depend on LoopBack core packages:
 npm install @loopback/core@^7 @loopback/repository@^8 @loopback/rest@^15 @loopback/boot@^8
 ```
@@ -39,7 +39,7 @@ import { ApplicationConfig } from '@loopback/core';
 import { BootMixin } from '@loopback/boot';
 import { RepositoryMixin } from '@loopback/repository';
 import { RestApplication } from '@loopback/rest';
-import { ODataComponent, ODATA_BINDINGS, ODataConfig } from '@loopback/odata';
+import { ODataComponent, ODATA_BINDINGS, ODataConfig } from '@urartian/loopback4-odata';
 
 export class MyAppApplication extends BootMixin(RepositoryMixin(RestApplication)) {
   constructor(options: ApplicationConfig = {}) {
@@ -62,7 +62,7 @@ export class MyAppApplication extends BootMixin(RepositoryMixin(RestApplication)
 
 ```ts
 import { Entity, property } from '@loopback/repository';
-import { odataModel } from '@loopback/odata';
+import { odataModel } from '@urartian/loopback4-odata';
 
 @odataModel({
   lbModel: { settings: { strict: true } },
@@ -229,7 +229,7 @@ OData endpoints return errors using an OData error payload (for example `{"error
 - `error.message` is human-readable and may change; do not parse it for behavior.
 - If a downstream connector/database error bubbles up with its own string `err.code`, it is preserved as diagnostics under `error.innererror.dbCode` (not as `error.code`).
 
-The authoritative list of stable codes lives in `src/odata-error-codes.ts` (exported as `ODataErrorCodes` from `@loopback/odata`).
+The authoritative list of stable codes lives in `src/odata-error-codes.ts` (exported as `ODataErrorCodes` from `@urartian/loopback4-odata`).
 
 Stable codes are grouped as follows:
 
@@ -295,7 +295,7 @@ export class MediaAssetController {
 If you expose differently named controller methods, supply custom aliases when registering the entity set so the security metadata still flows through. Any of the canonical handlers below can be remapped: `find`, `findById`, `create`, `updateById`, `replaceById`, `deleteById`, `count`, `linkNavigationRef`, `unlinkNavigationRef`, `getMediaValue`, `replaceMediaValue`, and `deleteMediaValue`.
 
 ```ts
-import { ODATA_BINDINGS } from '@loopback/odata';
+import { ODATA_BINDINGS } from '@urartian/loopback4-odata';
 
 const registry = await app.get(ODATA_BINDINGS.ENTITY_SET_REGISTRY);
 registry.register({
@@ -837,7 +837,7 @@ class ProductController {
 Use a model constructor/factory to generate ComplexType metadata for operation return values. For collections, wrap the type with `collectionOf(...)` (or use a literal `Collection(...)` CSDL string):
 
 ```ts
-import { odataFunction, collectionOf } from '@loopback/odata';
+import { odataFunction, collectionOf } from '@urartian/loopback4-odata';
 import { DecisionPermissionConfig } from '../models/decision-permission-config.model';
 
 @odataFunction({
@@ -866,7 +866,7 @@ Declare OData hooks right inside your LB4 controller using `@odata.before`, `@od
 Import from the package root:
 
 ```ts
-import { odata, CrudHookContext, CrudOnContext } from '@loopback/odata';
+import { odata, CrudHookContext, CrudOnContext } from '@urartian/loopback4-odata';
 ```
 
 Supported operations and scopes:
@@ -994,7 +994,7 @@ LoopBack models can advertise computed fields by marking them as non-persistent.
 ```ts
 // order.model.ts
 import { Entity, property } from '@loopback/repository';
-import { odataModel } from '@loopback/odata';
+import { odataModel } from '@urartian/loopback4-odata';
 
 @odataModel({ entitySetName: 'Orders' })
 export class Order extends Entity {
@@ -1015,7 +1015,7 @@ export class Order extends Entity {
 ```ts
 // order.odata-controller.ts
 import { AnyObject, repository } from '@loopback/repository';
-import { odata, CrudHookContext } from '@loopback/odata';
+import { odata, CrudHookContext } from '@urartian/loopback4-odata';
 import { Order } from './order.model';
 import { OrderRepository } from './order.repository';
 
@@ -1172,8 +1172,8 @@ String helpers such as `trim`/`concat` and date part functions (`month`, `day`, 
 Customize the OData component via `ODataConfig` bound at `odata.config` (the component registers a default). You can override it in your application before boot:
 
 ```ts
-import { ODATA_BINDINGS } from '@loopback/odata';
-import { ODataConfig } from '@loopback/odata';
+import { ODATA_BINDINGS } from '@urartian/loopback4-odata';
+import { ODataConfig } from '@urartian/loopback4-odata';
 
 // inside your app setup
 this.bind(ODATA_BINDINGS.CONFIG).to({
@@ -1234,7 +1234,7 @@ The service advertises supported `$filter` functions in `$metadata` via `Org.ODa
 - `filterFunctionsPreset: 'postgres'`: Postgres-ready set aligned with implemented pushdowns (includes `trim`, `concat`, `month`, etc.)
 
 ```ts
-import { ODATA_BINDINGS, ODataConfig, FILTER_FUNCTIONS_POSTGRES } from '@loopback/odata';
+import { ODATA_BINDINGS, ODataConfig, FILTER_FUNCTIONS_POSTGRES } from '@urartian/loopback4-odata';
 
 const currentConfig = this.getSync(ODATA_BINDINGS.CONFIG) as ODataConfig;
 
@@ -1355,7 +1355,7 @@ this.bind(ODATA_BINDINGS.CONFIG).to({
 For mixed datasources (or per-entity differences), prefer per-entity-set overrides:
 
 ```ts
-import { FILTER_FUNCTIONS_POSTGRES, type ODataEntitySetConfig } from '@loopback/odata';
+import { FILTER_FUNCTIONS_POSTGRES, type ODataEntitySetConfig } from '@urartian/loopback4-odata';
 
 export const PurchasesSet: ODataEntitySetConfig = {
   name: 'Purchases',
@@ -1387,7 +1387,7 @@ Spreading the current config ensures sensitive settings such as `tokenSecret` re
 Per-entity guardrails can be applied through the entity-set config you register with the registry binding. Entity-level limits override the global pagination block, allowing you to relax or tighten caps on a per-feed basis:
 
 ```ts
-import { type ODataEntitySetConfig } from '@loopback/odata';
+import { type ODataEntitySetConfig } from '@urartian/loopback4-odata';
 
 const ProductsSet: ODataEntitySetConfig<Product> = {
   name: 'Products',
@@ -1436,7 +1436,7 @@ const ProductsSet: ODataEntitySetConfig<Product> = {
 #### Tenant throttling example
 
 ```ts
-import { ODATA_BINDINGS } from '@loopback/odata';
+import { ODATA_BINDINGS } from '@urartian/loopback4-odata';
 
 app.bind(ODATA_BINDINGS.CONFIG).to({
   ...baseConfig,
@@ -1480,7 +1480,7 @@ The default throttling backend keeps counters in-memory inside each process. If 
 ```ts
 import Redis from 'ioredis';
 import { BindingScope } from '@loopback/core';
-import { ODATA_BINDINGS, RedisTenantThrottleStore } from '@loopback/odata';
+import { ODATA_BINDINGS, RedisTenantThrottleStore } from '@urartian/loopback4-odata';
 
 app
   .bind(ODATA_BINDINGS.THROTTLE_STORE)
@@ -1654,7 +1654,7 @@ When `hasStream` is enabled the booter inspects the repository binding and regis
 
 - If the repository prototype implements `getMedia(id, options)` / `setMedia(id, stream, metadata, options)` (and optionally `deleteMedia`), the booter wires a `RepositoryMediaHandlerAdapter` that forwards reads/writes into those hooks.
 - Otherwise, if `mediaField` is configured, a request-scoped `PropertyBackedMediaHandler` is bound which reads/writes the binary column directly.
-- You can always bind your own handler to the configured `mediaHandlerBindingKey` to integrate object storage, CDNs, etc. Custom handlers must implement the `ODataMediaHandler` interface exported from `@loopback/odata`.
+- You can always bind your own handler to the configured `mediaHandlerBindingKey` to integrate object storage, CDNs, etc. Custom handlers must implement the `ODataMediaHandler` interface exported from `@urartian/loopback4-odata`.
 
 For large-file scenarios, prefer a custom streaming handler over the default property-backed path. The default handler intentionally prioritizes safe bounded buffering with a conservative `10 MiB` limit. If your production requirements include uploads well above that range, route the stream into external storage or another sink inside a custom `ODataMediaHandler` instead of raising the in-memory limit indefinitely.
 
@@ -1691,7 +1691,7 @@ import {
   ODataMediaHandler,
   ODataMediaReadContext,
   ODataMediaWriteContext,
-} from '@loopback/odata';
+} from '@urartian/loopback4-odata';
 
 class S3MediaHandler implements ODataMediaHandler {
   constructor(@inject('services.S3') private readonly client: S3Client) {}
@@ -2054,7 +2054,7 @@ Configuration:
 >
 > ```ts
 > import { Entity, model, property, hasMany, belongsTo } from '@loopback/repository';
-> import { odataModel } from '@loopback/odata';
+> import { odataModel } from '@urartian/loopback4-odata';
 >
 > @odataModel({
 >   // marks Orders.items as a composition relation (explicit config)
@@ -2192,7 +2192,7 @@ Notes:
 Soft delete is an explicit design choice: implement it via an override handler:
 
 ```ts
-import { odata, CrudOnContext } from '@loopback/odata';
+import { odata, CrudOnContext } from '@urartian/loopback4-odata';
 
 export class OrdersController {
   constructor(/* inject your repository here */) {}

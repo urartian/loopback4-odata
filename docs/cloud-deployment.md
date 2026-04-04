@@ -1,6 +1,6 @@
 # Cloud Deployment Guidance for Host LB4 Apps
 
-This guide explains how to deploy a LoopBack 4 application that uses `@loopback/odata` on common cloud platforms.
+This guide explains how to deploy a LoopBack 4 application that uses `@urartian/loopback4-odata` on common cloud platforms.
 
 For v1, the important boundary is:
 
@@ -50,7 +50,7 @@ Recommended shape:
 
 Important note for Lambda-style hosting:
 
-- `@loopback/odata` is better suited to long-running LB4 server processes than to a serverless-first Lambda shape
+- `@urartian/loopback4-odata` is better suited to long-running LB4 server processes than to a serverless-first Lambda shape
 - OData batching, metadata routes, large request handling, and connection reuse are simpler on container-based runtimes
 
 If you use AWS with multiple replicas:
@@ -87,7 +87,7 @@ Operational note:
 
 ## VPS / VM guidance for host LB4 apps
 
-Self-managed VPS or VM deployments are also a valid fit for `@loopback/odata`
+Self-managed VPS or VM deployments are also a valid fit for `@urartian/loopback4-odata`
 as long as the LB4 app keeps the same production boundaries as the cloud-hosted
 shapes above.
 

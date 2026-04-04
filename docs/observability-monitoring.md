@@ -1,6 +1,6 @@
 # Observability and Monitoring
 
-This guide explains how to operate `@loopback/odata` in production with a host-first observability model.
+This guide explains how to operate `@urartian/loopback4-odata` in production with a host-first observability model.
 
 The extension already emits structured events and telemetry-friendly context. Your LoopBack 4 application should decide where those events go: console logs, Pino/Winston, OpenTelemetry, Sentry, CloudWatch, Datadog, or another platform.
 
@@ -34,7 +34,7 @@ Bind your application logger so OData events join the rest of your service logs:
 
 ```ts
 import pino from 'pino';
-import {ODATA_BINDINGS, ODataLogger} from '@loopback/odata';
+import {ODATA_BINDINGS, ODataLogger} from '@urartian/loopback4-odata';
 
 const logger = pino();
 

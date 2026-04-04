@@ -1,6 +1,6 @@
 # BI Interoperability Notes
 
-This guide explains how `@loopback/odata` behaves from the perspective of metadata-driven OData consumers such as BI and analytics tools.
+This guide explains how `@urartian/loopback4-odata` behaves from the perspective of metadata-driven OData consumers such as BI and analytics tools.
 
 It is intentionally tool-neutral. For v1, the goal is not to provide vendor-specific walkthroughs for Power BI, Tableau, or Excel. The goal is to document what those kinds of clients can rely on when they connect to this service.
 

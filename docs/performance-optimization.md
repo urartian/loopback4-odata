@@ -1,6 +1,6 @@
 # Performance Optimization
 
-This guide explains how to tune `@loopback/odata` for production workloads, with a PostgreSQL-first mindset for v1.
+This guide explains how to tune `@urartian/loopback4-odata` for production workloads, with a PostgreSQL-first mindset for v1.
 
 The goal is not to make every request as fast as possible at any cost. The goal is to:
 

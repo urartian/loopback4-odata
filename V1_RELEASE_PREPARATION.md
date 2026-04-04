@@ -1,4 +1,4 @@
-# @loopback/odata v1.0 Release Preparation
+# @urartian/loopback4-odata v1.0 Release Preparation
 
 This document outlines the comprehensive checklist and requirements for moving from version 0.1.0 to the stable v1.0.0 release. This ensures we have a solid foundation for the open source community.
 

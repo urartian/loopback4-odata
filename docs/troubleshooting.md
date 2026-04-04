@@ -1,6 +1,6 @@
 # Troubleshooting and FAQ
 
-This guide collects the most common production issues for `@loopback/odata` and the fastest ways to diagnose them.
+This guide collects the most common production issues for `@urartian/loopback4-odata` and the fastest ways to diagnose them.
 
 For v1, the supported SQL path is PostgreSQL. Connector-specific advice below assumes a PostgreSQL-backed LoopBack 4 application.
 

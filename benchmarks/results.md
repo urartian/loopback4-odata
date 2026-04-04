@@ -1,6 +1,6 @@
 # Benchmark Results
 
-This file captures the current Section 1.3 benchmark baselines for `@loopback/odata`.
+This file captures the current Section 1.3 benchmark baselines for `@urartian/loopback4-odata`.
 
 Update this file only with fresh benchmark runs that you want to keep as the current reference point.
 

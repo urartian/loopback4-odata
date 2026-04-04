@@ -1,6 +1,6 @@
 # Release Process
 
-This document describes the lightweight release process for `@loopback/odata`.
+This document describes the lightweight release process for `@urartian/loopback4-odata`.
 
 ## Before a release candidate
 

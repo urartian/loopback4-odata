@@ -1,6 +1,6 @@
 # Roadmap
 
-This roadmap captures the current direction for `@loopback/odata`.
+This roadmap captures the current direction for `@urartian/loopback4-odata`.
 
 ## Near-term priorities
 

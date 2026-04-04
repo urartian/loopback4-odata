@@ -2,7 +2,7 @@
 
 This guide covers the supported SQL path for v1: PostgreSQL.
 
-Use it when you want to move beyond the in-memory quick start and run `@loopback/odata` with:
+Use it when you want to move beyond the in-memory quick start and run `@urartian/loopback4-odata` with:
 
 - PostgreSQL-backed repositories
 - transactional writes
@@ -12,7 +12,7 @@ Use it when you want to move beyond the in-memory quick start and run `@loopback
 ## Prerequisites
 
 - a running PostgreSQL instance
-- a LoopBack 4 app using `@loopback/odata`
+- a LoopBack 4 app using `@urartian/loopback4-odata`
 - the PostgreSQL connector installed in your app
 
 Example:

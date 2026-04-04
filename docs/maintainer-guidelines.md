@@ -1,7 +1,7 @@
 # Maintainer Guidelines
 
 This document defines the minimum expectations for maintainers of
-`@loopback/odata`.
+`@urartian/loopback4-odata`.
 
 ## Core responsibilities
 

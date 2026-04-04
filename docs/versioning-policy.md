@@ -1,6 +1,6 @@
 # Versioning Policy
 
-`@loopback/odata` follows semantic versioning for published releases.
+`@urartian/loopback4-odata` follows semantic versioning for published releases.
 
 ## Versioning rules
 

@@ -1,6 +1,6 @@
 # Getting Started
 
-This guide walks through the fastest path to a working OData endpoint in a LoopBack 4 app using `@loopback/odata`.
+This guide walks through the fastest path to a working OData endpoint in a LoopBack 4 app using `@urartian/loopback4-odata`.
 
 You will:
 
@@ -26,7 +26,7 @@ The main path in this guide uses the in-memory connector so you can be running i
 ## 1. Install the package
 
 ```bash
-npm install @loopback/odata
+npm install @urartian/loopback4-odata
 npm install @loopback/core@^7 @loopback/repository@^8 @loopback/rest@^15 @loopback/boot@^8
 ```
 
@@ -39,7 +39,7 @@ import {ApplicationConfig} from '@loopback/core';
 import {BootMixin} from '@loopback/boot';
 import {RepositoryMixin} from '@loopback/repository';
 import {RestApplication} from '@loopback/rest';
-import {ODATA_BINDINGS, ODataComponent, ODataConfig} from '@loopback/odata';
+import {ODATA_BINDINGS, ODataComponent, ODataConfig} from '@urartian/loopback4-odata';
 
 export class MyAppApplication extends BootMixin(RepositoryMixin(RestApplication)) {
   constructor(options: ApplicationConfig = {}) {
@@ -64,7 +64,7 @@ Decorate the model with `@odataModel()`. You still use LoopBack property and rel
 
 ```ts
 import {Entity, property} from '@loopback/repository';
-import {odataModel} from '@loopback/odata';
+import {odataModel} from '@urartian/loopback4-odata';
 
 @odataModel({
   lbModel: {settings: {strict: true}},
@@ -120,7 +120,7 @@ this.repository(ProductRepository);
 Register a controller for the model. The component generates the repository-backed OData routes automatically.
 
 ```ts
-import {odataController} from '@loopback/odata';
+import {odataController} from '@urartian/loopback4-odata';
 
 @odataController(Product)
 export class ProductODataController {}

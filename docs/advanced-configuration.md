@@ -9,7 +9,7 @@ For v1, the supported SQL path is PostgreSQL.
 When overriding configuration, always start from the component's current config instead of replacing it outright.
 
 ```ts
-import {ODATA_BINDINGS, ODataConfig} from '@loopback/odata';
+import {ODATA_BINDINGS, ODataConfig} from '@urartian/loopback4-odata';
 
 const current = this.getSync(ODATA_BINDINGS.CONFIG) as ODataConfig;
 
