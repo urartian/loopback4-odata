@@ -215,7 +215,7 @@ Note: the default property-backed media handler intentionally keeps a bounded in
 - [x] Hotfix release process
 - [x] Deprecation policy and timeline
 
-**Acceptance Criteria**: Fully automated release process, clear versioning policy, support framework
+**Acceptance Criteria**: Documented release process, clear versioning policy, support framework
 
 ---
 
@@ -223,21 +223,19 @@ Note: the default property-backed media handler intentionally keeps a bounded in
 
 ### Final Validation (Before v1.0.0)
 - [ ] All major areas above completed
-- [ ] Community feedback incorporated
-- [ ] Performance benchmarks met
-- [ ] Security review passed
+- [ ] Supported CI verification completed
+- [ ] Performance benchmarks reviewed
+- [ ] Security and dependency review passed
 - [ ] Documentation review completed
 - [ ] Breaking change impact assessed
 - [ ] Release notes finalized
-- [ ] Announcement plan ready
+- [ ] Publish checklist confirmed
 
 ### Release Day Tasks
 - [ ] Final CI/CD pipeline run
 - [ ] Package publication
 - [ ] GitHub release creation
-- [ ] Documentation deployment
-- [ ] Community announcement
-- [ ] Social media/blog post publication
+- [ ] Documentation artifacts published
 
 ---
 
@@ -248,12 +246,12 @@ Note: the default property-backed media handler intentionally keeps a bounded in
 - **Documentation Coverage**: 100% of public APIs
 - **Performance**: <100ms response time for simple queries
 - **Security**: 0 high/critical vulnerabilities
-- **Community**: >10 contributors, >100 GitHub stars
+- **Release Readiness**: CI green on supported runtime, package metadata complete
 
 ### Qualitative Goals
 - **Developer Experience**: Easy setup within 15 minutes
 - **Enterprise Ready**: Production deployments at scale
-- **Community Adoption**: Active issue resolution and feature requests
+- **Community Readiness**: Clear support, contribution, and governance guidance
 - **Ecosystem Integration**: Successful BI tool integrations
 
 ---
