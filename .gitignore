@@ -3,3 +3,12 @@ dist/
 dist-tests/
 .devcontainer
 coverage/
+.codex
+.env
+.env.*
+!.env.example
+.npmrc
+*.pem
+*.key
+*.p12
+*.pfx

@@ -89,7 +89,7 @@ export class ExampleApp extends BootMixin(RepositoryMixin(RestApplication)) {
     const current = this.getSync(ODATA_BINDINGS.CONFIG) as ODataConfig;
     const enablePushdown = process.env.ENABLE_APPLY_PUSHDOWN === 'true';
     const logTelemetry = process.env.LOG_APPLY_TELEMETRY === 'true';
-    const tokenSecret = process.env.ODATA_TOKEN_SECRET ?? 'dev-example-secret';
+    const tokenSecret = process.env.ODATA_TOKEN_SECRET ?? 'change-me-example-secret';
     const maxOps = Number(process.env.BATCH_MAX_OPERATIONS ?? '');
     const maxPartBytes = Number(process.env.BATCH_MAX_PART_BYTES ?? '');
     const maxTopLimit = Number(process.env.ODATA_MAX_TOP ?? '');
