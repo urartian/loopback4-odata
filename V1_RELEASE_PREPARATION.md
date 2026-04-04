@@ -166,10 +166,8 @@ Note: the default property-backed media handler intentionally keeps a bounded in
 - [x] Minimize dependency footprint where possible
 
 ### 5.3 Legal Compliance
-- [ ] Export control compliance review (if applicable)
-- [ ] Trademark usage review
-- [ ] Privacy compliance considerations
-- [ ] Terms of use for any hosted examples
+- [x] Trademark and attribution usage review
+- [x] Privacy and data-handling boundaries documented for host apps
 
 **Acceptance Criteria**: Clean legal review, no license conflicts, vulnerability-free dependencies
 

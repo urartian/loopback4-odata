@@ -358,6 +358,40 @@ Recommended posture:
 - keep internal-only OData surfaces out of the public spec
 - review `/openapi.json` after changing visibility defaults
 
+## Trademark and attribution
+
+Use third-party project names descriptively and avoid implying endorsement.
+
+Recommended posture:
+
+- refer to LoopBack, PostgreSQL, AWS, Azure, and Google Cloud as third-party
+  platforms or projects, not as sponsors or endorsers of this package
+- preserve upstream license and attribution files when redistributing generated
+  documentation or bundled assets
+- keep this package's own license and third-party notices with the published
+  project materials
+
+## Privacy and data-handling boundaries
+
+`@loopback/odata` is a library package, not a hosted service.
+
+That means privacy and regulated-data obligations belong primarily to the host
+LB4 app and its operators.
+
+Recommended posture:
+
+- treat request bodies, query values, headers, and entity payloads as
+  application data owned by the host app
+- decide at the app level whether logs, telemetry, or error reporting may
+  contain identifiers or regulated fields
+- scrub or avoid sensitive payload logging before forwarding events into
+  OpenTelemetry, Sentry, CloudWatch, Datadog, or similar platforms
+- apply retention, redaction, and data-subject handling policies in the host
+  app and infrastructure
+
+The OData component provides protocol behavior and structured hooks, but it does
+not establish a privacy policy on behalf of the application that uses it.
+
 ## Suggested production checklist
 
 For a production LB4 deployment:
