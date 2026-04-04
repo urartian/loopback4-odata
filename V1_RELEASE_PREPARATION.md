@@ -122,17 +122,17 @@ Note: the default property-backed media handler intentionally keeps a bounded in
 ## 4. Configuration & Deployment ⏳
 
 ### 4.1 Production-Ready Defaults
-- [ ] Review all default configuration values for production readiness
-- [ ] Security-first defaults (strict mode, proper limits)
-- [ ] Performance-optimized defaults
-- [ ] Resource consumption limits properly set
+- [x] Review all default configuration values for production readiness
+- [x] Security-first defaults (strict mode, proper limits)
+- [x] Performance-optimized defaults
+- [x] Resource consumption limits properly set
 
 ### 4.2 Environment Configuration
-- [ ] Complete environment variable documentation
-- [ ] Configuration validation and error reporting
-- [ ] Docker-friendly configuration patterns
-- [ ] Kubernetes deployment examples
-- [ ] Health check endpoints
+- [x] Complete environment variable documentation
+- [x] Configuration validation and error reporting
+- [x] Docker-friendly configuration guidance for host LB4 apps
+- [x] Kubernetes deployment guidance for host LB4 apps
+- [x] Health check guidance for host LB4 apps
 
 ### 4.3 Observability & Monitoring
 - [ ] Structured logging documentation

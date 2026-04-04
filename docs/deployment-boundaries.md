@@ -139,6 +139,98 @@ Operational note:
 - rotating the secret invalidates existing `$skiptoken` and `$deltatoken` links
 - clients should be prepared to recover by starting a fresh read or snapshot flow
 
+## Docker-friendly configuration guidance
+
+For containerized LB4 apps, prefer environment-driven configuration instead of baking OData settings into the image.
+
+Recommended posture:
+
+- inject `ODATA_TOKEN_SECRET` through the container runtime or secret manager
+- inject PostgreSQL connection settings through environment variables
+- keep the image generic and move environment-specific values to deployment config
+- avoid checking secrets into `Dockerfile`, `.env`, or source control
+
+Typical variables for a PostgreSQL-backed deployment:
+
+```bash
+ODATA_TOKEN_SECRET=...
+PG_HOST=postgres
+PG_PORT=5432
+PG_USER=app_user
+PG_PASSWORD=...
+PG_DATABASE=app_db
+PG_SSL=false
+ENABLE_APPLY_PUSHDOWN=true
+LOG_APPLY_TELEMETRY=false
+```
+
+At the application layer, bind those variables into your datasource and OData config instead of hardcoding them:
+
+```ts
+this.bind(ODATA_BINDINGS.CONFIG).to({
+  ...current,
+  tokenSecret: process.env.ODATA_TOKEN_SECRET ?? current.tokenSecret,
+  enableApplyPushdown: process.env.ENABLE_APPLY_PUSHDOWN === 'true',
+  logApplyTelemetry: process.env.LOG_APPLY_TELEMETRY === 'true',
+});
+```
+
+The OData component does not require a custom Docker image layout. A normal LB4 container image is the right baseline.
+
+## Kubernetes deployment guidance
+
+For Kubernetes, keep the same boundary:
+
+- the host LB4 app owns manifests
+- the OData component owns config behavior and runtime expectations
+
+Recommended posture:
+
+- store `ODATA_TOKEN_SECRET` in a `Secret`
+- store non-secret tuning values in a `ConfigMap`
+- inject PostgreSQL credentials from a `Secret`
+- use a shared throttle store if you run multiple replicas and need consistent tenant quotas
+
+Suggested split:
+
+- `Secret`
+  - `ODATA_TOKEN_SECRET`
+  - `PG_PASSWORD`
+  - `REDIS_URL` when using a shared tenant throttle store
+- `ConfigMap`
+  - `PG_HOST`
+  - `PG_PORT`
+  - `PG_DATABASE`
+  - `PG_USER`
+  - `ENABLE_APPLY_PUSHDOWN`
+  - `LOG_APPLY_TELEMETRY`
+
+In multi-replica deployments, do not rely on the default in-memory throttle store when tenant quotas must apply consistently across pods. Bind a shared store such as `RedisTenantThrottleStore` instead.
+
+## Health check guidance for host LB4 apps
+
+The OData component does not register its own `/health`, `/ready`, or `/live` endpoints.
+
+That is intentional. In LB4, health endpoints belong to the host application.
+
+Recommended posture:
+
+- expose liveness/readiness endpoints from the app, not the component
+- keep liveness cheap and independent of heavy downstream checks
+- use readiness for checks that may depend on datasource or infrastructure state
+
+Practical guidance:
+
+- `liveness`
+  - process is up
+  - app boot completed
+- `readiness`
+  - app boot completed
+  - primary datasource can be reached if your operational model requires it
+  - optional shared infrastructure dependencies (for example Redis throttle store) are reachable when they are mandatory for the deployment
+
+The OData component should be treated as one dependency inside that app-level readiness decision, not as the owner of the health endpoint contract.
+
 ## PostgreSQL deployment posture
 
 For v1, PostgreSQL is the supported SQL path.
