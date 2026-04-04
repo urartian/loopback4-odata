@@ -200,17 +200,16 @@ Note: the default property-backed media handler intentionally keeps a bounded in
 ## 7. Release Engineering ⏳
 
 ### 7.1 Automated Release Process
-- [ ] CI/CD pipeline for automated testing
-- [ ] Automated npm package publishing
-- [ ] GitHub release automation
-- [ ] Changelog generation automation
-- [ ] Version bumping automation
+- [ ] CI workflow for automated verification
+- [x] Manual npm package publishing process
+- [x] Manual changelog and release notes process
+- [x] Manual version bump process
 
 ### 7.2 Release Documentation
-- [ ] Semantic versioning policy documentation
-- [ ] Release notes template
-- [ ] Changelog format standardization (Keep a Changelog)
-- [ ] Breaking change communication strategy
+- [x] Semantic versioning policy documentation
+- [x] Release notes template
+- [x] Changelog format standardization (Keep a Changelog)
+- [x] Breaking change communication strategy
 
 ### 7.3 Post-Release Support
 - [ ] Hotfix release process
