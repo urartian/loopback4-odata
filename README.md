@@ -1,6 +1,7 @@
 # @loopback/odata
 
 An extension for [LoopBack 4](https://loopback.io/doc/en/lb4/) that adds **OData protocol support**.
+This package implements **OData v4.0** for LoopBack 4 applications.
 
 - Auto-discovers OData controllers and generates CRUD routes.
 - Exposes OData-style endpoints (`/Products(1)`) and OpenAPI-compliant ones (`/Products/{id}`).
