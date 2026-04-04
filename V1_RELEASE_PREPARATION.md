@@ -189,10 +189,9 @@ Note: the default property-backed media handler intentionally keeps a bounded in
 - [x] Roadmap publication and maintenance
 
 ### 6.3 Community Engagement
-- [ ] GitHub repository optimization (topics, description, README)
-- [ ] Discussion forum setup (GitHub Discussions)
-- [ ] Communication channels (Slack, Discord, etc.)
-- [ ] Regular community updates process
+- [x] Repository metadata and README optimization
+- [x] Community contact guidance
+- [x] Lightweight community updates process
 
 **Acceptance Criteria**: Clear contribution process, active community engagement framework
 

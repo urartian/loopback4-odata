@@ -1,5 +1,6 @@
 {
   "name": "@loopback/odata",
+  "description": "LoopBack 4 extension that adds OData protocol support with decorators, generated CRUD routes, and PostgreSQL-focused production guidance.",
   "version": "0.1.0",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -37,9 +38,23 @@
   "engines": {
     "node": ">=22 <23"
   },
-  "keywords": [],
-  "author": "Artiom Sargesjan",
+  "keywords": [
+    "loopback4",
+    "loopback",
+    "odata",
+    "postgresql",
+    "typescript"
+  ],
+  "author": "Urartian LLC",
   "license": "MIT",
+  "homepage": "https://github.com/urartian/loopback4-odata#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/urartian/loopback4-odata.git"
+  },
+  "bugs": {
+    "url": "https://github.com/urartian/loopback4-odata/issues"
+  },
   "dependencies": {
     "ipaddr.js": "^2.3.0",
     "inflection": "^3.0.2",
