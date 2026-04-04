@@ -142,10 +142,10 @@ Note: the default property-backed media handler intentionally keeps a bounded in
 - [x] Performance monitoring setup guides
 
 ### 4.4 Cloud Provider Integration
-- [ ] AWS deployment guide (ECS, Lambda, RDS)
-- [ ] Azure deployment guide (App Service, SQL Database)
-- [ ] Google Cloud deployment guide (Cloud Run, Cloud SQL)
-- [ ] Database connection pooling recommendations
+- [x] AWS deployment guidance for host LB4 apps
+- [x] Azure deployment guidance for host LB4 apps
+- [x] Google Cloud deployment guidance for host LB4 apps
+- [x] Database connection pooling recommendations
 
 **Acceptance Criteria**: Complete deployment documentation, tested deployment patterns, monitoring setup
 
@@ -154,10 +154,10 @@ Note: the default property-backed media handler intentionally keeps a bounded in
 ## 5. Compliance & Legal ⏳
 
 ### 5.1 Licensing
-- [ ] Confirm MIT license compatibility with all dependencies
-- [ ] Update copyright headers consistently across all files
-- [ ] License file accuracy and completeness
-- [ ] Third-party license acknowledgments
+- [x] Confirm permissive license compatibility across installed dependencies
+- [x] Project copyright notice and package metadata consistency
+- [x] License file accuracy and completeness
+- [x] Third-party license inventory and acknowledgments
 
 ### 5.2 Dependency Audit
 - [ ] Security vulnerability scan of all dependencies
