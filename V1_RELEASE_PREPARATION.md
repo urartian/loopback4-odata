@@ -183,10 +183,10 @@ Note: the default property-backed media handler intentionally keeps a bounded in
 - [x] Contributor recognition system
 
 ### 6.2 Project Governance
-- [ ] Maintainer guidelines and responsibilities
-- [ ] Release process documentation
-- [ ] Security vulnerability disclosure process (`SECURITY.md`)
-- [ ] Roadmap publication and maintenance
+- [x] Maintainer guidelines and responsibilities
+- [x] Release process documentation
+- [x] Security vulnerability disclosure process (`SECURITY.md`)
+- [x] Roadmap publication and maintenance
 
 ### 6.3 Community Engagement
 - [ ] GitHub repository optimization (topics, description, README)
