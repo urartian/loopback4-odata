@@ -160,10 +160,10 @@ Note: the default property-backed media handler intentionally keeps a bounded in
 - [x] Third-party license inventory and acknowledgments
 
 ### 5.2 Dependency Audit
-- [ ] Security vulnerability scan of all dependencies
-- [ ] License compatibility review
-- [ ] Dependency freshness and maintenance status
-- [ ] Minimize dependency footprint where possible
+- [x] Security vulnerability scan of all dependencies
+- [x] License compatibility review
+- [x] Dependency freshness and maintenance status
+- [x] Minimize dependency footprint where possible
 
 ### 5.3 Legal Compliance
 - [ ] Export control compliance review (if applicable)
