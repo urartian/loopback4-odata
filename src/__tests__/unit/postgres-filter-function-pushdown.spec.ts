@@ -6,6 +6,7 @@ import { Entity, juggler, model, property } from '@loopback/repository';
 import {
   buildPostgresFilterCountQuery,
   buildPostgresFilterIdQuery,
+  supportsPostgresLambdaPushdown,
 } from '../../util/postgres-lambda-pushdown';
 import { ParsedExpression } from '../../services/odata-query-parser.service';
 
@@ -32,6 +33,23 @@ describe('Postgres $filter function pushdown', () => {
       execute: async () => [],
     } as unknown as juggler.DataSource;
   }
+
+  it('detects Postgres support from connector settings and execute capability', () => {
+    assert.equal(
+      supportsPostgresLambdaPushdown({
+        connector: {settings: {name: 'postgresql'}},
+        execute: async () => [],
+      } as unknown as juggler.DataSource),
+      true,
+    );
+
+    assert.equal(
+      supportsPostgresLambdaPushdown({
+        connector: {name: 'postgresql'},
+      } as unknown as juggler.DataSource),
+      false,
+    );
+  });
 
   it('builds SQL for trim(...) comparisons', () => {
     const dataSource = stubPostgresDataSource();
@@ -159,5 +177,81 @@ describe('Postgres $filter function pushdown', () => {
     assert('sql' in result);
     assert.match(result.sql, /UPPER\s*\(\s*r\."name"\s*\)\s+IS\s+NOT\s+NULL/i);
     assert.equal(result.params.length, 0);
+  });
+
+  it('declines non-Postgres datasources and unsupported root where clauses', () => {
+    const expr: ParsedExpression = {
+      operator: 'transformcmp',
+      transform: 'tolower',
+      field: 'name',
+      comparator: 'eq',
+      value: 'x',
+    };
+
+    const nonPostgres = buildPostgresFilterIdQuery({
+      dataSource: {
+        connector: {name: 'memory'},
+        execute: async () => [],
+      } as unknown as juggler.DataSource,
+      modelCtor: Widget,
+      expression: expr,
+      where: undefined,
+      order: undefined,
+      limit: 10,
+      offset: 0,
+    });
+    assert.deepEqual(nonPostgres, {declineReason: 'non-postgres'});
+
+    const unsupportedWhere = buildPostgresFilterCountQuery({
+      dataSource: stubPostgresDataSource(),
+      modelCtor: Widget,
+      expression: expr,
+      where: {name: {regexp: 'x'}} as any,
+    });
+    assert.deepEqual(unsupportedWhere, {declineReason: 'unsupported-root-where'});
+  });
+
+  it('declines unsupported ordering and composite identifiers', () => {
+    @model()
+    class CompositeWidget extends Entity {
+      @property({id: true, type: 'number'})
+      id!: number;
+
+      @property({id: true, type: 'string'})
+      region!: string;
+
+      @property({type: 'string'})
+      name!: string;
+    }
+
+    const expr: ParsedExpression = {
+      operator: 'transformcmp',
+      transform: 'tolower',
+      field: 'name',
+      comparator: 'eq',
+      value: 'x',
+    };
+
+    const unsupportedOrder = buildPostgresFilterIdQuery({
+      dataSource: stubPostgresDataSource(),
+      modelCtor: Widget,
+      expression: expr,
+      where: undefined,
+      order: ['name SIDEWAYS'],
+      limit: 10,
+      offset: 0,
+    });
+    assert.deepEqual(unsupportedOrder, {declineReason: 'unsupported-order'});
+
+    const compositeId = buildPostgresFilterIdQuery({
+      dataSource: stubPostgresDataSource(),
+      modelCtor: CompositeWidget,
+      expression: expr,
+      where: undefined,
+      order: undefined,
+      limit: 10,
+      offset: 0,
+    });
+    assert.deepEqual(compositeId, {declineReason: 'composite-or-missing-id'});
   });
 });

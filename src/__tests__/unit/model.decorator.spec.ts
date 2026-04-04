@@ -33,7 +33,7 @@ describe('@odataModel decorator', () => {
           strict: true,
           postgresql: { table: 'my_table' },
           indexes: {
-            idx_sku: { keys: { sku: 1 }, options: { unique: true } },
+            idxSku: { keys: { sku: 1 }, options: { unique: true } },
           },
         },
       },
@@ -59,7 +59,7 @@ describe('@odataModel decorator', () => {
       @model({ settings: { strict: true } })
       class Conflicting extends Entity {}
 
-      void Conflicting;
+      throw new Error(`Expected decorator application to fail for ${Conflicting.name}.`);
     } catch (err) {
       thrown = err;
     }

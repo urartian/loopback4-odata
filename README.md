@@ -9,7 +9,11 @@ An extension for [LoopBack 4](https://loopback.io/doc/en/lb4/) that adds **OData
 - Advanced `$apply` support including chained transformations, navigation-path aggregates, and safe in-memory fallbacks when connector pushdown is unavailable.
 - Streams `$batch` multipart payloads end-to-end, preserving binary sub-responses (PDFs, CSV exports, etc.) without re-encoding them (JSON batches base64-encode binary bodies and include their `Content-Type`).
 
+For v1, the officially documented and supported SQL path is PostgreSQL. Other connector-specific paths that may still exist in the codebase are not part of the supported surface yet.
+
 Currently in **phase 4** — CRUD endpoints are stable and advanced features like `$expand`, `$count`, `$batch`, Actions/Functions, server-driven paging (`$skiptoken`), and delta links (`$deltatoken`) are available. Focus is now on rounding out the filter grammar, improving configurability, enriching the CSDL, and hardening path rewriting.
+
+Community and support guidance lives in [docs/community.md](/workspace/docs/community.md).
 
 ---
 
@@ -21,7 +25,7 @@ npm install @loopback/odata
 npm install @loopback/core@^7 @loopback/repository@^8 @loopback/rest@^15 @loopback/boot@^8
 ```
 
-> Requires Node.js 18.x or 20.x and the host application must supply compatible versions of `@loopback/boot`, `@loopback/core`, `@loopback/repository`, and `@loopback/rest` (the extension lists them as peer dependencies to avoid duplicate copies).
+> Requires Node.js 22.x and the host application must supply compatible versions of `@loopback/boot`, `@loopback/core`, `@loopback/repository`, and `@loopback/rest` (the extension lists them as peer dependencies to avoid duplicate copies).
 
 ## Getting Started
 
@@ -225,6 +229,23 @@ OData endpoints return errors using an OData error payload (for example `{"error
 - If a downstream connector/database error bubbles up with its own string `err.code`, it is preserved as diagnostics under `error.innererror.dbCode` (not as `error.code`).
 
 The authoritative list of stable codes lives in `src/odata-error-codes.ts` (exported as `ODataErrorCodes` from `@loopback/odata`).
+
+Stable codes are grouped as follows:
+
+- Core HTTP-derived codes: `BadRequest`, `Unauthorized`, `Forbidden`, `NotFound`, `Conflict`, `MethodNotAllowed`, `PreconditionFailed`, `PreconditionRequired`, `PayloadTooLarge`, `NotImplemented`, `InternalServerError`, `NotAcceptable`, `UnsupportedMediaType`, `UnprocessableEntity`, `Gone`, `TooManyRequests`, `ServiceUnavailable`.
+  These are the default response codes emitted when no more specific OData code is attached to the error.
+- Batch and transport codes: `InvalidUrl`, `InvalidMethod`, `ResponseTooLarge`, `TooManyRedirects`, `BatchExecutionError`, `BatchSubRequestTimeout`, `batch-operation-limit-exceeded`, `changeset-operation-limit-exceeded`, `batch-payload-size-limit-exceeded`, `batch-part-size-limit-exceeded`, `batch-depth-limit-exceeded`.
+  These identify malformed batch requests, batch guardrail violations, redirect problems, timeouts, and oversized responses.
+- Preferences, tenancy, and transaction codes: `PreferenceNotSupported`, `TenantResolutionFailed`, `TransactionCommitFailed`, `TransactionsNotSupported`, `MultiDataSourceChangesetNotSupported`, `AtomicityGroupNotSupported`.
+  These cover unsupported client preferences, tenant resolution failures, and transactional guarantees that cannot be honored.
+- Content-ID resolution code: `content-id-reference-invalid`.
+  This is returned when a `$batch` request references an unknown or invalid `Content-ID`.
+- Query, lambda, pushdown, and guardrail codes: `lambda-or-unsupported`, `nested-lambda-depth-exceeded`, `lambda-alias-prefix-required`, `pushdown-join-count-exceeded`, `through-relation-unsupported`, `navigation-filter-requires-pushdown`, `postfilter-requires-pushdown`, `postfilter-top-required`, `postfilter-scan-limit-exceeded`, `lambda-pushdown-not-eligible`, `lambda-scan-limit-exceeded`.
+  These describe unsupported query shapes, lambda validation failures, and cases where bounded in-memory fallback or SQL pushdown constraints were exceeded.
+- Typed literal validation codes: `invalid-guid-literal`, `invalid-date-literal`, `invalid-datetimeoffset-literal`, `invalid-int64-literal`, `invalid-decimal-literal`, `in-list-too-large`, `in-operator-requires-list`, `in-operator-requires-literal-list-items`, `in-operator-requires-non-empty-list`.
+  These are used when OData literals cannot be parsed safely or when `in (...)` operands violate validation rules.
+
+For client code, prefer importing `ODataErrorCodes` and comparing against the exported constants instead of hard-coding string literals.
 
 ### Authentication & Authorization
 
@@ -1115,7 +1136,7 @@ Run `npm test` to compile the TypeScript specs and execute the unit suite. Accep
 - [x] Relational expansion via `$expand`
 - [x] Inline and standalone `$count`
 - [x] `$batch` endpoint (JSON and multipart/mixed)
-- Transactions are attempted for changesets (`atomicityGroup`). The component now caches whether each entity set's datasource can open LoopBack transactions: connectors such as PostgreSQL/MySQL succeed, while the in-memory connector is marked as non-transactional the first time a client attempts an atomicity group. Once a datasource is confirmed non-transactional the controller refuses future atomicity groups touching that entity set without instantiating its repository. When a datasource lacks transactions the affected changeset is rejected up front with `501 Not Implemented` and a `BatchExecutionError`; omit `atomicityGroup` to accept best-effort processing or switch to a transactional connector for true atomicity. `$metadata` surfaces the service-wide capability via the EntityContainer annotation `Org.OData.Capabilities.V1.BatchSupported/ChangeSetsSupported` (set to `true` only when every registered entity set is backed by a transactional datasource) and per-entity-set hints via `LoopBack.V1.BatchCapabilities.ChangeSetsSupported`, so clients can decide whether to emit change sets globally or only for specific entity sets.
+- Transactions are attempted for changesets (`atomicityGroup`). The component now caches whether each entity set's datasource can open LoopBack transactions: transactional connectors such as PostgreSQL succeed, while the in-memory connector is marked as non-transactional the first time a client attempts an atomicity group. Once a datasource is confirmed non-transactional the controller refuses future atomicity groups touching that entity set without instantiating its repository. When a datasource lacks transactions the affected changeset is rejected up front with `501 Not Implemented` and a `BatchExecutionError`; omit `atomicityGroup` to accept best-effort processing or switch to a transactional connector for true atomicity. `$metadata` surfaces the service-wide capability via the EntityContainer annotation `Org.OData.Capabilities.V1.BatchSupported/ChangeSetsSupported` (set to `true` only when every registered entity set is backed by a transactional datasource) and per-entity-set hints via `LoopBack.V1.BatchCapabilities.ChangeSetsSupported`, so clients can decide whether to emit change sets globally or only for specific entity sets.
 - [x] Honors `Prefer: return=minimal|representation` for write operations and emits `OData-Version`/`Preference-Applied` headers by default
 - [x] OData-compliant error payloads (`odata.error`) with 501 `PreferenceNotSupported` for unsupported preferences like `respond-async`
 - [x] Actions & Functions decorators with auto CSDL generation
@@ -1333,9 +1354,9 @@ this.bind(ODATA_BINDINGS.CONFIG).to({
 For mixed datasources (or per-entity differences), prefer per-entity-set overrides:
 
 ```ts
-import { FILTER_FUNCTIONS_POSTGRES, type EntitySetDef } from '@loopback/odata';
+import { FILTER_FUNCTIONS_POSTGRES, type ODataEntitySetConfig } from '@loopback/odata';
 
-export const PurchasesSet: EntitySetDef = {
+export const PurchasesSet: ODataEntitySetConfig = {
   name: 'Purchases',
   modelCtor: Purchase,
   capabilities: { filterFunctions: FILTER_FUNCTIONS_POSTGRES },
@@ -1362,10 +1383,12 @@ this.bind(ODATA_BINDINGS.CONFIG).to({
 
 Spreading the current config ensures sensitive settings such as `tokenSecret` remain intact unless you explicitly replace them.
 
-Per-entity guardrails can be applied through the registry definition. Entity-level limits override the global pagination block, allowing you to relax or tighten caps on a per-feed basis:
+Per-entity guardrails can be applied through the entity-set config you register with the registry binding. Entity-level limits override the global pagination block, allowing you to relax or tighten caps on a per-feed basis:
 
 ```ts
-const ProductsSet: EntitySetDef<Product> = {
+import { type ODataEntitySetConfig } from '@loopback/odata';
+
+const ProductsSet: ODataEntitySetConfig<Product> = {
   name: 'Products',
   modelCtor: Product,
   repositoryBindingKey: 'repositories.ProductRepository',
@@ -1400,7 +1423,7 @@ const ProductsSet: EntitySetDef<Product> = {
 - Sub-responses that exceed `maxResponseBodyBytes` are aborted in-process and return `413 ResponseTooLarge` so a single oversized entry cannot exhaust server memory even when the handler streams a large binary payload.
 - When the combined buffered responses and the serialized JSON/multipart payload would exceed `maxResponsePayloadBytes`, the controller rejects the entire batch with `413 Payload Too Large` before serialization begins, preventing attackers from flooding the process with many near-limit responses in a single request.
 - `$batch` limits are enforced while parsing the stream: once the cumulative payload or a single part exceeds the configured budget the server aborts immediately with `413 Payload Too Large`.
-- `$batch` atomicity detection is connector-aware: entity sets backed by datasources that expose `beginTransaction` (for example PostgreSQL or MySQL) are marked as transactional after the first successful changeset, while datasources without transactions (such as the in-memory connector) are marked as non-transactional and future atomicity groups targeting them are rejected immediately with `501 Not Implemented`. The generated CSDL advertises the service-wide capability (per spec) on the EntityContainer via `Org.OData.Capabilities.V1.BatchSupported/ChangeSetsSupported`, which flips to `true` only when every registered entity set is backed by a transactional datasource, and emits per-entity-set annotations under `LoopBack.V1.BatchCapabilities.ChangeSetsSupported` so tools can decide which entity sets allow change sets.
+- `$batch` atomicity detection is connector-aware: entity sets backed by datasources that expose `beginTransaction` (for example PostgreSQL) are marked as transactional after the first successful changeset, while datasources without transactions (such as the in-memory connector) are marked as non-transactional and future atomicity groups targeting them are rejected immediately with `501 Not Implemented`. The generated CSDL advertises the service-wide capability (per spec) on the EntityContainer via `Org.OData.Capabilities.V1.BatchSupported/ChangeSetsSupported`, which flips to `true` only when every registered entity set is backed by a transactional datasource, and emits per-entity-set annotations under `LoopBack.V1.BatchCapabilities.ChangeSetsSupported` so tools can decide which entity sets allow change sets.
 - `writeTransactions`: When enabled, non-`$batch` write requests (create/update/delete, deep insert/update, `$ref` link/unlink, `$value` media metadata updates) run inside a datasource transaction when the connector supports `beginTransaction` (recommended for PostgreSQL). Writes spanning multiple datasources are rejected by default (`rejectMultiDataSource: true`). External media stores (e.g., S3) remain best-effort side effects; the database transaction only covers repository writes.
 - `onDeltaTokenInvalid(event)`: Optional callback fired whenever a client supplies an expired, tampered, or mismatched `$deltatoken`. Useful for alerting/telemetry when secrets rotate.
 - `tenantResolver(request)`: Function that extracts a tenant/customer identifier from an incoming request (for example `req.user?.tenantId` or `req.get('x-tenant-id')`). When combined with `tenantQuotas`, the server enforces per-tenant throttling. If the resolver throws, the request now fails fast with `400 TenantResolutionFailed` so malformed or malicious headers cannot fall back to the unrestricted default bucket.
@@ -1433,7 +1456,7 @@ app.bind(ODATA_BINDINGS.CONFIG).to({
 
 With the snippet above every OData controller automatically throttles requests per tenant:
 
-- If a header is missing, traffic goes through the default bucket (`'default'`).
+- If `tenantResolver` returns an empty/undefined value, the request fails with `400 TenantResolutionFailed` instead of falling back to a shared bucket.
 - Premium tenants inherit the global limits unless an override is specified.
 - Configure `tenantQuotas.maxLeaseRefreshers` (default `1000`) to guard against unbounded lease refresh timers. When the cap is reached, additional tenants are rejected until current requests finish.
 - All operations (reads, writes, deletes, `$ref`) participate, and concurrency slots are released when the response finishes.
@@ -1472,7 +1495,7 @@ Any custom store only needs to implement the `TenantThrottleStore` interface (al
 - `logApplyTelemetry`: When `true`, emits a concise debug line for every `$apply` stage showing whether it was pushed down or processed in-memory (default: `false`).
 - `onApplyTelemetry(event)`: Structured hook invoked after each stage with `{entitySet, stageIndex, stageCount, mode, rows, durationMs, joinCount, reason}` so you can stream analytics into your own logging or monitoring pipeline.
 - `maxApplyNavigationFanout`: Maximum number of navigation combinations the in-memory fallback will materialize per stage before returning `400 Bad Request` (default: `1000`).
-- `enableApplyPushdown`: Opt-in switch that negotiates `$apply` pushdown with each datasource. When enabled, supported connectors (currently PostgreSQL and MySQL/MariaDB) execute `groupby()/aggregate()` pipelines in the database. Combine with `@odataModel({applyPushdown: true})` or `EntitySetRegistry.register({applyPushdown: true})` for per-entity control.
+- `enableApplyPushdown`: Opt-in switch that negotiates `$apply` pushdown with each datasource. When enabled, the supported v1 connector path is PostgreSQL, which executes `groupby()/aggregate()` pipelines in the database. Combine with `@odataModel({applyPushdown: true})` or an `ODataEntitySetConfig` registered through `ODATA_BINDINGS.ENTITY_SET_REGISTRY` for per-entity control.
 - `maxExpandDepth`: Maximum allowed `$expand` nesting depth; requests that exceed it return `400 Bad Request`.
 - `maxFilterPatternLength`: Caps underscore patterns generated when translating supported `$filter` functions like `length()` and `substring()` (including inside `$apply=filter(...)`) into LoopBack `like` clauses (default: `10000`). Requests that exceed it return `400 Bad Request`.
 - `maxSubstringStart`: Maximum allowed `substring(field, start, ...)` start index when translating to patterns (default: `10000`). Requests that exceed it return `400 Bad Request`.
@@ -1486,9 +1509,9 @@ Any custom store only needs to implement the `TenantThrottleStore` interface (al
 - `namespace`: Overrides the CSDL schema namespace (`Default` by default). All generated types live under this namespace.
 - `entityContainerName`: Controls the `<EntityContainer>` / JSON entity container name (`DefaultContainer` by default).
 - `namespaceAlias`: Adds the optional `Alias` attribute to the CSDL schema so clients can refer to types using a short prefix.
-- `capabilities`: Sets default service-level annotations such as supported filter functions, countability, permissions, stream support, and now OData capability records for inserts/updates/deletes/search via the `insertRestrictions`, `updateRestrictions`, `deleteRestrictions`, and `searchRestrictions` options. Values can be overridden per entity set via `EntitySetDef.capabilities`.
+- `capabilities`: Sets default service-level annotations such as supported filter functions, countability, permissions, stream support, and now OData capability records for inserts/updates/deletes/search via the `insertRestrictions`, `updateRestrictions`, `deleteRestrictions`, and `searchRestrictions` options. Values can be overridden per entity set via `ODataEntitySetConfig.capabilities`.
 - `enableDeepInsert`: Opt-in global switch for accepting nested payloads (deep insert). When `true`, every entity set defaults to deep insert unless overridden per model. When `false` (default), only entity sets with `@odataModel({deepInsert: true})` participate.
-- `enableDeepUpdate`: Opt-in global switch for deep updates (PATCH payloads containing related entities). Entity sets can override with `@odataModel({deepUpdate: true})` or `EntitySetRegistry.register({deepUpdate: true})`.
+- `enableDeepUpdate`: Opt-in global switch for deep updates (PATCH payloads containing related entities). Entity sets can override with `@odataModel({deepUpdate: true})` or an `ODataEntitySetConfig` registered through `ODATA_BINDINGS.ENTITY_SET_REGISTRY`.
 - `maxDeepInsertDepth`: Maximum recursion depth for deep insert traversal (default: `10`). Requests exceeding the limit are rejected with `400 Bad Request` to prevent runaway graphs.
 - `maxDeepUpdateDepth`: Maximum recursion depth for deep update traversal (defaults to `maxDeepInsertDepth` when not set).
 - `enableNavigationRefEndpoints`: Set to `false` to skip registration of navigation `$ref` routes if you prefer to manage linking manually (default: `true`).
@@ -1543,7 +1566,26 @@ app.bind(ODATA_BINDINGS.CONFIG).to({
 });
 ```
 
-Entity-set specific overrides are available via `EntitySetRegistry.register`:
+Example: `$filter` guardrails
+
+```ts
+app.bind(ODATA_BINDINGS.CONFIG).to({
+  ...current,
+  filter: {
+    maxInListItems: 200,
+    pushdownMaxJoinCount: 6,
+    maxPostFilterScanRows: 5000,
+    requireTopWhenPostFilter: true,
+  },
+});
+```
+
+- `maxInListItems` limits the number of literal values accepted by the OData `in (...)` operator.
+- `pushdownMaxJoinCount` caps join-heavy navigation filter pushdown before the runtime declines back to fallback logic.
+- `maxPostFilterScanRows` bounds in-memory post-filter evaluation so unsupported filters cannot trigger unbounded scans.
+- `requireTopWhenPostFilter` forces clients to provide `$top` when a request needs post-filter evaluation, helping keep fallback work predictable.
+
+Entity-set specific overrides are available via the registry binding (`ODATA_BINDINGS.ENTITY_SET_REGISTRY`) using `ODataEntitySetConfig`:
 
 - `capabilities`: refine or override filter functions, countability, navigation restrictions, permissions, or stream support for a single entity set.
 - `hasStream`: mark the backing entity type as streaming (`Org.OData.Core.V1.HasStream`).
@@ -1586,7 +1628,7 @@ Inspect the processed spec via `await app.restServer.getApiSpec()` or by request
 
 LoopBack OData services can expose [$value media streams](https://www.odata.org/documentation/odata-version-3-0/media-entities/) by decorating a model with `@odataModel({ hasStream: true })`. A few optional metadata properties help the runtime locate content and track metadata:
 
-- `mediaField`: Property name that stores the binary payload (Buffer/Uint8Array/Readable). When provided, the booter auto-registers a `PropertyBackedMediaHandler` that persists streams inside the entity itself.
+- `mediaField`: Property name that stores the binary payload (Buffer/Uint8Array/Readable). When provided, the booter auto-registers a `PropertyBackedMediaHandler` that persists streams inside the entity itself. This default path is meant for bounded payload sizes, not very large file ingestion.
 - `mediaContentTypeField`: String property containing the MIME type returned by `$value` (e.g., `image/png`).
 - `mediaEtagField`: Property holding the stream-specific ETag; enables conditional headers (`If-None-Match`, `If-Match`) for media operations.
 - `mediaLengthField`: Numeric property storing the byte length; when set the controller emits `Content-Length` without fully buffering the stream.
@@ -1597,7 +1639,7 @@ When `mediaEtagField` is configured the generated `$metadata` advertises `@Org.O
 
 When handling uploads the controller prefers metadata reported by the `ODataMediaHandler` over the incoming HTTP headers. Handlers can return `contentType`, `length`, and `etag` from their `write()` result to override the stored values. This enables sniffing binary payloads server-side, emitting custom weak ETags, or correcting bogus `Content-Type`/`Content-Length` headers before persisting the entity’s metadata and `@odata.mediaContentType`.
 
-When `mediaField` is configured the handler writes the uploaded stream directly into that property while enforcing `mediaMaxPayloadBytes` to guard against unbounded buffering. Make sure the backing column is a binary type in your datasource (e.g., PostgreSQL `bytea`, MySQL `LONGBLOB`, MSSQL `VARBINARY`). Use the connector-specific metadata to request the correct type:
+When `mediaField` is configured the default property-backed handler buffers the upload into memory and then writes the resulting `Buffer` into that property while enforcing `mediaMaxPayloadBytes` to guard against unbounded buffering. For the supported v1 PostgreSQL path, make sure the backing column is `bytea`. Use connector metadata like this:
 
 ```ts
 @property({
@@ -1611,7 +1653,9 @@ When `hasStream` is enabled the booter inspects the repository binding and regis
 
 - If the repository prototype implements `getMedia(id, options)` / `setMedia(id, stream, metadata, options)` (and optionally `deleteMedia`), the booter wires a `RepositoryMediaHandlerAdapter` that forwards reads/writes into those hooks.
 - Otherwise, if `mediaField` is configured, a request-scoped `PropertyBackedMediaHandler` is bound which reads/writes the binary column directly.
-- You can always bind your own handler to `def.mediaHandlerBindingKey` to integrate object storage, CDNs, etc. Custom handlers must implement the `ODataMediaHandler` interface exported from `src/services/odata-media-handler.ts`.
+- You can always bind your own handler to the configured `mediaHandlerBindingKey` to integrate object storage, CDNs, etc. Custom handlers must implement the `ODataMediaHandler` interface exported from `@loopback/odata`.
+
+For large-file scenarios, prefer a custom streaming handler over the default property-backed path. The default handler intentionally prioritizes safe bounded buffering with a conservative `10 MiB` limit. If your production requirements include uploads well above that range, route the stream into external storage or another sink inside a custom `ODataMediaHandler` instead of raising the in-memory limit indefinitely.
 
 Example: property-backed storage that tracks MIME type/length/ETag on the entity:
 
@@ -1743,7 +1787,7 @@ If you need a different page size, override `pageSize` at startup or per test us
 
 ### Delta Links
 
-When `enableDelta` is `true`, the first page of a collection includes an `@odata.deltaLink`. Clients can store that URL and call it later to retrieve only the entities that changed since the last sync. The implementation relies on each entity set having a stable change stamp (the first configured ETag property, or the field supplied via `@odataModel({delta: {field: ...}})` / `EntitySetDef.deltaField`). Delta links are signed with the same `tokenSecret`; tampering or using an expired token (see `deltaTokenTtl`) returns `400 Invalid $deltatoken`.
+When `enableDelta` is `true`, the first page of a collection includes an `@odata.deltaLink`. Clients can store that URL and call it later to retrieve only the entities that changed since the last sync. The implementation relies on each entity set having a stable change stamp (the first configured ETag property, or the field supplied via `@odataModel({delta: {field: ...}})` / `ODataEntitySetConfig.deltaField`). Delta links are signed with the same `tokenSecret`; tampering or using an expired token (see `deltaTokenTtl`) returns `400 Invalid $deltatoken`.
 
 ```http
 GET /odata/Products
@@ -1824,27 +1868,20 @@ Multi-stage pipeline with navigation joins and chained groupings (runs entirely 
 curl "http://127.0.0.1:3001/odata/OrderItems?\$apply=groupby((order/customer/country),aggregate(order/total%20with%20sum%20as%20TotalSpend))/filter(TotalSpend%20gt%202000)/groupby((order/customer/country),aggregate(TotalSpend%20with%20max%20as%20PeakSpend))/orderby(PeakSpend%20desc)"
 ```
 
-### `$apply` Pushdown (PostgreSQL & MySQL)
+### `$apply` Pushdown (PostgreSQL)
 
 - Pushdown is **opt-in**. Out of the box, `$apply` executes in memory. This is functionally correct but resource intensive; enable pushdown for production workloads. Once enabled, the SQL executors keep entire pipelines (multiple `groupby`/`aggregate` stages plus `filter`, `orderby`, `skip`, `top`) inside the database, emitting native `HAVING`, `ORDER BY`, `LIMIT`, and `OFFSET`.
-- Set `enableApplyPushdown: true` on `ODataConfig` to negotiate pushdown across datasources, or opt in per model with `@odataModel({applyPushdown: true})` / per entity set via `EntitySetRegistry.register({applyPushdown: true})`.
-- PostgreSQL **and** MySQL/MariaDB are supported natively today. The extension inspects each repository datasource and, when it detects a compatible connector, routes aggregation pipelines through a SQL executor built on `dataSource.execute(...)`.
-- Navigation aggregates are compiled into `LEFT JOIN` chains, so queries like `groupby((order/customer/country), aggregate(order/total with sum as TotalSpend))` continue to run server-side even when later stages reference aliases or regroup the intermediate result set. On MySQL the executor uses backticked identifiers and `?` placeholders, while PostgreSQL uses quoted identifiers and `$n` parameters.
+- Set `enableApplyPushdown: true` on `ODataConfig` to negotiate pushdown across datasources, or opt in per model with `@odataModel({applyPushdown: true})` / per entity set via an `ODataEntitySetConfig` registered through `ODATA_BINDINGS.ENTITY_SET_REGISTRY`.
+- PostgreSQL is the supported native pushdown path for v1. The extension inspects each repository datasource and, when it detects a compatible PostgreSQL connector, routes aggregation pipelines through a SQL executor built on `dataSource.execute(...)`.
+- Navigation aggregates are compiled into `LEFT JOIN` chains, so queries like `groupby((order/customer/country), aggregate(order/total with sum as TotalSpend))` continue to run server-side even when later stages reference aliases or regroup the intermediate result set. The PostgreSQL executor uses quoted identifiers and `$n` parameters.
 - Stage-level pagination and filters stay in SQL. Post-aggregate `filter(...)` segments translate to `HAVING` clauses, and `skip`/`top` stages map to `OFFSET`/`LIMIT` inside each stage rather than being re-applied in memory.
 - Telemetry hooks (`logApplyTelemetry: true` or a custom `onApplyFallback`) now capture per-stage execution mode, duration, row counts, and join counts so you can audit when a pipeline leaves the database.
 - Table and column names are inferred automatically from the connector metadata (including the default lowercase conversion), so the usual LoopBack naming conventions work without additional annotations. Override the metadata only when you map models to non-standard table names.
-- Unsupported scenarios automatically fall back to the in-memory executor. When `logApplyFallbacks` is enabled (or `onApplyFallback` is provided), additional events (`executor-declined`, `executor-error`, `missing-stage-filters`, `missing-stage-pagination`) surface whenever the pushdown path declines a request. Use these signals to monitor unexpected CPU/memory usage across both dialects.
+- Unsupported scenarios automatically fall back to the in-memory executor. When `logApplyFallbacks` is enabled (or `onApplyFallback` is provided), additional events (`executor-declined`, `executor-error`, `missing-stage-filters`, `missing-stage-pagination`) surface whenever the pushdown path declines a request. Use these signals to monitor unexpected CPU/memory usage.
 - Capability metadata reflects reality: entity sets only emit `Org.OData.Capabilities.V1.ApplySupported` when pushdown is active, so BI clients can rely on the annotation.
 - Custom connectors can participate by registering their own executor with `ODataApplyExecutorRegistry`. Executors decide at runtime whether they can satisfy a pipeline and can signal unsupported combinations by returning `undefined`, preserving the existing fallback behavior.
 
-To try pushdown with the example app (requires PostgreSQL or MySQL running locally):
-
-```bash
-USE_MYSQL=true MYSQL_HOST=127.0.0.1 MYSQL_USER=root MYSQL_PASSWORD=pass MYSQL_DATABASE=odata_dev \
-ENABLE_APPLY_PUSHDOWN=true LOG_APPLY_TELEMETRY=true npm run dev
-```
-
-Or, for PostgreSQL:
+To try pushdown with the example app (requires PostgreSQL running locally):
 
 ```bash
 USE_POSTGRES=true PG_HOST=127.0.0.1 PG_USER=postgres PG_PASSWORD=pass PG_DATABASE=odata_dev \
@@ -1994,7 +2031,7 @@ Configuration:
 
 > **Composition TL;DR**
 >
-> - Composition is **explicitly configured** (not inferred from required FKs): a relation is “composition” when it appears under `composition.*.relations` (global config, `@odataModel` decorator, or `EntitySetDef.composition`) after config resolution.
+> - Composition is **explicitly configured** (not inferred from required FKs): a relation is “composition” when it appears under `composition.*.relations` (global config, `@odataModel` decorator, or `ODataEntitySetConfig.composition`) after config resolution.
 > - It affects **delete semantics** (database-enforced via `ON DELETE ...` FKs, or application-enforced via configured delete policies).
 > - It also affects **write semantics** (regardless of enforcement mode): `$ref` link/unlink is rejected, and changing the child’s parent FK is rejected (direct `PATCH` and parent `PATCH` deep updates).
 >
@@ -2124,7 +2161,7 @@ If you can’t rely on DB-enforced referential actions (or you want explicit dep
   - `restrict` (default): reject parent deletes when composed children exist (`409 Conflict`)
   - `cascade`: delete composed children depth-first (and nested composed children) before deleting the parent
 
-Configuration is layered and merged per entity set with the following precedence (highest wins): registry (`EntitySetDef.composition`) → decorator (`@odataModel({composition})`) → global per-set (`ODataConfig.composition.entitySets`) → global default (`ODataConfig.composition.defaultDeletePolicy`).
+Configuration is layered and merged per entity set with the following precedence (highest wins): registry (`ODataEntitySetConfig.composition`) → decorator (`@odataModel({composition})`) → global per-set (`ODataConfig.composition.entitySets`) → global default (`ODataConfig.composition.defaultDeletePolicy`).
 
 Example (global config):
 
@@ -2201,7 +2238,7 @@ For `hasOne`, use `PUT /EntitySet(key)/Relation/$ref` to link and `DELETE /Entit
 
 Composition relations:
 
-- A relation is treated as composition when configured under `composition.*.relations` (global config, `@odataModel` decorator, or `EntitySetDef.composition`), i.e. when it appears in the resolved composition config.
+- A relation is treated as composition when configured under `composition.*.relations` (global config, `@odataModel` decorator, or `ODataEntitySetConfig.composition`), i.e. when it appears in the resolved composition config.
 - `$ref` link/unlink is rejected with `409 Conflict`; create the child under the parent (or set the parent FK on `POST /ChildSet`) and delete children via `DELETE /ChildSet(key)`.
 - Re-parenting by `PATCH`ing the child’s parent FK is rejected with `409 Conflict`.
 
@@ -2342,6 +2379,18 @@ this.bind(ODATA_BINDINGS.CONFIG).to({
 - The correlation block captures request IDs from headers (default `x-correlation-id`), optionally echoes them back on responses, and makes them available to repositories and telemetry emitters so your existing log aggregation or tracing tools can stitch events together.
 
 Use `ODATA_BINDINGS.LOGGER` to plug in your preferred logger (e.g., Pino, Winston) and enrich telemetry events with tenant IDs or custom tags before forwarding them to your observability stack.
+
+### LB4 Transport Security Responsibilities
+
+This component secures OData-specific behavior such as query guardrails, signed paging/delta tokens, payload limits, and normalized error envelopes. In a LoopBack 4 application, transport-wide HTTP policy still belongs to the host `RestApplication` (or your ingress / reverse proxy), not the OData component itself.
+
+For production LB4 deployments, configure these at the application layer:
+
+- CORS policy with the origins, methods, and headers your app actually allows.
+- Security headers such as `X-Content-Type-Options`, `X-Frame-Options`, `Content-Security-Policy`, and `Strict-Transport-Security`.
+- TLS termination and proxy/header trust policy.
+
+The OData component intentionally does not set these headers globally because doing so inside a reusable LB4 component would silently override host-application security policy.
 
 ### Configuration reference
 

@@ -1187,6 +1187,7 @@ describe('OData component acceptance', () => {
 
     await new Promise((resolve) => setTimeout(resolve, 1200));
     const expired = await client.get(deltaLink).expect(410);
+    expect(expired.body?.error?.code).to.equal('Gone');
     expect(expired.body?.error?.message).to.match(/expired/i);
     expect(
       events.some((event) => event.code === 'expired' && event.entitySet === 'Products'),

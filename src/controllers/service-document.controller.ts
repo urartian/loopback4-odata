@@ -1,5 +1,5 @@
 import { inject } from '@loopback/core';
-import { get, Response, RestBindings, Request } from '@loopback/rest';
+import { get, Response, RestBindings, Request, HttpErrors } from '@loopback/rest';
 import { ODATA_BINDINGS } from '../keys';
 import { EntitySetRegistry } from '../registry/entityset-registry';
 import { ODataConfig } from '../types';
@@ -8,6 +8,7 @@ import { markUndocumentedOperation } from '../util/openapi';
 import { acceptsAnyMediaType } from '../util/accept';
 import { normalizeBasePath } from '../util/base-path';
 import { ODataErrorCodes } from '../odata-error-codes';
+import { createODataHttpError } from '../util/odata-http-error';
 
 const SERVICE_DOCUMENT_OPERATION_SPEC = markUndocumentedOperation({
   responses: {
@@ -69,10 +70,11 @@ export class ODataServiceDocumentController {
       const accept = Array.isArray(acceptHeader) ? acceptHeader.join(',') : acceptHeader;
       if (accept?.trim()) {
         if (!acceptsAnyMediaType(accept, ['application/json'])) {
-          const err: any = new Error('NotAcceptable');
-          err.statusCode = 406;
-          err.code = ODataErrorCodes.NotAcceptable;
-          throw err;
+          throw createODataHttpError(
+            HttpErrors.NotAcceptable,
+            ODataErrorCodes.NotAcceptable,
+            'Accept header must allow application/json.',
+          );
         }
       }
     }

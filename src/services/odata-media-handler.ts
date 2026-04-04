@@ -3,18 +3,23 @@ import { HttpErrors } from '@loopback/rest';
 import { Readable } from 'stream';
 import { EntitySetDef } from '../registry/entityset-registry';
 
-type MediaRepository = DefaultCrudRepository<Entity & AnyObject, unknown>;
+/** Repository shape used by the built-in media handlers. */
+export type ODataMediaRepository = DefaultCrudRepository<Entity & AnyObject, unknown>;
 
+/** Shared context passed to custom media handlers for `$value` operations. */
 export interface ODataMediaHandlerContext {
   id: unknown;
+  /** @internal Internal entity-set definition currently handling the request. */
   entitySet: EntitySetDef;
   entity?: AnyObject;
-  repository: MediaRepository;
+  repository: ODataMediaRepository;
   options?: Options;
 }
 
+/** Context passed to `read()` handlers for media downloads. */
 export interface ODataMediaReadContext extends ODataMediaHandlerContext {}
 
+/** Result returned from `read()` describing the media stream and metadata. */
 export interface ODataMediaReadResult {
   stream: Readable;
   contentType?: string;
@@ -22,6 +27,7 @@ export interface ODataMediaReadResult {
   length?: number;
 }
 
+/** Context passed to `write()` handlers for media uploads. */
 export interface ODataMediaWriteContext extends ODataMediaHandlerContext {
   stream: Readable;
   contentType?: string;
@@ -29,20 +35,29 @@ export interface ODataMediaWriteContext extends ODataMediaHandlerContext {
   slug?: string;
 }
 
+/** Result returned from `write()` describing persisted media metadata. */
 export interface ODataMediaWriteResult {
   etag?: string;
   contentType?: string;
   length?: number;
 }
 
+/** Context passed to optional `delete()` handlers for media removal. */
 export interface ODataMediaDeleteContext extends ODataMediaHandlerContext {}
 
+/**
+ * Custom media handler contract for `$value` endpoints.
+ *
+ * Implement this interface when binary payloads should be read from or written
+ * to an external store instead of being buffered in entity properties.
+ */
 export interface ODataMediaHandler {
   read(ctx: ODataMediaReadContext): Promise<ODataMediaReadResult | undefined>;
   write(ctx: ODataMediaWriteContext): Promise<ODataMediaWriteResult | undefined>;
   delete?(ctx: ODataMediaDeleteContext): Promise<void>;
 }
 
+/** Repository-side convenience contract adapted by `RepositoryMediaHandlerAdapter`. */
 export interface RepositoryMediaAdapterTarget {
   getMedia?: (
     id: unknown,
@@ -62,17 +77,25 @@ export interface RepositoryMediaAdapterTarget {
   deleteMedia?: (id: unknown, options?: Options) => Promise<void> | void;
 }
 
+/** Options for the built-in property-backed media handler. */
 export interface PropertyBackedMediaHandlerOptions {
   maxPayloadBytes?: number;
 }
 
+/** Default upload cap for the built-in property-backed media handler (10 MiB). */
 export const DEFAULT_PROPERTY_MEDIA_PAYLOAD_LIMIT = 10 * 1024 * 1024; // 10 MiB
 
+/**
+ * Built-in media handler that stores binary payloads directly in an entity property.
+ *
+ * This is a convenient default for small/medium blobs. For large-file streaming,
+ * prefer a custom `ODataMediaHandler` backed by object storage or another streaming store.
+ */
 export class PropertyBackedMediaHandler implements ODataMediaHandler {
   private readonly maxPayloadBytes: number;
 
   constructor(
-    private readonly repository: MediaRepository,
+    private readonly repository: ODataMediaRepository,
     private readonly field: string,
     options?: PropertyBackedMediaHandlerOptions,
   ) {
@@ -191,8 +214,14 @@ export class PropertyBackedMediaHandler implements ODataMediaHandler {
   }
 }
 
+/**
+ * Adapter that turns repository-level `getMedia` / `setMedia` / `deleteMedia`
+ * methods into an `ODataMediaHandler`.
+ */
 export class RepositoryMediaHandlerAdapter implements ODataMediaHandler {
-  constructor(private readonly repository: MediaRepository & RepositoryMediaAdapterTarget) {}
+  constructor(
+    private readonly repository: ODataMediaRepository & RepositoryMediaAdapterTarget,
+  ) {}
 
   async read(ctx: ODataMediaReadContext): Promise<ODataMediaReadResult | undefined> {
     if (typeof this.repository.getMedia !== 'function') {

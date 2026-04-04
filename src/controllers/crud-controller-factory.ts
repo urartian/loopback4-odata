@@ -91,6 +91,7 @@ import {
   ODataConfig,
   ODataRequestState,
 } from '../types';
+import { createODataHttpError } from '../util/odata-http-error';
 import * as ipaddr from 'ipaddr.js';
 import { getODataSearchableProps } from '../decorators/search.decorators';
 import { getODataModelMeta } from '../decorators/model.decorator';
@@ -1197,11 +1198,11 @@ export function defineODataCrudController(def: EntitySetDef) {
       const unique = Array.from(new Set(allowed));
       if (!acceptsAnyMediaType(accept, unique)) {
         const requirement = normalized ?? 'binary responses';
-        const err = new HttpErrors.NotAcceptable(
+        throw createODataHttpError(
+          HttpErrors.NotAcceptable,
+          ODataErrorCodes.NotAcceptable,
           `Accept header must allow ${requirement} (${unique.join(', ')}).`,
         );
-        (err as any).code = ODataErrorCodes.NotAcceptable;
-        throw err;
       }
     }
 
@@ -1218,11 +1219,11 @@ export function defineODataCrudController(def: EntitySetDef) {
         this.request.get('Content-Type') ??
         (this.request.headers?.['content-type'] as string | undefined);
       if (!type || !type.trim()) {
-        const err = new HttpErrors.UnsupportedMediaType(
+        throw createODataHttpError(
+          HttpErrors.UnsupportedMediaType,
+          ODataErrorCodes.UnsupportedMediaType,
           'Content-Type header is required for media requests.',
         );
-        (err as any).code = ODataErrorCodes.UnsupportedMediaType;
-        throw err;
       }
       return type;
     }
@@ -4161,9 +4162,9 @@ export function defineODataCrudController(def: EntitySetDef) {
       result: Exclude<DeltaTokenValidationResult, { ok: true; payload?: DeltaTokenPayload }>,
     ): never {
       if (result.code === 'expired') {
-        throw new HttpErrors.Gone(result.message);
+        throw createODataHttpError(HttpErrors.Gone, ODataErrorCodes.Gone, result.message);
       }
-      throw new HttpErrors.BadRequest(result.message);
+      throw createODataHttpError(HttpErrors.BadRequest, ODataErrorCodes.BadRequest, result.message);
     }
 
     emitApplyTelemetry(
@@ -7873,9 +7874,11 @@ export function defineODataCrudController(def: EntitySetDef) {
         this.response.type('application/json');
         return;
       }
-      const err = new HttpErrors.NotAcceptable('Only JSON $format values are supported.');
-      (err as any).code = ODataErrorCodes.NotAcceptable;
-      throw err;
+      throw createODataHttpError(
+        HttpErrors.NotAcceptable,
+        ODataErrorCodes.NotAcceptable,
+        'Only JSON $format values are supported.',
+      );
     }
 
     ensureAcceptsJson(additionalTypes?: string[]) {
@@ -7889,11 +7892,11 @@ export function defineODataCrudController(def: EntitySetDef) {
         [];
       const allowedTypes = ['application/json', ...extras];
       if (!acceptsAnyMediaType(accept, allowedTypes)) {
-        const err = new HttpErrors.NotAcceptable(
+        throw createODataHttpError(
+          HttpErrors.NotAcceptable,
+          ODataErrorCodes.NotAcceptable,
           `Accept header must allow one of: ${allowedTypes.join(', ')}.`,
         );
-        (err as any).code = ODataErrorCodes.NotAcceptable;
-        throw err;
       }
     }
 
@@ -7906,9 +7909,11 @@ export function defineODataCrudController(def: EntitySetDef) {
       const lower = type.toLowerCase();
       const ok = lower.includes('application/json') || lower.endsWith('+json');
       if (!ok) {
-        const err = new HttpErrors.UnsupportedMediaType('Content-Type must be application/json.');
-        (err as any).code = ODataErrorCodes.UnsupportedMediaType;
-        throw err;
+        throw createODataHttpError(
+          HttpErrors.UnsupportedMediaType,
+          ODataErrorCodes.UnsupportedMediaType,
+          'Content-Type must be application/json.',
+        );
       }
     }
 
@@ -7990,17 +7995,23 @@ export function defineODataCrudController(def: EntitySetDef) {
           requireSample: false,
         });
         if (message === 'tenant-rate-limit-exceeded') {
-          throw new HttpErrors.TooManyRequests(
+          throw createODataHttpError(
+            HttpErrors.TooManyRequests,
+            ODataErrorCodes.TooManyRequests,
             'Tenant request rate exceeded. Retry after a short delay.',
           );
         }
         if (message === 'tenant-concurrent-limit-exceeded') {
-          throw new HttpErrors.TooManyRequests(
+          throw createODataHttpError(
+            HttpErrors.TooManyRequests,
+            ODataErrorCodes.TooManyRequests,
             'Tenant concurrent request limit exceeded. Retry after a short delay.',
           );
         }
         if (message === 'tenant-lease-refreshers-exhausted') {
-          throw new HttpErrors.ServiceUnavailable(
+          throw createODataHttpError(
+            HttpErrors.ServiceUnavailable,
+            ODataErrorCodes.ServiceUnavailable,
             'Tenant throttling is temporarily saturated. Retry after a short delay.',
           );
         }
@@ -8013,14 +8024,23 @@ export function defineODataCrudController(def: EntitySetDef) {
       if (!resolver) return 'default';
       try {
         const resolved = resolver(this.request);
-        return resolved ?? 'default';
+        if (typeof resolved === 'string' && resolved.trim().length > 0) {
+          return resolved;
+        }
+        throw createODataHttpError(
+          HttpErrors.BadRequest,
+          ODataErrorCodes.TenantResolutionFailed,
+          'Unable to resolve tenant identifier from request.',
+        );
       } catch (error) {
         if (error instanceof HttpErrors.HttpError) {
           throw error;
         }
-        const err = new HttpErrors.BadRequest('Unable to resolve tenant identifier from request.');
-        (err as AnyObject).code = ODataErrorCodes.TenantResolutionFailed;
-        throw err;
+        throw createODataHttpError(
+          HttpErrors.BadRequest,
+          ODataErrorCodes.TenantResolutionFailed,
+          'Unable to resolve tenant identifier from request.',
+        );
       }
     }
 
@@ -8088,9 +8108,19 @@ export function defineODataCrudController(def: EntitySetDef) {
     }
 
     throwPreconditionFailed(message = 'ETag does not match the current resource version.') {
-      const error = new HttpErrors.PreconditionFailed(message);
-      (error as any).code = ODataErrorCodes.PreconditionFailed;
-      throw error;
+      throw createODataHttpError(
+        HttpErrors.PreconditionFailed,
+        ODataErrorCodes.PreconditionFailed,
+        message,
+      );
+    }
+
+    throwPreconditionRequired(message = 'If-Match header is required when ETags are enabled.') {
+      throw createODataHttpError(
+        HttpErrors.PreconditionRequired,
+        ODataErrorCodes.PreconditionRequired,
+        message,
+      );
     }
 
     setEtagHeaderFromPlain(plain?: AnyObject) {
@@ -10731,11 +10761,7 @@ export function defineODataCrudController(def: EntitySetDef) {
           const requireEtag = (this.etagEnabled() || Boolean(mediaEtagField)) && this.cfg?.strict;
           const currentEtag = this.readMediaEtag(plain);
           if (requireEtag && !ifMatch) {
-            const error = new HttpErrors.PreconditionRequired(
-              'If-Match header is required when ETags are enabled.',
-            );
-            (error as any).code = ODataErrorCodes.PreconditionRequired;
-            throw error;
+            this.throwPreconditionRequired();
           }
           if (
             ifMatch &&
@@ -10866,11 +10892,7 @@ export function defineODataCrudController(def: EntitySetDef) {
           const requireEtag = (this.etagEnabled() || Boolean(mediaEtagField)) && this.cfg?.strict;
           const currentEtag = this.readMediaEtag(plain);
           if (requireEtag && !ifMatch) {
-            const error = new HttpErrors.PreconditionRequired(
-              'If-Match header is required when ETags are enabled.',
-            );
-            (error as any).code = ODataErrorCodes.PreconditionRequired;
-            throw error;
+            this.throwPreconditionRequired();
           }
           if (
             ifMatch &&
@@ -11597,11 +11619,7 @@ export function defineODataCrudController(def: EntitySetDef) {
           const ifMatch = this.parseIfMatchHeader();
 
           if (this.etagEnabled() && this.cfg?.strict && !ifMatch) {
-            const error = new HttpErrors.PreconditionRequired(
-              'If-Match header is required when ETags are enabled.',
-            );
-            (error as any).code = ODataErrorCodes.PreconditionRequired;
-            throw error;
+            this.throwPreconditionRequired();
           }
 
           if (ifMatch && !ifMatch.any && this.etagEnabled()) {
@@ -11714,11 +11732,7 @@ export function defineODataCrudController(def: EntitySetDef) {
           const parentIdValue = entityId;
 
           if (this.etagEnabled() && this.cfg?.strict && !ifMatch) {
-            const error = new HttpErrors.PreconditionRequired(
-              'If-Match header is required when ETags are enabled.',
-            );
-            (error as any).code = ODataErrorCodes.PreconditionRequired;
-            throw error;
+            this.throwPreconditionRequired();
           }
 
           let conditionalWhere: CrudWhere | undefined;
@@ -13032,7 +13046,7 @@ export function defineODataCrudController(def: EntitySetDef) {
                 return acc;
               }, {});
               let offset = 0;
-              while (true) {
+              for (;;) {
                 if (state.entitiesPlanned >= state.maxEntities) {
                   this.throwCompositionGuardrail(
                     'maxEntities',

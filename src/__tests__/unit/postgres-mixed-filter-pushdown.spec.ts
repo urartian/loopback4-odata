@@ -32,6 +32,18 @@ describe('Postgres mixed $filter pushdown', () => {
     customerId!: number;
   }
 
+  @model()
+  class CompositePurchase extends Entity {
+    @property({id: true})
+    id!: number;
+
+    @property({id: true, type: 'string'})
+    region!: string;
+
+    @property({type: 'string'})
+    status!: string;
+  }
+
   function stubPostgresDataSource(): juggler.DataSource {
     return {
       connector: {
@@ -197,6 +209,144 @@ describe('Postgres mixed $filter pushdown', () => {
     assert.equal(result.params[0], '%ali%');
   });
 
+  it('pushes down root startswith/endswith variants with transform and negation', () => {
+    const dataSource = stubPostgresDataSource();
+
+    const startsWith = buildPostgresMixedFilterIdQuery({
+      dataSource,
+      modelCtor: Purchase,
+      expression: {
+        operator: 'function',
+        name: 'startswith',
+        field: 'status',
+        args: ['Op'],
+        transform: 'tolower',
+      } as any,
+      where: undefined,
+      order: undefined,
+      limit: 10,
+      offset: 0,
+    });
+    assert('sql' in startsWith);
+    assert.match(startsWith.sql, /LOWER\(r\."status"\)\s+LIKE/i);
+    assert.equal(startsWith.params[0], 'Op%');
+
+    const endsWithNegated = buildPostgresMixedFilterIdQuery({
+      dataSource,
+      modelCtor: Purchase,
+      expression: {
+        operator: 'function',
+        name: 'endswith',
+        field: 'status',
+        args: ['ed'],
+        negated: true,
+      } as any,
+      where: undefined,
+      order: undefined,
+      limit: 10,
+      offset: 0,
+    });
+    assert('sql' in endsWithNegated);
+    assert.match(endsWithNegated.sql, /\bNOT LIKE\b/i);
+    assert.equal(endsWithNegated.params[0], '%ed');
+  });
+
+  it('pushes down transformed null comparisons on root fields', () => {
+    const dataSource = stubPostgresDataSource();
+    const result = buildPostgresMixedFilterIdQuery({
+      dataSource,
+      modelCtor: Purchase,
+      expression: {
+        operator: 'transformcmp',
+        transform: 'toupper',
+        field: 'status',
+        comparator: 'eq',
+        value: null,
+      },
+      where: undefined,
+      order: undefined,
+      limit: 10,
+      offset: 0,
+    });
+
+    assert('sql' in result);
+    assert.match(result.sql, /UPPER\(r\."status"\)\s+IS\s+NULL/i);
+    assert.equal(result.params.length, 0);
+  });
+
+  it('pushes down root datepart, indexof, and substring comparisons', () => {
+    @model()
+    class TimedPurchase extends Entity {
+      @property({id: true})
+      id!: number;
+
+      @property({type: Date})
+      createdAt!: Date;
+
+      @property({type: 'string'})
+      status!: string;
+    }
+
+    const dataSource = stubPostgresDataSource();
+
+    const datepart = buildPostgresMixedFilterIdQuery({
+      dataSource,
+      modelCtor: TimedPurchase,
+      expression: {
+        operator: 'datepart',
+        part: 'month',
+        field: 'createdAt',
+        comparator: 'gte',
+        value: 4,
+      },
+      where: undefined,
+      order: undefined,
+      limit: 10,
+      offset: 0,
+    });
+    assert('sql' in datepart);
+    assert.match(datepart.sql, /EXTRACT\(MONTH FROM timezone\('UTC', r\."createdAt"\)\)\s+>=/i);
+    assert.equal(datepart.params[0], 4);
+
+    const indexOf = buildPostgresMixedFilterIdQuery({
+      dataSource,
+      modelCtor: TimedPurchase,
+      expression: {
+        operator: 'indexofcmp',
+        field: 'status',
+        needle: 'pen',
+        comparator: 'eq',
+        value: -1,
+      } as any,
+      where: undefined,
+      order: undefined,
+      limit: 10,
+      offset: 0,
+    });
+    assert('sql' in indexOf);
+    assert.match(indexOf.sql, /\bNOT ILIKE\b/i);
+    assert.equal(indexOf.params[0], '%pen%');
+
+    const substring = buildPostgresMixedFilterIdQuery({
+      dataSource,
+      modelCtor: TimedPurchase,
+      expression: {
+        operator: 'substrcmp',
+        field: 'status',
+        start: 2,
+        literal: 'en',
+        comparator: 'neq',
+      } as any,
+      where: undefined,
+      order: undefined,
+      limit: 10,
+      offset: 0,
+    });
+    assert('sql' in substring);
+    assert.match(substring.sql, /\bNOT LIKE\b/i);
+    assert.equal(substring.params[0], '__en');
+  });
+
   it('translates root where inq/nin with null using IS NULL/IS NOT NULL', () => {
     const dataSource = stubPostgresDataSource();
 
@@ -283,6 +433,46 @@ describe('Postgres mixed $filter pushdown', () => {
     assert.equal(result.params[0], '__%');
   });
 
+  it('covers root length edge cases for zero and upper bounds', () => {
+    const dataSource = stubPostgresDataSource();
+
+    const equalsZero = buildPostgresMixedFilterIdQuery({
+      dataSource,
+      modelCtor: Purchase,
+      expression: {
+        operator: 'lengthcmp',
+        field: 'status',
+        comparator: 'eq',
+        value: 0,
+      },
+      where: undefined,
+      order: undefined,
+      limit: 10,
+      offset: 0,
+    });
+    assert('sql' in equalsZero);
+    assert.match(equalsZero.sql, /r\."status"\s*=\s*\$1/i);
+    assert.equal(equalsZero.params[0], '');
+
+    const lte = buildPostgresMixedFilterIdQuery({
+      dataSource,
+      modelCtor: Purchase,
+      expression: {
+        operator: 'lengthcmp',
+        field: 'status',
+        comparator: 'lte',
+        value: 2,
+      },
+      where: undefined,
+      order: undefined,
+      limit: 10,
+      offset: 0,
+    });
+    assert('sql' in lte);
+    assert.match(lte.sql, /\bNOT LIKE\b/i);
+    assert.equal(lte.params[0], '___%');
+  });
+
   it('declines unsupported root where and unsupported order', () => {
     const dataSource = stubPostgresDataSource();
 
@@ -309,5 +499,46 @@ describe('Postgres mixed $filter pushdown', () => {
     });
     assert('declineReason' in unsupportedOrder);
     assert.equal((unsupportedOrder as any).declineReason, 'unsupported-order');
+  });
+
+  it('declines non-Postgres datasources, composite ids, and unsupported lambda roots', () => {
+    const nonPostgres = buildPostgresMixedFilterIdQuery({
+      dataSource: {
+        connector: {name: 'memory'},
+        execute: async () => [],
+      } as unknown as juggler.DataSource,
+      modelCtor: Purchase,
+      expression: {operator: 'comparison', field: 'status', comparator: 'eq', value: 'Open'},
+      where: undefined,
+      order: undefined,
+      limit: 10,
+      offset: 0,
+    });
+    assert.deepEqual(nonPostgres, {declineReason: 'non-postgres'});
+
+    const compositeId = buildPostgresMixedFilterIdQuery({
+      dataSource: stubPostgresDataSource(),
+      modelCtor: CompositePurchase,
+      expression: {operator: 'comparison', field: 'status', comparator: 'eq', value: 'Open'},
+      where: undefined,
+      order: undefined,
+      limit: 10,
+      offset: 0,
+    });
+    assert.deepEqual(compositeId, {declineReason: 'composite-or-missing-id'});
+
+    const unsupportedLambda = buildPostgresMixedFilterCountQuery({
+      dataSource: stubPostgresDataSource(),
+      modelCtor: Purchase,
+      expression: {
+        operator: 'lambda',
+        lambdaType: 'any',
+        path: ['customer'],
+        alias: 'c',
+        predicate: {operator: 'comparison', field: 'c/name', comparator: 'eq', value: 'Alice'},
+      } as any,
+      where: undefined,
+    });
+    assert.deepEqual(unsupportedLambda, {declineReason: 'unsupported-filter'});
   });
 });

@@ -87,12 +87,17 @@ export class ODataErrorProvider implements Provider<Reject> {
       const conflict = new HttpErrors.Conflict(
         'Delete restricted by referential integrity constraints.',
       );
-      (conflict as AnyObject).innerError = {
-        ...(anyErr?.constraint ? { constraint: anyErr.constraint } : {}),
-        ...(anyErr?.table ? { table: anyErr.table } : {}),
-        ...(anyErr?.detail ? { detail: anyErr.detail } : {}),
+      const innerError: AnyObject = {
         dbCode: anyErr.code,
       };
+      if (this.options.debug) {
+        Object.assign(innerError, {
+          ...(anyErr?.constraint ? { constraint: anyErr.constraint } : {}),
+          ...(anyErr?.table ? { table: anyErr.table } : {}),
+          ...(anyErr?.detail ? { detail: anyErr.detail } : {}),
+        });
+      }
+      (conflict as AnyObject).innerError = innerError;
       return conflict;
     }
 
@@ -117,6 +122,12 @@ export class ODataErrorProvider implements Provider<Reject> {
         return ODataErrorCodes.NotFound;
       case 422:
         return ODataErrorCodes.UnprocessableEntity;
+      case 410:
+        return ODataErrorCodes.Gone;
+      case 429:
+        return ODataErrorCodes.TooManyRequests;
+      case 503:
+        return ODataErrorCodes.ServiceUnavailable;
       case 409:
         return ODataErrorCodes.Conflict;
       case 412:
@@ -153,6 +164,12 @@ export class ODataErrorProvider implements Provider<Reject> {
         return 428;
       case ODataErrorCodes.UnprocessableEntity:
         return 422;
+      case ODataErrorCodes.Gone:
+        return 410;
+      case ODataErrorCodes.TooManyRequests:
+        return 429;
+      case ODataErrorCodes.ServiceUnavailable:
+        return 503;
       default:
         return undefined;
     }

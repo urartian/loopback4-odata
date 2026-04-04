@@ -2,6 +2,7 @@ import { Request, Response } from '@loopback/rest';
 import { AnyObject, Entity, Filter, FilterExcludingWhere, Options } from '@loopback/repository';
 import type { EntitySetDef } from '../registry/entityset-registry';
 
+/** CRUD operations that can be intercepted by OData controller hooks. */
 export type CrudOperation =
   | 'READ'
   | 'CREATE'
@@ -11,6 +12,7 @@ export type CrudOperation =
   | 'UNLINK_NAVIGATION';
 export type CrudScope = 'collection' | 'entity' | 'count';
 
+/** All hookable CRUD operations in the order used by wildcard decorators. */
 export const CRUD_OPERATIONS: ReadonlyArray<CrudOperation> = [
   'READ',
   'CREATE',
@@ -20,12 +22,19 @@ export const CRUD_OPERATIONS: ReadonlyArray<CrudOperation> = [
   'UNLINK_NAVIGATION',
 ];
 
+/**
+ * Shared hook context passed to `@odata.before()` and `@odata.after()` handlers.
+ *
+ * Hooks may inspect and mutate payload, filter, navigation metadata, and shared
+ * `state` values as the request moves through the generated CRUD pipeline.
+ */
 export interface CrudHookContext {
   // Operation targeting
   operation: CrudOperation;
   scope?: CrudScope;
 
   // Request wiring
+  /** @internal Internal resolved entity-set definition for the current request. */
   entitySet?: EntitySetDef;
   repository?: unknown; // DefaultCrudRepository<Entity, unknown>
   options?: Options;
@@ -51,6 +60,7 @@ export interface CrudHookContext {
   result?: unknown;
 }
 
+/** Helper methods available to `@odata.on()` overrides. */
 export interface CrudOnHelpers {
   entity(plain: AnyObject | undefined): AnyObject | undefined;
   collection(items: Array<AnyObject | Entity>, totalCount?: number): AnyObject;
@@ -58,10 +68,12 @@ export interface CrudOnHelpers {
   noContent(): void;
 }
 
+/** Context passed to `@odata.on()` overrides. */
 export interface CrudOnContext extends CrudHookContext {
   helpers: CrudOnHelpers;
 }
 
+/** Stored metadata describing one decorated hook method. */
 export interface HookMeta {
   methodName: string;
   op: CrudOperation;
@@ -69,6 +81,7 @@ export interface HookMeta {
   scope?: CrudScope;
 }
 
+/** Aggregated hook metadata discovered on an OData controller. */
 export interface CrudHookBundle {
   before: HookMeta[];
   after: HookMeta[];

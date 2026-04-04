@@ -17,12 +17,27 @@ const noopLogger: ODataLogger = {
 };
 
 const createMiddlewareContext = (url: string): MiddlewareContext => {
+  const responseHeaders = new Map<string, string>();
   const ctx: MiddlewareContext = {
-    request: { url } as any,
-    response: {} as any,
+    request: {
+      url,
+      header(name: string) {
+        return (this.headers ?? {})[name.toLowerCase()];
+      },
+    } as any,
+    response: {
+      getHeader(name: string) {
+        return responseHeaders.get(name.toLowerCase());
+      },
+      setHeader(name: string, value: string) {
+        responseHeaders.set(name.toLowerCase(), value);
+      },
+      headersSent: false,
+    } as any,
     bind: () => ctx as any,
     getSync: () => undefined,
   } as any;
+  (ctx as any)._responseHeaders = responseHeaders;
   return ctx;
 };
 
@@ -138,5 +153,123 @@ describe('root basePath middleware handling', () => {
     await middleware(ctx, async () => undefined);
 
     assert.equal(ctx.request.url, '/odata/');
+  });
+
+  it('skips binding request state for non-OData requests', async () => {
+    const provider = new ODataRequestContextProvider({ basePath: '/api/odata' } as any);
+    const middleware = provider.value();
+    const ctx = createMiddlewareContext('/health');
+    let nextCalls = 0;
+    let boundState: unknown;
+    ctx.bind = () =>
+      ({
+        to(value: unknown) {
+          boundState = value;
+          return { inScope: () => ctx };
+        },
+      } as any);
+
+    await middleware(ctx, async () => {
+      nextCalls += 1;
+      return 'ok';
+    });
+
+    assert.equal(nextCalls, 1);
+    assert.equal(boundState, undefined);
+  });
+
+  it('captures correlation, tenant, telemetry preferences, and batch depth for OData requests', async () => {
+    const provider = new ODataRequestContextProvider({
+      basePath: '/api/odata',
+      tenantResolver: (req: any) => req.header('x-tenant-id'),
+      correlation: {
+        responseHeaderName: 'x-request-id',
+      },
+      telemetry: {
+        enabled: true,
+        emitStatisticsHeader: true,
+        requestLogging: { enabled: true, allowClientOverride: true },
+      },
+    } as any);
+    const middleware = provider.value();
+    const ctx = createMiddlewareContext('/api/odata/Products');
+    (ctx.request as any).headers = {
+      prefer: 'telemetry=statistics, telemetry="request-log"',
+      'x-tenant-id': 'tenant-a',
+    };
+    (ctx.request as any).__odataBatchDepth = 2;
+
+    let boundState: any;
+    ctx.bind = () =>
+      ({
+        to(value: unknown) {
+          boundState = value;
+          return { inScope: () => ctx };
+        },
+      } as any);
+
+    await middleware(ctx, async () => undefined);
+
+    assert.equal(boundState.tenantId, 'tenant-a');
+    assert.equal(boundState.batchDepth, 2);
+    assert.equal(boundState.telemetry?.enabled, true);
+    assert.equal(boundState.telemetry?.requestLoggingEnabled, true);
+    assert.equal(boundState.statistics?.requested, true);
+    assert.equal(typeof boundState.correlationId, 'string');
+    assert.equal(
+      (ctx as any)._responseHeaders.get('x-request-id'),
+      boundState.correlationId,
+    );
+    assert.match(
+      String((ctx as any)._responseHeaders.get('preference-applied')),
+      /telemetry=statistics/i,
+    );
+  });
+
+  it('tolerates tenant resolver failures and disabled correlation', async () => {
+    const provider = new ODataRequestContextProvider({
+      basePath: '/odata',
+      tenantResolver: () => {
+        throw new Error('boom');
+      },
+      correlation: { enabled: false },
+    } as any);
+    const middleware = provider.value();
+    const ctx = createMiddlewareContext('/odata/Products');
+    let boundState: any;
+    ctx.bind = () =>
+      ({
+        to(value: unknown) {
+          boundState = value;
+          return { inScope: () => ctx };
+        },
+      } as any);
+
+    await middleware(ctx, async () => undefined);
+
+    assert.equal(boundState.tenantId, undefined);
+    assert.equal(boundState.correlationId, undefined);
+  });
+
+  it('deduplicates Preference-Applied values and rounds telemetry payloads', () => {
+    const provider = new ODataRequestContextProvider({ basePath: '/odata' } as any);
+    const appendPreferenceApplied = (provider as any).appendPreferenceApplied.bind(provider);
+    const roundNumber = (provider as any).roundNumber.bind(provider);
+    const response = {
+      value: 'telemetry=statistics',
+      getHeader() {
+        return this.value;
+      },
+      setHeader(_name: string, value: string) {
+        this.value = value;
+      },
+    } as any;
+
+    appendPreferenceApplied(response, 'telemetry=statistics');
+    appendPreferenceApplied(response, 'telemetry=request-log');
+
+    assert.equal(response.value, 'telemetry=statistics, telemetry=request-log');
+    assert.equal(roundNumber(1.2345, 2), 1.23);
+    assert.equal(roundNumber(Number.POSITIVE_INFINITY, 2), Number.POSITIVE_INFINITY);
   });
 });

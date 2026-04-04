@@ -22,6 +22,44 @@ describe('Postgres lambda pushdown', () => {
     return ds;
   }
 
+  it('declines non-Postgres datasources and missing lambda inputs', () => {
+    const nonPostgres = buildPostgresLambdaIdQuery({
+      dataSource: {
+        connector: {name: 'memory'},
+        execute: async () => [],
+      } as unknown as juggler.DataSource,
+      modelCtor: Product,
+      lambdas: [],
+      where: undefined,
+      order: undefined,
+      limit: 10,
+      offset: 0,
+    });
+    assert.deepEqual(nonPostgres, {declineReason: 'non-postgres'});
+
+    const noLambdas = buildPostgresLambdaIdQuery({
+      dataSource: stubPostgresDataSource(),
+      modelCtor: Product,
+      lambdas: [],
+      where: undefined,
+      order: undefined,
+      limit: 10,
+      offset: 0,
+    });
+    assert.deepEqual(noLambdas, {declineReason: 'no-lambdas'});
+
+    const noLambdaExpression = buildPostgresLambdaIdQuery({
+      dataSource: stubPostgresDataSource(),
+      modelCtor: Product,
+      expression: {operator: 'comparison', field: 'price', comparator: 'gt', value: 1000},
+      where: undefined,
+      order: undefined,
+      limit: 10,
+      offset: 0,
+    });
+    assert.deepEqual(noLambdaExpression, {declineReason: 'no-lambdas'});
+  });
+
   it('builds EXISTS SQL for any(...)', () => {
     const dataSource = stubPostgresDataSource();
     const lambda: LambdaExpression = {
@@ -208,6 +246,40 @@ describe('Postgres lambda pushdown', () => {
     assert.equal(result.params[1], 1000);
   });
 
+  it('supports NOT and null-aware transform comparisons inside lambda predicates', () => {
+    const dataSource = stubPostgresDataSource();
+    const expr: ParsedExpression = {
+      operator: 'not',
+      expr: {
+        operator: 'lambda',
+        lambdaType: 'any',
+        path: ['orderItems'],
+        alias: 'i',
+        predicate: {
+          operator: 'transformcmp',
+          transform: 'toupper',
+          field: 'i/sku',
+          comparator: 'eq',
+          value: null,
+        },
+      } as any,
+    };
+
+    const result = buildPostgresLambdaIdQuery({
+      dataSource,
+      modelCtor: Product,
+      expression: expr,
+      where: undefined,
+      order: undefined,
+      limit: 10,
+      offset: 0,
+    });
+
+    assert('sql' in result);
+    assert.match(result.sql, /\bNOT\s+\(/i);
+    assert.match(result.sql, /UPPER\([^)]+\)\s+IS\s+NULL/i);
+  });
+
   it('builds COUNT(*) SQL for top-level lambda expressions', () => {
     const dataSource = stubPostgresDataSource();
     const expr: ParsedExpression = {
@@ -262,6 +334,108 @@ describe('Postgres lambda pushdown', () => {
     assert('sql' in result);
     assert.match(result.sql, /EXISTS\s*\(SELECT 1 FROM/i);
     assert.match(result.sql, /\bJOIN\b/i);
+  });
+
+  it('pushes down startswith/endswith variants and date parts inside lambda predicates', () => {
+    @model()
+    class EventItem extends Entity {
+      @property({type: 'number', id: true})
+      id!: number;
+
+      @property({type: 'number'})
+      eventId!: number;
+
+      @property({type: 'string'})
+      code!: string;
+
+      @property({type: Date})
+      createdAt!: Date;
+    }
+
+    @model()
+    class Event extends Entity {
+      @property({type: 'number', id: true})
+      id!: number;
+
+      @hasMany(() => EventItem)
+      items?: EventItem[];
+    }
+
+    const dataSource = stubPostgresDataSource();
+    const startsWithLambda: LambdaExpression = {
+      type: 'any',
+      path: ['items'],
+      alias: 'i',
+      predicate: {
+        operator: 'function',
+        name: 'startswith',
+        field: 'i/code',
+        args: ['EV'],
+        transform: 'tolower',
+      } as any,
+    };
+
+    const startsWith = buildPostgresLambdaIdQuery({
+      dataSource,
+      modelCtor: Event,
+      lambdas: [startsWithLambda],
+      where: undefined,
+      order: undefined,
+      limit: 10,
+      offset: 0,
+    });
+    assert('sql' in startsWith);
+    assert.match(startsWith.sql, /LOWER\([^)]+\)\s+LIKE/i);
+    assert.equal(startsWith.params[0], 'EV%');
+
+    const endsWithLambda: LambdaExpression = {
+      type: 'any',
+      path: ['items'],
+      alias: 'i',
+      predicate: {
+        operator: 'function',
+        name: 'endswith',
+        field: 'i/code',
+        args: ['99'],
+        negated: true,
+      } as any,
+    };
+
+    const endsWith = buildPostgresLambdaIdQuery({
+      dataSource,
+      modelCtor: Event,
+      lambdas: [endsWithLambda],
+      where: undefined,
+      order: undefined,
+      limit: 10,
+      offset: 0,
+    });
+    assert('sql' in endsWith);
+    assert.match(endsWith.sql, /\bNOT LIKE\b/i);
+    assert.equal(endsWith.params[0], '%99');
+
+    const datePartLambda: LambdaExpression = {
+      type: 'any',
+      path: ['items'],
+      alias: 'i',
+      predicate: {
+        operator: 'datepart',
+        part: 'month',
+        field: 'i/createdAt',
+        comparator: 'gte',
+        value: 4,
+      },
+    };
+
+    const datePart = buildPostgresLambdaCountQuery({
+      dataSource,
+      modelCtor: Event,
+      lambdas: [datePartLambda],
+      where: undefined,
+    });
+    assert('sql' in datePart);
+    assert.match(datePart.sql, /EXTRACT\(MONTH FROM timezone\('UTC'/i);
+    assert.equal(datePart.params[0], 4);
   });
 
   it('declines incomplete through metadata', () => {
@@ -405,6 +579,89 @@ describe('Postgres lambda pushdown', () => {
     assert.match(result.sql, /LOWER\(/i);
   });
 
+  it('pushes down trim/concat string function comparisons inside lambda predicates', () => {
+    @model()
+    class TextChild extends Entity {
+      @property({type: 'number', id: true})
+      id!: number;
+
+      @property({type: 'number'})
+      textParentId!: number;
+
+      @property({type: 'string'})
+      code!: string;
+
+      @property({type: 'string'})
+      suffix!: string;
+    }
+
+    @model()
+    class TextParent extends Entity {
+      @property({type: 'number', id: true})
+      id!: number;
+
+      @hasMany(() => TextChild)
+      children?: TextChild[];
+    }
+
+    const dataSource = stubPostgresDataSource();
+    const trimLambda: LambdaExpression = {
+      type: 'any',
+      path: ['children'],
+      alias: 'c',
+      predicate: {
+        operator: 'stringfncmp',
+        name: 'trim',
+        args: [{kind: 'field', name: 'c/code'}],
+        comparator: 'neq',
+        value: 'x',
+      } as any,
+    };
+
+    const trimResult = buildPostgresLambdaIdQuery({
+      dataSource,
+      modelCtor: TextParent,
+      lambdas: [trimLambda],
+      where: undefined,
+      order: undefined,
+      limit: 10,
+      offset: 0,
+    });
+    assert('sql' in trimResult);
+    assert.match(trimResult.sql, /btrim\([^)]+\)\s+<>\s+\$\d+/i);
+
+    const concatLambda: LambdaExpression = {
+      type: 'any',
+      path: ['children'],
+      alias: 'c',
+      predicate: {
+        operator: 'stringfncmp',
+        name: 'concat',
+        args: [
+          {kind: 'field', name: 'c/code', transform: 'tolower'},
+          {kind: 'literal', value: '-'},
+          {kind: 'field', name: 'c/suffix', transform: 'toupper'},
+        ],
+        comparator: 'eq',
+        value: 'ab-CD',
+      } as any,
+    };
+
+    const concatResult = buildPostgresLambdaIdQuery({
+      dataSource,
+      modelCtor: TextParent,
+      lambdas: [concatLambda],
+      where: undefined,
+      order: undefined,
+      limit: 10,
+      offset: 0,
+    });
+    assert('sql' in concatResult);
+    assert.match(concatResult.sql, /concat\(/i);
+    assert.match(concatResult.sql, /LOWER\(/i);
+    assert.match(concatResult.sql, /UPPER\(/i);
+  });
+
   it('declines when root OR contains an unsupported clause', () => {
     const dataSource = stubPostgresDataSource();
     const lambda: LambdaExpression = {
@@ -428,6 +685,66 @@ describe('Postgres lambda pushdown', () => {
 
     assert('declineReason' in result);
     assert.equal(result.declineReason, 'unsupported-root-where');
+  });
+
+  it('declines unsupported order, composite ids, and count-builder guardrails', () => {
+    @model()
+    class CompositeProduct extends Entity {
+      @property({type: 'number', id: true})
+      id!: number;
+
+      @property({type: 'string', id: true})
+      region!: string;
+    }
+
+    const dataSource = stubPostgresDataSource();
+    const lambda: LambdaExpression = {
+      type: 'any',
+      path: ['orderItems'],
+      alias: 'i',
+      predicate: {operator: 'comparison', field: 'i/unitPrice', comparator: 'gt', value: 800},
+    };
+
+    const unsupportedOrder = buildPostgresLambdaIdQuery({
+      dataSource,
+      modelCtor: Product,
+      lambdas: [lambda],
+      where: undefined,
+      order: ['price SIDEWAYS'],
+      limit: 10,
+      offset: 0,
+    });
+    assert.deepEqual(unsupportedOrder, {declineReason: 'unsupported-order'});
+
+    const compositeId = buildPostgresLambdaIdQuery({
+      dataSource,
+      modelCtor: CompositeProduct,
+      lambdas: [lambda],
+      where: undefined,
+      order: undefined,
+      limit: 10,
+      offset: 0,
+    });
+    assert.deepEqual(compositeId, {declineReason: 'composite-or-missing-id'});
+
+    const countNonPostgres = buildPostgresLambdaCountQuery({
+      dataSource: {
+        connector: {name: 'memory'},
+        execute: async () => [],
+      } as unknown as juggler.DataSource,
+      modelCtor: Product,
+      lambdas: [lambda],
+      where: undefined,
+    });
+    assert.deepEqual(countNonPostgres, {declineReason: 'non-postgres'});
+
+    const countNoLambdas = buildPostgresLambdaCountQuery({
+      dataSource,
+      modelCtor: Product,
+      lambdas: [],
+      where: undefined,
+    });
+    assert.deepEqual(countNoLambdas, {declineReason: 'no-lambdas'});
   });
 
   it('declines when lambda OR contains an unsupported predicate branch', () => {

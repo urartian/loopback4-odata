@@ -157,4 +157,153 @@ describe('OData config validation', () => {
 
     expect(() => validateODataConfig(config)).to.throw(/composition\.enforcement/);
   });
+
+  it('normalizes telemetry, correlation, tenant quota, and write transaction settings', () => {
+    const config: ODataConfig = {
+      tokenSecret: 'test-secret',
+      telemetry: {
+        level: 'info',
+        categories: ['apply', 'requests'],
+        sampleRate: '0.5' as any,
+        statisticsHeaderName: '  X-Stats  ' as any,
+        statisticsPrecision: '3' as any,
+        requestLogging: {
+          maxPayloadBytes: '2048' as any,
+          maskHeaders: ['authorization'],
+          maskBodyPaths: ['password'],
+        },
+      },
+      correlation: {
+        headerName: '  x-correlation-id  ' as any,
+        responseHeaderName: '  x-request-id  ' as any,
+        generateWhenMissing: true,
+        propagateToRepositories: false,
+        repositoryOptionsKey: '  requestContext  ' as any,
+      },
+      tenantQuotas: {
+        maxRequestsPerMinute: '60' as any,
+        maxConcurrentRequests: '5' as any,
+        maxLeaseRefreshers: '2' as any,
+        overrides: {
+          alpha: {
+            maxRequestsPerMinute: '30' as any,
+            maxConcurrentRequests: '3' as any,
+          },
+        },
+      },
+      writeTransactions: {
+        enabled: true,
+        requireTransactionSupport: true,
+        rejectMultiDataSource: false,
+        isolationLevel: ' read_committed ' as any,
+      },
+    };
+
+    validateODataConfig(config);
+
+    expect(config.telemetry?.sampleRate).to.equal(0.5);
+    expect(config.telemetry?.statisticsHeaderName).to.equal('X-Stats');
+    expect(config.telemetry?.statisticsPrecision).to.equal(3);
+    expect(config.telemetry?.requestLogging?.maxPayloadBytes).to.equal(2048);
+    expect(config.correlation?.headerName).to.equal('x-correlation-id');
+    expect(config.correlation?.responseHeaderName).to.equal('x-request-id');
+    expect(config.correlation?.repositoryOptionsKey).to.equal('requestContext');
+    expect(config.tenantQuotas?.maxRequestsPerMinute).to.equal(60);
+    expect(config.tenantQuotas?.maxConcurrentRequests).to.equal(5);
+    expect(config.tenantQuotas?.maxLeaseRefreshers).to.equal(2);
+    expect(config.tenantQuotas?.overrides?.alpha?.maxRequestsPerMinute).to.equal(30);
+    expect(config.tenantQuotas?.overrides?.alpha?.maxConcurrentRequests).to.equal(3);
+    expect(config.writeTransactions?.isolationLevel).to.equal('READ_COMMITTED');
+  });
+
+  it('throws for invalid telemetry settings', () => {
+    expect(() =>
+      validateODataConfig({
+        tokenSecret: 'test-secret',
+        telemetry: {sampleRate: 2 as any},
+      }),
+    ).to.throw(/telemetry\.sampleRate/);
+
+    expect(() =>
+      validateODataConfig({
+        tokenSecret: 'test-secret',
+        telemetry: {categories: ['apply', 'nope' as any]},
+      }),
+    ).to.throw(/telemetry\.categories contains unsupported value/);
+
+    expect(() =>
+      validateODataConfig({
+        tokenSecret: 'test-secret',
+        telemetry: {
+          requestLogging: {maskHeaders: 'authorization' as any},
+        },
+      }),
+    ).to.throw(/requestLogging\.maskHeaders must be an array/);
+  });
+
+  it('throws for invalid correlation, tenant quota, and write transaction settings', () => {
+    expect(() =>
+      validateODataConfig({
+        tokenSecret: 'test-secret',
+        correlation: {headerName: '   ' as any},
+      }),
+    ).to.throw(/correlation\.headerName/);
+
+    expect(() =>
+      validateODataConfig({
+        tokenSecret: 'test-secret',
+        tenantQuotas: {
+          maxRequestsPerMinute: 10,
+          overrides: {alpha: {maxConcurrentRequests: 0}},
+        },
+      }),
+    ).to.throw(/tenantQuotas\.overrides\["alpha"\]\.maxConcurrentRequests/);
+
+    expect(() =>
+      validateODataConfig({
+        tokenSecret: 'test-secret',
+        writeTransactions: {isolationLevel: 'snapshot' as any},
+      }),
+    ).to.throw(/writeTransactions\.isolationLevel/);
+  });
+
+  it('validates composition entity-set relation delete policies', () => {
+    const config: ODataConfig = {
+      tokenSecret: 'test-secret',
+      composition: {
+        entitySets: {
+          Orders: {
+            relations: {
+              items: {
+                delete: 'cascade',
+              },
+            },
+          },
+        },
+      },
+    };
+
+    validateODataConfig(config);
+
+    expect(config.composition?.entitySets?.Orders?.relations?.items?.delete).to.equal('cascade');
+  });
+
+  it('throws for invalid composition entity-set relation config', () => {
+    expect(() =>
+      validateODataConfig({
+        tokenSecret: 'test-secret',
+        composition: {
+          entitySets: {
+            Orders: {
+              relations: {
+                items: {
+                  delete: 'archive' as any,
+                },
+              },
+            },
+          },
+        },
+      }),
+    ).to.throw(/must be "restrict" or "cascade"/);
+  });
 });
