@@ -495,6 +495,7 @@ class ProductODataController {
   @odataAction({
     name: 'resetInventory',
     binding: 'unbound',
+    params: [{ name: 'confirm', type: 'Edm.Boolean' }],
   })
   async resetInventory(body: { confirm?: boolean } = {}) {
     if (!body.confirm) return { status: 'skipped' };
@@ -505,6 +506,7 @@ class ProductODataController {
   @odataAction({
     name: 'resetInventoryRaw',
     binding: 'unbound',
+    params: [{ name: 'confirm', type: 'Edm.Boolean' }],
     rawResponse: true,
   })
   async resetInventoryRaw(body: { confirm?: boolean } = {}) {

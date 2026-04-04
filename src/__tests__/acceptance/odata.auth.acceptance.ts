@@ -107,7 +107,7 @@ class TestAuthEnforcerInterceptor implements Provider<Interceptor> {
 
 @odataController(Product)
 class MethodProtectedOperationsController {
-  @odataFunction({ name: 'methodProtected', binding: 'unbound' })
+  @odataFunction({ name: 'methodProtected', binding: 'unbound', params: [] })
   @authenticate('jwt')
   @authorize({ scopes: ['incident.read'], allowedRoles: ['ADMIN'] })
   methodProtected(@inject(TEST_USER_BINDING) currentUser?: { id: string } | null) {
@@ -119,7 +119,7 @@ class MethodProtectedOperationsController {
 @authorize({ scopes: ['incident.manage'], allowedRoles: ['ADMIN'] })
 @odataController(Product)
 class ClassProtectedOperationsController {
-  @odataFunction({ name: 'classProtected', binding: 'unbound' })
+  @odataFunction({ name: 'classProtected', binding: 'unbound', params: [] })
   classProtected(@inject(TEST_USER_BINDING) currentUser?: { id: string } | null) {
     return { userId: currentUser?.id ?? null };
   }
