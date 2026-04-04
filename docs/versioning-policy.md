@@ -40,3 +40,15 @@ When a release contains a breaking or contract-affecting change:
 - update [docs/pre-v1-notes.md](/workspace/docs/pre-v1-notes.md) when the
   supported contract changes
 - update narrative docs and TypeDoc when public behavior changes
+
+## Deprecation policy
+
+When a supported feature, config field, or behavior is being phased out:
+
+- document the deprecation in release notes
+- describe the preferred replacement when one exists
+- avoid removing the deprecated surface in the same non-major release where the
+  deprecation is first announced
+
+For v1-era changes, keep deprecation handling simple and explicit rather than
+building a complex support matrix.

@@ -212,10 +212,8 @@ Note: the default property-backed media handler intentionally keeps a bounded in
 - [x] Breaking change communication strategy
 
 ### 7.3 Post-Release Support
-- [ ] Hotfix release process
-- [ ] LTS version support policy
-- [ ] Deprecation policy and timeline
-- [ ] Migration support for major versions
+- [x] Hotfix release process
+- [x] Deprecation policy and timeline
 
 **Acceptance Criteria**: Fully automated release process, clear versioning policy, support framework
 

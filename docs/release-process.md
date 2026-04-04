@@ -35,3 +35,16 @@ Suggested flow:
 - monitor issues for regressions
 - document hotfix-worthy problems quickly
 - update roadmap and contract notes when priorities change
+
+## Hotfix process
+
+Use a hotfix release when a published version has a regression, security issue,
+or serious documentation/configuration error that should not wait for the next
+planned release.
+
+Recommended flow:
+
+1. isolate the smallest safe fix
+2. rerun lint, tests, and any targeted verification needed for the affected area
+3. publish a patch release with focused release notes
+4. call out the impact, fix, and any operator action required
