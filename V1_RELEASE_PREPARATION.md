@@ -135,11 +135,11 @@ Note: the default property-backed media handler intentionally keeps a bounded in
 - [x] Health check guidance for host LB4 apps
 
 ### 4.3 Observability & Monitoring
-- [ ] Structured logging documentation
-- [ ] Metrics and telemetry configuration guide
-- [ ] OpenTelemetry integration examples
-- [ ] Error tracking integration (Sentry, Bugsnag)
-- [ ] Performance monitoring setup guides
+- [x] Structured logging documentation
+- [x] Metrics and telemetry configuration guide
+- [x] OpenTelemetry integration guidance for host LB4 apps
+- [x] Error tracking integration guidance for host LB4 apps
+- [x] Performance monitoring setup guides
 
 ### 4.4 Cloud Provider Integration
 - [ ] AWS deployment guide (ECS, Lambda, RDS)
