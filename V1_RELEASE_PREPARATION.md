@@ -176,11 +176,11 @@ Note: the default property-backed media handler intentionally keeps a bounded in
 ## 6. Community & Governance ⏳
 
 ### 6.1 Contribution Framework
-- [ ] `CONTRIBUTING.md` with clear guidelines
-- [ ] Code of conduct (`CODE_OF_CONDUCT.md`)
-- [ ] Issue templates for bugs and features
-- [ ] Pull request template
-- [ ] Contributor recognition system
+- [x] `CONTRIBUTING.md` with clear guidelines
+- [x] Code of conduct (`CODE_OF_CONDUCT.md`)
+- [x] Issue templates for bugs and features
+- [x] Pull request template
+- [x] Contributor recognition system
 
 ### 6.2 Project Governance
 - [ ] Maintainer guidelines and responsibilities
