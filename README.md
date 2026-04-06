@@ -12,7 +12,7 @@ This package implements **OData v4.0** for LoopBack 4 applications.
 
 For v1, the officially documented and supported SQL path is PostgreSQL. Other connector-specific paths that may still exist in the codebase are not part of the supported surface yet.
 
-Currently in **phase 4** — CRUD endpoints are stable and advanced features like `$expand`, `$count`, `$batch`, Actions/Functions, server-driven paging (`$skiptoken`), and delta links (`$deltatoken`) are available. Focus is now on rounding out the filter grammar, improving configurability, enriching the CSDL, and hardening path rewriting.
+`v1.0.0` is the first supported public release of the package. CRUD endpoints, `$expand`, `$count`, `$batch`, Actions/Functions, server-driven paging (`$skiptoken`), delta links (`$deltatoken`), and PostgreSQL-first production guidance are part of the documented surface. Ongoing work is tracked in [docs/roadmap.md](https://github.com/urartian/loopback4-odata/blob/main/docs/roadmap.md).
 
 Community and support guidance lives in [docs/community.md](https://github.com/urartian/loopback4-odata/blob/main/docs/community.md).
 
@@ -180,9 +180,9 @@ Static singleton (fixed key):
 export class AppSettings extends Entity {}
 ```
 
-#### Interop note (SAP CAP)
+#### Interop note
 
-Some OData servers (for example SAP CAP) choose to treat singletons as “singleton-only” resources
+Some OData servers choose to treat singletons as “singleton-only” resources
 that reject `POST` and do not expose a corresponding entity set collection endpoint at the same
 URL. By default, this extension exposes singletons **in addition to** the entity set endpoints, so
 clients must call the singleton URL (`/odata/<singleton.name>`) to get singleton semantics. Use
@@ -207,7 +207,7 @@ When `singletonOnly: true`:
 - The service document and `$metadata` omit the `EntitySet` entry for the model.
 - Collection/entity set CRUD routes are not registered (no `GET/POST /odata/<EntitySetName>`).
 - The singleton routes remain available under `/odata/<singleton.name>`.
-- `singleton.name` may match `entitySetName` (CAP-style `/odata/Settings`).
+- `singleton.name` may match `entitySetName` (for example `/odata/Settings`).
 - Bound actions/functions and entity-set navigation routes are not generated in this mode yet.
 
 Endpoints (examples):
@@ -1722,7 +1722,7 @@ Handlers run inside the request scope, so repository injections, current-tenant 
 
 ### JSON Stream Properties (PostgreSQL `json`/`jsonb`)
 
-If you store JSON in a PostgreSQL `json`/`jsonb` column (or otherwise model it as an object), you can expose it to OData clients as a **stream property** (`Edm.Stream`) with `Core.MediaType = application/json` (similar to SAP CAP’s pattern).
+If you store JSON in a PostgreSQL `json`/`jsonb` column (or otherwise model it as an object), you can expose it to OData clients as a **stream property** (`Edm.Stream`) with `Core.MediaType = application/json`.
 
 Model example:
 
