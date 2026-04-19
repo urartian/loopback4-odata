@@ -4,7 +4,7 @@ An extension for [LoopBack 4](https://loopback.io/doc/en/lb4/) that adds **OData
 This package implements **OData v4.0** for LoopBack 4 applications.
 
 - Auto-discovers OData controllers and generates CRUD routes.
-- Exposes OData-style endpoints (`/Products(1)`) and OpenAPI-compliant ones (`/Products/{id}`).
+- Exposes OData-style endpoints (`/odata/Products(1)`) and OpenAPI-compliant ones (`/odata/Products/{id}`).
 - Provides `$metadata` endpoint.
 - Simple developer experience with decorators.
 - Advanced `$apply` support including chained transformations, navigation-path aggregates, and safe in-memory fallbacks when connector pushdown is unavailable.
@@ -127,11 +127,13 @@ this.repository(ProductRepository);
 4. Add a controller
 
 ```ts
+import { odataController } from '@urartian/loopback4-odata';
+
 @odataController(Product)
 export class ProductODataController {}
 ```
 
-That’s it — the extension generates repository-backed CRUD endpoints automatically.
+That’s it — the extension generates repository-backed CRUD endpoints automatically. For a fully wired runnable reference, see `examples/basic-app/index.ts` in this repository.
 
 ## Singletons
 
@@ -336,15 +338,15 @@ export class OrderODataController {
 
 Navigation reference routes run through the generated CRUD controller, so the same LoopBack authentication and authorization interceptors execute before links are created or removed. Stub methods with `@authenticate` / `@authorize` metadata (or aliases from the writable methods) are enough to secure the `$ref` endpoints without any additional plumbing.
 
-## Endpoints (Phase 3)
+## Example Requests
 
-Start your app and test:
+To try the repository's bundled demo app:
 
 ```bash
-npm start
+npm run dev
 ```
 
-For a quick demo, run `npm run dev`; this boots the example app in `examples/basic-app`, with an in-memory datasource pre-seeded with sample products and orders so you can experiment with the query options immediately.
+This boots the example app in `examples/basic-app`, with an in-memory datasource pre-seeded with sample products and orders so you can experiment with the query options immediately. If you are integrating the package into your own LoopBack 4 application, use that host app's normal start command instead.
 
 > The example binds `tokenSecret` from `process.env.ODATA_TOKEN_SECRET` but the component already enforces the same behavior internally. In production you must set that environment variable; in dev/test a random secret is generated per boot (logged at INFO) unless you override it. You can also tweak guardrails at runtime via environment variables such as `BATCH_MAX_OPERATIONS`, `BATCH_MAX_PART_BYTES`, `ODATA_MAX_TOP`, `ODATA_MAX_SKIP`, `ODATA_MAX_PAGE_SIZE`, and `ODATA_MAX_APPLY_PAGE_SIZE`.
 
