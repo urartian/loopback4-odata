@@ -7450,12 +7450,17 @@ export function defineODataCrudController(def: EntitySetDef) {
       pageRows?: AnyObject[],
     ): string {
       if (!rows.length) {
-        return (
-          previousToken ??
-          encodeDeltaToken(
-            { entitySet, lastValue: new Date().toISOString(), buckets },
-            this.buildDeltaTokenOptions(),
-          )
+        const previousPayload = this.tryDecodePreviousDeltaToken(previousToken);
+        return encodeDeltaToken(
+          {
+            entitySet,
+            lastValue: previousPayload?.lastValue ?? new Date().toISOString(),
+            keyValues: previousPayload?.keyValues,
+            pageKeys: previousPayload?.pageKeys,
+            buckets,
+            issuedAt: previousPayload?.issuedAt,
+          },
+          this.buildDeltaTokenOptions(),
         );
       }
       const filteredPageRows = this.filterDeltaPageRows(pageRows, deltaField);
@@ -7538,7 +7543,7 @@ export function defineODataCrudController(def: EntitySetDef) {
       const tombstones: AnyObject[] = [];
       const seen = new Set<string>();
       for (const candidate of entries) {
-        const signature = JSON.stringify(
+        const signature = stableStringify(
           Object.keys(candidate)
             .sort()
             .reduce<Record<string, unknown>>((acc, key) => {
@@ -7556,6 +7561,15 @@ export function defineODataCrudController(def: EntitySetDef) {
         });
       }
       return tombstones;
+    }
+
+    tryDecodePreviousDeltaToken(previousToken?: string): DeltaTokenPayload | undefined {
+      if (!previousToken) return undefined;
+      try {
+        return decodeDeltaToken(previousToken, this.buildDeltaTokenOptions());
+      } catch {
+        return undefined;
+      }
     }
 
     async computeDeltaTokenFromRepository(

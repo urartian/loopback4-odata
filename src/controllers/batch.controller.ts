@@ -693,7 +693,6 @@ export class ODataBatchController {
         this.markEntitySetNonTransactional(def, dataSource.name ?? def.repositoryBindingKey);
         return false;
       }
-      this.markEntitySetNonTransactional(def, dataSource.name ?? def.repositoryBindingKey);
       this.warn('Unable to verify datasource transaction capability during refresh.', {
         entitySet: def.name,
         dataSource: dataSource.name ?? def.repositoryBindingKey,
@@ -1348,6 +1347,16 @@ export class ODataBatchController {
       throw err;
     }
     const type = def?.type;
+    if (
+      typeof value === 'bigint' ||
+      type === 'bigint' ||
+      type === BigInt ||
+      type === 'int64' ||
+      type === 'long' ||
+      type === 'integer'
+    ) {
+      return value.toString();
+    }
     if (type === Number || type === 'number') {
       const num = Number(value);
       if (!Number.isNaN(num)) return String(num);
@@ -2084,9 +2093,18 @@ export class ODataBatchController {
         IsolationLevel.READ_COMMITTED,
       )) as unknown as Transaction;
     } catch (err) {
-      throw new HttpErrors.NotImplemented(
-        `Datasource ${dataSource.name ?? 'unknown'} cannot begin a transaction: ${(err as Error).message ?? 'unsupported connector'}.`,
-      );
+      if (err instanceof HttpErrors.HttpError && err.statusCode === 501) {
+        throw new HttpErrors.NotImplemented(
+          `Datasource ${dataSource.name ?? 'unknown'} cannot begin a transaction: ${err.message ?? 'unsupported connector'}.`,
+        );
+      }
+      const message = (err as Error)?.message?.toLowerCase?.() ?? '';
+      if (message.includes('not implemented') || message.includes('not support')) {
+        throw new HttpErrors.NotImplemented(
+          `Datasource ${dataSource.name ?? 'unknown'} cannot begin a transaction: ${(err as Error).message ?? 'unsupported connector'}.`,
+        );
+      }
+      throw err;
     }
   }
 

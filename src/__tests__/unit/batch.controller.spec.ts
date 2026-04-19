@@ -129,6 +129,12 @@ function createControllerWithRegistry(
 }
 
 describe('$batch controller', () => {
+  @model()
+  class BigIntProduct extends Entity {
+    @property({ id: true, type: 'bigint' })
+    id!: bigint;
+  }
+
   it('injects correlation header into subrequests', async () => {
     const correlationId = 'cid-123';
     const controller = new ODataBatchController(
@@ -1781,7 +1787,7 @@ describe('$batch controller', () => {
     assert.equal(def.transactionCapabilityLocked, true);
   });
 
-  it('treats unknown probe results as non-transactional to avoid repeated refreshes', async () => {
+  it('propagates transient transaction refresh failures without locking the entity set', async () => {
     let repositoryResolutions = 0;
     const def = {
       name: 'Products',
@@ -1823,16 +1829,16 @@ describe('$batch controller', () => {
     );
 
     assert.equal(def.supportsTransactions, false);
-    assert.equal(def.transactionCapabilityLocked, true);
+    assert.equal(def.transactionCapabilityLocked, false);
     assert.equal(repositoryResolutions, 1);
 
     await assert.rejects(
       (controller as any).createAtomicGroupContext('g2', [
         { method: 'POST', url: '/odata/Products' },
       ]),
-      (err: unknown) => err instanceof HttpErrors.NotImplemented,
+      (err: unknown) => err instanceof Error && err.message === 'timeout',
     );
-    assert.equal(repositoryResolutions, 1);
+    assert.equal(repositoryResolutions, 2);
   });
 
   it('marks entity sets as non-transactional when beginTransaction rejects as unsupported', async () => {
@@ -1871,6 +1877,32 @@ describe('$batch controller', () => {
       (err: unknown) => err instanceof HttpErrors.NotImplemented,
     );
     assert.equal(def.supportsTransactions, false);
+  });
+
+  it('builds bigint content-id entity paths without quoting the key', () => {
+    const registry = {
+      findByName: (name: string) =>
+        name === 'Products'
+          ? {
+              name: 'Products',
+              modelCtor: BigIntProduct,
+              repositoryBindingKey: 'repositories.Products',
+            }
+          : undefined,
+    } as any;
+    const controller = new ODataBatchController(
+      { handleRequest: async () => undefined } as any,
+      'http://localhost',
+      createRequestContextStub(),
+      { get: async () => undefined } as any,
+      registry,
+      noopLogger,
+      defaultConfig,
+    );
+
+    const path = (controller as any).buildEntityKeyPath('Products', { id: BigInt(123) });
+
+    assert.equal(path, '/odata/Products(123)');
   });
 
   it('rejects dependsOn references to later requests', async () => {

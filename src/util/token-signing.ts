@@ -27,17 +27,25 @@ type TokenEnvelope<T> = {
 };
 
 const TOKEN_VERSION: TokenEnvelope<unknown>['v'] = 'v3';
-const MAX_TOKEN_ENVELOPE_BYTES = 64 * 1024; // keep envelopes under 64KB to avoid blocking JSON parsing
+export const MAX_TOKEN_ENVELOPE_BYTES = 64 * 1024; // keep envelopes under 64KB to avoid blocking JSON parsing
+
+function normalizeStableValue(value: unknown): unknown {
+  if (typeof value === 'bigint') {
+    return { odataType: 'bigint', value: value.toString() };
+  }
+  if (!value || typeof value !== 'object') return value;
+  if (Array.isArray(value)) {
+    return value.map((entry) => normalizeStableValue(entry));
+  }
+  const sorted: Record<string, unknown> = {};
+  for (const entryKey of Object.keys(value).sort()) {
+    sorted[entryKey] = normalizeStableValue((value as Record<string, unknown>)[entryKey]);
+  }
+  return sorted;
+}
 
 export function stableStringify(value: unknown): string {
-  return JSON.stringify(value, function replacer(this: unknown, key: string, val: unknown) {
-    if (!val || typeof val !== 'object' || Array.isArray(val)) return val;
-    const sorted: Record<string, unknown> = {};
-    for (const entryKey of Object.keys(val).sort()) {
-      sorted[entryKey] = (val as Record<string, unknown>)[entryKey];
-    }
-    return sorted;
-  });
+  return JSON.stringify(normalizeStableValue(value));
 }
 
 function encodeEnvelope<T>(envelope: TokenEnvelope<T>): string {
