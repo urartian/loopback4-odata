@@ -11186,8 +11186,8 @@ export function defineODataCrudController(def: EntitySetDef) {
           }
 
           const inlineCountRequested = Boolean((parsed as any).inlineCount);
-          const requestedSkip = (parsed as any).skip as number | undefined;
-          const requestedTop = (parsed as any).top as number | undefined;
+          const requestedSkip = (parsed as any).offset as number | undefined;
+          const requestedTop = (parsed as any).limit as number | undefined;
 
           const navFilter: Filter<AnyObject> = {};
           if ((parsed as any).fields) navFilter.fields = (parsed as any).fields;
@@ -11207,7 +11207,25 @@ export function defineODataCrudController(def: EntitySetDef) {
             postFilterExpr = splitWhere.structuredExpr;
           }
           if (splitWhere.repoExpr) {
-            navFilter.where = splitWhere.repoExpr as AnyObject;
+            try {
+              navFilter.where = buildWhereFromParsedExpression(splitWhere.repoExpr, {
+                maxFilterPatternLength: this.cfg?.maxFilterPatternLength,
+                maxSubstringStart: this.cfg?.maxSubstringStart,
+                maxSubstringLength: this.cfg?.maxSubstringLength,
+                maxFilterFieldNameLength: this.cfg?.maxFilterFieldNameLength,
+                maxInListItems: this.cfg?.filter?.maxInListItems,
+              }) as AnyObject;
+            } catch (error) {
+              if (error instanceof UnsupportedFilterError) {
+                postFilterExpr = this.combinePostFilterExpressions(
+                  postFilterExpr,
+                  splitWhere.repoExpr,
+                );
+                delete navFilter.where;
+              } else {
+                throw error;
+              }
+            }
           }
           if (postFilterExpr && this.cfg?.strict) {
             throw this.badRequestWithCode(

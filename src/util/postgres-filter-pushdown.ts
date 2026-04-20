@@ -496,7 +496,10 @@ function translateRootStringFunction(
     if (typeof name !== 'string' || name.includes('/')) return undefined;
     const column = resolveColumn(options.modelCtor, name, options.dataSource, options.metaCache);
     if (!column) return undefined;
-    return `${options.tableAlias}.${column}`;
+    const columnExpr = `${options.tableAlias}.${column}`;
+    if (arg.transform === 'tolower') return `LOWER(${columnExpr})`;
+    if (arg.transform === 'toupper') return `UPPER(${columnExpr})`;
+    return columnExpr;
   };
 
   if (expr.name === 'trim') {
@@ -521,16 +524,9 @@ function translateRootStringFunction(
         const paramPlaceholder = placeholder(options.params, arg.value);
         parts.push(`${paramPlaceholder}::TEXT`);
       } else {
-        const name = arg.name;
-        if (typeof name !== 'string' || name.includes('/')) return undefined;
-        const column = resolveColumn(
-          options.modelCtor,
-          name,
-          options.dataSource,
-          options.metaCache,
-        );
-        if (!column) return undefined;
-        parts.push(`${options.tableAlias}.${column}`);
+        const part = resolveArg(arg);
+        if (!part) return undefined;
+        parts.push(part);
       }
     }
     const op = expr.comparator === 'eq' ? '=' : '<>';

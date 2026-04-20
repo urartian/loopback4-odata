@@ -108,6 +108,53 @@ describe('Postgres $filter function pushdown', () => {
     assert.equal(result.params[1], 'x!');
   });
 
+  it('applies transforms to root trim/concat string function arguments', () => {
+    const dataSource = stubPostgresDataSource();
+
+    const trimResult = buildPostgresFilterIdQuery({
+      dataSource,
+      modelCtor: Widget,
+      expression: {
+        operator: 'stringfncmp',
+        name: 'trim',
+        args: [{ kind: 'field', name: 'name', transform: 'tolower' }],
+        comparator: 'eq',
+        value: 'x',
+      },
+      where: undefined,
+      order: undefined,
+      limit: 10,
+      offset: 0,
+    });
+
+    assert('sql' in trimResult);
+    assert.match(trimResult.sql, /btrim\s*\(\s*LOWER\s*\(\s*r\."name"\s*\)\s*\)\s*=/i);
+
+    const concatResult = buildPostgresFilterIdQuery({
+      dataSource,
+      modelCtor: Widget,
+      expression: {
+        operator: 'stringfncmp',
+        name: 'concat',
+        args: [
+          { kind: 'field', name: 'name', transform: 'tolower' },
+          { kind: 'literal', value: '-' },
+          { kind: 'field', name: 'name', transform: 'toupper' },
+        ],
+        comparator: 'eq',
+        value: 'x-X',
+      },
+      where: undefined,
+      order: undefined,
+      limit: 10,
+      offset: 0,
+    });
+
+    assert('sql' in concatResult);
+    assert.match(concatResult.sql, /concat\s*\(\s*LOWER\s*\(\s*r\."name"\s*\)/i);
+    assert.match(concatResult.sql, /UPPER\s*\(\s*r\."name"\s*\)/i);
+  });
+
   it('builds SQL for month(...) comparisons using UTC semantics', () => {
     const dataSource = stubPostgresDataSource();
     const expr: ParsedExpression = {

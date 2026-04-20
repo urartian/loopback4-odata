@@ -347,6 +347,53 @@ describe('Postgres mixed $filter pushdown', () => {
     assert.equal(substring.params[0], '__en');
   });
 
+  it('applies transforms to root trim/concat string function arguments', () => {
+    const dataSource = stubPostgresDataSource();
+
+    const trimResult = buildPostgresMixedFilterIdQuery({
+      dataSource,
+      modelCtor: Purchase,
+      expression: {
+        operator: 'stringfncmp',
+        name: 'trim',
+        args: [{ kind: 'field', name: 'status', transform: 'tolower' }],
+        comparator: 'eq',
+        value: 'open',
+      },
+      where: undefined,
+      order: undefined,
+      limit: 10,
+      offset: 0,
+    });
+
+    assert('sql' in trimResult);
+    assert.match(trimResult.sql, /btrim\s*\(\s*LOWER\s*\(\s*r\."status"\s*\)\s*\)\s*=/i);
+
+    const concatResult = buildPostgresMixedFilterIdQuery({
+      dataSource,
+      modelCtor: Purchase,
+      expression: {
+        operator: 'stringfncmp',
+        name: 'concat',
+        args: [
+          { kind: 'field', name: 'status', transform: 'tolower' },
+          { kind: 'literal', value: '-' },
+          { kind: 'field', name: 'status', transform: 'toupper' },
+        ],
+        comparator: 'eq',
+        value: 'open-OPEN',
+      },
+      where: undefined,
+      order: undefined,
+      limit: 10,
+      offset: 0,
+    });
+
+    assert('sql' in concatResult);
+    assert.match(concatResult.sql, /concat\s*\(\s*LOWER\s*\(\s*r\."status"\s*\)/i);
+    assert.match(concatResult.sql, /UPPER\s*\(\s*r\."status"\s*\)/i);
+  });
+
   it('translates root where inq/nin with null using IS NULL/IS NOT NULL', () => {
     const dataSource = stubPostgresDataSource();
 
