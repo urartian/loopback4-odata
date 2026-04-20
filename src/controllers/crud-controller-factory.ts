@@ -5485,6 +5485,131 @@ export function defineODataCrudController(def: EntitySetDef) {
       }
     }
 
+    buildSingleEntityFilterExpression(
+      parsed: ReturnType<typeof parseODataQuery>,
+    ): ParsedExpression | undefined {
+      let postFilterExpr = this.coerceFilterExpressionLiterals(parsed.postFilter);
+      const coercedWhereExpression = this.coerceFilterExpressionLiterals(parsed.whereExpression);
+      if (coercedWhereExpression) {
+        if (this.cfg?.strict) {
+          this.validateParsedExpressionFields(coercedWhereExpression, '$filter');
+        }
+        postFilterExpr = this.combinePostFilterExpressions(
+          postFilterExpr,
+          coercedWhereExpression,
+        );
+      }
+
+      const unsupportedFunctions = parsed.unsupportedFunctions ?? [];
+      if (postFilterExpr && unsupportedFunctions.length && this.cfg?.strict) {
+        throw new HttpErrors.BadRequest(
+          `Unsupported filter functions in strict mode: ${unsupportedFunctions.join(', ')}`,
+        );
+      }
+      return postFilterExpr;
+    }
+
+    parseSingleEntityFilterExpressionFromRequest(): ParsedExpression | undefined {
+      const query = this.request.query as Record<string, string | string[] | undefined> | undefined;
+      if (!query || !Object.prototype.hasOwnProperty.call(query, '$filter')) return undefined;
+      try {
+        const parsed = parseODataQuery(
+          { $filter: query.$filter },
+          {
+            relations: modelRelations,
+            strict: Boolean(this.cfg?.strict),
+            maxFilterPatternLength: this.cfg?.maxFilterPatternLength,
+            maxSubstringStart: this.cfg?.maxSubstringStart,
+            maxSubstringLength: this.cfg?.maxSubstringLength,
+            maxFilterFieldNameLength: this.cfg?.maxFilterFieldNameLength,
+            maxLambdaExistsDepth: this.cfg?.lambda?.pushdownMaxExistsDepth,
+            maxInListItems: this.cfg?.filter?.maxInListItems,
+          },
+        );
+        return this.buildSingleEntityFilterExpression(parsed);
+      } catch (error) {
+        if (error instanceof HttpErrors.HttpError) throw error;
+        if (error instanceof LambdaQueryRejectedError) {
+          this.emitTelemetry({
+            category: 'rewrite',
+            event: 'lambda-mode',
+            level: 'warn',
+            context: {
+              entitySet: setName,
+              mode: 'rejected',
+              reason: error.reason,
+              lambdasCount: error.lambdasCount,
+              paths: error.paths,
+            },
+          });
+          const err = new HttpErrors.BadRequest((error as Error).message);
+          (err as any).code = error.reason;
+          throw err;
+        }
+        const message = (error as Error).message ?? 'Invalid OData query.';
+        throw new HttpErrors.BadRequest(message);
+      }
+    }
+
+    collectFilterProjectionDependencies(expr: ParsedExpression | undefined): Set<string> {
+      const deps = new Set<string>();
+      const addField = (field: string | undefined) => {
+        const head = String(field ?? '').split('/')[0];
+        if (head) deps.add(head);
+      };
+      const visit = (node: ParsedExpression | undefined) => {
+        if (!node) return;
+        switch (node.operator) {
+          case 'comparison':
+          case 'function':
+          case 'transformcmp':
+          case 'fncmp':
+          case 'datepart':
+          case 'indexofcmp':
+          case 'substrcmp':
+          case 'lengthcmp':
+            addField(node.field);
+            return;
+          case 'stringfncmp':
+            for (const arg of node.args) {
+              if (arg.kind === 'field') addField(arg.name);
+            }
+            return;
+          case 'logical':
+            for (const child of node.expressions) visit(child);
+            return;
+          case 'not':
+            visit(node.expr);
+            return;
+          case 'lambda':
+            visit(node.predicate);
+            return;
+          default:
+            return;
+        }
+      };
+      visit(expr);
+      return deps;
+    }
+
+    ensureFilterFieldProjection(
+      fields: Filter<CrudEntity>['fields'],
+      expr: ParsedExpression | undefined,
+    ): Filter<CrudEntity>['fields'] {
+      const dependencies = this.collectFilterProjectionDependencies(expr);
+      if (!dependencies.size) return fields;
+
+      const projection =
+        !fields || typeof fields === 'string' || Array.isArray(fields)
+          ? this.normalizeFieldSelection(fields)
+          : { ...(fields as AnyObject) };
+      const next = projection ?? {};
+      for (const dep of dependencies) {
+        next[dep] = true;
+      }
+      return Object.keys(next).length ? (next as Filter<CrudEntity>['fields']) : fields;
+    }
+
     compareValues(a: unknown, b: unknown): number {
       if (a === b) return 0;
       if (a == null) return -1;
@@ -10493,7 +10618,6 @@ export function defineODataCrudController(def: EntitySetDef) {
       this.ensureEtagField(baseFilter as Filter<CrudEntity>);
       const ifNoneMatch = this.parseIfNoneMatchHeader();
       let postFilterExpr: ParsedExpression | undefined;
-      let unsupportedFunctions: string[] = [];
       let computeExpressions: ComputeExpression[] | undefined;
 
       try {
@@ -10513,23 +10637,7 @@ export function defineODataCrudController(def: EntitySetDef) {
         this.enforceApplyCapability(applySupported, parsed);
         this.applyFormatPreference(parsed.format);
         computeExpressions = parsed.compute;
-        postFilterExpr = this.coerceFilterExpressionLiterals(parsed.postFilter);
-        const coercedWhereExpression = this.coerceFilterExpressionLiterals(parsed.whereExpression);
-        if (coercedWhereExpression) {
-          if (this.cfg?.strict) {
-            this.validateParsedExpressionFields(coercedWhereExpression, '$filter');
-          }
-          postFilterExpr = this.combinePostFilterExpressions(
-            postFilterExpr,
-            coercedWhereExpression,
-          );
-        }
-        unsupportedFunctions = parsed.unsupportedFunctions ?? [];
-        if (postFilterExpr && unsupportedFunctions.length && this.cfg?.strict) {
-          throw new HttpErrors.BadRequest(
-            `Unsupported filter functions in strict mode: ${unsupportedFunctions.join(', ')}`,
-          );
-        }
+        postFilterExpr = this.buildSingleEntityFilterExpression(parsed);
         const sanitized: Filter<CrudEntity> = {};
         if (parsed.fields) {
           const aliases = computeExpressions?.map((expr) => expr.alias) ?? [];
@@ -11005,6 +11113,8 @@ export function defineODataCrudController(def: EntitySetDef) {
         fields: { [propertyName]: true },
       };
       this.ensureEtagField(baseFilter);
+      const postFilterExpr = this.parseSingleEntityFilterExpressionFromRequest();
+      baseFilter.fields = this.ensureFilterFieldProjection(baseFilter.fields, postFilterExpr);
 
       const ifNoneMatch = this.parseIfNoneMatchHeader();
       const entityId = this.coerceParentId(id);
@@ -11024,6 +11134,11 @@ export function defineODataCrudController(def: EntitySetDef) {
         const options = this.repositoryOptions();
         const entity = await this.repository.findById(entityId as any, baseFilter, options);
         const plain = this.toPlainEntity(entity) ?? {};
+        if (postFilterExpr && !this.evaluatePredicate(postFilterExpr, plain, '', plain)) {
+          this.ensureODataHeaders();
+          this.response.status(204).end();
+          return undefined;
+        }
         const etag = this.computeEtagFromPlain(plain);
 
         if (ifNoneMatch && !ifNoneMatch.any && etag && matchesEtag(etag, ifNoneMatch.values)) {
@@ -11099,6 +11214,10 @@ export function defineODataCrudController(def: EntitySetDef) {
             fields: { [propertyName]: true },
           };
       this.ensureEtagField(baseFilter);
+      const propertyFilterExpr = isRelation
+        ? undefined
+        : this.parseSingleEntityFilterExpressionFromRequest();
+      baseFilter.fields = this.ensureFilterFieldProjection(baseFilter.fields, propertyFilterExpr);
       const ctx = this.buildHookContext({
         operation: op,
         scope,
@@ -11348,6 +11467,11 @@ export function defineODataCrudController(def: EntitySetDef) {
 
         const entity = await this.repository.findById(entityId as any, baseFilter, options);
         const plain = this.toPlainEntity(entity) ?? {};
+        if (propertyFilterExpr && !this.evaluatePredicate(propertyFilterExpr, plain, '', plain)) {
+          this.ensureODataHeaders();
+          this.response.status(204).end();
+          return undefined;
+        }
 
         const rawValue = (plain as AnyObject)[propertyName];
         this.ensureODataHeaders();
