@@ -10514,6 +10514,16 @@ export function defineODataCrudController(def: EntitySetDef) {
         this.applyFormatPreference(parsed.format);
         computeExpressions = parsed.compute;
         postFilterExpr = this.coerceFilterExpressionLiterals(parsed.postFilter);
+        const coercedWhereExpression = this.coerceFilterExpressionLiterals(parsed.whereExpression);
+        if (coercedWhereExpression) {
+          if (this.cfg?.strict) {
+            this.validateParsedExpressionFields(coercedWhereExpression, '$filter');
+          }
+          postFilterExpr = this.combinePostFilterExpressions(
+            postFilterExpr,
+            coercedWhereExpression,
+          );
+        }
         unsupportedFunctions = parsed.unsupportedFunctions ?? [];
         if (postFilterExpr && unsupportedFunctions.length && this.cfg?.strict) {
           throw new HttpErrors.BadRequest(
@@ -11307,6 +11317,14 @@ export function defineODataCrudController(def: EntitySetDef) {
           }
 
           const plain = this.toPlainEntity(entity) ?? {};
+          if (
+            coercedWhereExpression &&
+            !this.evaluatePredicate(coercedWhereExpression, plain, '', plain)
+          ) {
+            this.ensureODataHeaders();
+            this.response.status(204).end();
+            return undefined;
+          }
           this.ensureODataHeaders();
           const contextUrl = `${contextBase}/${propertyName}/$entity`;
           const result = {

@@ -343,4 +343,27 @@ describe('CRUD controller navigation path validation', () => {
     expect(findCalls[0].where).to.not.have.property('operator');
     expect(result.value).to.containDeep([{ descr: 'urgent' }]);
   });
+
+  it('applies navigation singleton filter expressions after relation get', async () => {
+    const getCalls: any[] = [];
+    const repo = {
+      status: () => ({
+        get: async (filter: any) => {
+          getCalls.push(filter);
+          return { code: 'OPEN', name: 'Open' };
+        },
+      }),
+    };
+    const controller = createRuntimeController(
+      { $filter: "name eq 'Closed'" },
+      repo,
+      { strict: true },
+    );
+
+    const result = await (controller as any).getEntityProperty('incident-1', 'status');
+
+    expect(getCalls).to.have.length(1);
+    expect(getCalls[0]).to.containEql({ where: { name: 'Closed' } });
+    expect(result).to.equal(undefined);
+  });
 });
