@@ -5787,6 +5787,13 @@ export function defineODataCrudController(def: EntitySetDef) {
           return this.isStructuredFieldPath(expr.field)
             ? { structuredExpr: expr }
             : { repoExpr: expr };
+        case 'function':
+          if (expr.transform) {
+            return { structuredExpr: expr };
+          }
+          return this.isStructuredFieldPath(expr.field)
+            ? { structuredExpr: expr }
+            : { repoExpr: expr };
         case 'logical':
           if (expr.type === 'and') {
             const repoChildren: ParsedExpression[] = [];
