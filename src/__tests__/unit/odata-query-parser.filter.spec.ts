@@ -70,6 +70,21 @@ describe('parseODataQuery string functions', () => {
 });
 
 describe('parseODataQuery extended filter grammar', () => {
+  it('rejects malformed filters with trailing tokens or unterminated strings', () => {
+    assert.throws(
+      () => parseODataQuery({ $filter: "name eq 'Laptop' garbage" }),
+      /Invalid \$filter expression/i,
+    );
+    assert.throws(
+      () => parseODataQuery({ $filter: "name eq 'Laptop" }),
+      /Unterminated string literal/i,
+    );
+    assert.throws(
+      () => parseODataQuery({ $filter: "name eq 'Laptop'" + ')' }),
+      /Invalid \$filter expression/i,
+    );
+  });
+
   it('supports NOT on comparisons', () => {
     const parsed = parseODataQuery({
       $filter: 'not price gt 100',
@@ -276,6 +291,13 @@ describe('parseODataQuery in operator', () => {
       () => parseODataQuery({ $filter: 'status in (Open)' }, { strict: true }),
       /requires literal/i,
     );
+  });
+
+  it('rejects malformed in() list separators', () => {
+    assert.throws(() => parseODataQuery({ $filter: 'id in (1 2)' }), /Expected comma/i);
+    assert.throws(() => parseODataQuery({ $filter: 'id in (1,,2)' }), /Expected list item/i);
+    assert.throws(() => parseODataQuery({ $filter: 'id in (,1)' }), /Expected list item/i);
+    assert.throws(() => parseODataQuery({ $filter: 'id in (1,)' }), /Expected list item/i);
   });
 });
 

@@ -67,6 +67,12 @@ describe('parseODataQuery expansions & counts', () => {
     ]);
   });
 
+  it('rejects invalid scoped expand paging and ordering options', () => {
+    assert.throws(() => parse({ $expand: 'items($top=-1)' }), /Invalid \$top value/i);
+    assert.throws(() => parse({ $expand: 'items($skip=abc)' }), /Invalid \$skip value/i);
+    assert.throws(() => parse({ $expand: 'items($orderby=name sideways)' }), /Invalid \$orderby/i);
+  });
+
   it('parses repository-supported scoped expand filters', () => {
     const result = parse({ $expand: "items($filter=name eq 'abc')" });
     assert.deepStrictEqual(result.include, [
