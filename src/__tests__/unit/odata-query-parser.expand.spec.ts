@@ -67,6 +67,35 @@ describe('parseODataQuery expansions & counts', () => {
     ]);
   });
 
+  it('parses repository-supported scoped expand filters', () => {
+    const result = parse({ $expand: "items($filter=name eq 'abc')" });
+    assert.deepStrictEqual(result.include, [
+      {
+        relation: 'items',
+        scope: {
+          where: { name: 'abc' },
+        },
+      },
+    ]);
+  });
+
+  it('rejects scoped expand filters that need relation post-filter evaluation', () => {
+    const filters = [
+      "tolower(name) eq 'abc'",
+      "contains(tolower(name),'abc')",
+      "trim(name) eq 'abc'",
+      "concat(name,'-',code) eq 'abc-001'",
+      "product/any(p:p/name eq 'abc')",
+    ];
+
+    for (const filter of filters) {
+      assert.throws(
+        () => parse({ $expand: `items($filter=${filter})` }),
+        /\$expand \$filter requires unsupported relation post-filter evaluation/i,
+      );
+    }
+  });
+
   it('keeps expanded relation when root $select omits navigation property', () => {
     const result = parse({ $select: 'id,name', $expand: 'customer' });
     assert.deepStrictEqual(result.include, [{ relation: 'customer' }]);

@@ -2798,6 +2798,12 @@ function parseExpandOptions(
       }
       case '$filter': {
         const parsed = parseODataQuery({ $filter: rawValue }, { ...parseOptions, relations });
+        const unsupported = collectUnsupportedExpandFilterFeatures(parsed);
+        if (unsupported.length) {
+          throw new Error(
+            `$expand $filter requires unsupported relation post-filter evaluation: ${unsupported.join(', ')}.`,
+          );
+        }
         if (parsed.where) {
           scope = mergeScopes(scope, { where: parsed.where });
         }
@@ -2850,6 +2856,40 @@ function parseExpandOptions(
   }
 
   return { scope, includes: nestedIncludes, levels };
+}
+
+function collectUnsupportedExpandFilterFeatures(parsed: ParsedODataQuery): string[] {
+  const unsupported: string[] = [];
+
+  if (parsed.postFilter) {
+    unsupported.push(...(parsed.unsupportedFunctions?.length ? parsed.unsupportedFunctions : ['post-filter']));
+  }
+  if (parsed.lambdas?.length || parsed.lambdaExpression) {
+    unsupported.push('lambda');
+  }
+
+  const visit = (expr: ParsedExpression | undefined) => {
+    if (!expr) return;
+    if (expr.operator === 'function' && expr.transform) {
+      unsupported.push(expr.transform);
+      return;
+    }
+    if (expr.operator === 'logical') {
+      expr.expressions.forEach(visit);
+      return;
+    }
+    if (expr.operator === 'not') {
+      visit(expr.expr);
+      return;
+    }
+    if (expr.operator === 'lambda') {
+      unsupported.push('lambda');
+      visit(expr.predicate);
+    }
+  };
+
+  visit(parsed.whereExpression);
+  return Array.from(new Set(unsupported));
 }
 
 function buildIncludeFromParts(
