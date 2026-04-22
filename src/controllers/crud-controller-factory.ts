@@ -358,8 +358,12 @@ export function defineODataCrudController(def: EntitySetDef) {
 
   const repoBindingKey = repositoryBindingKey;
 
-  const contextBase = `/odata/$metadata#${setName}`;
-  const entityContext = `${contextBase}/$entity`;
+  const resolveContextBase = (cfg?: ODataConfig): string => {
+    const serviceRoot = normalizeBasePath(cfg?.basePath);
+    const metadataPath = serviceRoot === '/' ? '/$metadata' : `${serviceRoot}/$metadata`;
+    return `${metadataPath}#${setName}`;
+  };
+  const resolveEntityContext = (cfg?: ODataConfig): string => `${resolveContextBase(cfg)}/$entity`;
   const modelDefinition = (ensureModelDefinitionWithRelations(modelCtor) ??
     ((modelCtor as { definition?: ModelDefinition }).definition as
       | ModelDefinition
@@ -2559,7 +2563,7 @@ export function defineODataCrudController(def: EntitySetDef) {
           return undefined;
         };
 
-        const helpers = this.helpersForEntity(entityContext, op);
+        const helpers = this.helpersForEntity(resolveEntityContext(this.cfg), op);
         const onCtx = this.buildOnContext(ctx, helpers);
         const res = await this.runOn(op, undefined, onCtx, execDefault);
         ctx.result = res;
@@ -2671,7 +2675,7 @@ export function defineODataCrudController(def: EntitySetDef) {
           await navRepo.replaceById(navId as any, plain as AnyObject, this.repositoryOptions());
         };
 
-        const helpers = this.helpersForEntity(entityContext, op);
+        const helpers = this.helpersForEntity(resolveEntityContext(this.cfg), op);
         const onCtx = this.buildOnContext(ctx, helpers);
         const res = await this.runOn(op, undefined, onCtx, execDefault);
         ctx.result = res;
@@ -5485,6 +5489,131 @@ export function defineODataCrudController(def: EntitySetDef) {
       }
     }
 
+    buildSingleEntityFilterExpression(
+      parsed: ReturnType<typeof parseODataQuery>,
+    ): ParsedExpression | undefined {
+      let postFilterExpr = this.coerceFilterExpressionLiterals(parsed.postFilter);
+      const coercedWhereExpression = this.coerceFilterExpressionLiterals(parsed.whereExpression);
+      if (coercedWhereExpression) {
+        if (this.cfg?.strict) {
+          this.validateParsedExpressionFields(coercedWhereExpression, '$filter');
+        }
+        postFilterExpr = this.combinePostFilterExpressions(
+          postFilterExpr,
+          coercedWhereExpression,
+        );
+      }
+
+      const unsupportedFunctions = parsed.unsupportedFunctions ?? [];
+      if (postFilterExpr && unsupportedFunctions.length && this.cfg?.strict) {
+        throw new HttpErrors.BadRequest(
+          `Unsupported filter functions in strict mode: ${unsupportedFunctions.join(', ')}`,
+        );
+      }
+      return postFilterExpr;
+    }
+
+    parseSingleEntityFilterExpressionFromRequest(): ParsedExpression | undefined {
+      const query = this.request.query as Record<string, string | string[] | undefined> | undefined;
+      if (!query || !Object.prototype.hasOwnProperty.call(query, '$filter')) return undefined;
+      try {
+        const parsed = parseODataQuery(
+          { $filter: query.$filter },
+          {
+            relations: modelRelations,
+            strict: Boolean(this.cfg?.strict),
+            maxFilterPatternLength: this.cfg?.maxFilterPatternLength,
+            maxSubstringStart: this.cfg?.maxSubstringStart,
+            maxSubstringLength: this.cfg?.maxSubstringLength,
+            maxFilterFieldNameLength: this.cfg?.maxFilterFieldNameLength,
+            maxLambdaExistsDepth: this.cfg?.lambda?.pushdownMaxExistsDepth,
+            maxInListItems: this.cfg?.filter?.maxInListItems,
+          },
+        );
+        return this.buildSingleEntityFilterExpression(parsed);
+      } catch (error) {
+        if (error instanceof HttpErrors.HttpError) throw error;
+        if (error instanceof LambdaQueryRejectedError) {
+          this.emitTelemetry({
+            category: 'rewrite',
+            event: 'lambda-mode',
+            level: 'warn',
+            context: {
+              entitySet: setName,
+              mode: 'rejected',
+              reason: error.reason,
+              lambdasCount: error.lambdasCount,
+              paths: error.paths,
+            },
+          });
+          const err = new HttpErrors.BadRequest((error as Error).message);
+          (err as any).code = error.reason;
+          throw err;
+        }
+        const message = (error as Error).message ?? 'Invalid OData query.';
+        throw new HttpErrors.BadRequest(message);
+      }
+    }
+
+    collectFilterProjectionDependencies(expr: ParsedExpression | undefined): Set<string> {
+      const deps = new Set<string>();
+      const addField = (field: string | undefined) => {
+        const head = String(field ?? '').split('/')[0];
+        if (head) deps.add(head);
+      };
+      const visit = (node: ParsedExpression | undefined) => {
+        if (!node) return;
+        switch (node.operator) {
+          case 'comparison':
+          case 'function':
+          case 'transformcmp':
+          case 'fncmp':
+          case 'datepart':
+          case 'indexofcmp':
+          case 'substrcmp':
+          case 'lengthcmp':
+            addField(node.field);
+            return;
+          case 'stringfncmp':
+            for (const arg of node.args) {
+              if (arg.kind === 'field') addField(arg.name);
+            }
+            return;
+          case 'logical':
+            for (const child of node.expressions) visit(child);
+            return;
+          case 'not':
+            visit(node.expr);
+            return;
+          case 'lambda':
+            visit(node.predicate);
+            return;
+          default:
+            return;
+        }
+      };
+      visit(expr);
+      return deps;
+    }
+
+    ensureFilterFieldProjection(
+      fields: Filter<CrudEntity>['fields'],
+      expr: ParsedExpression | undefined,
+    ): Filter<CrudEntity>['fields'] {
+      const dependencies = this.collectFilterProjectionDependencies(expr);
+      if (!dependencies.size) return fields;
+
+      const projection =
+        !fields || typeof fields === 'string' || Array.isArray(fields)
+          ? this.normalizeFieldSelection(fields)
+          : { ...(fields as AnyObject) };
+      const next = projection ?? {};
+      for (const dep of dependencies) {
+        next[dep] = true;
+      }
+      return Object.keys(next).length ? (next as Filter<CrudEntity>['fields']) : fields;
+    }
+
     compareValues(a: unknown, b: unknown): number {
       if (a === b) return 0;
       if (a == null) return -1;
@@ -5784,6 +5913,13 @@ export function defineODataCrudController(def: EntitySetDef) {
             ? { structuredExpr: expr }
             : { repoExpr: expr };
         case 'transformcmp':
+          return this.isStructuredFieldPath(expr.field)
+            ? { structuredExpr: expr }
+            : { repoExpr: expr };
+        case 'function':
+          if (expr.transform) {
+            return { structuredExpr: expr };
+          }
           return this.isStructuredFieldPath(expr.field)
             ? { structuredExpr: expr }
             : { repoExpr: expr };
@@ -7450,12 +7586,17 @@ export function defineODataCrudController(def: EntitySetDef) {
       pageRows?: AnyObject[],
     ): string {
       if (!rows.length) {
-        return (
-          previousToken ??
-          encodeDeltaToken(
-            { entitySet, lastValue: new Date().toISOString(), buckets },
-            this.buildDeltaTokenOptions(),
-          )
+        const previousPayload = this.tryDecodePreviousDeltaToken(previousToken);
+        return encodeDeltaToken(
+          {
+            entitySet,
+            lastValue: previousPayload?.lastValue ?? new Date().toISOString(),
+            keyValues: previousPayload?.keyValues,
+            pageKeys: previousPayload?.pageKeys,
+            buckets,
+            issuedAt: previousPayload?.issuedAt,
+          },
+          this.buildDeltaTokenOptions(),
         );
       }
       const filteredPageRows = this.filterDeltaPageRows(pageRows, deltaField);
@@ -7538,7 +7679,7 @@ export function defineODataCrudController(def: EntitySetDef) {
       const tombstones: AnyObject[] = [];
       const seen = new Set<string>();
       for (const candidate of entries) {
-        const signature = JSON.stringify(
+        const signature = stableStringify(
           Object.keys(candidate)
             .sort()
             .reduce<Record<string, unknown>>((acc, key) => {
@@ -7556,6 +7697,15 @@ export function defineODataCrudController(def: EntitySetDef) {
         });
       }
       return tombstones;
+    }
+
+    tryDecodePreviousDeltaToken(previousToken?: string): DeltaTokenPayload | undefined {
+      if (!previousToken) return undefined;
+      try {
+        return decodeDeltaToken(previousToken, this.buildDeltaTokenOptions());
+      } catch {
+        return undefined;
+      }
     }
 
     async computeDeltaTokenFromRepository(
@@ -8314,7 +8464,7 @@ export function defineODataCrudController(def: EntitySetDef) {
           const values = items.map((it) => self.toPlainEntity(it as any) ?? (it as AnyObject));
           const decorated = self.decoratePlainEntities(values);
           return {
-            '@odata.context': contextBase,
+            '@odata.context': resolveContextBase(self.cfg),
             ...(totalCount !== undefined ? { '@odata.count': totalCount } : {}),
             value: decorated,
           } as AnyObject;
@@ -8990,6 +9140,7 @@ export function defineODataCrudController(def: EntitySetDef) {
         }
       }
       const requiresPostFilter = Boolean(postFilterExpr) || planRequiresPostProcessing;
+      const contextBase = resolveContextBase(this.cfg);
 
       const op: CrudOperation = 'READ';
       const scope: CrudScope = 'collection';
@@ -9246,7 +9397,7 @@ export function defineODataCrudController(def: EntitySetDef) {
             : [];
           const bucketState = this.buildBucketState(finalStage?.spec.groupBy ?? [], decorated);
           const result = {
-            '@odata.context': contextBase,
+            '@odata.context': resolveContextBase(this.cfg),
             value: aggregatedTombstones.length
               ? [...decorated, ...aggregatedTombstones]
               : decorated,
@@ -9445,7 +9596,7 @@ export function defineODataCrudController(def: EntitySetDef) {
                 clientPaths: this.mergeIncludePaths(clientIncludePaths),
               });
               const result = {
-                '@odata.context': contextBase,
+                '@odata.context': resolveContextBase(this.cfg),
                 ...(inlineCountRequested && totalCount !== undefined
                   ? { '@odata.count': totalCount }
                   : {}),
@@ -9591,7 +9742,7 @@ export function defineODataCrudController(def: EntitySetDef) {
               clientPaths: this.mergeIncludePaths(clientIncludePaths),
             });
             const result = {
-              '@odata.context': contextBase,
+              '@odata.context': resolveContextBase(this.cfg),
               ...(inlineCountRequested && totalCount !== undefined
                 ? { '@odata.count': totalCount }
                 : {}),
@@ -9795,7 +9946,7 @@ export function defineODataCrudController(def: EntitySetDef) {
                   clientPaths: this.mergeIncludePaths(clientIncludePaths),
                 });
                 const result = {
-                  '@odata.context': contextBase,
+                  '@odata.context': resolveContextBase(this.cfg),
                   ...(inlineCountRequested ? { '@odata.count': totalCount! } : {}),
                   value: this.decoratePlainEntities(ordered),
                 } as AnyObject;
@@ -9888,7 +10039,7 @@ export function defineODataCrudController(def: EntitySetDef) {
             clientPaths: this.mergeIncludePaths(clientIncludePaths),
           });
           const result = {
-            '@odata.context': contextBase,
+            '@odata.context': resolveContextBase(this.cfg),
             ...(inlineCountRequested ? { '@odata.count': filtered.length } : {}),
             value: this.decoratePlainEntities(paged),
           } as AnyObject;
@@ -10035,7 +10186,7 @@ export function defineODataCrudController(def: EntitySetDef) {
         const combined = tombstones.length ? [...decorated, ...tombstones] : decorated;
         this.recordTelemetryStats({ rows: combined.length });
         const result = {
-          '@odata.context': contextBase,
+          '@odata.context': resolveContextBase(this.cfg),
           ...(inlineCountRequested ? { '@odata.count': totalCount ?? filteredResults.length } : {}),
           value: combined,
         } as AnyObject;
@@ -10049,7 +10200,7 @@ export function defineODataCrudController(def: EntitySetDef) {
         return result;
       };
 
-      const helpers = this.helpersForEntity(entityContext, op);
+      const helpers = this.helpersForEntity(resolveEntityContext(this.cfg), op);
       const onCtx = this.buildOnContext(ctx, helpers);
       const res = await this.runOn(op, scope, onCtx, execDefault);
       ctx.result = res;
@@ -10437,7 +10588,7 @@ export function defineODataCrudController(def: EntitySetDef) {
         return result;
       };
 
-      const helpers = this.helpersForEntity(entityContext, op);
+      const helpers = this.helpersForEntity(resolveEntityContext(this.cfg), op);
       const onCtx = this.buildOnContext(ctx, helpers);
       const res = await this.runOn(op, scope, onCtx, execDefault);
       ctx.result = res;
@@ -10472,7 +10623,6 @@ export function defineODataCrudController(def: EntitySetDef) {
       this.ensureEtagField(baseFilter as Filter<CrudEntity>);
       const ifNoneMatch = this.parseIfNoneMatchHeader();
       let postFilterExpr: ParsedExpression | undefined;
-      let unsupportedFunctions: string[] = [];
       let computeExpressions: ComputeExpression[] | undefined;
 
       try {
@@ -10492,13 +10642,7 @@ export function defineODataCrudController(def: EntitySetDef) {
         this.enforceApplyCapability(applySupported, parsed);
         this.applyFormatPreference(parsed.format);
         computeExpressions = parsed.compute;
-        postFilterExpr = this.coerceFilterExpressionLiterals(parsed.postFilter);
-        unsupportedFunctions = parsed.unsupportedFunctions ?? [];
-        if (postFilterExpr && unsupportedFunctions.length && this.cfg?.strict) {
-          throw new HttpErrors.BadRequest(
-            `Unsupported filter functions in strict mode: ${unsupportedFunctions.join(', ')}`,
-          );
-        }
+        postFilterExpr = this.buildSingleEntityFilterExpression(parsed);
         const sanitized: Filter<CrudEntity> = {};
         if (parsed.fields) {
           const aliases = computeExpressions?.map((expr) => expr.alias) ?? [];
@@ -10582,14 +10726,14 @@ export function defineODataCrudController(def: EntitySetDef) {
         this.setEtagHeaderFromPlain(plain);
         const decorated = this.decoratePlainEntity(plain, etag);
         const result = {
-          '@odata.context': entityContext,
+          '@odata.context': resolveEntityContext(this.cfg),
           ...decorated,
         } as AnyObject;
         ctx.result = result;
         return result;
       };
 
-      const helpers = this.helpersForEntity(entityContext, op);
+      const helpers = this.helpersForEntity(resolveEntityContext(this.cfg), op);
       const onCtx = this.buildOnContext(ctx, helpers);
       const res = await this.runOn(op, scope, onCtx, execDefault);
       ctx.result = res;
@@ -10831,7 +10975,7 @@ export function defineODataCrudController(def: EntitySetDef) {
             this.setEtagHeaderFromPlain(responsePlain);
             this.setMediaEtagHeader(responsePlain);
             const result = {
-              '@odata.context': entityContext,
+              '@odata.context': resolveEntityContext(this.cfg),
               ...decorated,
             } as AnyObject;
             ctx.result = result;
@@ -10974,6 +11118,8 @@ export function defineODataCrudController(def: EntitySetDef) {
         fields: { [propertyName]: true },
       };
       this.ensureEtagField(baseFilter);
+      const postFilterExpr = this.parseSingleEntityFilterExpressionFromRequest();
+      baseFilter.fields = this.ensureFilterFieldProjection(baseFilter.fields, postFilterExpr);
 
       const ifNoneMatch = this.parseIfNoneMatchHeader();
       const entityId = this.coerceParentId(id);
@@ -10993,6 +11139,11 @@ export function defineODataCrudController(def: EntitySetDef) {
         const options = this.repositoryOptions();
         const entity = await this.repository.findById(entityId as any, baseFilter, options);
         const plain = this.toPlainEntity(entity) ?? {};
+        if (postFilterExpr && !this.evaluatePredicate(postFilterExpr, plain, '', plain)) {
+          this.ensureODataHeaders();
+          this.response.status(204).end();
+          return undefined;
+        }
         const etag = this.computeEtagFromPlain(plain);
 
         if (ifNoneMatch && !ifNoneMatch.any && etag && matchesEtag(etag, ifNoneMatch.values)) {
@@ -11068,6 +11219,10 @@ export function defineODataCrudController(def: EntitySetDef) {
             fields: { [propertyName]: true },
           };
       this.ensureEtagField(baseFilter);
+      const propertyFilterExpr = isRelation
+        ? undefined
+        : this.parseSingleEntityFilterExpressionFromRequest();
+      baseFilter.fields = this.ensureFilterFieldProjection(baseFilter.fields, propertyFilterExpr);
       const ctx = this.buildHookContext({
         operation: op,
         scope,
@@ -11165,8 +11320,8 @@ export function defineODataCrudController(def: EntitySetDef) {
           }
 
           const inlineCountRequested = Boolean((parsed as any).inlineCount);
-          const requestedSkip = (parsed as any).skip as number | undefined;
-          const requestedTop = (parsed as any).top as number | undefined;
+          const requestedSkip = (parsed as any).offset as number | undefined;
+          const requestedTop = (parsed as any).limit as number | undefined;
 
           const navFilter: Filter<AnyObject> = {};
           if ((parsed as any).fields) navFilter.fields = (parsed as any).fields;
@@ -11186,7 +11341,25 @@ export function defineODataCrudController(def: EntitySetDef) {
             postFilterExpr = splitWhere.structuredExpr;
           }
           if (splitWhere.repoExpr) {
-            navFilter.where = splitWhere.repoExpr as AnyObject;
+            try {
+              navFilter.where = buildWhereFromParsedExpression(splitWhere.repoExpr, {
+                maxFilterPatternLength: this.cfg?.maxFilterPatternLength,
+                maxSubstringStart: this.cfg?.maxSubstringStart,
+                maxSubstringLength: this.cfg?.maxSubstringLength,
+                maxFilterFieldNameLength: this.cfg?.maxFilterFieldNameLength,
+                maxInListItems: this.cfg?.filter?.maxInListItems,
+              }) as AnyObject;
+            } catch (error) {
+              if (error instanceof UnsupportedFilterError) {
+                postFilterExpr = this.combinePostFilterExpressions(
+                  postFilterExpr,
+                  splitWhere.repoExpr,
+                );
+                delete navFilter.where;
+              } else {
+                throw error;
+              }
+            }
           }
           if (postFilterExpr && this.cfg?.strict) {
             throw this.badRequestWithCode(
@@ -11229,7 +11402,7 @@ export function defineODataCrudController(def: EntitySetDef) {
             }
 
             this.ensureODataHeaders();
-            const contextUrl = `${contextBase}/${propertyName}`;
+            const contextUrl = `${resolveContextBase(this.cfg)}/${propertyName}`;
             const result = {
               '@odata.context': contextUrl,
               ...(inlineCountRequested ? { '@odata.count': plain.length } : {}),
@@ -11268,8 +11441,16 @@ export function defineODataCrudController(def: EntitySetDef) {
           }
 
           const plain = this.toPlainEntity(entity) ?? {};
+          if (
+            coercedWhereExpression &&
+            !this.evaluatePredicate(coercedWhereExpression, plain, '', plain)
+          ) {
+            this.ensureODataHeaders();
+            this.response.status(204).end();
+            return undefined;
+          }
           this.ensureODataHeaders();
-          const contextUrl = `${contextBase}/${propertyName}/$entity`;
+          const contextUrl = `${resolveContextBase(this.cfg)}/${propertyName}/$entity`;
           const result = {
             '@odata.context': contextUrl,
             ...plain,
@@ -11291,6 +11472,11 @@ export function defineODataCrudController(def: EntitySetDef) {
 
         const entity = await this.repository.findById(entityId as any, baseFilter, options);
         const plain = this.toPlainEntity(entity) ?? {};
+        if (propertyFilterExpr && !this.evaluatePredicate(propertyFilterExpr, plain, '', plain)) {
+          this.ensureODataHeaders();
+          this.response.status(204).end();
+          return undefined;
+        }
 
         const rawValue = (plain as AnyObject)[propertyName];
         this.ensureODataHeaders();
@@ -11309,7 +11495,7 @@ export function defineODataCrudController(def: EntitySetDef) {
           return rawValue;
         }
 
-        const contextUrl = `${contextBase}/${propertyName}`;
+        const contextUrl = `${resolveContextBase(this.cfg)}/${propertyName}`;
         const responsePayload = {
           '@odata.context': contextUrl,
           value: rawValue,
@@ -11537,14 +11723,14 @@ export function defineODataCrudController(def: EntitySetDef) {
           this.response.status(201);
           this.applyPreference(preference);
           const result = {
-            '@odata.context': entityContext,
+            '@odata.context': resolveEntityContext(this.cfg),
             ...decorated,
           } as AnyObject;
           ctx.result = result;
           return result;
         };
 
-        const helpers = this.helpersForEntity(entityContext, op);
+        const helpers = this.helpersForEntity(resolveEntityContext(this.cfg), op);
         const onCtx = this.buildOnContext(ctx, helpers);
         const res = await this.runOn(op, scope, onCtx, execDefault);
         ctx.result = res;
@@ -11650,14 +11836,14 @@ export function defineODataCrudController(def: EntitySetDef) {
 
           this.applyPreference(preference);
           const result = {
-            '@odata.context': entityContext,
+            '@odata.context': resolveEntityContext(this.cfg),
             ...decorated,
           } as AnyObject;
           ctx.result = result;
           return result;
         };
 
-        const helpers = this.helpersForEntity(entityContext, op);
+        const helpers = this.helpersForEntity(resolveEntityContext(this.cfg), op);
         const onCtx = this.buildOnContext(ctx, helpers);
         const res = await this.runOn(op, scope, onCtx, execDefault);
         ctx.result = res;
@@ -11822,14 +12008,14 @@ export function defineODataCrudController(def: EntitySetDef) {
 
           this.applyPreference(preference);
           const result = {
-            '@odata.context': entityContext,
+            '@odata.context': resolveEntityContext(this.cfg),
             ...decorated,
           } as AnyObject;
           ctx.result = result;
           return result;
         };
 
-        const helpers = this.helpersForEntity(entityContext, op);
+        const helpers = this.helpersForEntity(resolveEntityContext(this.cfg), op);
         const onCtx = this.buildOnContext(ctx, helpers);
         const res = await this.runOn(op, scope, onCtx, execDefault);
         ctx.result = res;
@@ -12064,7 +12250,7 @@ export function defineODataCrudController(def: EntitySetDef) {
             this.applyPreference(preference);
             this.response.status(200);
             const result = {
-              '@odata.context': entityContext,
+              '@odata.context': resolveEntityContext(this.cfg),
               ...decorated,
             } as AnyObject;
             ctx.result = result;
@@ -12077,7 +12263,7 @@ export function defineODataCrudController(def: EntitySetDef) {
           return undefined;
         };
 
-        const helpers = this.helpersForEntity(entityContext, op);
+        const helpers = this.helpersForEntity(resolveEntityContext(this.cfg), op);
         const onCtx = this.buildOnContext(ctx, helpers);
         const res = await this.runOn(op, scope, onCtx, execDefault);
         ctx.result = res;

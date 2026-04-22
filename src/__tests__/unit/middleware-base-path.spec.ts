@@ -41,12 +41,22 @@ const createMiddlewareContext = (url: string): MiddlewareContext => {
   return ctx;
 };
 
+const createODataRegistry = (): EntitySetRegistry => {
+  const registry = new EntitySetRegistry();
+  class ProductEntity {}
+  class OrderEntity {}
+  registry.register({ name: 'Products', modelCtor: ProductEntity as any });
+  registry.register({ name: 'Orders', modelCtor: OrderEntity as any });
+  return registry;
+};
+
 describe('root basePath middleware handling', () => {
   it('rewrites root-mounted requests to /odata paths', async () => {
+    const registry = createODataRegistry();
     const provider = new OdataPathRewriterProvider(
       { basePath: '/' } as any,
       noopLogger,
-      new EntitySetRegistry(),
+      registry,
     );
     const middleware = provider.value();
     const ctx = createMiddlewareContext('/Products');
@@ -70,18 +80,38 @@ describe('root basePath middleware handling', () => {
     assert.equal(ctx.request.url, '/odata?foo=bar');
   });
 
-  it('treats root basePath as matching any absolute path in request-context provider', () => {
-    const provider = new ODataRequestContextProvider({ basePath: '/' } as any);
+  it('treats root basePath as matching only OData root routes in request-context provider', () => {
+    const provider = new ODataRequestContextProvider({ basePath: '/' } as any, createODataRegistry());
     const isODataRequest = (provider as any).isODataRequest.bind(provider);
     assert.equal(isODataRequest({ url: '/Products' }, '/'), true);
     assert.equal(isODataRequest({ url: '/?foo=1' }, '/'), true);
+    assert.equal(isODataRequest({ url: '/health' }, '/'), false);
   });
 
-  it('treats root basePath as matching any absolute path in request-logging provider', () => {
-    const provider = new RequestLoggingProvider({ basePath: '/' } as any, noopLogger);
+  it('treats root basePath as matching only OData root routes in request-logging provider', () => {
+    const provider = new RequestLoggingProvider(
+      { basePath: '/' } as any,
+      noopLogger,
+      createODataRegistry(),
+    );
     const isODataRequest = (provider as any).isODataRequest.bind(provider);
     assert.equal(isODataRequest({ url: '/Orders' }, '/'), true);
     assert.equal(isODataRequest({ url: '/#fragment' }, '/'), true);
+    assert.equal(isODataRequest({ url: '/openapi.json' }, '/'), false);
+  });
+
+  it('does not rewrite non-OData routes when basePath is root', async () => {
+    const provider = new OdataPathRewriterProvider(
+      { basePath: '/' } as any,
+      noopLogger,
+      createODataRegistry(),
+    );
+    const middleware = provider.value();
+    const ctx = createMiddlewareContext('/health');
+
+    await middleware(ctx, async () => undefined);
+
+    assert.equal(ctx.request.url, '/health');
   });
 
   it('does not rewrite non-OData routes containing parentheses', async () => {

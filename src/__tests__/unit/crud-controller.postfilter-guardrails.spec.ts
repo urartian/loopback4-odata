@@ -160,4 +160,30 @@ describe('CRUD controller post-filter guardrails', () => {
     const result = await controller.list();
     expect((result as any).value.map((item: any) => item.id)).to.eql([1]);
   });
+
+  it('applies ordinary $filter expressions on entity reads', async () => {
+    const controller = createController(
+      { $filter: "name eq 'expected'" },
+      { strict: false },
+      {
+        findById: async () => ({ id: 1, name: 'actual' }),
+      },
+    );
+
+    await expect(controller.findById(1)).to.be.rejectedWith(/Entity not found/);
+  });
+
+  it('returns entity reads when ordinary $filter expressions match', async () => {
+    const controller = createController(
+      { $filter: "name eq 'expected'" },
+      { strict: false },
+      {
+        findById: async () => ({ id: 1, name: 'expected' }),
+      },
+    );
+
+    const result = await controller.findById(1);
+
+    expect((result as any).name).to.equal('expected');
+  });
 });

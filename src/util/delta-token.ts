@@ -1,5 +1,6 @@
 import {
   DeltaTokenSecurityOptions,
+  MAX_TOKEN_ENVELOPE_BYTES,
   TokenVerificationError,
   signDeltaToken,
   verifyDeltaToken,
@@ -164,6 +165,56 @@ function decodeKeyValuesArray(raw?: unknown): Record<string, unknown>[] | undefi
   return decoded.length ? decoded : undefined;
 }
 
+function encodeStructuredValue(value: unknown): unknown {
+  if (value === undefined) return undefined;
+  if (Array.isArray(value)) {
+    return value.map((entry) => encodeStructuredValue(entry));
+  }
+  if (isPlainRecord(value)) {
+    const encoded: Record<string, unknown> = {};
+    for (const [key, nested] of Object.entries(value)) {
+      encoded[key] = encodeStructuredValue(nested);
+    }
+    return encoded;
+  }
+  return encodeValue(value);
+}
+
+function decodeStructuredValue(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map((entry) => decodeStructuredValue(entry));
+  }
+  if (isEncodedDeltaValue(value)) {
+    return decodeStoredValue(value);
+  }
+  if (isPlainRecord(value)) {
+    const decoded: Record<string, unknown> = {};
+    for (const [key, nested] of Object.entries(value)) {
+      decoded[key] = decodeStructuredValue(nested);
+    }
+    return decoded;
+  }
+  return value;
+}
+
+function encodeBucketState(entry: DeltaTokenBucketState): DeltaTokenBucketState {
+  return {
+    key: (encodeStructuredValue(entry.key) as Record<string, unknown>) ?? {},
+    data: isPlainRecord(entry.data)
+      ? (encodeStructuredValue(entry.data) as Record<string, unknown>)
+      : undefined,
+  };
+}
+
+function decodeBucketState(entry: DeltaTokenBucketState): DeltaTokenBucketState {
+  return {
+    key: (decodeStructuredValue(entry.key) as Record<string, unknown>) ?? {},
+    data: isPlainRecord(entry.data)
+      ? (decodeStructuredValue(entry.data) as Record<string, unknown>)
+      : undefined,
+  };
+}
+
 export function encodeDeltaToken(
   payload: DeltaTokenPayload,
   options: DeltaTokenSecurityOptions,
@@ -173,14 +224,22 @@ export function encodeDeltaToken(
     lastValue: payload.lastValue,
     keyValues: encodeKeyValues(payload.keyValues),
     pageKeys: encodeKeyValuesArray(payload.pageKeys),
-    buckets: payload.buckets ? payload.buckets.map(cloneBucketState) : undefined,
+    buckets: payload.buckets ? payload.buckets.map((entry) => encodeBucketState(entry)) : undefined,
     issuedAt: payload.issuedAt ?? new Date().toISOString(),
   };
   return signDeltaToken(encodedPayload, options);
 }
 
+function decodeLegacyPayload(raw: string): string {
+  const decodedBuffer = Buffer.from(raw, 'base64');
+  if (decodedBuffer.length > MAX_TOKEN_ENVELOPE_BYTES) {
+    throw new TokenVerificationError('Token payload exceeds maximum size.', 'invalid');
+  }
+  return decodedBuffer.toString('utf8');
+}
+
 function decodeLegacyToken(token: string): DeltaTokenPayload {
-  const raw = Buffer.from(token.slice(LEGACY_PREFIX.length), 'base64').toString('utf8');
+  const raw = decodeLegacyPayload(token.slice(LEGACY_PREFIX.length));
   const [entitySet, lastValue, keySegment] = raw.split('|');
   if (!entitySet || !lastValue) {
     throw new Error('Invalid delta token payload.');
@@ -203,7 +262,7 @@ function decodeLegacyToken(token: string): DeltaTokenPayload {
 }
 
 function decodeJsonToken(token: string): DeltaTokenPayload {
-  const raw = Buffer.from(token.slice(JSON_PREFIX.length), 'base64').toString('utf8');
+  const raw = decodeLegacyPayload(token.slice(JSON_PREFIX.length));
   const parsed = JSON.parse(raw) as {
     entitySet: string;
     lastValue: string;
@@ -274,13 +333,6 @@ function cloneRecord(
   return clone;
 }
 
-function cloneBucketState(entry: DeltaTokenBucketState): DeltaTokenBucketState {
-  return {
-    key: cloneRecord(entry.key) ?? {},
-    data: cloneRecord(entry.data),
-  };
-}
-
 function normalizeBucketStates(raw?: unknown): DeltaTokenBucketState[] | undefined {
   if (!Array.isArray(raw)) return undefined;
   const normalized: DeltaTokenBucketState[] = [];
@@ -293,10 +345,12 @@ function normalizeBucketStates(raw?: unknown): DeltaTokenBucketState[] | undefin
     const key = isPlainRecord(candidate.key) ? cloneRecord(candidate.key) : undefined;
     const data = isPlainRecord(candidate.data) ? cloneRecord(candidate.data) : undefined;
     if (key) {
-      normalized.push(data ? { key, data } : { key });
+      normalized.push(decodeBucketState(data ? { key, data } : { key }));
       continue;
     }
-    normalized.push({ key: cloneRecord(candidate as Record<string, unknown>) ?? {} });
+    normalized.push(
+      decodeBucketState({ key: cloneRecord(candidate as Record<string, unknown>) ?? {} }),
+    );
   }
   return normalized.length ? normalized : undefined;
 }

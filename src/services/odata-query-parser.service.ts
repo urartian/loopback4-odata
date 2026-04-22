@@ -329,6 +329,9 @@ function tokenize(filter: string): string[] {
   }
 
   if (current) tokens.push(current);
+  if (inString) {
+    throw new Error('Unterminated string literal in filter expression.');
+  }
 
   return tokens;
 }
@@ -818,21 +821,36 @@ function parseInComparison(
 
   const values: unknown[] = [];
   let cursor = index + 3;
+  let expectValue = true;
   while (cursor < tokens.length) {
     const token = tokens[cursor];
-    if (token === ')') break;
-    if (token === ',') {
+    if (token === ')') {
+      if (expectValue && values.length) {
+        throw new Error('Malformed in expression. Expected list item.');
+      }
+      break;
+    }
+    if (expectValue) {
+      if (token === ',') {
+        throw new Error('Malformed in expression. Expected list item.');
+      }
+      if (ctx.strict && !isInListLiteralToken(token)) {
+        throw badRequestWithCode(
+          'in operator requires literal list items.',
+          ODataErrorCodes.InOperatorRequiresLiteralListItems,
+        );
+      }
+      values.push(parseLiteral(token));
       cursor += 1;
+      expectValue = false;
       continue;
     }
-    if (ctx.strict && !isInListLiteralToken(token)) {
-      throw badRequestWithCode(
-        'in operator requires literal list items.',
-        ODataErrorCodes.InOperatorRequiresLiteralListItems,
-      );
+
+    if (token !== ',') {
+      throw new Error('Malformed in expression. Expected comma between list items.');
     }
-    values.push(parseLiteral(token));
     cursor += 1;
+    expectValue = true;
   }
 
   if (tokens[cursor] !== ')') {
@@ -1888,15 +1906,28 @@ function buildWhere(expr: ParsedExpression, options?: ParseOptions): Where<AnyOb
 
 function parseOrder(order?: string): string[] | undefined {
   if (!order) return undefined;
-  return order
-    .split(',')
-    .map((part) => {
-      const [field, direction] = part.trim().split(/\s+/);
-      if (!field) return '';
-      const dir = direction?.toUpperCase() === 'DESC' ? 'DESC' : 'ASC';
-      return `${field} ${dir}`.trim();
-    })
-    .filter(Boolean);
+  const parsed = order.split(',').map((part) => {
+    const trimmed = part.trim();
+    if (!trimmed) {
+      throw new Error('Invalid $orderby expression: empty property.');
+    }
+    const tokens = trimmed.split(/\s+/);
+    if (tokens.length > 2) {
+      throw new Error(`Invalid $orderby expression: ${trimmed}`);
+    }
+    const [field, direction] = tokens;
+    const normalizedDirection = direction?.toLowerCase();
+    if (
+      normalizedDirection !== undefined &&
+      normalizedDirection !== 'asc' &&
+      normalizedDirection !== 'desc'
+    ) {
+      throw new Error(`Invalid $orderby direction: ${direction}`);
+    }
+    const dir = normalizedDirection === 'desc' ? 'DESC' : 'ASC';
+    return `${field} ${dir}`;
+  });
+  return parsed.length ? parsed : undefined;
 }
 
 function parseCompute(compute: string): ComputeExpression[] {
@@ -2404,6 +2435,18 @@ function parseNonNegativeInteger(value: string, transformation: string): number 
   return num;
 }
 
+function parseQueryNonNegativeInteger(value: string, option: '$top' | '$skip'): number {
+  const trimmed = value.trim();
+  if (!/^\d+$/.test(trimmed)) {
+    throw new Error(`Invalid ${option} value: ${value}`);
+  }
+  const num = Number(trimmed);
+  if (!Number.isSafeInteger(num)) {
+    throw new Error(`Invalid ${option} value: ${value}`);
+  }
+  return num;
+}
+
 function parseApply(apply: string): AggregationSpec | undefined {
   const pipeline = parseApplyPipeline(apply);
   return deriveAggregationSpecFromPipeline(pipeline);
@@ -2798,6 +2841,12 @@ function parseExpandOptions(
       }
       case '$filter': {
         const parsed = parseODataQuery({ $filter: rawValue }, { ...parseOptions, relations });
+        const unsupported = collectUnsupportedExpandFilterFeatures(parsed);
+        if (unsupported.length) {
+          throw new Error(
+            `$expand $filter requires unsupported relation post-filter evaluation: ${unsupported.join(', ')}.`,
+          );
+        }
         if (parsed.where) {
           scope = mergeScopes(scope, { where: parsed.where });
         }
@@ -2811,18 +2860,12 @@ function parseExpandOptions(
         break;
       }
       case '$top': {
-        const limit = Number(rawValue);
-        if (!Number.isFinite(limit)) {
-          throw new Error(`Invalid $top value: ${rawValue}`);
-        }
+        const limit = parseQueryNonNegativeInteger(rawValue, '$top');
         scope = mergeScopes(scope, { limit });
         break;
       }
       case '$skip': {
-        const offset = Number(rawValue);
-        if (!Number.isFinite(offset)) {
-          throw new Error(`Invalid $skip value: ${rawValue}`);
-        }
+        const offset = parseQueryNonNegativeInteger(rawValue, '$skip');
         scope = mergeScopes(scope, { offset });
         break;
       }
@@ -2850,6 +2893,40 @@ function parseExpandOptions(
   }
 
   return { scope, includes: nestedIncludes, levels };
+}
+
+function collectUnsupportedExpandFilterFeatures(parsed: ParsedODataQuery): string[] {
+  const unsupported: string[] = [];
+
+  if (parsed.postFilter) {
+    unsupported.push(...(parsed.unsupportedFunctions?.length ? parsed.unsupportedFunctions : ['post-filter']));
+  }
+  if (parsed.lambdas?.length || parsed.lambdaExpression) {
+    unsupported.push('lambda');
+  }
+
+  const visit = (expr: ParsedExpression | undefined) => {
+    if (!expr) return;
+    if (expr.operator === 'function' && expr.transform) {
+      unsupported.push(expr.transform);
+      return;
+    }
+    if (expr.operator === 'logical') {
+      expr.expressions.forEach(visit);
+      return;
+    }
+    if (expr.operator === 'not') {
+      visit(expr.expr);
+      return;
+    }
+    if (expr.operator === 'lambda') {
+      unsupported.push('lambda');
+      visit(expr.predicate);
+    }
+  };
+
+  visit(parsed.whereExpression);
+  return Array.from(new Set(unsupported));
 }
 
 function buildIncludeFromParts(
@@ -3008,6 +3085,14 @@ export interface ParsedODataQuery extends Filter<AnyObject> {
   compute?: ComputeExpression[];
 }
 
+function singleQueryValue(query: QueryObject, key: string): string | undefined {
+  const value = query[key];
+  if (Array.isArray(value)) {
+    throw new Error(`Duplicate query option is not allowed: ${key}`);
+  }
+  return typeof value === 'string' ? value : undefined;
+}
+
 export function parseODataQuery(query: QueryObject, options: ParseOptions = {}): ParsedODataQuery {
   const filter: ParsedODataQuery = {};
   const { relations } = options;
@@ -3036,11 +3121,14 @@ export function parseODataQuery(query: QueryObject, options: ParseOptions = {}):
     }
   }
 
-  const filterExpr = typeof query['$filter'] === 'string' ? query['$filter'] : undefined;
+  const filterExpr = singleQueryValue(query, '$filter');
   if (filterExpr) {
     const tokens = tokenize(filterExpr);
     if (tokens.length) {
-      const [expr] = parseFilter(tokens, 0, ctx);
+      const [expr, nextIndex] = parseFilter(tokens, 0, ctx);
+      if (nextIndex !== tokens.length) {
+        throw new Error(`Invalid $filter expression near "${tokens[nextIndex]}".`);
+      }
       const rewritten = rewriteNegatedLambdas(expr);
       validateLambdaExpressionTree(rewritten, options);
       const { lambdas, predicate, lambdaExpression } = splitLambdaExpressions(rewritten);
@@ -3072,32 +3160,32 @@ export function parseODataQuery(query: QueryObject, options: ParseOptions = {}):
     }
   }
 
-  const orderby = typeof query['$orderby'] === 'string' ? query['$orderby'] : undefined;
+  const orderby = singleQueryValue(query, '$orderby');
   if (orderby) {
     filter.order = parseOrder(orderby);
   }
 
-  const top = typeof query['$top'] === 'string' ? Number(query['$top']) : undefined;
-  if (Number.isFinite(top)) {
-    filter.limit = Number(top);
+  const top = singleQueryValue(query, '$top');
+  if (top !== undefined) {
+    filter.limit = parseQueryNonNegativeInteger(top, '$top');
   }
 
-  const skip = typeof query['$skip'] === 'string' ? Number(query['$skip']) : undefined;
-  if (Number.isFinite(skip)) {
-    filter.offset = Number(skip);
+  const skip = singleQueryValue(query, '$skip');
+  if (skip !== undefined) {
+    filter.offset = parseQueryNonNegativeInteger(skip, '$skip');
   }
 
-  const skiptoken = typeof query['$skiptoken'] === 'string' ? query['$skiptoken'] : undefined;
+  const skiptoken = singleQueryValue(query, '$skiptoken');
   if (skiptoken) {
     filter.skipToken = skiptoken;
   }
 
-  const delta = typeof query['$deltatoken'] === 'string' ? query['$deltatoken'] : undefined;
+  const delta = singleQueryValue(query, '$deltatoken');
   if (delta) {
     filter.deltaToken = delta;
   }
 
-  const select = typeof query['$select'] === 'string' ? query['$select'] : undefined;
+  const select = singleQueryValue(query, '$select');
   if (select) {
     filter.fields = parseSelect(select);
   }
@@ -3109,30 +3197,34 @@ export function parseODataQuery(query: QueryObject, options: ParseOptions = {}):
     ensureFieldsIncludeRelations(filter, include);
   }
 
-  const inlineCount =
-    typeof query['$count'] === 'string' && query['$count'].toLowerCase() === 'true';
-  if (inlineCount) {
-    filter.inlineCount = true;
+  const count = singleQueryValue(query, '$count');
+  if (count !== undefined) {
+    const normalized = count.trim().toLowerCase();
+    if (normalized === 'true') {
+      filter.inlineCount = true;
+    } else if (normalized !== 'false') {
+      throw new Error(`Invalid $count value: ${count}`);
+    }
   }
 
-  const search = typeof query['$search'] === 'string' ? query['$search'] : undefined;
+  const search = singleQueryValue(query, '$search');
   if (search) {
     filter.search = search;
   }
 
-  const apply = typeof query['$apply'] === 'string' ? query['$apply'] : undefined;
+  const apply = singleQueryValue(query, '$apply');
   if (apply) {
     const pipeline = parseApplyPipeline(apply);
     filter.applyPipeline = pipeline;
     filter.apply = deriveAggregationSpecFromPipeline(pipeline);
   }
 
-  const format = typeof query['$format'] === 'string' ? query['$format'] : undefined;
+  const format = singleQueryValue(query, '$format');
   if (format) {
     filter.format = format;
   }
 
-  const computeRaw = typeof query['$compute'] === 'string' ? query['$compute'] : undefined;
+  const computeRaw = singleQueryValue(query, '$compute');
   if (computeRaw) {
     filter.compute = parseCompute(computeRaw);
   }

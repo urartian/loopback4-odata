@@ -69,7 +69,7 @@ Recommended shape:
 
 Operational note:
 
-- make sure your externally visible `basePath` and proxy headers are configured correctly so `@odata.context` and generated links reflect the public service root
+- make sure your externally visible `basePath` and proxy headers are configured correctly so `@odata.context`, generated links, and published OpenAPI OData paths reflect the public service root
 
 ## Google Cloud guidance for host LB4 apps
 
@@ -106,6 +106,7 @@ Operational note:
 
 - configure trusted proxy behavior and `basePath` so generated OData links
   reflect the public service URL
+- if you use `basePath: '/'`, keep health checks and other non-OData endpoints owned by the host LB4 app; only registered OData routes should live at root
 - keep the LB4 app stateless even on a single VM so scaling out later does not
   require reworking token, throttle, or media assumptions
 - when you move from one VM to multiple instances, switch tenant throttling to
@@ -150,6 +151,7 @@ Before shipping a cloud deployment, confirm:
 - tenant throttling uses a shared store when multiple replicas are involved
 - health endpoints are owned by the host LB4 app
 - `basePath` and trusted proxy settings match the public service URL
+- if `basePath: '/'`, root-level non-OData routes such as `/health` still resolve outside the OData component
 
 ## Related docs
 

@@ -7,6 +7,7 @@ import { emitTelemetryEvent } from '../util/telemetry';
 import { RequestContext } from '@loopback/rest';
 import { EntitySetRegistry } from '../registry/entityset-registry';
 import {
+  buildODataRootRouteNames,
   findMatchingRequestUrl,
   normalizeBasePath,
   pathMatches,
@@ -14,6 +15,9 @@ import {
 } from '../util/base-path';
 
 export class OdataPathRewriterProvider implements Provider<Middleware> {
+  private cachedRootNames?: Set<string>;
+  private cachedRegistryVersion = -1;
+
   constructor(
     @inject(ODATA_BINDINGS.CONFIG) private readonly cfg: ODataConfig,
     @inject(ODATA_BINDINGS.LOGGER) private readonly logger: ODataLogger,
@@ -34,7 +38,11 @@ export class OdataPathRewriterProvider implements Provider<Middleware> {
         const currentUrl = ctx.request.url || '';
         const alreadyCanonical = pathMatches(currentUrl, '/odata');
         if (!alreadyCanonical) {
-          const match = findMatchingRequestUrl(ctx.request, basePath);
+          const match = findMatchingRequestUrl(
+            ctx.request,
+            basePath,
+            this.getConfiguredRootRouteNames(),
+          );
           if (match) {
             ctx.request.url = '/odata' + stripBasePath(match, basePath);
             basePathRewritten = true;
@@ -124,6 +132,17 @@ export class OdataPathRewriterProvider implements Provider<Middleware> {
     } catch {
       return undefined;
     }
+  }
+
+  private getConfiguredRootRouteNames(): ReadonlySet<string> | undefined {
+    const version = this.registry.getVersion();
+    if (this.cachedRootNames && this.cachedRegistryVersion === version) {
+      return this.cachedRootNames;
+    }
+
+    this.cachedRootNames = buildODataRootRouteNames(this.registry.list());
+    this.cachedRegistryVersion = version;
+    return this.cachedRootNames;
   }
 }
 

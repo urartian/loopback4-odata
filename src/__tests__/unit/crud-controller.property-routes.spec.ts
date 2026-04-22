@@ -14,6 +14,9 @@ class PropertyRouteEntity extends Entity {
   @property({type: 'string'})
   name?: string;
 
+  @property({type: 'string'})
+  status?: string;
+
   @property({type: 'number'})
   price?: number;
 
@@ -128,6 +131,46 @@ describe('ODataCrudController property routes', () => {
     expect(response.headers.ETag).to.equal('W/"W/\\"v3\\""');
   });
 
+  it('returns 204 when scalar property read filter does not match the entity', async () => {
+    const {controller, response} = givenController({
+      query: {$filter: "status eq 'Completed'"},
+      entity: {id: 1, status: 'Draft', version: 'v3'},
+    });
+
+    const result = await controller.getEntityProperty(1, 'status');
+
+    expect(result).to.equal(undefined);
+    sinon.assert.calledWith(response.statusStub, 204);
+    sinon.assert.calledOnce(response.endStub);
+  });
+
+  it('returns scalar property payload when read filter matches the entity', async () => {
+    const {controller} = givenController({
+      query: {$filter: "status eq 'Draft'"},
+      entity: {id: 1, status: 'Draft', version: 'v3'},
+    });
+
+    const result = await controller.getEntityProperty(1, 'status');
+
+    expect(result).to.deepEqual({
+      '@odata.context': '/odata/$metadata#Products/status',
+      value: 'Draft',
+    });
+  });
+
+  it('returns 204 when scalar $value read filter does not match the entity', async () => {
+    const {controller, response} = givenController({
+      query: {$filter: "status eq 'Completed'"},
+      entity: {id: 1, status: 'Draft', version: 'v3'},
+    });
+
+    const result = await controller.getPropertyValue(1, 'status');
+
+    expect(result).to.equal(undefined);
+    sinon.assert.calledWith(response.statusStub, 204);
+    sinon.assert.calledOnce(response.endStub);
+  });
+
   it('streams JSON-valued properties directly when JSON is accepted', async () => {
     const {controller, response} = givenController({
       requestHeaders: {accept: 'application/json'},
@@ -166,6 +209,7 @@ describe('ODataCrudController property routes', () => {
 
   function givenController(options?: {
     requestHeaders?: Record<string, string>;
+    query?: Record<string, string | string[] | undefined>;
     entity?: AnyObject;
   }) {
     const headers = normalizeHeaders(options?.requestHeaders);
@@ -176,7 +220,7 @@ describe('ODataCrudController property routes', () => {
     } as unknown as DefaultCrudRepository<Entity & AnyObject, unknown>;
     const controller = new ControllerCtor(
       repository,
-      createRequest(headers),
+      createRequest(headers, options?.query),
       response,
       httpCtx,
       cfg,
@@ -196,9 +240,13 @@ function normalizeHeaders(headers?: Record<string, string>) {
   return normalized;
 }
 
-function createRequest(headers: Record<string, string>): Request {
+function createRequest(
+  headers: Record<string, string>,
+  query?: Record<string, string | string[] | undefined>,
+): Request {
   return {
     headers,
+    query: query ?? {},
     get(name: string) {
       return headers[name.toLowerCase()];
     },

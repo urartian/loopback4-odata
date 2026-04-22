@@ -53,10 +53,15 @@ this.bind(ODATA_BINDINGS.CONFIG).to({
 
 Check:
 
-- `GET /odata`
-- `GET /odata/$metadata`
+- `GET <basePath>`
+- `GET <basePath>/$metadata`
 
-Both should advertise the externally visible root, not the internal LB4 path.
+Examples:
+
+- if `basePath: '/api/odata'`, check `GET /api/odata` and `GET /api/odata/$metadata`
+- if `basePath: '/'`, check `GET /` and `GET /$metadata`
+
+Both should advertise the externally visible root, not the internal LB4 path. When `basePath: '/'`, unrelated app routes such as `/health` should still behave like normal non-OData routes.
 
 ### Routes are missing from OpenAPI output
 

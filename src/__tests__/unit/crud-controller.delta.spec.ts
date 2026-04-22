@@ -215,6 +215,41 @@ describe('CRUD controller delta helpers', () => {
     expect(payload.pageKeys).to.be.undefined();
   });
 
+  it('reissues delta tokens for empty grouped pages instead of reusing stale bucket state', () => {
+    const controller = createController();
+    const previousToken = (controller as any).createDeltaTokenForRows(
+      'Widgets',
+      [{ id: 8, updatedAt: new Date('2024-01-08T00:00:00Z') }],
+      'updatedAt',
+      ['id'],
+      undefined,
+      [{ key: { region: 'west' }, data: { total: 1 } }],
+      [{ id: 8, updatedAt: new Date('2024-01-08T00:00:00Z') }],
+    );
+    const previousPayload = decodeDeltaToken(previousToken, {
+      secret: 'delta-secret',
+      allowLegacyUnsigned: false,
+    });
+
+    const nextToken = (controller as any).createDeltaTokenForRows(
+      'Widgets',
+      [],
+      'updatedAt',
+      ['id'],
+      previousToken,
+      [],
+      [],
+    );
+    const nextPayload = decodeDeltaToken(nextToken, {
+      secret: 'delta-secret',
+      allowLegacyUnsigned: false,
+    });
+
+    expect(nextToken).to.not.equal(previousToken);
+    expect(nextPayload.lastValue).to.equal(previousPayload.lastValue);
+    expect(nextPayload.buckets).to.be.undefined();
+  });
+
   it('anchors on source rows when filtered page rows are empty', () => {
     const controller = createController();
     const rows = [{ id: 7, updatedAt: new Date('2024-01-07T00:00:00Z') }];
@@ -240,6 +275,43 @@ describe('CRUD controller delta helpers', () => {
     expect(payload.pageKeys).to.containDeep([{ id: 7 }]);
   });
 
+  it('round-trips bigint bucket state without crashing token generation', () => {
+    const controller = createController();
+
+    const token = (controller as any).createDeltaTokenForRows(
+      'Widgets',
+      [{ id: 9, updatedAt: new Date('2024-01-09T00:00:00Z') }],
+      'updatedAt',
+      ['id'],
+      undefined,
+      [
+        {
+          key: { bucketId: BigInt(10) },
+          data: {
+            total: BigInt(11),
+            nested: { count: BigInt(12) },
+            values: [BigInt(13)],
+          },
+        },
+      ],
+      [{ id: 9, updatedAt: new Date('2024-01-09T00:00:00Z') }],
+    );
+    const payload = decodeDeltaToken(token, {
+      secret: 'delta-secret',
+      allowLegacyUnsigned: false,
+    });
+
+    expect(payload.buckets).to.have.length(1);
+    expect(payload.buckets?.[0]).to.deepEqual({
+      key: { bucketId: BigInt(10) },
+      data: {
+        total: BigInt(11),
+        nested: { count: BigInt(12) },
+        values: [BigInt(13)],
+      },
+    });
+  });
+
   it('emits tombstones for missing page keys', async () => {
     const controller = createController();
     (controller as AnyObject).repository = {
@@ -258,6 +330,24 @@ describe('CRUD controller delta helpers', () => {
     expect(tombstones).to.have.length(1);
     expect(tombstones[0]).to.containDeep({
       id: 2,
+      '@removed': { reason: 'deleted' },
+    });
+  });
+
+  it('deduplicates bigint tombstone candidates without throwing', async () => {
+    const controller = createController();
+    (controller as AnyObject).repository = {
+      findOne: async () => undefined,
+    };
+
+    const tombstones = await (controller as any).computeTombstones([
+      { id: BigInt(2) },
+      { id: BigInt(2) },
+    ]);
+
+    expect(tombstones).to.have.length(1);
+    expect(tombstones[0]).to.containDeep({
+      id: BigInt(2),
       '@removed': { reason: 'deleted' },
     });
   });

@@ -128,7 +128,20 @@ function createControllerWithRegistry(
   return controller;
 }
 
+function createODataRegistry() {
+  const registry = new EntitySetRegistry();
+  class ProductEntity {}
+  registry.register({ name: 'Products', modelCtor: ProductEntity as any });
+  return registry;
+}
+
 describe('$batch controller', () => {
+  @model()
+  class BigIntProduct extends Entity {
+    @property({ id: true, type: 'bigint' })
+    id!: bigint;
+  }
+
   it('injects correlation header into subrequests', async () => {
     const correlationId = 'cid-123';
     const controller = new ODataBatchController(
@@ -785,6 +798,72 @@ describe('$batch controller', () => {
         id: 'forbidden',
         method: 'GET',
         url: '/internal/admin/reset',
+      },
+      undefined,
+      requestStub('application/json'),
+      limits,
+    );
+
+    assert.equal(result.status, 400);
+    assert.equal((result.body as any)?.error?.code, 'InvalidUrl');
+    assert.equal(callCount, 0);
+  });
+
+  it('rejects absolute root paths outside OData when basePath is root', async () => {
+    let callCount = 0;
+    const controller = new ODataBatchController(
+      {
+        handleRequest: async () => {
+          callCount++;
+        },
+      } as any,
+      'http://localhost',
+      createRequestContextStub(),
+      { get: async () => undefined } as any,
+      createODataRegistry(),
+      noopLogger,
+      { ...defaultConfig, basePath: '/' },
+    );
+
+    const limits = (controller as any).getBatchLimits();
+    const result = await (controller as any).executeSingle(
+      {
+        id: 'health',
+        method: 'GET',
+        url: '/health',
+      },
+      undefined,
+      requestStub('application/json'),
+      limits,
+    );
+
+    assert.equal(result.status, 400);
+    assert.equal((result.body as any)?.error?.code, 'InvalidUrl');
+    assert.equal(callCount, 0);
+  });
+
+  it('rejects relative root paths outside OData when basePath is root', async () => {
+    let callCount = 0;
+    const controller = new ODataBatchController(
+      {
+        handleRequest: async () => {
+          callCount++;
+        },
+      } as any,
+      'http://localhost',
+      createRequestContextStub(),
+      { get: async () => undefined } as any,
+      createODataRegistry(),
+      noopLogger,
+      { ...defaultConfig, basePath: '/' },
+    );
+
+    const limits = (controller as any).getBatchLimits();
+    const result = await (controller as any).executeSingle(
+      {
+        id: 'health',
+        method: 'GET',
+        url: 'health',
       },
       undefined,
       requestStub('application/json'),
@@ -1781,7 +1860,7 @@ describe('$batch controller', () => {
     assert.equal(def.transactionCapabilityLocked, true);
   });
 
-  it('treats unknown probe results as non-transactional to avoid repeated refreshes', async () => {
+  it('propagates transient transaction refresh failures without locking the entity set', async () => {
     let repositoryResolutions = 0;
     const def = {
       name: 'Products',
@@ -1823,16 +1902,16 @@ describe('$batch controller', () => {
     );
 
     assert.equal(def.supportsTransactions, false);
-    assert.equal(def.transactionCapabilityLocked, true);
+    assert.equal(def.transactionCapabilityLocked, false);
     assert.equal(repositoryResolutions, 1);
 
     await assert.rejects(
       (controller as any).createAtomicGroupContext('g2', [
         { method: 'POST', url: '/odata/Products' },
       ]),
-      (err: unknown) => err instanceof HttpErrors.NotImplemented,
+      (err: unknown) => err instanceof Error && err.message === 'timeout',
     );
-    assert.equal(repositoryResolutions, 1);
+    assert.equal(repositoryResolutions, 2);
   });
 
   it('marks entity sets as non-transactional when beginTransaction rejects as unsupported', async () => {
@@ -1871,6 +1950,32 @@ describe('$batch controller', () => {
       (err: unknown) => err instanceof HttpErrors.NotImplemented,
     );
     assert.equal(def.supportsTransactions, false);
+  });
+
+  it('builds bigint content-id entity paths without quoting the key', () => {
+    const registry = {
+      findByName: (name: string) =>
+        name === 'Products'
+          ? {
+              name: 'Products',
+              modelCtor: BigIntProduct,
+              repositoryBindingKey: 'repositories.Products',
+            }
+          : undefined,
+    } as any;
+    const controller = new ODataBatchController(
+      { handleRequest: async () => undefined } as any,
+      'http://localhost',
+      createRequestContextStub(),
+      { get: async () => undefined } as any,
+      registry,
+      noopLogger,
+      defaultConfig,
+    );
+
+    const path = (controller as any).buildEntityKeyPath('Products', { id: BigInt(123) });
+
+    assert.equal(path, '/odata/Products(123)');
   });
 
   it('rejects dependsOn references to later requests', async () => {

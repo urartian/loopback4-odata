@@ -154,6 +154,52 @@ describe('CRUD controller navigation path validation', () => {
     );
   }
 
+  function createRuntimeController(
+    query: Record<string, string | string[] | undefined>,
+    repo: any,
+    cfg: Partial<ODataConfig> = {},
+  ) {
+    const Controller = defineODataCrudController(def);
+    const resolvedConfig = {
+      ...cfg,
+      tokenSecret: cfg.tokenSecret ?? 'test-secret',
+    } as ODataConfig;
+    const request = {
+      query,
+      get: () => undefined,
+      headers: {},
+      originalUrl: '/odata/Incidents(incident-1)/notes',
+    };
+    const response = {
+      headersSent: false,
+      set() {},
+      getHeader() {
+        return undefined;
+      },
+      type() {
+        return this;
+      },
+      status() {
+        return this;
+      },
+      end() {},
+      once() {},
+    };
+    return new Controller(
+      repo,
+      request as any,
+      response as any,
+      {} as any,
+      resolvedConfig,
+      {} as any,
+      noopLogger,
+      {
+        check: async (_tenant?: string) => undefined,
+        release: () => undefined,
+      } as ODataTenantThrottler,
+    );
+  }
+
   it('allows filtering on navigation properties in strict mode', () => {
     const controller = createController({ strict: true });
     const filter: AnyObject = { where: { 'status/code': 'NEW' } };
@@ -268,5 +314,56 @@ describe('CRUD controller navigation path validation', () => {
       HttpErrors.BadRequest,
       /Unknown property in \$filter: notes\/location\/city/i,
     );
+  });
+
+  it('converts navigation collection filter expressions and paging before relation find', async () => {
+    const findCalls: any[] = [];
+    const repo = {
+      notes: () => ({
+        find: async (filter: any) => {
+          findCalls.push(filter);
+          return [{ id: 2, incidentId: 'incident-1', descr: 'urgent' }];
+        },
+      }),
+    };
+    const controller = createRuntimeController(
+      { $filter: "descr eq 'urgent'", $top: '2', $skip: '1' },
+      repo,
+      { strict: true },
+    );
+
+    const result = (await (controller as any).getEntityProperty('incident-1', 'notes')) as any;
+
+    expect(findCalls).to.have.length(1);
+    expect(findCalls[0]).to.containEql({
+      where: { descr: 'urgent' },
+      limit: 2,
+      offset: 1,
+    });
+    expect(findCalls[0].where).to.not.have.property('operator');
+    expect(result.value).to.containDeep([{ descr: 'urgent' }]);
+  });
+
+  it('applies navigation singleton filter expressions after relation get', async () => {
+    const getCalls: any[] = [];
+    const repo = {
+      status: () => ({
+        get: async (filter: any) => {
+          getCalls.push(filter);
+          return { code: 'OPEN', name: 'Open' };
+        },
+      }),
+    };
+    const controller = createRuntimeController(
+      { $filter: "name eq 'Closed'" },
+      repo,
+      { strict: true },
+    );
+
+    const result = await (controller as any).getEntityProperty('incident-1', 'status');
+
+    expect(getCalls).to.have.length(1);
+    expect(getCalls[0]).to.containEql({ where: { name: 'Closed' } });
+    expect(result).to.equal(undefined);
   });
 });

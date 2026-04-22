@@ -64,4 +64,20 @@ describe('delta token encode/decode', () => {
     const token = `v1:${legacyPayload}`;
     expect(() => decodeDeltaToken(token, { ...options, allowLegacyUnsigned: true })).to.throw();
   });
+
+  it('rejects oversized legacy v1 tokens before decoding', () => {
+    const legacyPayload = Buffer.alloc(70 * 1024, 'a').toString('base64');
+    const token = `v1:${legacyPayload}`;
+    expect(() => decodeDeltaToken(token, { ...options, allowLegacyUnsigned: true })).to.throw(
+      TokenVerificationError,
+    );
+  });
+
+  it('rejects oversized legacy v2 tokens before JSON parsing', () => {
+    const legacyPayload = Buffer.alloc(70 * 1024, 'a').toString('base64');
+    const token = `v2:${legacyPayload}`;
+    expect(() => decodeDeltaToken(token, { ...options, allowLegacyUnsigned: true })).to.throw(
+      TokenVerificationError,
+    );
+  });
 });

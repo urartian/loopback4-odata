@@ -105,4 +105,44 @@ describe('CRUD controller Postgres $filter function pushdown', () => {
     expect(findCalls.length).to.equal(1);
     expect(findCalls[0].where).to.containEql({ id: { inq: [1] } });
   });
+
+  it('pushes down contains(tolower(...)) filters on Postgres in strict mode', async () => {
+    const executeCalls: Array<{ sql: string; params: unknown[] }> = [];
+    const findCalls: any[] = [];
+    const dataSource = {
+      connector: {
+        name: 'postgresql',
+        table: (modelName: string) => modelName,
+        column: (_modelName: string, propertyName: string) => propertyName,
+      },
+      execute: async (sql: string, params: unknown[]) => {
+        executeCalls.push({ sql, params });
+        return [{ id: 1 }];
+      },
+    };
+    const repo = {
+      dataSource,
+      find: async (filter: any) => {
+        findCalls.push(filter);
+        return [{ id: 1, name: 'Notification job delivery' }];
+      },
+      count: async () => ({ count: 0 }),
+    };
+    const controller = createController(
+      { $filter: "contains(tolower(name),'Notification Job Delivery')" },
+      repo,
+    );
+
+    const result = await controller.list();
+
+    expect(executeCalls.length).to.be.greaterThan(0);
+    expect(executeCalls[0].sql).to.match(/LOWER\s*\(\s*r\."name"\s*\)\s+LIKE/i);
+    expect(executeCalls[0].params).to.containEql('%notification job delivery%');
+    expect(findCalls.length).to.equal(1);
+    expect(findCalls[0].where).to.containEql({ id: { inq: [1] } });
+    expect(findCalls[0].where).to.not.containEql({
+      name: { like: '%notification job delivery%', options: 'i' },
+    });
+    expect((result as any).value).to.containDeep([{ name: 'Notification job delivery' }]);
+  });
 });

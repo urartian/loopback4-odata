@@ -1,6 +1,7 @@
 /// <reference path="../../types/testing.globals.d.ts" />
 
 import { Client, createRestAppClient, expect } from '@loopback/testlab';
+import { get } from '@loopback/rest';
 import {
   TestApplication,
   givenODataApplication,
@@ -15,6 +16,13 @@ type ConfigOverrides = Omit<Partial<ODataConfig>, 'pagination'> & {
   pagination?: Partial<ODataPaginationConfig>;
 };
 type AppConfigurator = (app: TestApplication) => Promise<void> | void;
+
+class HealthController {
+  @get('/health')
+  ping() {
+    return { ok: true };
+  }
+}
 
 describe('OData config plumbing acceptance', () => {
   let app: TestApplication;
@@ -95,6 +103,12 @@ describe('OData config plumbing acceptance', () => {
     const res = await client.get('/api/odata').expect(200);
     expect(res.headers['odata-version']).to.equal('4.0');
     expect(res.body['@odata.context']).to.equal('/api/odata/$metadata');
+
+    const products = await client.get('/api/odata/Products').expect(200);
+    expect(products.body['@odata.context']).to.equal('/api/odata/$metadata#Products');
+
+    const singleton = await client.get('/api/odata/PrimaryLibrary').expect(200);
+    expect(singleton.body['@odata.context']).to.equal('/api/odata/$metadata#PrimaryLibrary');
   });
 
   it('emits the configured basePath in @odata.context for bound operation results', async () => {
@@ -111,11 +125,40 @@ describe('OData config plumbing acceptance', () => {
   });
 
   it('supports root basePath configuration', async function (this: any) {
-    await replaceApp(this, { basePath: '/' });
+    await replaceApp(this, { basePath: '/' }, async (freshApp) => {
+      freshApp.controller(HealthController);
+    });
     const res = await client.get('/').expect(200);
     expect(res.headers['odata-version']).to.equal('4.0');
     expect(res.body['@odata.context']).to.equal('/$metadata');
     await client.get('/Products').expect(200);
+    await client.get('/health').expect(200, { ok: true });
+  });
+
+  it('rejects non-OData subrequests in $batch when basePath is root', async function (this: any) {
+    await replaceApp(this, { basePath: '/' }, async (freshApp) => {
+      freshApp.controller(HealthController);
+    });
+
+    const res = await client
+      .post('/$batch')
+      .send({
+        requests: [
+          { id: 'health', method: 'GET', url: '/health' },
+          { id: 'products', method: 'GET', url: '/Products?$top=1' },
+        ],
+      })
+      .expect(200);
+
+    const responses = res.body.responses as Array<{ id?: string; status: number; body?: any }>;
+    expect(responses).to.be.Array();
+    const health = responses.find((entry) => entry.id === 'health');
+    const products = responses.find((entry) => entry.id === 'products');
+
+    expect(health?.status).to.equal(400);
+    expect(health?.body?.error?.code).to.equal('InvalidUrl');
+    expect(products?.status).to.equal(200);
+    expect(Array.isArray(products?.body?.value)).to.be.true();
   });
 
   it('honors custom basePath when the Rest server is mounted under the same prefix', async function (this: any) {
@@ -131,6 +174,15 @@ describe('OData config plumbing acceptance', () => {
     expect(metadata.text ?? metadata.body).to.be.ok();
 
     await client.get('/api/odata/Products').expect(200);
+  });
+
+  it('publishes OpenAPI paths under the configured basePath', async () => {
+    const spec = await client.get('/openapi.json').expect(200);
+
+    expect(spec.body.paths?.['/api/odata/Products']).to.be.Object();
+    expect(spec.body.paths?.['/api/odata/PrimaryLibrary']).to.be.Object();
+    expect(spec.body.paths?.['/odata/Products']).to.be.undefined();
+    expect(spec.body.paths?.['/odata/PrimaryLibrary']).to.be.undefined();
   });
 
   it('executes $batch requests that use the configured basePath', async () => {
@@ -695,6 +747,7 @@ describe('OData config plumbing acceptance', () => {
       method: 'POST',
       status: 201,
       telemetryCategory: 'requests',
+      url: '/api/odata/Products',
     });
     const headers = requestLog?.context?.headers as Record<string, unknown>;
     expect(headers?.authorization).to.equal('***');
@@ -722,6 +775,7 @@ describe('OData config plumbing acceptance', () => {
     expect(logEntries[0].context).to.containDeep({
       telemetryCategory: 'requests',
       method: 'GET',
+      url: '/api/odata/Products',
     });
   });
 });

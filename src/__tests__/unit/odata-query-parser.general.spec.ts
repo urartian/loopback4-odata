@@ -52,6 +52,41 @@ describe('parseODataQuery basics', () => {
     assert.deepStrictEqual(query.fields, { id: true, name: true, price: true });
   });
 
+  it('rejects invalid pagination values', () => {
+    assert.throws(() => parseODataQuery({ $top: '-1' }), /Invalid \$top value/i);
+    assert.throws(() => parseODataQuery({ $top: 'abc' }), /Invalid \$top value/i);
+    assert.throws(() => parseODataQuery({ $skip: '-1' }), /Invalid \$skip value/i);
+    assert.throws(() => parseODataQuery({ $skip: '1.5' }), /Invalid \$skip value/i);
+  });
+
+  it('rejects invalid orderby directions and extra tokens', () => {
+    assert.throws(() => parseODataQuery({ $orderby: 'name sideways' }), /Invalid \$orderby/i);
+    assert.throws(() => parseODataQuery({ $orderby: 'name desc garbage' }), /Invalid \$orderby/i);
+    assert.throws(() => parseODataQuery({ $orderby: ',name' }), /Invalid \$orderby/i);
+  });
+
+  it('rejects duplicate scalar query options', () => {
+    assert.throws(
+      () => parseODataQuery({ $filter: ["name eq 'A'", 'id eq 1'] }),
+      /Duplicate query option.*\$filter/i,
+    );
+    assert.throws(() => parseODataQuery({ $top: ['1', '2'] }), /Duplicate query option.*\$top/i);
+    assert.throws(
+      () => parseODataQuery({ $orderby: ['name asc', 'id desc'] }),
+      /Duplicate query option.*\$orderby/i,
+    );
+    assert.throws(
+      () => parseODataQuery({ $count: ['true', 'false'] }),
+      /Duplicate query option.*\$count/i,
+    );
+  });
+
+  it('validates $count values', () => {
+    assert.equal(parseODataQuery({ $count: 'true' }).inlineCount, true);
+    assert.equal(parseODataQuery({ $count: 'false' }).inlineCount, undefined);
+    assert.throws(() => parseODataQuery({ $count: 'maybe' }), /Invalid \$count value/i);
+  });
+
   it('rejects unsupported comparators', () => {
     assert.throws(() => parseODataQuery({ $filter: 'price like 100' }), /Unsupported comparator/i);
   });

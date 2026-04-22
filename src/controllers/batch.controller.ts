@@ -44,6 +44,11 @@ import { emitTelemetryEvent } from '../util/telemetry';
 import { rewriteODataUrl } from '../middleware/odata-path-rewriter';
 import { ensureModelDefinitionWithRelations } from '../util/model-definition';
 import { ODataErrorCodes } from '../odata-error-codes';
+import {
+  buildODataRootRouteNames,
+  matchesConfiguredODataPath,
+  normalizeBasePath,
+} from '../util/base-path';
 
 const BATCH_OPERATION_SPEC = markUndocumentedOperation({
   responses: {
@@ -247,6 +252,8 @@ class AtomicityGroupContext {
 export class ODataBatchController {
   private readonly serviceRootPath: string;
   private readonly serviceRootSegments: string[];
+  private cachedRootNames?: Set<string>;
+  private cachedRegistryVersion = -1;
 
   constructor(
     @inject(RestBindings.HANDLER)
@@ -264,7 +271,7 @@ export class ODataBatchController {
     @inject(ODATA_BINDINGS.CONFIG)
     private readonly cfg: ODataConfig,
   ) {
-    this.serviceRootPath = this.normalizeServiceRootPath(this.cfg?.basePath);
+    this.serviceRootPath = normalizeBasePath(this.cfg?.basePath);
     this.serviceRootSegments = this.serviceRootPath.split('/').filter(Boolean);
   }
 
@@ -693,7 +700,6 @@ export class ODataBatchController {
         this.markEntitySetNonTransactional(def, dataSource.name ?? def.repositoryBindingKey);
         return false;
       }
-      this.markEntitySetNonTransactional(def, dataSource.name ?? def.repositoryBindingKey);
       this.warn('Unable to verify datasource transaction capability during refresh.', {
         entitySet: def.name,
         dataSource: dataSource.name ?? def.repositoryBindingKey,
@@ -1348,6 +1354,16 @@ export class ODataBatchController {
       throw err;
     }
     const type = def?.type;
+    if (
+      typeof value === 'bigint' ||
+      type === 'bigint' ||
+      type === BigInt ||
+      type === 'int64' ||
+      type === 'long' ||
+      type === 'integer'
+    ) {
+      return value.toString();
+    }
     if (type === Number || type === 'number') {
       const num = Number(value);
       if (!Number.isNaN(num)) return String(num);
@@ -2084,9 +2100,18 @@ export class ODataBatchController {
         IsolationLevel.READ_COMMITTED,
       )) as unknown as Transaction;
     } catch (err) {
-      throw new HttpErrors.NotImplemented(
-        `Datasource ${dataSource.name ?? 'unknown'} cannot begin a transaction: ${(err as Error).message ?? 'unsupported connector'}.`,
-      );
+      if (err instanceof HttpErrors.HttpError && err.statusCode === 501) {
+        throw new HttpErrors.NotImplemented(
+          `Datasource ${dataSource.name ?? 'unknown'} cannot begin a transaction: ${err.message ?? 'unsupported connector'}.`,
+        );
+      }
+      const message = (err as Error)?.message?.toLowerCase?.() ?? '';
+      if (message.includes('not implemented') || message.includes('not support')) {
+        throw new HttpErrors.NotImplemented(
+          `Datasource ${dataSource.name ?? 'unknown'} cannot begin a transaction: ${(err as Error).message ?? 'unsupported connector'}.`,
+        );
+      }
+      throw err;
     }
   }
 
@@ -2505,14 +2530,15 @@ export class ODataBatchController {
 
   private ensureWithinServiceRoot(url: string): string | undefined {
     if (!url || !url.startsWith('/')) return undefined;
-    const root = this.serviceRootPath === '/' ? '/' : this.serviceRootPath;
-    if (root === '/') return url;
-    const question = url.indexOf('?');
-    const pathOnly = question >= 0 ? url.slice(0, question) : url;
-    const normalizedPath = pathOnly.length > 1 ? pathOnly.replace(/\/+$/, '') || '/' : pathOnly;
-    if (normalizedPath === root) return url;
-    if (normalizedPath.startsWith(`${root}/`)) return url;
-    return undefined;
+    const rootRouteNames =
+      this.serviceRootPath === '/' ? this.getConfiguredRootRouteNames() : undefined;
+    return matchesConfiguredODataPath(
+      url,
+      this.serviceRootPath,
+      rootRouteNames,
+    )
+      ? url
+      : undefined;
   }
 
   private buildServiceRelativePath(rawUrl: string): string | undefined {
@@ -2526,7 +2552,7 @@ export class ODataBatchController {
     const normalizedPath = pathPart.replace(/^\/+/, '');
     const prefix = this.serviceRootPath === '/' ? '/' : this.serviceRootPath;
     const separator = normalizedPath.length === 0 ? '' : this.serviceRootPath === '/' ? '' : '/';
-    return `${prefix}${separator}${normalizedPath}${query}`;
+    return this.ensureWithinServiceRoot(`${prefix}${separator}${normalizedPath}${query}`);
   }
 
   private buildQueryObject(query: string): Record<string, string | string[]> {
@@ -2548,18 +2574,6 @@ export class ODataBatchController {
     return result;
   }
 
-  private normalizeServiceRootPath(basePath?: string): string {
-    const fallback = '/odata';
-    const candidate =
-      typeof basePath === 'string' && basePath.trim().length ? basePath.trim() : fallback;
-    let normalized = candidate.startsWith('/') ? candidate : `/${candidate}`;
-    if (normalized.length > 1) {
-      normalized = normalized.replace(/\/+$/, '');
-      if (!normalized) normalized = '/';
-    }
-    return normalized || '/';
-  }
-
   private stripServiceRootSegments(segments: string[]): string[] | undefined {
     if (!this.serviceRootSegments.length) return segments;
     if (segments.length < this.serviceRootSegments.length) return undefined;
@@ -2570,6 +2584,17 @@ export class ODataBatchController {
       }
     }
     return segments.slice(this.serviceRootSegments.length);
+  }
+
+  private getConfiguredRootRouteNames(): ReadonlySet<string> | undefined {
+    const version = this.registry.getVersion();
+    if (this.cachedRootNames && this.cachedRegistryVersion === version) {
+      return this.cachedRootNames;
+    }
+
+    this.cachedRootNames = buildODataRootRouteNames(this.registry.list());
+    this.cachedRegistryVersion = version;
+    return this.cachedRootNames;
   }
 
   private resolveAllowedSubRequestHeaders(): Set<string> {

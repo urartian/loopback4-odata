@@ -50,7 +50,10 @@ This matters because:
 
 - OData routes are still handled internally under `/odata`
 - response metadata such as `@odata.context` uses the configured external base path
+- generated OpenAPI OData paths also reflect the configured external base path
 - generated links need to match what clients actually see
+
+If you intentionally set `basePath: '/'`, the public OData surface moves to the app root (`/`, `/$metadata`, `/$batch`, `/Products`, ...), but only registered OData routes are claimed there. Host-app routes such as `/health`, `/openapi.json`, or other non-OData endpoints remain owned by the LB4 application.
 
 ### Proxy header trust
 
@@ -77,7 +80,7 @@ Recommended posture:
 
 - prefer `trustedProxySubnets` over blanket trust
 - do not rely on Express global `trust proxy` behavior to configure OData implicitly
-- verify that generated `@odata.context` and links match the externally visible service root
+- verify that generated `@odata.context`, links, and published OpenAPI OData paths match the externally visible service root
 
 ## Authentication and authorization
 

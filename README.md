@@ -4,7 +4,7 @@ An extension for [LoopBack 4](https://loopback.io/doc/en/lb4/) that adds **OData
 This package implements **OData v4.0** for LoopBack 4 applications.
 
 - Auto-discovers OData controllers and generates CRUD routes.
-- Exposes OData-style endpoints (`/Products(1)`) and OpenAPI-compliant ones (`/Products/{id}`).
+- Exposes OData-style endpoints (`/odata/Products(1)`) and OpenAPI-compliant ones (`/odata/Products/{id}`).
 - Provides `$metadata` endpoint.
 - Simple developer experience with decorators.
 - Advanced `$apply` support including chained transformations, navigation-path aggregates, and safe in-memory fallbacks when connector pushdown is unavailable.
@@ -127,11 +127,13 @@ this.repository(ProductRepository);
 4. Add a controller
 
 ```ts
+import { odataController } from '@urartian/loopback4-odata';
+
 @odataController(Product)
 export class ProductODataController {}
 ```
 
-That’s it — the extension generates repository-backed CRUD endpoints automatically.
+That’s it — the extension generates repository-backed CRUD endpoints automatically. For a fully wired runnable reference, see `examples/basic-app/index.ts` in this repository.
 
 ## Singletons
 
@@ -336,15 +338,15 @@ export class OrderODataController {
 
 Navigation reference routes run through the generated CRUD controller, so the same LoopBack authentication and authorization interceptors execute before links are created or removed. Stub methods with `@authenticate` / `@authorize` metadata (or aliases from the writable methods) are enough to secure the `$ref` endpoints without any additional plumbing.
 
-## Endpoints (Phase 3)
+## Example Requests
 
-Start your app and test:
+To try the repository's bundled demo app:
 
 ```bash
-npm start
+npm run dev
 ```
 
-For a quick demo, run `npm run dev`; this boots the example app in `examples/basic-app`, with an in-memory datasource pre-seeded with sample products and orders so you can experiment with the query options immediately.
+This boots the example app in `examples/basic-app`, with an in-memory datasource pre-seeded with sample products and orders so you can experiment with the query options immediately. If you are integrating the package into your own LoopBack 4 application, use that host app's normal start command instead.
 
 > The example binds `tokenSecret` from `process.env.ODATA_TOKEN_SECRET` but the component already enforces the same behavior internally. In production you must set that environment variable; in dev/test a random secret is generated per boot (logged at INFO) unless you override it. You can also tweak guardrails at runtime via environment variables such as `BATCH_MAX_OPERATIONS`, `BATCH_MAX_PART_BYTES`, `ODATA_MAX_TOP`, `ODATA_MAX_SKIP`, `ODATA_MAX_PAGE_SIZE`, and `ODATA_MAX_APPLY_PAGE_SIZE`.
 
@@ -1177,7 +1179,7 @@ import { ODataConfig } from '@urartian/loopback4-odata';
 
 // inside your app setup
 this.bind(ODATA_BINDINGS.CONFIG).to({
-  basePath: '/api/odata', // default: '/odata'
+  basePath: '/api/odata', // default: '/odata'; use '/' to expose OData at the app root
   csdlFormat: 'xml', // 'xml' | 'json' (default 'xml')
   namespace: 'Catalog', // default: 'Default'
   entityContainerName: 'CatalogService', // default: 'DefaultContainer'
@@ -1225,6 +1227,8 @@ this.bind(ODATA_BINDINGS.CONFIG).to({
   },
 } as ODataConfig);
 ```
+
+When `basePath` is set to `'/'`, the public OData service is rooted at `/` instead of `/odata`: the service document is served from `/`, metadata from `/$metadata`, and entity sets from paths such as `/Products`. Only registered OData routes are claimed there, so unrelated application routes like `/health` or `/openapi.json` continue to behave normally.
 
 ### Capabilities presets (FilterFunctions)
 
@@ -1403,7 +1407,7 @@ const ProductsSet: ODataEntitySetConfig<Product> = {
 
 > **Validation:** Guardrail values must be positive integers. Invalid settings (for example, `pagination.maxPageSize: 0` or `skipTokenTtl: -5`) cause startup to fail fast so configuration issues surface immediately.
 
-- `basePath`: Externally visible service root. All OData routes are served under this path (via middleware rewrite) while internal routes remain at `/odata`. Response metadata (`@odata.context`) uses this value.
+- `basePath`: Externally visible service root. OData routes are served under this path (via middleware rewrite) while internal routes remain at `/odata`. Response metadata (`@odata.context`) and published OpenAPI OData paths use this value. When set to `'/'`, the public OData routes move to the app root (`/`, `/$metadata`, `/$batch`, `/Products`, ...) but unrelated non-OData routes are not rewritten.
 - `trustProxyHeaders`: Controls whether `Forwarded` / `X-Forwarded-*` headers participate in host/protocol detection. Set to `true` to always trust them, or `false`/omitted to ignore them entirely (this now ignores Express' global `trust proxy` flag so the OData component cannot be opted-in accidentally). When disabled, the controller only considers the immediate request's `Host` and `protocol` values, preventing spoofed headers from bypassing origin scoping.
 - `trustedProxySubnets`: CIDR/IP allow-list (`string[]`) describing which reverse proxies are allowed to supply `Forwarded` / `X-Forwarded-*` headers (for example `['10.0.0.0/8', '2001:db8::/32']`). Defaults to `[]`, meaning proxy headers are ignored unless `trustProxyHeaders === true`. When populated, the controller only honors proxy headers if the remote address matches a configured subnet, so direct-to-app attackers cannot spoof origins even when the app runs behind ingress.
 - `pagination.maxTop`: Caps `$top` for collection reads. When `strict=true` requests above the cap return `400 Bad Request`; otherwise the server clamps the value. Legacy `config.maxTop` is still honored but the nested value takes precedence.
@@ -1549,6 +1553,13 @@ Example: With `{basePath: '/api/odata', maxTop: 100, enableCount: false}`
 - `GET /api/odata/Products?$top=1000` returns at most 100 records.
 - `GET /api/odata/Products?$count=true` → `400 Bad Request` (unsupported option).
 - `GET /api/odata/Products/$count` → `501 Not Implemented`.
+
+Example: With `{basePath: '/'}`:
+
+- The service document is served from `/`.
+- Metadata is served from `/$metadata`.
+- Entity sets and singletons are served from root-level paths such as `/Products` and `/Me`.
+- Non-OData routes such as `/health` and `/openapi.json` remain owned by the host LB4 app.
 
 Example: Lambda guardrails
 

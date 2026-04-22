@@ -4,8 +4,15 @@ import { HttpError } from 'http-errors';
 import { ErrorWriterOptions, writeErrorToResponse } from 'strong-error-handler';
 import { ODATA_VERSION } from '../constants';
 import { ODATA_BINDINGS } from '../keys';
+import { EntitySetRegistry } from '../registry/entityset-registry';
 import { ODataConfig } from '../types';
-import { gatherRequestUrls, normalizeBasePath, pathMatches } from '../util/base-path';
+import {
+  buildODataRootRouteNames,
+  gatherRequestUrls,
+  matchesConfiguredODataPath,
+  normalizeBasePath,
+  pathMatches,
+} from '../util/base-path';
 import { ODataErrorCodes } from '../odata-error-codes';
 
 type AnyObject = Record<string, unknown>;
@@ -23,12 +30,16 @@ type ExtendedHttpError = HttpError & {
 @injectable({ scope: BindingScope.SINGLETON })
 export class ODataErrorProvider implements Provider<Reject> {
   private readonly stableCodes = new Set<string>(Object.values(ODataErrorCodes));
+  private cachedRootNames?: Set<string>;
+  private cachedRegistryVersion = -1;
 
   constructor(
     @inject(RestBindings.ERROR_WRITER_OPTIONS, { optional: true })
     private readonly options: ErrorWriterOptions = {},
     @inject(ODATA_BINDINGS.CONFIG)
     private readonly cfg: ODataConfig,
+    @inject(ODATA_BINDINGS.ENTITY_SET_REGISTRY, { optional: true })
+    private readonly registry?: EntitySetRegistry,
   ) {}
 
   value(): Reject {
@@ -36,7 +47,9 @@ export class ODataErrorProvider implements Provider<Reject> {
       const basePath = normalizeBasePath(this.cfg?.basePath);
       const urls = gatherRequestUrls(request);
       const targetsOData = urls.some(
-        (url) => pathMatches(url, '/odata') || pathMatches(url, basePath),
+        (url) =>
+          pathMatches(url, '/odata') ||
+          matchesConfiguredODataPath(url, basePath, this.getConfiguredRootRouteNames()),
       );
       if (!targetsOData) {
         writeErrorToResponse(err, request, response, this.options);
@@ -204,5 +217,17 @@ export class ODataErrorProvider implements Provider<Reject> {
       inner.dbCode = dbCode;
     }
     return inner;
+  }
+
+  private getConfiguredRootRouteNames(): ReadonlySet<string> | undefined {
+    if (!this.registry) return undefined;
+    const version = this.registry.getVersion();
+    if (this.cachedRootNames && this.cachedRegistryVersion === version) {
+      return this.cachedRootNames;
+    }
+
+    this.cachedRootNames = buildODataRootRouteNames(this.registry.list());
+    this.cachedRegistryVersion = version;
+    return this.cachedRootNames;
   }
 }
