@@ -1,6 +1,7 @@
 /// <reference path="../../types/testing.globals.d.ts" />
 
 import { Client, createRestAppClient, expect } from '@loopback/testlab';
+import { get } from '@loopback/rest';
 import {
   TestApplication,
   givenODataApplication,
@@ -15,6 +16,13 @@ type ConfigOverrides = Omit<Partial<ODataConfig>, 'pagination'> & {
   pagination?: Partial<ODataPaginationConfig>;
 };
 type AppConfigurator = (app: TestApplication) => Promise<void> | void;
+
+class HealthController {
+  @get('/health')
+  ping() {
+    return { ok: true };
+  }
+}
 
 describe('OData config plumbing acceptance', () => {
   let app: TestApplication;
@@ -117,11 +125,14 @@ describe('OData config plumbing acceptance', () => {
   });
 
   it('supports root basePath configuration', async function (this: any) {
-    await replaceApp(this, { basePath: '/' });
+    await replaceApp(this, { basePath: '/' }, async (freshApp) => {
+      freshApp.controller(HealthController);
+    });
     const res = await client.get('/').expect(200);
     expect(res.headers['odata-version']).to.equal('4.0');
     expect(res.body['@odata.context']).to.equal('/$metadata');
     await client.get('/Products').expect(200);
+    await client.get('/health').expect(200, { ok: true });
   });
 
   it('honors custom basePath when the Rest server is mounted under the same prefix', async function (this: any) {
@@ -710,6 +721,7 @@ describe('OData config plumbing acceptance', () => {
       method: 'POST',
       status: 201,
       telemetryCategory: 'requests',
+      url: '/api/odata/Products',
     });
     const headers = requestLog?.context?.headers as Record<string, unknown>;
     expect(headers?.authorization).to.equal('***');
@@ -737,6 +749,7 @@ describe('OData config plumbing acceptance', () => {
     expect(logEntries[0].context).to.containDeep({
       telemetryCategory: 'requests',
       method: 'GET',
+      url: '/api/odata/Products',
     });
   });
 });

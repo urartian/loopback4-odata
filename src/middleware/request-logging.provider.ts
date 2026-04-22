@@ -2,6 +2,7 @@ import { inject, Provider } from '@loopback/core';
 import { AnyObject } from '@loopback/repository';
 import { Middleware, MiddlewareContext, Request } from '@loopback/rest';
 import { ODATA_BINDINGS, ODataLogger } from '../keys';
+import { EntitySetRegistry } from '../registry/entityset-registry';
 import {
   ODataConfig,
   ODataRequestLoggingConfig,
@@ -9,7 +10,14 @@ import {
   ODataTelemetryState,
 } from '../types';
 import { emitTelemetryEvent } from '../util/telemetry';
-import { gatherRequestUrls, normalizeBasePath, pathMatches } from '../util/base-path';
+import {
+  buildODataRootRouteNames,
+  findMatchingRequestUrl,
+  gatherRequestUrls,
+  matchesConfiguredODataPath,
+  normalizeBasePath,
+  pathMatches,
+} from '../util/base-path';
 
 interface CapturedPayload {
   body?: unknown;
@@ -28,10 +36,14 @@ export class RequestLoggingProvider implements Provider<Middleware> {
   static readonly MAX_CONTAINER_ENTRIES = 100;
   private static readonly ACCESSOR_PLACEHOLDER = '[Getter]';
   private static readonly NON_PLAIN_PLACEHOLDER = '[NonPlainObject]';
+  private cachedRootNames?: Set<string>;
+  private cachedRegistryVersion = -1;
 
   constructor(
     @inject(ODATA_BINDINGS.CONFIG) private readonly cfg: ODataConfig,
     @inject(ODATA_BINDINGS.LOGGER, { optional: true }) private readonly logger?: ODataLogger,
+    @inject(ODATA_BINDINGS.ENTITY_SET_REGISTRY, { optional: true })
+    private readonly registry?: EntitySetRegistry,
   ) {}
 
   value(): Middleware {
@@ -49,7 +61,7 @@ export class RequestLoggingProvider implements Provider<Middleware> {
 
       const startedAt = process.hrtime.bigint();
       const method = ctx.request.method ?? 'GET';
-      const url = ctx.request.url ?? '';
+      const url = this.resolveRequestUrl(ctx.request, basePath);
       let result: unknown;
       let error: Error | undefined;
 
@@ -94,11 +106,39 @@ export class RequestLoggingProvider implements Provider<Middleware> {
   private isODataRequest(request: Request, configuredBasePath: string): boolean {
     const urls = gatherRequestUrls(request);
     for (const url of urls) {
-      if (pathMatches(url, '/odata') || pathMatches(url, configuredBasePath)) {
+      if (
+        pathMatches(url, '/odata') ||
+        matchesConfiguredODataPath(url, configuredBasePath, this.getConfiguredRootRouteNames())
+      ) {
         return true;
       }
     }
     return false;
+  }
+
+  private resolveRequestUrl(request: Request, configuredBasePath: string): string {
+    const publicUrl = findMatchingRequestUrl(
+      request,
+      configuredBasePath,
+      this.getConfiguredRootRouteNames(),
+    );
+    if (publicUrl) return publicUrl;
+    if (typeof request.originalUrl === 'string' && request.originalUrl.trim()) {
+      return request.originalUrl;
+    }
+    return request.url ?? '';
+  }
+
+  private getConfiguredRootRouteNames(): ReadonlySet<string> | undefined {
+    if (!this.registry) return undefined;
+    const version = this.registry.getVersion();
+    if (this.cachedRootNames && this.cachedRegistryVersion === version) {
+      return this.cachedRootNames;
+    }
+
+    this.cachedRootNames = buildODataRootRouteNames(this.registry.list());
+    this.cachedRegistryVersion = version;
+    return this.cachedRootNames;
   }
 
   private resolveRequestState(ctx: MiddlewareContext): ODataRequestState | undefined {

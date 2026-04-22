@@ -3,6 +3,7 @@ import { Middleware, Request } from '@loopback/rest';
 import { AnyObject } from '@loopback/repository';
 import { randomUUID } from 'node:crypto';
 import { ODATA_BINDINGS } from '../keys';
+import { EntitySetRegistry } from '../registry/entityset-registry';
 import { ODATA_BATCH_DEPTH, ODATA_BATCH_DEPTH_PROP } from '../constants';
 import {
   ODataConfig,
@@ -12,13 +13,26 @@ import {
   ODataTelemetryCategory,
   ODataTelemetryState,
 } from '../types';
-import { gatherRequestUrls, normalizeBasePath, pathMatches } from '../util/base-path';
+import {
+  buildODataRootRouteNames,
+  gatherRequestUrls,
+  matchesConfiguredODataPath,
+  normalizeBasePath,
+  pathMatches,
+} from '../util/base-path';
 
 type TelemetryPreference = 'statistics' | 'request-log';
 type MiddlewareContext = Parameters<Middleware>[0];
 
 export class ODataRequestContextProvider implements Provider<Middleware> {
-  constructor(@inject(ODATA_BINDINGS.CONFIG) private readonly cfg: ODataConfig) {}
+  private cachedRootNames?: Set<string>;
+  private cachedRegistryVersion = -1;
+
+  constructor(
+    @inject(ODATA_BINDINGS.CONFIG) private readonly cfg: ODataConfig,
+    @inject(ODATA_BINDINGS.ENTITY_SET_REGISTRY, { optional: true })
+    private readonly registry?: EntitySetRegistry,
+  ) {}
 
   value(): Middleware {
     const basePath = normalizeBasePath(this.cfg?.basePath);
@@ -58,11 +72,26 @@ export class ODataRequestContextProvider implements Provider<Middleware> {
   private isODataRequest(request: Request, configuredBasePath: string): boolean {
     const urls = gatherRequestUrls(request);
     for (const url of urls) {
-      if (pathMatches(url, '/odata') || pathMatches(url, configuredBasePath)) {
+      if (
+        pathMatches(url, '/odata') ||
+        matchesConfiguredODataPath(url, configuredBasePath, this.getConfiguredRootRouteNames())
+      ) {
         return true;
       }
     }
     return false;
+  }
+
+  private getConfiguredRootRouteNames(): ReadonlySet<string> | undefined {
+    if (!this.registry) return undefined;
+    const version = this.registry.getVersion();
+    if (this.cachedRootNames && this.cachedRegistryVersion === version) {
+      return this.cachedRootNames;
+    }
+
+    this.cachedRootNames = buildODataRootRouteNames(this.registry.list());
+    this.cachedRegistryVersion = version;
+    return this.cachedRootNames;
   }
 
   private applyCorrelation(

@@ -37,7 +37,7 @@ this.bind(ODATA_BINDINGS.CONFIG).to({
 
 Recommended defaults:
 
-- `basePath`: set this to the externally visible OData root
+- `basePath`: set this to the externally visible OData root; when set to `'/'`, public OData routes move to `/`, `/$metadata`, `/$batch`, and registered root-level entity paths such as `/Products`, while non-OData routes remain untouched
 - `namespace` and `entityContainerName`: set these once before clients depend on your metadata
 - `documentInOpenApiDefault`: keep `'auto'` unless you want every generated route published
 - `removeUndocumentedFromSpec`: keep `true` unless you explicitly want internal routes left in `/openapi.json`
