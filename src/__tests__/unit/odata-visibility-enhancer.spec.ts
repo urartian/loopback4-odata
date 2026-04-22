@@ -70,4 +70,35 @@ describe('ODataVisibilitySpecEnhancer', () => {
     expect(internal?.get?.['x-visibility']).to.equal('internal');
     expect(internal?.post?.['x-visibility']).to.equal('documented');
   });
+
+  it('rewrites published OData paths to the configured basePath', () => {
+    const enhancer = new ODataVisibilitySpecEnhancer({
+      basePath: '/api/odata',
+      removeUndocumentedFromSpec: false,
+    } as ODataConfig);
+    const spec = buildSpec();
+
+    enhancer.modifySpec(spec);
+
+    expect(spec.paths?.['/api/odata/InternalEntities']).to.be.Object();
+    expect(spec.paths?.['/api/odata/HiddenOnly']).to.be.Object();
+    expect(spec.paths?.['/odata/InternalEntities']).to.be.undefined();
+    expect(spec.paths?.['/odata/HiddenOnly']).to.be.undefined();
+    expect(spec.paths?.['/custom']).to.be.Object();
+  });
+
+  it('rewrites published OData paths when basePath is root', () => {
+    const enhancer = new ODataVisibilitySpecEnhancer({
+      basePath: '/',
+      removeUndocumentedFromSpec: false,
+    } as ODataConfig);
+    const spec = buildSpec();
+
+    enhancer.modifySpec(spec);
+
+    expect(spec.paths?.['/InternalEntities']).to.be.Object();
+    expect(spec.paths?.['/HiddenOnly']).to.be.Object();
+    expect(spec.paths?.['/odata/InternalEntities']).to.be.undefined();
+    expect(spec.paths?.['/odata/HiddenOnly']).to.be.undefined();
+  });
 });

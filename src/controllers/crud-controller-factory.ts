@@ -358,8 +358,12 @@ export function defineODataCrudController(def: EntitySetDef) {
 
   const repoBindingKey = repositoryBindingKey;
 
-  const contextBase = `/odata/$metadata#${setName}`;
-  const entityContext = `${contextBase}/$entity`;
+  const resolveContextBase = (cfg?: ODataConfig): string => {
+    const serviceRoot = normalizeBasePath(cfg?.basePath);
+    const metadataPath = serviceRoot === '/' ? '/$metadata' : `${serviceRoot}/$metadata`;
+    return `${metadataPath}#${setName}`;
+  };
+  const resolveEntityContext = (cfg?: ODataConfig): string => `${resolveContextBase(cfg)}/$entity`;
   const modelDefinition = (ensureModelDefinitionWithRelations(modelCtor) ??
     ((modelCtor as { definition?: ModelDefinition }).definition as
       | ModelDefinition
@@ -2559,7 +2563,7 @@ export function defineODataCrudController(def: EntitySetDef) {
           return undefined;
         };
 
-        const helpers = this.helpersForEntity(entityContext, op);
+        const helpers = this.helpersForEntity(resolveEntityContext(this.cfg), op);
         const onCtx = this.buildOnContext(ctx, helpers);
         const res = await this.runOn(op, undefined, onCtx, execDefault);
         ctx.result = res;
@@ -2671,7 +2675,7 @@ export function defineODataCrudController(def: EntitySetDef) {
           await navRepo.replaceById(navId as any, plain as AnyObject, this.repositoryOptions());
         };
 
-        const helpers = this.helpersForEntity(entityContext, op);
+        const helpers = this.helpersForEntity(resolveEntityContext(this.cfg), op);
         const onCtx = this.buildOnContext(ctx, helpers);
         const res = await this.runOn(op, undefined, onCtx, execDefault);
         ctx.result = res;
@@ -8460,7 +8464,7 @@ export function defineODataCrudController(def: EntitySetDef) {
           const values = items.map((it) => self.toPlainEntity(it as any) ?? (it as AnyObject));
           const decorated = self.decoratePlainEntities(values);
           return {
-            '@odata.context': contextBase,
+            '@odata.context': resolveContextBase(self.cfg),
             ...(totalCount !== undefined ? { '@odata.count': totalCount } : {}),
             value: decorated,
           } as AnyObject;
@@ -9136,6 +9140,7 @@ export function defineODataCrudController(def: EntitySetDef) {
         }
       }
       const requiresPostFilter = Boolean(postFilterExpr) || planRequiresPostProcessing;
+      const contextBase = resolveContextBase(this.cfg);
 
       const op: CrudOperation = 'READ';
       const scope: CrudScope = 'collection';
@@ -9392,7 +9397,7 @@ export function defineODataCrudController(def: EntitySetDef) {
             : [];
           const bucketState = this.buildBucketState(finalStage?.spec.groupBy ?? [], decorated);
           const result = {
-            '@odata.context': contextBase,
+            '@odata.context': resolveContextBase(this.cfg),
             value: aggregatedTombstones.length
               ? [...decorated, ...aggregatedTombstones]
               : decorated,
@@ -9591,7 +9596,7 @@ export function defineODataCrudController(def: EntitySetDef) {
                 clientPaths: this.mergeIncludePaths(clientIncludePaths),
               });
               const result = {
-                '@odata.context': contextBase,
+                '@odata.context': resolveContextBase(this.cfg),
                 ...(inlineCountRequested && totalCount !== undefined
                   ? { '@odata.count': totalCount }
                   : {}),
@@ -9737,7 +9742,7 @@ export function defineODataCrudController(def: EntitySetDef) {
               clientPaths: this.mergeIncludePaths(clientIncludePaths),
             });
             const result = {
-              '@odata.context': contextBase,
+              '@odata.context': resolveContextBase(this.cfg),
               ...(inlineCountRequested && totalCount !== undefined
                 ? { '@odata.count': totalCount }
                 : {}),
@@ -9941,7 +9946,7 @@ export function defineODataCrudController(def: EntitySetDef) {
                   clientPaths: this.mergeIncludePaths(clientIncludePaths),
                 });
                 const result = {
-                  '@odata.context': contextBase,
+                  '@odata.context': resolveContextBase(this.cfg),
                   ...(inlineCountRequested ? { '@odata.count': totalCount! } : {}),
                   value: this.decoratePlainEntities(ordered),
                 } as AnyObject;
@@ -10034,7 +10039,7 @@ export function defineODataCrudController(def: EntitySetDef) {
             clientPaths: this.mergeIncludePaths(clientIncludePaths),
           });
           const result = {
-            '@odata.context': contextBase,
+            '@odata.context': resolveContextBase(this.cfg),
             ...(inlineCountRequested ? { '@odata.count': filtered.length } : {}),
             value: this.decoratePlainEntities(paged),
           } as AnyObject;
@@ -10181,7 +10186,7 @@ export function defineODataCrudController(def: EntitySetDef) {
         const combined = tombstones.length ? [...decorated, ...tombstones] : decorated;
         this.recordTelemetryStats({ rows: combined.length });
         const result = {
-          '@odata.context': contextBase,
+          '@odata.context': resolveContextBase(this.cfg),
           ...(inlineCountRequested ? { '@odata.count': totalCount ?? filteredResults.length } : {}),
           value: combined,
         } as AnyObject;
@@ -10195,7 +10200,7 @@ export function defineODataCrudController(def: EntitySetDef) {
         return result;
       };
 
-      const helpers = this.helpersForEntity(entityContext, op);
+      const helpers = this.helpersForEntity(resolveEntityContext(this.cfg), op);
       const onCtx = this.buildOnContext(ctx, helpers);
       const res = await this.runOn(op, scope, onCtx, execDefault);
       ctx.result = res;
@@ -10583,7 +10588,7 @@ export function defineODataCrudController(def: EntitySetDef) {
         return result;
       };
 
-      const helpers = this.helpersForEntity(entityContext, op);
+      const helpers = this.helpersForEntity(resolveEntityContext(this.cfg), op);
       const onCtx = this.buildOnContext(ctx, helpers);
       const res = await this.runOn(op, scope, onCtx, execDefault);
       ctx.result = res;
@@ -10721,14 +10726,14 @@ export function defineODataCrudController(def: EntitySetDef) {
         this.setEtagHeaderFromPlain(plain);
         const decorated = this.decoratePlainEntity(plain, etag);
         const result = {
-          '@odata.context': entityContext,
+          '@odata.context': resolveEntityContext(this.cfg),
           ...decorated,
         } as AnyObject;
         ctx.result = result;
         return result;
       };
 
-      const helpers = this.helpersForEntity(entityContext, op);
+      const helpers = this.helpersForEntity(resolveEntityContext(this.cfg), op);
       const onCtx = this.buildOnContext(ctx, helpers);
       const res = await this.runOn(op, scope, onCtx, execDefault);
       ctx.result = res;
@@ -10970,7 +10975,7 @@ export function defineODataCrudController(def: EntitySetDef) {
             this.setEtagHeaderFromPlain(responsePlain);
             this.setMediaEtagHeader(responsePlain);
             const result = {
-              '@odata.context': entityContext,
+              '@odata.context': resolveEntityContext(this.cfg),
               ...decorated,
             } as AnyObject;
             ctx.result = result;
@@ -11397,7 +11402,7 @@ export function defineODataCrudController(def: EntitySetDef) {
             }
 
             this.ensureODataHeaders();
-            const contextUrl = `${contextBase}/${propertyName}`;
+            const contextUrl = `${resolveContextBase(this.cfg)}/${propertyName}`;
             const result = {
               '@odata.context': contextUrl,
               ...(inlineCountRequested ? { '@odata.count': plain.length } : {}),
@@ -11445,7 +11450,7 @@ export function defineODataCrudController(def: EntitySetDef) {
             return undefined;
           }
           this.ensureODataHeaders();
-          const contextUrl = `${contextBase}/${propertyName}/$entity`;
+          const contextUrl = `${resolveContextBase(this.cfg)}/${propertyName}/$entity`;
           const result = {
             '@odata.context': contextUrl,
             ...plain,
@@ -11490,7 +11495,7 @@ export function defineODataCrudController(def: EntitySetDef) {
           return rawValue;
         }
 
-        const contextUrl = `${contextBase}/${propertyName}`;
+        const contextUrl = `${resolveContextBase(this.cfg)}/${propertyName}`;
         const responsePayload = {
           '@odata.context': contextUrl,
           value: rawValue,
@@ -11718,14 +11723,14 @@ export function defineODataCrudController(def: EntitySetDef) {
           this.response.status(201);
           this.applyPreference(preference);
           const result = {
-            '@odata.context': entityContext,
+            '@odata.context': resolveEntityContext(this.cfg),
             ...decorated,
           } as AnyObject;
           ctx.result = result;
           return result;
         };
 
-        const helpers = this.helpersForEntity(entityContext, op);
+        const helpers = this.helpersForEntity(resolveEntityContext(this.cfg), op);
         const onCtx = this.buildOnContext(ctx, helpers);
         const res = await this.runOn(op, scope, onCtx, execDefault);
         ctx.result = res;
@@ -11831,14 +11836,14 @@ export function defineODataCrudController(def: EntitySetDef) {
 
           this.applyPreference(preference);
           const result = {
-            '@odata.context': entityContext,
+            '@odata.context': resolveEntityContext(this.cfg),
             ...decorated,
           } as AnyObject;
           ctx.result = result;
           return result;
         };
 
-        const helpers = this.helpersForEntity(entityContext, op);
+        const helpers = this.helpersForEntity(resolveEntityContext(this.cfg), op);
         const onCtx = this.buildOnContext(ctx, helpers);
         const res = await this.runOn(op, scope, onCtx, execDefault);
         ctx.result = res;
@@ -12003,14 +12008,14 @@ export function defineODataCrudController(def: EntitySetDef) {
 
           this.applyPreference(preference);
           const result = {
-            '@odata.context': entityContext,
+            '@odata.context': resolveEntityContext(this.cfg),
             ...decorated,
           } as AnyObject;
           ctx.result = result;
           return result;
         };
 
-        const helpers = this.helpersForEntity(entityContext, op);
+        const helpers = this.helpersForEntity(resolveEntityContext(this.cfg), op);
         const onCtx = this.buildOnContext(ctx, helpers);
         const res = await this.runOn(op, scope, onCtx, execDefault);
         ctx.result = res;
@@ -12245,7 +12250,7 @@ export function defineODataCrudController(def: EntitySetDef) {
             this.applyPreference(preference);
             this.response.status(200);
             const result = {
-              '@odata.context': entityContext,
+              '@odata.context': resolveEntityContext(this.cfg),
               ...decorated,
             } as AnyObject;
             ctx.result = result;
@@ -12258,7 +12263,7 @@ export function defineODataCrudController(def: EntitySetDef) {
           return undefined;
         };
 
-        const helpers = this.helpersForEntity(entityContext, op);
+        const helpers = this.helpersForEntity(resolveEntityContext(this.cfg), op);
         const onCtx = this.buildOnContext(ctx, helpers);
         const res = await this.runOn(op, scope, onCtx, execDefault);
         ctx.result = res;

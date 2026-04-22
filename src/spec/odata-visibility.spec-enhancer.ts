@@ -2,6 +2,7 @@ import { BindingScope, inject, injectable } from '@loopback/core';
 import { asSpecEnhancer, OASEnhancer, OpenApiSpec } from '@loopback/openapi-v3';
 import { ODataConfig } from '../types';
 import { ODATA_BINDINGS } from '../keys';
+import { normalizeBasePath } from '../util/base-path';
 
 const HTTP_METHODS: Array<
   'get' | 'put' | 'post' | 'delete' | 'options' | 'head' | 'patch' | 'trace'
@@ -63,6 +64,44 @@ export class ODataVisibilitySpecEnhancer implements OASEnhancer {
       delete spec.paths[path];
     }
 
+    const basePath = normalizeBasePath(this.config?.basePath);
+    if (basePath !== '/odata') {
+      spec.paths = remapODataPaths(spec.paths, basePath);
+    }
+
     return spec;
   }
+}
+
+function remapODataPaths(
+  paths: NonNullable<OpenApiSpec['paths']>,
+  basePath: string,
+): NonNullable<OpenApiSpec['paths']> {
+  const remapped: NonNullable<OpenApiSpec['paths']> = {};
+
+  for (const [pathKey, pathSpec] of Object.entries(paths)) {
+    const targetPath = rewriteODataPath(pathKey, basePath);
+    const existing = remapped[targetPath];
+    remapped[targetPath] =
+      existing && pathSpec
+        ? ({
+            ...existing,
+            ...pathSpec,
+          } as (typeof remapped)[string])
+        : pathSpec;
+  }
+
+  return remapped;
+}
+
+function rewriteODataPath(pathKey: string, basePath: string): string {
+  if (pathKey === '/odata') {
+    return basePath;
+  }
+  if (!pathKey.startsWith('/odata/')) {
+    return pathKey;
+  }
+
+  const suffix = pathKey.slice('/odata'.length);
+  return basePath === '/' ? suffix || '/' : `${basePath}${suffix}`;
 }

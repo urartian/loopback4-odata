@@ -95,6 +95,12 @@ describe('OData config plumbing acceptance', () => {
     const res = await client.get('/api/odata').expect(200);
     expect(res.headers['odata-version']).to.equal('4.0');
     expect(res.body['@odata.context']).to.equal('/api/odata/$metadata');
+
+    const products = await client.get('/api/odata/Products').expect(200);
+    expect(products.body['@odata.context']).to.equal('/api/odata/$metadata#Products');
+
+    const singleton = await client.get('/api/odata/PrimaryLibrary').expect(200);
+    expect(singleton.body['@odata.context']).to.equal('/api/odata/$metadata#PrimaryLibrary');
   });
 
   it('emits the configured basePath in @odata.context for bound operation results', async () => {
@@ -131,6 +137,15 @@ describe('OData config plumbing acceptance', () => {
     expect(metadata.text ?? metadata.body).to.be.ok();
 
     await client.get('/api/odata/Products').expect(200);
+  });
+
+  it('publishes OpenAPI paths under the configured basePath', async () => {
+    const spec = await client.get('/openapi.json').expect(200);
+
+    expect(spec.body.paths?.['/api/odata/Products']).to.be.Object();
+    expect(spec.body.paths?.['/api/odata/PrimaryLibrary']).to.be.Object();
+    expect(spec.body.paths?.['/odata/Products']).to.be.undefined();
+    expect(spec.body.paths?.['/odata/PrimaryLibrary']).to.be.undefined();
   });
 
   it('executes $batch requests that use the configured basePath', async () => {

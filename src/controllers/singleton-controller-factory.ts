@@ -26,6 +26,7 @@ import {
   MethodAliasMap,
 } from '../util/security-metadata';
 import { AnyObject } from '@loopback/repository';
+import { normalizeBasePath } from '../util/base-path';
 
 type ODataVisibility = 'documented' | 'undocumented';
 
@@ -141,7 +142,11 @@ export function defineODataSingletonController(
   const singletonName = singleton.name;
   const operationVisibility: ODataVisibility =
     def.documentInOpenApi === false ? 'undocumented' : 'documented';
-  const contextBase = `/odata/$metadata#${singletonName}`;
+  const resolveContextBase = (cfg?: ODataConfig): string => {
+    const serviceRoot = normalizeBasePath(cfg?.basePath);
+    const metadataPath = serviceRoot === '/' ? '/$metadata' : `${serviceRoot}/$metadata`;
+    return `${metadataPath}#${singletonName}`;
+  };
 
   const entityResponseSchema = {
     allOf: [
@@ -229,13 +234,14 @@ export function defineODataSingletonController(
       if (typeof obj['@odata.context'] !== 'string') return obj;
 
       if (!propertyName) {
-        obj['@odata.context'] = contextBase;
+        obj['@odata.context'] = resolveContextBase(this.cfg);
         return obj;
       }
 
       const isEntityResponse =
         !Object.prototype.hasOwnProperty.call(obj, 'value') &&
         Object.keys(obj).some((key) => key !== '@odata.context' && !key.startsWith('@odata.'));
+      const contextBase = resolveContextBase(this.cfg);
       obj['@odata.context'] = isEntityResponse
         ? `${contextBase}/${propertyName}/$entity`
         : `${contextBase}/${propertyName}`;
