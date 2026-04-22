@@ -135,6 +135,32 @@ describe('OData config plumbing acceptance', () => {
     await client.get('/health').expect(200, { ok: true });
   });
 
+  it('rejects non-OData subrequests in $batch when basePath is root', async function (this: any) {
+    await replaceApp(this, { basePath: '/' }, async (freshApp) => {
+      freshApp.controller(HealthController);
+    });
+
+    const res = await client
+      .post('/$batch')
+      .send({
+        requests: [
+          { id: 'health', method: 'GET', url: '/health' },
+          { id: 'products', method: 'GET', url: '/Products?$top=1' },
+        ],
+      })
+      .expect(200);
+
+    const responses = res.body.responses as Array<{ id?: string; status: number; body?: any }>;
+    expect(responses).to.be.Array();
+    const health = responses.find((entry) => entry.id === 'health');
+    const products = responses.find((entry) => entry.id === 'products');
+
+    expect(health?.status).to.equal(400);
+    expect(health?.body?.error?.code).to.equal('InvalidUrl');
+    expect(products?.status).to.equal(200);
+    expect(Array.isArray(products?.body?.value)).to.be.true();
+  });
+
   it('honors custom basePath when the Rest server is mounted under the same prefix', async function (this: any) {
     await replaceApp(this, {}, async (freshApp) => {
       freshApp.basePath('/api/odata');

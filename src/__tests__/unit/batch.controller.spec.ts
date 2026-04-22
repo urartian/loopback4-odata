@@ -128,6 +128,13 @@ function createControllerWithRegistry(
   return controller;
 }
 
+function createODataRegistry() {
+  const registry = new EntitySetRegistry();
+  class ProductEntity {}
+  registry.register({ name: 'Products', modelCtor: ProductEntity as any });
+  return registry;
+}
+
 describe('$batch controller', () => {
   @model()
   class BigIntProduct extends Entity {
@@ -791,6 +798,72 @@ describe('$batch controller', () => {
         id: 'forbidden',
         method: 'GET',
         url: '/internal/admin/reset',
+      },
+      undefined,
+      requestStub('application/json'),
+      limits,
+    );
+
+    assert.equal(result.status, 400);
+    assert.equal((result.body as any)?.error?.code, 'InvalidUrl');
+    assert.equal(callCount, 0);
+  });
+
+  it('rejects absolute root paths outside OData when basePath is root', async () => {
+    let callCount = 0;
+    const controller = new ODataBatchController(
+      {
+        handleRequest: async () => {
+          callCount++;
+        },
+      } as any,
+      'http://localhost',
+      createRequestContextStub(),
+      { get: async () => undefined } as any,
+      createODataRegistry(),
+      noopLogger,
+      { ...defaultConfig, basePath: '/' },
+    );
+
+    const limits = (controller as any).getBatchLimits();
+    const result = await (controller as any).executeSingle(
+      {
+        id: 'health',
+        method: 'GET',
+        url: '/health',
+      },
+      undefined,
+      requestStub('application/json'),
+      limits,
+    );
+
+    assert.equal(result.status, 400);
+    assert.equal((result.body as any)?.error?.code, 'InvalidUrl');
+    assert.equal(callCount, 0);
+  });
+
+  it('rejects relative root paths outside OData when basePath is root', async () => {
+    let callCount = 0;
+    const controller = new ODataBatchController(
+      {
+        handleRequest: async () => {
+          callCount++;
+        },
+      } as any,
+      'http://localhost',
+      createRequestContextStub(),
+      { get: async () => undefined } as any,
+      createODataRegistry(),
+      noopLogger,
+      { ...defaultConfig, basePath: '/' },
+    );
+
+    const limits = (controller as any).getBatchLimits();
+    const result = await (controller as any).executeSingle(
+      {
+        id: 'health',
+        method: 'GET',
+        url: 'health',
       },
       undefined,
       requestStub('application/json'),
